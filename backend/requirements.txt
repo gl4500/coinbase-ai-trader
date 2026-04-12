@@ -1,0 +1,16 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+aiosqlite==0.20.0
+python-dotenv==1.0.1
+httpx==0.27.2
+websockets==13.1
+pydantic==2.9.2
+python-multipart==0.0.12
+PyJWT>=2.8.0
+cryptography>=42.0.0
+numpy>=1.26.0
+# PyTorch — install separately (already installed):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-cov==7.1.0

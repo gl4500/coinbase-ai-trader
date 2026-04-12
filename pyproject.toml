@@ -1,0 +1,58 @@
+[project]
+name = "coinbase-ai-trader"
+version = "1.0.0"
+requires-python = ">=3.11"
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths        = ["backend/tests"]
+asyncio_mode     = "auto"          # pytest-asyncio auto mode
+python_files     = ["test_*.py"]
+python_classes   = ["Test*"]
+python_functions = ["test_*"]
+addopts          = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--color=yes",
+]
+markers = [
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+    "integration: tests that hit a real DB or network",
+]
+
+# ── bandit (Python SAST) ──────────────────────────────────────────────────────
+[tool.bandit]
+targets    = ["backend"]
+exclude_dirs = ["backend/tests", ".venv"]
+skips      = [
+    "B101",   # assert statements in tests — expected
+]
+severity   = "medium"    # flag MEDIUM and above
+
+# ── ruff (linting + formatting) ───────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["backend"]
+exclude = [".venv", "dist", "node_modules", "frontend"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "B",   # flake8-bugbear
+    "S",   # flake8-bandit (security)
+    "I",   # isort
+]
+ignore = [
+    "S101",  # assert in tests
+    "S105",  # hardcoded password in tests/config templates
+    "B008",  # do not perform function call in argument defaults (FastAPI Depends)
+    "E501",  # line length handled by ruff formatter
+]
+per-file-ignores = { "backend/tests/*" = ["S", "B"] }
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "database", "agents", "clients", "services"]
