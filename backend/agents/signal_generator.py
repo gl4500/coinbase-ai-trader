@@ -6,7 +6,7 @@ Generates BUY/SELL signals from TA indicators computed on hourly candle data.
 Indicators:
   • RSI(14)              — oversold / overbought
   • EMA cross(9/21)      — golden / death cross
-  • MACD(12,26,9)        — histogram sign
+  • MACD(5,13,3)         — histogram sign (fast params for 1h crypto)
   • Bollinger(20,2)      — band position
   • ADX(14)              — trend regime gate (< threshold → suppress momentum signals)
   • MFI(14)              — volume-weighted RSI (accumulation/distribution)
@@ -62,8 +62,8 @@ def _ema(prices: List[float], period: int) -> List[float]:
 
 
 def _macd(closes: List[float],
-          fast: int = 12, slow: int = 26,
-          signal: int = 9) -> Tuple[float, float, float]:
+          fast: int = 5, slow: int = 13,
+          signal: int = 3) -> Tuple[float, float, float]:
     if len(closes) < slow + signal:
         return 0.0, 0.0, 0.0
     ema_fast  = _ema(closes, fast)
@@ -129,9 +129,9 @@ def _adx(highs: List[float], lows: List[float],
     def _wilder(data: List[float], n: int) -> List[float]:
         if len(data) < n:
             return [0.0]
-        s = [sum(data[:n])]
+        s = [sum(data[:n]) / n]   # mean init (Wilder smoothing)
         for v in data[n:]:
-            s.append(s[-1] - s[-1] / n + v)
+            s.append((s[-1] * (n - 1) + v) / n)
         return s
 
     dm_plus, dm_minus, trs = [], [], []
@@ -224,6 +224,148 @@ def _vwap(highs: List[float], lows: List[float],
     dist     = (c[-1] - vwap) / vwap if vwap else 0.0
     norm     = max(-1.0, min(1.0, dist / 0.05))
     return vwap, norm
+
+
+def _hurst_exponent(closes: List[float], min_len: int = 50) -> float:
+    """
+    Estimate Hurst Exponent via R/S analysis (rescaled range).
+    H > 0.6 → persistent trend (momentum works).
+    H < 0.4 → mean-reverting (oscillator works).
+    H ≈ 0.5 → random walk / unknown regime.
+    Returns 0.5 (neutral) if fewer than min_len data points.
+    """
+    n = len(closes)
+    if n < min_len:
+        return 0.5
+    lags = [max(2, n // 8), max(4, n // 4), max(8, n // 2), n]
+    rs_vals, lag_vals = [], []
+    for lag in lags:
+        sub = closes[-lag:]
+        if len(sub) < 4:
+            continue
+        mean   = sum(sub) / len(sub)
+        dev    = [x - mean for x in sub]
+        cum    = [sum(dev[:i + 1]) for i in range(len(dev))]
+        r      = max(cum) - min(cum)
+        s      = math.sqrt(sum(d ** 2 for d in dev) / len(dev))
+        if s > 0:
+            rs_vals.append(math.log(r / s))
+            lag_vals.append(math.log(lag))
+    if len(rs_vals) < 2:
+        return 0.5
+    # Linear regression of log(R/S) vs log(lag)
+    n_pts  = len(lag_vals)
+    xm     = sum(lag_vals) / n_pts
+    ym     = sum(rs_vals)  / n_pts
+    num    = sum((lag_vals[i] - xm) * (rs_vals[i] - ym) for i in range(n_pts))
+    den    = sum((lag_vals[i] - xm) ** 2              for i in range(n_pts))
+    h      = num / den if den else 0.5
+    return max(0.0, min(1.0, h))
+
+
+def _multi_rsi(closes: List[float],
+               periods: Tuple[int, int, int] = (6, 12, 24),
+               oversold: float = 30.0,
+               overbought: float = 70.0) -> dict:
+    """
+    Compute RSI for three periods and return a vote count.
+    buy_votes  = number of periods where RSI is oversold (< oversold threshold).
+    sell_votes = number of periods where RSI is overbought (> overbought threshold).
+    Max 3 votes each. Used to confirm signal strength across timeframes.
+    """
+    min_needed = max(periods) + 1
+    if len(closes) < min_needed:
+        return {"rsi6": 50.0, "rsi12": 50.0, "rsi24": 50.0,
+                "buy_votes": 0, "sell_votes": 0}
+    rsi6  = _rsi(closes, period=periods[0])
+    rsi12 = _rsi(closes, period=periods[1])
+    rsi24 = _rsi(closes, period=periods[2])
+    buy_votes  = sum(1 for r in (rsi6, rsi12, rsi24) if r < oversold)
+    sell_votes = sum(1 for r in (rsi6, rsi12, rsi24) if r > overbought)
+    return {
+        "rsi6":  round(rsi6,  1),
+        "rsi12": round(rsi12, 1),
+        "rsi24": round(rsi24, 1),
+        "buy_votes":  buy_votes,
+        "sell_votes": sell_votes,
+    }
+
+
+def _dissimilarity_index(closes: List[float], period: int = 14) -> float:
+    """
+    Dissimilarity Index (DI): percentage distance of current price from its SMA.
+    DI = |close[-1] - SMA(close, period)| / SMA × 100
+
+    When DI > ~3%, CNN/LSTM features become unreliable because the price has
+    strayed far from the distribution seen during training.
+    Returns 0.0 when there are insufficient data points.
+    """
+    if len(closes) < period:
+        return 0.0
+    sma = sum(closes[-period:]) / period
+    if sma == 0:
+        return 0.0
+    return abs(closes[-1] - sma) / sma * 100.0
+
+
+def _kelly_fraction(confidence: float, max_frac: float = 0.25) -> float:
+    """
+    Fractional Kelly Criterion (25% of full Kelly) for position sizing.
+    For a binary win/loss bet where win_prob = confidence:
+      full Kelly  = 2p - 1
+      capped Kelly = min(max(full_kelly, 0), max_frac)
+    Returns 0.0 when confidence ≤ 0.5 (no edge → don't trade).
+    """
+    full_kelly = 2.0 * confidence - 1.0
+    return max(0.0, min(full_kelly, max_frac))
+
+
+def _realized_vol(closes: List[float], window: int = 20,
+                  annualize_days: int = 365) -> float:
+    """
+    Annualized realized volatility from log returns.
+    annualize_days=365 for crypto (trades 24/7).
+    Returns 0.0 if insufficient data.
+    """
+    if len(closes) < window + 1:
+        return 0.0
+    log_returns = [math.log(closes[i] / closes[i - 1])
+                   for i in range(len(closes) - window, len(closes))
+                   if closes[i - 1] > 0 and closes[i] > 0]
+    if len(log_returns) < 2:
+        return 0.0
+    mean = sum(log_returns) / len(log_returns)
+    variance = sum((r - mean) ** 2 for r in log_returns) / (len(log_returns) - 1)
+    return math.sqrt(variance * annualize_days)
+
+
+def _shannon_entropy(closes: List[float], window: int = 20, n_bins: int = 10) -> float:
+    """
+    Shannon entropy of the log-return distribution over the last `window` bars.
+    High entropy (~log2(n_bins)) = returns are uniformly distributed = noise.
+    Low entropy = returns are concentrated = information / structure present.
+    Normalised to [0, 1]: 0 = pure structure, 1 = pure noise.
+    Returns 0.5 (neutral) if insufficient data.
+    """
+    if len(closes) < window + 1:
+        return 0.5
+    log_returns = [math.log(closes[i] / closes[i - 1])
+                   for i in range(len(closes) - window, len(closes))
+                   if closes[i - 1] > 0 and closes[i] > 0]
+    if len(log_returns) < 4:
+        return 0.5
+    mn, mx = min(log_returns), max(log_returns)
+    if mx == mn:
+        return 0.0   # all returns identical = zero entropy
+    bin_width = (mx - mn) / n_bins
+    counts = [0] * n_bins
+    for r in log_returns:
+        idx = min(int((r - mn) / bin_width), n_bins - 1)
+        counts[idx] += 1
+    n = len(log_returns)
+    entropy = -sum((c / n) * math.log2(c / n) for c in counts if c > 0)
+    max_entropy = math.log2(n_bins)
+    return round(entropy / max_entropy, 4) if max_entropy > 0 else 0.5
 
 
 def _stoch_rsi(closes: List[float],

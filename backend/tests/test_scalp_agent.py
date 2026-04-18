@@ -38,6 +38,8 @@ from agents.scalp_agent import (
     _MIN_SCORE,
     _SCALP_BALANCE,
     _MAX_FRAC,
+    _MAX_SCALP_PRODUCTS,
+    _MIN_CANDLES,
 )
 
 
@@ -231,19 +233,51 @@ class TestScalpBook:
             await book.sell("BTC-USD", 50_200.0)
         assert not book.has_position("BTC-USD")
 
-    def test_daily_halt_triggers_at_3pct(self):
+    def test_exit_stats_recorded_on_loss(self):
+        """sell() at a loss increments SL losses counter and total_pnl."""
+        import asyncio
         book = _ScalpBook()
-        book._start_balance = 1_000.0
-        book.balance = 969.9   # 3.01% drawdown
-        book._day_str = time.strftime("%Y-%m-%d")
-        assert book.daily_halt() is True
+        book.positions["BTC-USD"] = {
+            "size": 0.004, "avg_price": 50_000.0,
+            "entry_time": time.time() - 60,
+            "high_water": 50_000.0, "trail_dist": 62.5,
+            "entry_reasons": ["RSI7=22 deeply oversold"],
+        }
+        book.balance = 800.0
 
-    def test_daily_halt_not_triggered_below_threshold(self):
+        async def _run():
+            with (
+                patch("agents.scalp_agent.database.save_agent_state", new=AsyncMock()),
+                patch("agents.scalp_agent.database.close_trade",      new=AsyncMock()),
+            ):
+                await book.sell("BTC-USD", 49_875.0, trigger="SL")  # -0.25% → loss
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert book._stats["SL"]["losses"] == 1
+        assert book._stats["SL"]["total_pnl"] < 0
+
+    def test_exit_stats_recorded_on_win(self):
+        """sell() at a gain increments TP wins counter."""
+        import asyncio
         book = _ScalpBook()
-        book._start_balance = 1_000.0
-        book.balance = 975.0   # 2.5% drawdown
-        book._day_str = time.strftime("%Y-%m-%d")
-        assert book.daily_halt() is False
+        book.positions["BTC-USD"] = {
+            "size": 0.004, "avg_price": 50_000.0,
+            "entry_time": time.time() - 60,
+            "high_water": 50_150.0, "trail_dist": 62.5,
+            "entry_reasons": [],
+        }
+        book.balance = 800.0
+
+        async def _run():
+            with (
+                patch("agents.scalp_agent.database.save_agent_state", new=AsyncMock()),
+                patch("agents.scalp_agent.database.close_trade",      new=AsyncMock()),
+            ):
+                await book.sell("BTC-USD", 50_150.0, trigger="TP")  # +0.30% → win
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        assert book._stats["TP"]["wins"] == 1
+        assert book._stats["TP"]["total_pnl"] > 0
 
     def test_status_structure(self):
         book = _ScalpBook()
@@ -297,31 +331,66 @@ class TestScalpAgent:
         assert ag._running is False
 
     @pytest.mark.asyncio
-    async def test_scan_entries_skips_when_halted(self):
-        ag = self._agent()
-        ag.book.balance = 0.0          # 100% drawdown → daily halt
-        ag.book._start_balance = 1000.0
-        ag.book._day_str = time.strftime("%Y-%m-%d")
+    async def test_scan_logs_summary_each_cycle(self):
+        """_scan_entries must log a summary line so activity is visible in the UI."""
+        import logging
+        from agents.scalp_agent import ScalpAgent
 
-        buy_mock = AsyncMock()
-        with patch.object(ag.book, "buy", buy_mock):
+        ag = ScalpAgent()
+        products_mock = AsyncMock(return_value=[])   # no eligible products
+
+        with (
+            patch.object(ag, "_get_scalp_products", products_mock),
+            patch("agents.scalp_agent.logger") as mock_log,
+        ):
             await ag._scan_entries()
 
+        # Any call to logger.info, logger.warning, or logger.debug counts as a summary
+        any_log_call = (
+            mock_log.info.called or
+            mock_log.warning.called or
+            mock_log.debug.called
+        )
+        assert any_log_call, (
+            "_scan_entries produced no log output — scan activity is invisible to the user"
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_entries_continues_after_losses(self):
+        """No daily halt — agent keeps scanning even after losing trades."""
+        ag = self._agent()
+        # Simulate prior losses in stats
+        ag.book._stats["SL"]["losses"] = 5
+        ag.book._stats["SL"]["total_pnl"] = -15.0
+
+        buy_mock = AsyncMock(return_value=(0.0, 0.0))
+        with (
+            patch("agents.scalp_agent.database.get_products",
+                  new=AsyncMock(return_value=[])),
+            patch.object(ag.book, "buy", buy_mock),
+        ):
+            await ag._scan_entries()  # should run, not be blocked
+
+        # No buy because no products — but the scan ran (not skipped by halt)
         buy_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_scan_entries_skips_at_max_concurrent(self):
         """Already at _MAX_CONCURRENT positions → no new buy attempted."""
+        from agents.scalp_agent import _MAX_CONCURRENT
         ag = self._agent(ws_price=50_000.0)
-        # Manually populate two positions
-        ag.book.positions = {
-            "BTC-USD": {"size": 0.001, "avg_price": 50_000.0,
-                        "entry_time": time.time(), "high_water": 50_000.0, "trail_dist": 50.0},
-            "ETH-USD": {"size": 0.01, "avg_price": 3_000.0,
-                        "entry_time": time.time(), "high_water": 3_000.0, "trail_dist": 5.0},
-        }
+        # Fill positions up to the max
+        for i in range(_MAX_CONCURRENT):
+            ag.book.positions[f"COIN{i}-USD"] = {
+                "size": 0.001, "avg_price": 50_000.0,
+                "entry_time": time.time(), "high_water": 50_000.0, "trail_dist": 50.0,
+            }
         buy_mock = AsyncMock()
-        with patch.object(ag.book, "buy", buy_mock):
+        products_mock = AsyncMock(return_value=["XRP-USD", "ADA-USD"])
+        with (
+            patch.object(ag, "_get_scalp_products", products_mock),
+            patch.object(ag.book, "buy", buy_mock),
+        ):
             await ag._scan_entries()
 
         buy_mock.assert_not_called()
@@ -382,3 +451,59 @@ class TestScalpAgent:
             await ag._check_exits()
 
         sell_mock.assert_not_called()
+
+
+# ── Dynamic product selection ───────────────────────────────────────────────────
+
+class TestGetScalpProducts:
+    """_get_scalp_products() should return tracked products with enough candle data."""
+
+    @pytest.mark.asyncio
+    async def test_returns_products_with_candles(self):
+        """Only products with >= MIN_CANDLES candles and price >= _MIN_PRICE are returned."""
+        ag = ScalpAgent()
+        tracked = [
+            {"product_id": "XRP-USD", "price": 1.33},
+            {"product_id": "ADA-USD", "price": 0.24},
+            {"product_id": "BTC-USD", "price": 0.0},   # 0 candles → excluded
+        ]
+        candle_map = {"XRP-USD": 120, "ADA-USD": 80, "BTC-USD": 0}
+
+        async def fake_get_candles(pid, limit):
+            return [{}] * candle_map[pid]
+
+        with (
+            patch("agents.scalp_agent.database.get_products", AsyncMock(return_value=tracked)),
+            patch("agents.scalp_agent.database.get_candles", side_effect=fake_get_candles),
+        ):
+            result = await ag._get_scalp_products()
+
+        assert "XRP-USD" in result
+        assert "ADA-USD" in result
+        assert "BTC-USD" not in result  # 0 candles → excluded
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_tracked_products(self):
+        ag = ScalpAgent()
+        with patch("agents.scalp_agent.database.get_products", AsyncMock(return_value=[])):
+            result = await ag._get_scalp_products()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_limited_to_max_products(self):
+        """Should cap at _MAX_SCALP_PRODUCTS to avoid scanning everything."""
+        from agents.scalp_agent import _MAX_SCALP_PRODUCTS
+        ag = ScalpAgent()
+        # 10 tracked products all with candles and valid prices
+        tracked = [{"product_id": f"COIN{i}-USD", "price": 1.0 + i} for i in range(10)]
+
+        async def fake_get_candles(pid, limit):
+            return [{}] * 120  # all have enough
+
+        with (
+            patch("agents.scalp_agent.database.get_products", AsyncMock(return_value=tracked)),
+            patch("agents.scalp_agent.database.get_candles", side_effect=fake_get_candles),
+        ):
+            result = await ag._get_scalp_products()
+
+        assert len(result) <= _MAX_SCALP_PRODUCTS

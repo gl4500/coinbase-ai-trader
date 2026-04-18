@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @layer base {
   body { @apply bg-gray-950 text-gray-100 font-sans antialiased; }
 }
@@ -36,7 +45,7 @@
            text-white text-sm font-medium transition-colors;
   }
   .tab {
-    @apply px-4 py-2 text-sm font-medium rounded-lg transition-colors cursor-pointer;
+    @apply px-3 py-1.5 text-sm font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap flex-shrink-0;
   }
   .tab-active  { @apply bg-indigo-600 text-white; }
   .tab-inactive { @apply text-gray-400 hover:text-gray-200 hover:bg-gray-800; }

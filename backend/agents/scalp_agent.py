@@ -25,7 +25,8 @@ Fee math: Coinbase maker 0.006% per side = 0.012% round-trip
 
 Dry-run balance: $1,000 (mirrors Tech/Momentum/CNN)
 Max position: 20% per slot (max 2 concurrent)
-Daily halt: balance drawdown > 3% stops trading for rest of day
+Exit reason logging: every closed trade records trigger, PnL, hold time,
+and entry signal pattern so parameter tuning is data-driven.
 """
 import asyncio
 import logging
@@ -49,13 +50,14 @@ _TAKE_PROFIT         = 0.0030   # 0.30% TP
 _HARD_STOP           = 0.0025   # 0.25% SL
 _ATR_TRAIL_MULT      = 1.5      # trailing stop = 1.5 * ATR(7)
 _TIME_EXIT_SEC       = 900      # 15 min hard time exit
-_DAILY_HALT_FRAC     = 0.03     # halt if daily drawdown > 3%
 _MIN_SCORE           = 5        # minimum confluence score to enter
 _ADX_TREND           = 25       # ADX > this = trending (enables momentum signals)
 _ADX_RANGE           = 20       # ADX < this = ranging (enables mean-revert signals)
 _TICK_SLEEP          = 1.0      # check open positions every 1 second
 _CANDLE_SLEEP        = 60.0     # re-evaluate entry every 60 seconds
-_SCALP_PRODUCTS      = ["BTC-USD", "ETH-USD"]  # tight-spread products only
+_MIN_CANDLES         = 40               # minimum candle bars required for indicators
+_MAX_SCALP_PRODUCTS  = 10              # cap — don't scan the entire universe
+_MIN_PRICE           = 0.01            # skip micro-priced tokens (unprofitable spreads)
 
 
 # ── Book ───────────────────────────────────────────────────────────────────────
@@ -68,8 +70,11 @@ class _ScalpBook:
         self.balance      = _SCALP_BALANCE
         self.positions: Dict[str, Dict] = {}   # pid -> {size, avg_price, entry_time, high_water}
         self.realized_pnl = 0.0
-        self._start_balance = _SCALP_BALANCE   # resets daily
-        self._day_str       = ""               # YYYY-MM-DD, resets daily halt
+        # Per-trigger outcome counters — used to diagnose which exit parameter loses money
+        self._stats: Dict[str, Dict] = {
+            trigger: {"wins": 0, "losses": 0, "total_pnl": 0.0}
+            for trigger in ("TP", "SL", "TRAIL", "TIME")
+        }
 
     async def load(self) -> None:
         state = await database.load_agent_state(self._agent)
@@ -78,9 +83,17 @@ class _ScalpBook:
             self.realized_pnl = state["realized_pnl"]
             self.positions    = state["positions"]
             self._start_balance = self.balance
+
+            corrupt = [pid for pid, pos in self.positions.items()
+                       if pos.get("avg_price", 0) == 0]
+            for pid in corrupt:
+                del self.positions[pid]
+                logger.warning(f"SCALP book: dropped corrupt position {pid} (avg_price=0)")
+
             logger.info(
                 f"SCALP book restored | balance=${self.balance:.2f} | "
                 f"pnl=${self.realized_pnl:+.2f} | positions={len(self.positions)}"
+                + (f" | dropped {len(corrupt)} corrupt" if corrupt else "")
             )
         else:
             logger.info(f"SCALP book: starting fresh at ${self.balance:.2f}")
@@ -96,27 +109,20 @@ class _ScalpBook:
     def position_count(self) -> int:
         return len(self.positions)
 
-    def daily_halt(self) -> bool:
-        today = time.strftime("%Y-%m-%d")
-        if today != self._day_str:
-            self._day_str       = today
-            self._start_balance = self.balance
-        drawdown = (self._start_balance - self.balance) / max(self._start_balance, 1.0)
-        return drawdown >= _DAILY_HALT_FRAC
-
     async def buy(self, pid: str, price: float, atr: float,
-                  trigger: str = "SCALP") -> Tuple[float, float]:
+                  trigger: str = "SCALP", entry_reasons: Optional[List[str]] = None) -> Tuple[float, float]:
         spend = min(self.balance * _MAX_FRAC, self.balance * 0.95)
-        if spend < 1.0 or price <= 0:
+        if spend < 1.0 or price <= 0 or price < _MIN_PRICE:
             return 0.0, 0.0
         size  = spend / price
         trail = max(atr * _ATR_TRAIL_MULT, price * _HARD_STOP)
         self.positions[pid] = {
-            "size":        size,
-            "avg_price":   price,
-            "entry_time":  time.time(),
-            "high_water":  price,
-            "trail_dist":  trail,
+            "size":          size,
+            "avg_price":     price,
+            "entry_time":    time.time(),
+            "high_water":    price,
+            "trail_dist":    trail,
+            "entry_reasons": entry_reasons or [],  # confluence signals that fired
         }
         self.balance -= spend
         await self._save()
@@ -136,14 +142,40 @@ class _ScalpBook:
         pnl       = proceeds - pos["size"] * pos["avg_price"]
         self.balance      += proceeds
         self.realized_pnl += pnl
+
+        # ── Update per-trigger stats ──────────────────────────────────────────
+        bucket = self._stats.get(trigger, self._stats.setdefault(
+            trigger, {"wins": 0, "losses": 0, "total_pnl": 0.0}
+        ))
+        bucket["total_pnl"] += pnl
+        if pnl >= 0:
+            bucket["wins"]   += 1
+        else:
+            bucket["losses"] += 1
+
+        # ── Structured exit log ───────────────────────────────────────────────
+        hold_sec  = time.time() - pos["entry_time"]
+        pct_move  = (price - pos["avg_price"]) / pos["avg_price"] * 100
+        outcome   = "WIN" if pnl >= 0 else "LOSS"
+        st        = self._stats[trigger] if trigger in self._stats else bucket
+        win_rate  = st["wins"] / max(st["wins"] + st["losses"], 1) * 100
+        log_fn    = logger.info if pnl >= 0 else logger.warning
+        entry_sig = ", ".join(pos.get("entry_reasons", [])[:3]) or "n/a"
+        log_fn(
+            f"SCALP EXIT [{trigger}] {outcome} | {pid} | "
+            f"entry=${pos['avg_price']:.4f} exit=${price:.4f} | "
+            f"move={pct_move:+.3f}% pnl=${pnl:+.4f} | "
+            f"hold={hold_sec:.0f}s | "
+            f"entry signals: [{entry_sig}] | "
+            f"{trigger} lifetime: {st['wins']}W/{st['losses']}L "
+            f"wr={win_rate:.0f}% totpnl=${st['total_pnl']:+.2f}"
+        )
+
         await self._save()
         await database.close_trade(
             agent=self._agent, product_id=pid, exit_price=price,
             size=pos["size"], pnl=pnl, trigger_close=trigger,
             balance_after=self.balance,
-        )
-        logger.info(
-            f"SCALP SELL {pid} @ ${price:,.4f} | pnl=${pnl:+.4f} | trigger={trigger}"
         )
         return pnl
 
@@ -161,6 +193,16 @@ class _ScalpBook:
                     "entry_time": p["entry_time"],
                 }
                 for pid, p in self.positions.items()
+            },
+            "exit_stats": {
+                trigger: {
+                    "wins":      s["wins"],
+                    "losses":    s["losses"],
+                    "win_rate":  round(s["wins"] / max(s["wins"] + s["losses"], 1) * 100, 1),
+                    "total_pnl": round(s["total_pnl"], 2),
+                }
+                for trigger, s in self._stats.items()
+                if s["wins"] + s["losses"] > 0
             },
         }
 
@@ -259,10 +301,11 @@ class ScalpAgent:
       - exit_loop  : monitors open positions every 1 s for exit conditions
     """
 
-    def __init__(self, ws_subscriber=None):
+    def __init__(self, ws_subscriber=None, is_trading_fn=None):
         self.book             = _ScalpBook()
         self._ws              = ws_subscriber
         self._running         = False
+        self._is_trading_fn   = is_trading_fn
         self._entry_task: Optional[asyncio.Task] = None
         self._exit_task:  Optional[asyncio.Task] = None
         self.scan_count       = 0
@@ -275,10 +318,26 @@ class ScalpAgent:
             return self._ws.get_price(pid)
         return None
 
+    async def _get_scalp_products(self) -> List[str]:
+        """Return tracked products that have enough candle data and a tradeable price."""
+        tracked = await database.get_products(tracked_only=True, limit=200)
+        eligible = []
+        for p in tracked:
+            pid   = p["product_id"]
+            price = float(p.get("price") or 0)
+            if price < _MIN_PRICE:
+                continue   # skip micro-priced tokens
+            candles = await database.get_candles(pid, limit=_MIN_CANDLES)
+            if len(candles) >= _MIN_CANDLES:
+                eligible.append(pid)
+            if len(eligible) >= _MAX_SCALP_PRODUCTS:
+                break
+        return eligible
+
     async def _get_candles(self, pid: str) -> Optional[Dict]:
         """Fetch 1-min candle data; return None if not enough bars."""
         candles = await database.get_candles(pid, limit=120)
-        if len(candles) < 40:
+        if len(candles) < _MIN_CANDLES:
             return None
         return {
             "closes": [c["close"]  for c in candles],
@@ -290,12 +349,18 @@ class ScalpAgent:
     # -- entry loop --------------------------------------------------------------
 
     async def _entry_loop(self) -> None:
-        await asyncio.sleep(90)   # warm-up delay
         while self._running:
             try:
-                await self._scan_entries()
+                if self._is_trading_fn is None or self._is_trading_fn():
+                    await self._scan_entries()
                 self.scan_count  += 1
                 self.last_scan_at = time.time()
+                logger.info(
+                    f"SCALP scan #{self.scan_count} done | "
+                    f"open={self.book.position_count()} | "
+                    f"balance=${self.book.balance:.2f} | "
+                    f"pnl=${self.book.realized_pnl:+.2f}"
+                )
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -303,14 +368,15 @@ class ScalpAgent:
             await asyncio.sleep(_CANDLE_SLEEP)
 
     async def _scan_entries(self) -> None:
-        if self.book.daily_halt():
-            logger.warning("SCALP daily halt active — skipping entry scan")
-            return
-
         if self.book.position_count() >= _MAX_CONCURRENT:
             return
 
-        for pid in _SCALP_PRODUCTS:
+        products = await self._get_scalp_products()
+        if not products:
+            logger.warning("SCALP: no eligible products with candle data — skipping scan")
+            return
+
+        for pid in products:
             if self.book.has_position(pid):
                 continue
             if self.book.position_count() >= _MAX_CONCURRENT:
@@ -347,6 +413,9 @@ class ScalpAgent:
 
             # Use live tick price if available, else last candle close
             price = self._live_price(pid) or closes[-1]
+            if not price or price < _MIN_PRICE:
+                logger.debug(f"SCALP {pid}: live price ${price} below MIN_PRICE — skip")
+                continue
             atr7  = _atr(highs, lows, closes, period=7)
 
             regime = 'TREND' if trending else 'RANGE'
@@ -354,7 +423,7 @@ class ScalpAgent:
                 f"SCALP ENTRY {pid} | score={score} | ADX={adx:.1f} "
                 f"| {regime} | {', '.join(reasons[:3])}"
             )
-            await self.book.buy(pid, price, atr7, trigger="SCALP")
+            await self.book.buy(pid, price, atr7, trigger="SCALP", entry_reasons=reasons)
             await database.save_agent_decision({
                 "agent":      "SCALP",
                 "product_id": pid,

@@ -49,15 +49,21 @@ export default function PositionTracker({ positions, portfolio }: Props) {
             </thead>
             <tbody>
               {positions.map(p => {
+                const corrupt = (p as any).entry_corrupt
                 const pnl    = p.cash_pnl ?? 0
                 const pctPnl = p.pct_pnl  ?? 0
                 const fmtP   = (n: number) => n >= 1000
                   ? n.toLocaleString('en-US', { maximumFractionDigits: 2 })
                   : n.toFixed(4)
                 return (
-                  <tr key={p.product_id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                  <tr key={p.product_id} className={`border-b border-gray-800/50 hover:bg-gray-800/30 ${corrupt ? 'opacity-50' : ''}`}>
                     <td className="py-2 pr-4">
                       <span className="font-medium text-white">{p.product_id}</span>
+                      {corrupt && (
+                        <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-red-900/50 text-red-400 border border-red-800" title="Entry price was $0 — position data is corrupt">
+                          bad entry
+                        </span>
+                      )}
                     </td>
                     <td className="py-2 pr-4 text-right">
                       <span className={`text-xs px-1.5 py-0.5 rounded ${p.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
@@ -68,21 +74,27 @@ export default function PositionTracker({ positions, portfolio }: Props) {
                       {p.size.toFixed(6)} {p.base_currency}
                     </td>
                     <td className="py-2 pr-4 text-right font-mono text-gray-400">
-                      ${fmtP(p.avg_price)}
+                      {corrupt ? <span className="text-red-500">$0.0000</span> : `$${fmtP(p.avg_price)}`}
                     </td>
                     <td className="py-2 pr-4 text-right font-mono text-white">
-                      ${fmtP(p.current_price ?? 0)}
+                      {p.current_price != null ? `$${fmtP(p.current_price)}` : <span className="text-gray-600">—</span>}
                     </td>
                     <td className="py-2 pr-4 text-right font-mono text-gray-300">
                       ${(p.current_value ?? 0).toFixed(2)}
                     </td>
                     <td className="py-2 text-right">
-                      <div className={`font-mono text-sm ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
-                      </div>
-                      <div className={`text-xs ${pctPnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                        {pctPnl >= 0 ? '+' : ''}{pctPnl.toFixed(2)}%
-                      </div>
+                      {corrupt || p.current_price == null ? (
+                        <span className="text-gray-600 text-xs">—</span>
+                      ) : (
+                        <>
+                          <div className={`font-mono text-sm ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                          </div>
+                          <div className={`text-xs ${pctPnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                            {pctPnl >= 0 ? '+' : ''}{pctPnl.toFixed(2)}%
+                          </div>
+                        </>
+                      )}
                     </td>
                   </tr>
                 )

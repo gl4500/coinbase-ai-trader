@@ -48,6 +48,7 @@ from agents.scalp_agent import ScalpAgent
 from services.ws_subscriber import CoinbaseWSSubscriber
 from services.portfolio_tracker import PortfolioTracker
 from services.outcome_tracker import get_tracker
+from services.history_backfill import get_backfill
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 _LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
@@ -56,13 +57,34 @@ os.makedirs(_LOG_DIR, exist_ok=True)
 _fmt     = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
                               datefmt="%Y-%m-%d %H:%M:%S")
 _level   = getattr(logging, config.log_level.upper(), logging.INFO)
+
+
+class _WinSafeRotatingFileHandler(RotatingFileHandler):
+    """
+    RotatingFileHandler that survives WinError 32 (file-in-use) during rotation.
+    On Windows, os.rename() fails if any handle still points to the source file.
+    We close our own handle first, rename, then reopen.
+    """
+    def rotate(self, source: str, dest: str) -> None:
+        if self.stream is not None:
+            self.stream.close()      # release our handle before rename
+            self.stream = None       # type: ignore[assignment]
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+            os.rename(source, dest)
+        except PermissionError:
+            pass                     # another process holds it — skip silently
+        self.stream = self._open()   # reopen fresh log file
+
+
 _console = logging.StreamHandler()
 _console.setFormatter(_fmt)
-_file_all = RotatingFileHandler(
+_file_all = _WinSafeRotatingFileHandler(
     os.path.join(_LOG_DIR, "backend.log"), maxBytes=5_000_000, backupCount=10, encoding="utf-8"
 )
 _file_all.setFormatter(_fmt)
-_file_err = RotatingFileHandler(
+_file_err = _WinSafeRotatingFileHandler(
     os.path.join(_LOG_DIR, "errors.log"), maxBytes=5_000_000, backupCount=10, encoding="utf-8"
 )
 _file_err.setLevel(logging.WARNING)
@@ -238,63 +260,88 @@ async def broadcast_state() -> None:
     })
 
 
+# ── Agent startup stagger delays (seconds) ────────────────────────────────────
+_TECH_START_DELAY     =  5   # CNN starts at 0; Tech after 5s
+_MOMENTUM_START_DELAY = 10   # Momentum after 10s
+_SCALP_START_DELAY    = 15   # Scalp after 15s  (its _entry_loop has no extra warmup)
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await database.init_db()
 
-    # WS subscriber created first so agents can reference it for live prices
-    app_state.ws_subscriber   = CoinbaseWSSubscriber(broadcast_fn=broadcast)
+    # Trim old decision history (keep 7 days — CNN only needs last 2 rows per product)
+    deleted = await database.purge_old_decisions(days=7)
+    if deleted:
+        logger.info(f"Startup: purged {deleted} agent_decisions older than 7 days")
 
+    # Instantiate all objects (no I/O, fast)
+    app_state.ws_subscriber   = CoinbaseWSSubscriber(broadcast_fn=broadcast)
     app_state.scanner         = MarketScanner()
     app_state.signal_gen      = SignalGenerator()
     app_state.order_executor  = OrderExecutor(dry_run=app_state.dry_run)
     app_state.cnn_agent       = CoinbaseCNNAgent(ws_subscriber=app_state.ws_subscriber)
+    _is_trading = lambda: app_state.is_trading
     app_state.tech_agent      = TechAgentCB(ws_subscriber=app_state.ws_subscriber)
     app_state.momentum_agent  = MomentumAgentCB(ws_subscriber=app_state.ws_subscriber)
-    app_state.scalp_agent     = ScalpAgent(ws_subscriber=app_state.ws_subscriber)
+    app_state.scalp_agent     = ScalpAgent(ws_subscriber=app_state.ws_subscriber, is_trading_fn=_is_trading)
     app_state.portfolio       = PortfolioTracker(ws_subscriber=app_state.ws_subscriber)
 
-    # Initial market scan — discovers all USD spot pairs dynamically
-    try:
-        await app_state.scanner.scan()
-    except Exception as e:
-        logger.warning(f"Initial scan failed: {e}")
-
-    # Subscribe WS to whatever the scanner discovered
-    app_state.ws_subscriber.set_products(list(app_state.scanner.tracked_ids))
+    # Seed WS subscriber from DB-cached tracked products immediately —
+    # don't wait for the scan; the scan will refresh this list in the background.
+    cached_products = await database.get_products(tracked_only=True, limit=200)
+    cached_ids      = [p["product_id"] for p in cached_products]
+    if cached_ids:
+        app_state.ws_subscriber.set_products(cached_ids)
+        logger.info(f"WS seeded from DB cache: {len(cached_ids)} products")
     await app_state.ws_subscriber.start()
+
+    # Background scan — refreshes product list without blocking startup
+    async def _background_scan():
+        try:
+            await app_state.scanner.scan()
+            app_state.ws_subscriber.set_products(list(app_state.scanner.tracked_ids))
+            logger.info(f"Background scan complete: {len(app_state.scanner.tracked_ids)} products")
+        except Exception as e:
+            logger.warning(f"Background scan failed: {e}")
+
+    asyncio.create_task(_background_scan())
 
     app_state.scanner_task   = asyncio.create_task(app_state.scanner.run_loop())
     app_state.portfolio_task = asyncio.create_task(app_state.portfolio.run_loop())
-    # CNN loop uses its own _CNNBook to track positions and write to the trades table.
-    # Real live orders additionally go through order_executor when is_trading=True.
+    app_state.outcome_task   = asyncio.create_task(get_tracker().run_loop())
+
+    # CNN loop — starts immediately
     app_state.cnn_task = asyncio.create_task(
         app_state.cnn_agent.run_loop(
             order_executor      = app_state.order_executor,
-            is_trading_fn       = lambda: True,   # always run book simulation
+            is_trading_fn       = lambda: app_state.is_trading,
             train_every_n_scans = config.cnn_train_every_n_scans,
         )
     )
-    # Sub-agents: stagger start by 30 s each so they don't all hit the DB at startup
+
+    # Sub-agents: short stagger so they don't all hammer the DB simultaneously
     async def _delayed_tech():
-        await asyncio.sleep(30)
-        await app_state.tech_agent.run_loop()
+        await asyncio.sleep(_TECH_START_DELAY)
+        await app_state.tech_agent.run_loop(is_trading_fn=_is_trading)
+
     async def _delayed_momentum():
-        await asyncio.sleep(60)
-        await app_state.momentum_agent.run_loop()
+        await asyncio.sleep(_MOMENTUM_START_DELAY)
+        await app_state.momentum_agent.run_loop(is_trading_fn=_is_trading)
+
     async def _delayed_scalp():
-        await asyncio.sleep(90)
+        await asyncio.sleep(_SCALP_START_DELAY)
         await app_state.scalp_agent.start()
+
     app_state.tech_task     = asyncio.create_task(_delayed_tech())
     app_state.momentum_task = asyncio.create_task(_delayed_momentum())
     app_state.scalp_task    = asyncio.create_task(_delayed_scalp())
-    app_state.outcome_task  = asyncio.create_task(get_tracker().run_loop())
 
     logger.info("Coinbase Trader ready — http://localhost:8001")
     logger.info(f"Credentials: {'OK' if config.has_credentials else 'MISSING'}")
     logger.info(f"Mode: {'DRY-RUN' if app_state.dry_run else 'LIVE'}")
-    logger.info(f"Tracking {len(app_state.scanner.tracked_ids)} USD spot pairs")
+    logger.info(f"WS tracking {len(cached_ids)} products (scan refreshing in background)")
 
     yield
 
@@ -462,6 +509,11 @@ async def get_cnn_status():
         "drawdown":         dd_status,
         "last_trained_at":  agent.last_trained_at if agent else None,
         "train_count":      agent.train_count     if agent else 0,
+        # Win rate tracking
+        "wins":             agent.book.wins        if agent else 0,
+        "losses":           agent.book.losses      if agent else 0,
+        "win_rate":         round(agent.book.win_rate * 100, 1) if agent else 0.0,
+        "expectancy_pct":   round(agent.book.expectancy, 3)     if agent else 0.0,
     }
 
 
@@ -513,6 +565,57 @@ async def trigger_cnn_training(
     _: None = Depends(verify_api_key),
 ):
     return await app_state.cnn_agent.train_on_history(epochs=epochs)
+
+
+# ── History Backfill ──────────────────────────────────────────────────────────
+@app.post("/api/history/backfill")
+async def trigger_history_backfill(
+    days:          int           = Query(365, ge=7, le=730),
+    product_id:    Optional[str] = Query(None, description="Single product ID"),
+    all_coinbase:  bool          = Query(False, description="Backfill ALL Coinbase USD pairs"),
+    _: None = Depends(verify_api_key),
+):
+    """
+    Fetch historical hourly candles from Coinbase and write to parquet files.
+    Runs as a background task — never blocks agents.
+    Incremental — safe to re-run; only downloads bars not already stored.
+    Returns immediately with {"status": "started"}.
+    """
+    pids = [product_id] if product_id else None
+
+    async def _run():
+        try:
+            result = await get_backfill().run(days=days, product_ids=pids, all_coinbase=all_coinbase)
+            logger.info(f"Backfill complete: {result['total_products']} products | {result['total_new_bars']} new bars")
+        except Exception as e:
+            logger.error(f"Backfill error: {e}")
+
+    asyncio.create_task(_run())
+    scope = "all Coinbase USD pairs" if all_coinbase else (product_id or "tracked products")
+    return {"status": "started", "days": days, "scope": scope}
+
+
+@app.get("/api/history/status")
+async def get_history_status():
+    """List all products that have parquet history files and their bar counts."""
+    import os
+    from services.history_backfill import _HISTORY_DIR, load_history
+    if not os.path.exists(_HISTORY_DIR):
+        return {"files": []}
+    files = []
+    for fname in sorted(os.listdir(_HISTORY_DIR)):
+        if not fname.endswith(".parquet"):
+            continue
+        pid    = fname.replace(".parquet", "").replace("_", "-")
+        candles = load_history(pid)
+        if candles:
+            files.append({
+                "product_id": pid,
+                "bars":       len(candles),
+                "oldest":     candles[0]["start"],
+                "newest":     candles[-1]["start"],
+            })
+    return {"files": files}
 
 
 # ── Orders ────────────────────────────────────────────────────────────────────
@@ -689,11 +792,16 @@ async def get_agent_status():
     cnn_book = app_state.cnn_agent.book if app_state.cnn_agent else None
     cnn_status: Dict = {}
     if cnn_book:
+        cnn_agent = app_state.cnn_agent
         cnn_status = {
             "agent":          "CNN",
             "balance":        round(cnn_book.balance, 2),
             "realized_pnl":   round(cnn_book.realized_pnl, 2),
             "open_positions": len(cnn_book.positions),
+            "scan_count":     cnn_agent.scan_count     if cnn_agent else 0,
+            "last_scan_at":   cnn_agent.last_scan_at   if cnn_agent else None,
+            "signals_buy":    cnn_agent.signals_buy     if cnn_agent else 0,
+            "signals_sell":   cnn_agent.signals_sell    if cnn_agent else 0,
             "positions":      {
                 pid: {"size": round(p["size"], 6), "avg_price": round(p["avg_price"], 6)}
                 for pid, p in cnn_book.positions.items()
@@ -707,14 +815,50 @@ async def get_agent_status():
 
     # Enrich positions with live price + unrealized PnL
     ws = app_state.ws_subscriber
+
+    # Collect ALL held product IDs across all agents so we can ensure WS coverage
+    all_held_pids: set = set()
+    for st in (tech_status, mom_status, cnn_status, scalp_status):
+        all_held_pids.update(st.get("positions", {}).keys())
+
+    # Subscribe WS to any held product not already in its subscription list
+    # (catches positions opened before MIN_PRICE was raised)
+    if ws and all_held_pids:
+        current_subs = set(ws._products)
+        missing      = all_held_pids - current_subs
+        if missing:
+            ws.set_products(list(current_subs | missing))
+            logger.info(f"WS: added {len(missing)} held-but-untracked products — reconnecting: {missing}")
+            asyncio.create_task(ws.reconnect())
+
+    # REST fallback: for held products with no WS price, fetch via product endpoint and seed WS state
+    if ws and all_held_pids:
+        no_price = [pid for pid in all_held_pids if not ws.get_price(pid)]
+        for pid in no_price:
+            try:
+                prod = await coinbase_client.get_product(pid)
+                price_str = prod.get("price") if prod else None
+                if price_str:
+                    rest_price = float(price_str)
+                    ws.state[pid] = {"product_id": pid, "price": rest_price,
+                                     "bid": None, "ask": None, "volume_24h": 0.0, "pct_change": 0.0}
+                    logger.debug(f"REST price fallback: {pid} = {rest_price}")
+            except Exception as _e:
+                logger.debug(f"REST price fallback failed for {pid}: {_e}")
+
     for st in (tech_status, mom_status, cnn_status, scalp_status):
         positions = st.get("positions", {})
         for pid, pos in positions.items():
             live = ws.get_price(pid) if ws else None
-            if live:
+            entry = pos.get("avg_price", 0)
+
+            # Flag zero-entry positions — data is corrupt (opened before price was available)
+            pos["entry_corrupt"] = entry == 0
+
+            if live and entry > 0:
                 pos["current_price"]  = round(live, 6)
-                pos["unrealized_pnl"] = round((live - pos["avg_price"]) * pos["size"], 4)
-                pos["pct_pnl"]        = round((live - pos["avg_price"]) / pos["avg_price"] * 100, 2)
+                pos["unrealized_pnl"] = round((live - entry) * pos["size"], 4)
+                pos["pct_pnl"]        = round((live - entry) / entry * 100, 2)
             else:
                 pos["current_price"]  = None
                 pos["unrealized_pnl"] = None
@@ -735,6 +879,144 @@ async def get_trades(
         agent=agent, product_id=product_id,
         open_only=open_only, closed_only=closed_only, limit=limit,
     )
+
+
+@app.get("/api/performance")
+async def get_performance():
+    """
+    Monthly performance breakdown + rolling metrics for the dashboard.
+    Returns monthly stats, cumulative balance curve, and $50k/yr projection.
+    """
+    import aiosqlite
+    from database import DB_PATH, _DB_TIMEOUT
+    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Monthly closed-trade aggregates
+        cursor = await db.execute("""
+            SELECT
+                strftime('%Y-%m', closed_at)          AS month,
+                COUNT(*)                               AS trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                ROUND(SUM(pnl), 2)                    AS total_pnl,
+                ROUND(AVG(pct_pnl), 2)                AS avg_pct_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0  THEN pnl END), 4)  AS avg_win,
+                ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END), 4)  AS avg_loss,
+                MIN(balance_after)                     AS low_balance,
+                MAX(balance_after)                     AS high_balance,
+                (SELECT balance_after FROM trades t2
+                 WHERE strftime('%Y-%m', t2.closed_at) = strftime('%Y-%m', t.closed_at)
+                   AND t2.closed_at IS NOT NULL
+                 ORDER BY t2.closed_at ASC LIMIT 1)   AS open_balance,
+                (SELECT balance_after FROM trades t2
+                 WHERE strftime('%Y-%m', t2.closed_at) = strftime('%Y-%m', t.closed_at)
+                   AND t2.closed_at IS NOT NULL
+                 ORDER BY t2.closed_at DESC LIMIT 1)  AS close_balance
+            FROM trades t
+            WHERE closed_at IS NOT NULL
+            GROUP BY month
+            ORDER BY month ASC
+        """)
+        months = [dict(r) for r in await cursor.fetchall()]
+
+        # Add win_rate, expectancy, and monthly_return_pct per month
+        for m in months:
+            t = (m["wins"] or 0) + (m["losses"] or 0)
+            wr = (m["wins"] or 0) / t if t else 0.0
+            m["win_rate"] = round(wr * 100, 1)
+            avg_win  = m["avg_win"]  or 0.0
+            avg_loss = m["avg_loss"] or 0.0
+            # Expectancy = expected $ per trade (negative = losing system)
+            m["expectancy"] = round(wr * avg_win + (1 - wr) * avg_loss, 3)
+            ob  = m["open_balance"] or 0
+            pnl = m["total_pnl"]    or 0
+            m["monthly_return_pct"] = round(pnl / ob * 100, 2) if ob > 0 else 0.0
+
+        # Rolling 30-day stats (last 30 days of closed trades)
+        cursor = await db.execute("""
+            SELECT
+                COUNT(*)                                   AS trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)  AS wins,
+                ROUND(SUM(pnl), 2)                         AS total_pnl,
+                (SELECT balance_after FROM trades
+                 WHERE closed_at IS NOT NULL
+                   AND closed_at >= datetime('now', '-30 days')
+                 ORDER BY closed_at ASC  LIMIT 1)          AS first_balance,
+                (SELECT balance_after FROM trades
+                 WHERE closed_at IS NOT NULL
+                   AND closed_at >= datetime('now', '-30 days')
+                 ORDER BY closed_at DESC LIMIT 1)          AS last_balance
+            FROM trades
+            WHERE closed_at IS NOT NULL
+              AND closed_at >= datetime('now', '-30 days')
+        """)
+        r30 = dict(await cursor.fetchone())
+        t30 = r30["trades"] or 0
+        w30 = r30["wins"] or 0
+        fb30 = r30["first_balance"] or 0
+        rolling_return_pct = round((r30["total_pnl"] or 0) / fb30 * 100, 2) if fb30 > 0 else 0.0
+        rolling_win_rate   = round(w30 / t30 * 100, 1) if t30 else 0.0
+
+        # All-time stats
+        cursor = await db.execute("""
+            SELECT
+                COUNT(*)                                  AS total_trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS total_wins,
+                ROUND(SUM(pnl), 2)                        AS total_pnl,
+                MIN(balance_after)                        AS first_balance,
+                MAX(balance_after)                        AS peak_balance,
+                (SELECT balance_after FROM trades
+                 WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1) AS current_balance
+            FROM trades WHERE closed_at IS NOT NULL
+        """)
+        overall = dict(await cursor.fetchone())
+
+    curr_bal = overall["current_balance"] or 0
+    first_bal = overall["first_balance"] or curr_bal or 1
+    total_t = overall["total_trades"] or 0
+    total_w = overall["total_wins"] or 0
+    all_time_win_rate = round(total_w / total_t * 100, 1) if total_t else 0.0
+
+    # Projection: use trailing 30-day monthly return to project path to $50k/year
+    # $50k/year means the account needs to generate $50k annually
+    # We estimate months_to_goal based on trailing rate
+    annual_goal_usd = 50_000
+    projected_months: Optional[float] = None
+    if rolling_return_pct > 0 and curr_bal > 0:
+        monthly_rate = rolling_return_pct / 100
+        # months until annual income (12 * monthly_pnl) >= $50k
+        # 12 * bal * (1+r)^n * r >= 50000  → solve numerically
+        bal = curr_bal
+        for n in range(1, 600):
+            bal *= (1 + monthly_rate)
+            if 12 * bal * monthly_rate >= annual_goal_usd:
+                projected_months = n
+                break
+
+    return {
+        "months":               months,
+        "rolling_30d": {
+            "trades":         t30,
+            "wins":           w30,
+            "win_rate_pct":   rolling_win_rate,
+            "return_pct":     rolling_return_pct,
+            "total_pnl":      round(r30["total_pnl"] or 0, 2),
+        },
+        "overall": {
+            "total_trades":   total_t,
+            "total_wins":     total_w,
+            "win_rate_pct":   all_time_win_rate,
+            "total_pnl":      round(overall["total_pnl"] or 0, 2),
+            "current_balance": round(curr_bal, 2),
+            "peak_balance":    round(overall["peak_balance"] or 0, 2),
+        },
+        "projection": {
+            "annual_goal_usd":    annual_goal_usd,
+            "trailing_monthly_pct": rolling_return_pct,
+            "months_to_goal":     projected_months,
+        },
+    }
 
 
 @app.get("/api/agents/decisions")

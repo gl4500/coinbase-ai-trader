@@ -228,9 +228,12 @@ class TestMomentumThresholds:
     def test_sell_threshold(self):
         assert _SELL_THRESHOLD > 0.0
 
-    def test_thresholds_symmetric(self):
-        """Buy and sell thresholds should be equal (symmetric strategy)."""
-        assert _BUY_THRESHOLD == pytest.approx(_SELL_THRESHOLD, abs=0.01)
+    def test_thresholds_asymmetric(self):
+        """Buy threshold is intentionally higher than sell — higher bar for entries."""
+        assert _BUY_THRESHOLD > _SELL_THRESHOLD, (
+            f"BUY={_BUY_THRESHOLD} should be > SELL={_SELL_THRESHOLD} "
+            "(raised buy threshold eliminates weak 34%-win-rate entries)"
+        )
 
 
 # ── analyze_product ────────────────────────────────────────────────────────────
@@ -265,3 +268,24 @@ class TestMomentumAnalyze:
         if result is not None:
             assert result["product_id"] == "BTC-USD"
             assert result["side"] in ("BUY", "SELL", "HOLD")
+
+
+class TestMomentumMinPriceGuard:
+    """Momentum agent must skip products priced below MIN_PRICE."""
+
+    @pytest.mark.asyncio
+    async def test_micro_price_returns_none(self):
+        from agents.momentum_agent_cb import MomentumAgentCB, MIN_PRICE
+        ag = MomentumAgentCB()
+        product = {"product_id": "BONK-USD", "price": 0.0000139}
+        result = await ag.analyze_product(product)
+        assert result is None, f"Momentum must return None for price < MIN_PRICE, got {result}"
+
+    @pytest.mark.asyncio
+    async def test_price_at_min_price_not_blocked(self):
+        from agents.momentum_agent_cb import MomentumAgentCB, MIN_PRICE
+        ag = MomentumAgentCB()
+        product = {"product_id": "EDGE-USD", "price": MIN_PRICE}
+        with patch("agents.momentum_agent_cb.database.get_candles", new=AsyncMock(return_value=[])):
+            result = await ag.analyze_product(product)
+        assert result is None  # no candles → None, but not blocked by price guard

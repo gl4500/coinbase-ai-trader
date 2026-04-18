@@ -27,15 +27,18 @@ from typing import Dict, List, Optional, Tuple
 
 import database
 from clients import coinbase_client
-from agents.signal_generator import _adx, _mfi
+from agents.signal_generator import _adx, _mfi, _rsi
 from services.outcome_tracker import get_tracker
 
 logger = logging.getLogger(__name__)
 
 _DRY_RUN_BALANCE   = 1_000.0
-_BUY_THRESHOLD     = 0.30
+_BUY_THRESHOLD     = 0.45   # raised from 0.30 — eliminates weak entries (was 34% win rate)
+_RSI_OVERBOUGHT    = 65.0   # block buys when RSI ≥ 65 (overbought — high loss rate)
+_ADX_MIN_TREND     = 20.0   # require confirmed trend before entering
 _SELL_THRESHOLD    = 0.30
 _TRAILING_STOP     = 0.03    # 3 % trailing stop from high-water mark
+MIN_PRICE          = 0.01    # skip micro-priced tokens (unprofitable spreads)
 _HARD_STOP_LOSS    = 0.05    # 5 % hard stop below avg entry price (real-time)
 _TAKE_PROFIT       = 0.20    # 20 % take-profit above avg entry price (real-time)
 _MOMENTUM_SHORT    = 5       # 5-bar ROC
@@ -110,10 +113,19 @@ class _Book:
             self.realized_pnl = state["realized_pnl"]
             self.positions    = state["positions"]
             high_water_ref.update(state["high_water"])
+
+            corrupt = [pid for pid, pos in self.positions.items()
+                       if pos.get("avg_price", 0) == 0]
+            for pid in corrupt:
+                del self.positions[pid]
+                high_water_ref.pop(pid, None)
+                logger.warning(f"{self._agent}: dropped corrupt position {pid} (avg_price=0)")
+
             logger.info(
                 f"{self._agent} state restored | balance=${self.balance:.2f} | "
                 f"pnl=${self.realized_pnl:+.2f} | positions={len(self.positions)} | "
                 f"high_water={len(high_water_ref)}"
+                + (f" | dropped {len(corrupt)} corrupt" if corrupt else "")
             )
         else:
             logger.info(f"{self._agent} no saved state — starting fresh at ${self.balance:.2f}")
@@ -209,7 +221,11 @@ class MomentumAgentCB:
         if not self.book.has_position(pid):
             # No position — check if we have a cached buy signal
             sc = self._score_cache.get(pid)
-            if sc and sc["buy_score"] >= _BUY_THRESHOLD and sc["vw_mom"] > 0:
+            if (sc
+                    and sc["buy_score"] >= _BUY_THRESHOLD
+                    and sc["vw_mom"] > 0
+                    and sc.get("rsi", 50.0) < _RSI_OVERBOUGHT
+                    and sc.get("adx", 0.0)  >= _ADX_MIN_TREND):
                 lock = self._get_lock(pid)
                 if lock.locked():
                     return
@@ -347,6 +363,7 @@ class MomentumAgentCB:
         # Regime and volume-direction indicators
         adx_val, _, _ = _adx(highs, lows, closes, period=14)
         mfi_val       = _mfi(highs, lows, closes, volumes, period=14)
+        rsi_val       = _rsi(closes, period=14)
 
         # BUY score
         buy_score   = 0.0
@@ -408,6 +425,7 @@ class MomentumAgentCB:
             "consistency":  round(consistency, 3),
             "adx":          round(adx_val, 1),
             "mfi":          round(mfi_val, 1),
+            "rsi":          round(rsi_val, 1),
         }
 
     # ── Single-product analyze ────────────────────────────────────────────────
@@ -416,6 +434,8 @@ class MomentumAgentCB:
         pid   = product["product_id"]
         price = self._live_price(pid, product.get("price", 0))
         if not price or price <= 0:
+            return None
+        if price < MIN_PRICE:
             return None
 
         candles = await database.get_candles(pid, limit=80)
@@ -453,7 +473,9 @@ class MomentumAgentCB:
             )
             self.signals_sell += 1
 
-        elif buy_score >= _BUY_THRESHOLD and not has_pos and sc["vw_mom"] > 0 and sc["adx"] >= 20:
+        elif (buy_score >= _BUY_THRESHOLD and not has_pos and sc["vw_mom"] > 0
+              and sc.get("rsi", 50.0) < _RSI_OVERBOUGHT
+              and sc.get("adx", 0.0) >= _ADX_MIN_TREND):
             frac = _MAX_POSITION_FRAC * buy_score
             self._high_water[pid] = price
             spent, _ = await self.book.buy(pid, price, frac, self._high_water, trigger="SCAN")
@@ -538,7 +560,7 @@ class MomentumAgentCB:
             await asyncio.sleep(0.05)
         return signals
 
-    async def run_loop(self, interval: int = _SCAN_INTERVAL) -> None:
+    async def run_loop(self, interval: int = _SCAN_INTERVAL, is_trading_fn=None) -> None:
         await self.start()   # restore persisted state before first scan
         logger.info(
             f"MomentumAgentCB loop started | interval={interval}s | "
@@ -546,14 +568,15 @@ class MomentumAgentCB:
         )
         while True:
             try:
-                sigs = await self.scan_all()
-                self.last_scan_at = time.time()
-                self.scan_count  += 1
-                logger.info(
-                    f"MomentumAgentCB scan #{self.scan_count} done | "
-                    f"signals={len(sigs)} | balance=${self.book.balance:.2f} | "
-                    f"pnl=${self.book.realized_pnl:+.2f}"
-                )
+                if is_trading_fn is None or is_trading_fn():
+                    sigs = await self.scan_all()
+                    self.last_scan_at = time.time()
+                    self.scan_count  += 1
+                    logger.info(
+                        f"MomentumAgentCB scan #{self.scan_count} done | "
+                        f"signals={len(sigs)} | balance=${self.book.balance:.2f} | "
+                        f"pnl=${self.book.realized_pnl:+.2f}"
+                    )
             except asyncio.CancelledError:
                 return
             except Exception as e:

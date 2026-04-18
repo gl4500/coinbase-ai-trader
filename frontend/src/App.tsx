@@ -23,8 +23,9 @@ import OrderBook        from './components/OrderBook'
 import PositionTracker  from './components/PositionTracker'
 import SignalDashboard  from './components/SignalDashboard'
 import CNNDashboard     from './components/CNNDashboard'
-import AgentsDashboard  from './components/AgentsDashboard'
-import LogViewer        from './components/LogViewer'
+import AgentsDashboard      from './components/AgentsDashboard'
+import LogViewer             from './components/LogViewer'
+import PerformanceDashboard  from './components/PerformanceDashboard'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -104,7 +105,7 @@ interface AppData {
   products:   Product[]
 }
 
-const TABS = ['Markets', 'Order Book', 'Positions', 'Signals', 'CNN', 'Agents', 'Logs'] as const
+const TABS = ['Markets', 'Order Book', 'Positions', 'Signals', 'CNN', 'Agents', 'Performance', 'Logs'] as const
 type Tab = typeof TABS[number]
 
 // ── App ────────────────────────────────────────────────────────────────────────
@@ -273,7 +274,7 @@ export default function App() {
         </div>
 
         {/* Tab bar */}
-        <div className="max-w-screen-2xl mx-auto px-4 pb-2 flex gap-1 overflow-x-auto">
+        <div className="max-w-screen-2xl mx-auto px-4 pb-2 flex gap-0.5 overflow-x-auto scrollbar-none">
           {TABS.map(tab => (
             <button
               key={tab}
@@ -308,6 +309,9 @@ export default function App() {
         )}
         {activeTab === 'Agents' && (
           <AgentsDashboard />
+        )}
+        {activeTab === 'Performance' && (
+          <PerformanceDashboard />
         )}
         {activeTab === 'Logs' && (
           <LogViewer />

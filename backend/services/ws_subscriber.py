@@ -48,6 +48,16 @@ class CoinbaseWSSubscriber:
     def set_products(self, product_ids: List[str]) -> None:
         self._products = list(product_ids)
 
+    async def reconnect(self) -> None:
+        """Cancel the current WS connection and immediately reconnect with updated product list."""
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._task = asyncio.create_task(self._run())
+
     async def _run(self) -> None:
         while True:
             try:

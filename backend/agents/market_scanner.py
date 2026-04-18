@@ -15,6 +15,12 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
+# Minimum USD price to track a product.
+# Below this threshold the bid-ask spread as a % of price makes profitable
+# trading impossible — any 0.0000-display token is excluded.
+# $0.01 is the practical floor: sub-cent tokens have 1%+ spreads on Coinbase.
+MIN_PRICE = 0.01
+
 
 class MarketScanner:
     def __init__(self):
@@ -42,15 +48,18 @@ class MarketScanner:
             logger.warning(f"Coinbase product fetch failed: {e}")
             all_products = []
 
-        # Filter to online, tradeable USD pairs with sufficient volume
+        # Filter to online, tradeable USD pairs with sufficient volume and price
         max_tracked   = getattr(config, "max_tracked_products", 100)
         min_volume    = getattr(config, "min_volume_24h", 1_000_000)
+        min_price     = getattr(config, "min_price", MIN_PRICE)
         eligible = [
             p for p in all_products
             if p.get("quote_currency_id") == "USD"
             and p.get("status") == "online"
             and not p.get("trading_disabled", False)
-            and float(p.get("volume_24h", 0) or 0) >= min_volume
+            and float(p.get("price", 0) or 0) >= min_price
+            # volume_24h from Coinbase is in base currency — multiply by price for USD notional
+            and float(p.get("volume_24h", 0) or 0) * float(p.get("price", 0) or 0) >= min_volume
         ]
         # Sort by 24h volume descending and cap
         eligible.sort(key=lambda p: float(p.get("volume_24h", 0) or 0), reverse=True)
@@ -61,6 +70,18 @@ class MarketScanner:
             logger.info(f"Discovered {len(self.tracked_ids)} USD spot pairs (top by volume)")
         else:
             logger.warning("No eligible USD spot pairs found — check credentials / volume threshold")
+
+        # Untrack any products already in DB that no longer meet the criteria
+        # (catches stale rows from before MIN_PRICE was raised or volume dropped)
+        try:
+            all_db = await database.get_products(tracked_only=True, limit=500)
+            stale  = [p["product_id"] for p in all_db if p["product_id"] not in self.tracked_ids]
+            for pid in stale:
+                await database.set_product_tracked(pid, False)
+            if stale:
+                logger.info(f"Scanner: untracked {len(stale)} products below price/volume threshold: {stale}")
+        except Exception as e:
+            logger.debug(f"Stale product cleanup failed: {e}")
 
         # Build lookup by product_id
         product_map: Dict[str, Dict] = {p.get("product_id", ""): p for p in all_products}

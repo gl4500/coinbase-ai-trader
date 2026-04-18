@@ -24,6 +24,13 @@ Channels:
   Ch 17  5-min RSI(12) / 100          (fast momentum — current hour in 5-min bars)
   Ch 18  5-min price velocity         (rate of change per 5-min bar, normalised)
   Ch 19  5-min volume z-score         (volume spike vs. 60-bar mean, normalised)
+  Ch 20  funding rate (normalised)    (perp market sentiment: positive = longs pay)
+  Ch 21  BTC return correlation       (rolling 20-bar Pearson vs BTC returns)
+  Ch 22  sin(hour-of-day × 2π/24)    (time-of-day cyclical encoding)
+  Ch 23  cos(hour-of-day × 2π/24)    (time-of-day cyclical encoding)
+  Ch 24  IV/RV20 spread (clipped [-1,1]) (Deribit IV minus 20d realized vol)
+  Ch 25  IV/RV60 spread (clipped [-1,1]) (Deribit IV minus 60d realized vol)
+  Ch 26  L/S sentiment ([-1,1])          (Binance top-trader long minus short ratio)
 
 Architecture: Conv1D × 4 → MaxPool × 2 → LSTM(2-layer) → FC → sigmoid
 Blend: trending market → CNN 75% / LLM 25%
@@ -33,6 +40,7 @@ Install PyTorch (CUDA 12.x):
   pip install torch --index-url https://download.pytorch.org/whl/cu124
 """
 import asyncio
+import datetime as _dt
 import json
 import logging
 import math
@@ -45,15 +53,32 @@ import httpx
 
 import database
 from clients import coinbase_client
+from data.lgbm_filter import LGBMFilter
 from agents.signal_generator import (
     _rsi, _ema, _macd, _bollinger, _ema_cross,
     _atr, _adx, _mfi, _obv_slope, _stoch_rsi, _vwap,
+    _hurst_exponent, _dissimilarity_index, _kelly_fraction,
+    _realized_vol, _shannon_entropy,
 )
 from config import config
 from services.outcome_tracker import get_tracker
+from services.fear_greed import get_fear_greed
+from services.history_backfill import load_history
+from services.deribit_iv import get_iv, compute_iv_rv_spreads
+from services.binance_sentiment import get_ls_sentiment
+from services.hmm_regime import get_detector, regime_blend
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
 _CNN_MAX_FRAC        = 0.15    # max 15% of portfolio per position
+_CNN_STOP_LOSS_PCT   = 0.08    # 8% hard stop-loss below avg entry price
+_CNN_MAX_HOLD_SECS   = 48 * 3600  # 48 hour max hold time
+MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unprofitable spreads)
+_LGBM_RETRAIN_EVERY  = 50      # retrain LightGBM after every N new closed trades
+_LGBM_MODEL_PATH     = os.path.join(os.path.dirname(__file__), "..", "data", "lgbm_filter.pkl")
+_HURST_TREND_THRESH  = 0.55    # H > this → trending (CNN bias toward momentum signals)
+_HURST_MR_THRESH     = 0.45    # H < this → mean-reverting (suppress trending signals)
+_DI_SUPPRESS_THRESH  = 5.0     # DI > this % → price far from SMA, suppress Ollama
+_ENTROPY_SKIP_THRESH = 0.85    # entropy > this → signal is noise, skip entirely
 
 
 class _CNNBook:
@@ -74,12 +99,52 @@ class _CNNBook:
             self.balance      = state["balance"]
             self.realized_pnl = state["realized_pnl"]
             self.positions    = state["positions"]
+
+            # Drop corrupt positions (avg_price == 0) — these were opened before
+            # the price filter existed and can never be exited meaningfully
+            corrupt = [pid for pid, pos in self.positions.items()
+                       if pos.get("avg_price", 0) == 0]
+            for pid in corrupt:
+                del self.positions[pid]
+                logger.warning(
+                    f"CNN book: dropped corrupt position {pid} (avg_price=0) — "
+                    f"will reconcile open trade row below"
+                )
+
             logger.info(
                 f"CNN book restored | balance=${self.balance:.2f} | "
                 f"pnl=${self.realized_pnl:+.2f} | positions={len(self.positions)}"
+                + (f" | dropped {len(corrupt)} corrupt" if corrupt else "")
             )
         else:
             logger.info(f"CNN book: no saved state — starting fresh at ${self.balance:.2f}")
+
+        # Reconcile: close ghost open trades in the DB that don't match the current book.
+        # Two cases:
+        #   1. Product not in current positions at all → close every open row
+        #   2. Product IS in current positions but has multiple open rows → keep only newest (highest id)
+        open_trades = await database.get_trades(agent=self._agent, open_only=True, limit=500)
+
+        # Group open rows by product, sorted newest-first (get_trades returns newest-first)
+        by_product: Dict[str, list] = {}
+        for t in open_trades:
+            by_product.setdefault(t["product_id"], []).append(t)
+
+        ghost_count = 0
+        for pid, rows in by_product.items():
+            if pid not in self.positions:
+                # Orphan product — close all rows
+                for t in rows:
+                    await database.close_trade_by_id(t["id"], trigger_close="STARTUP_CLEANUP")
+                    ghost_count += 1
+            elif len(rows) > 1:
+                # Duplicate rows — keep newest (rows[0], highest id first), close the rest
+                for t in rows[1:]:
+                    await database.close_trade_by_id(t["id"], trigger_close="STARTUP_CLEANUP")
+                    ghost_count += 1
+
+        if ghost_count:
+            logger.info(f"CNN book: reconciled {ghost_count} ghost open trade row(s) from prior sessions")
 
     async def _save(self) -> None:
         await database.save_agent_state(
@@ -88,6 +153,26 @@ class _CNNBook:
 
     def has_position(self, pid: str) -> bool:
         return pid in self.positions
+
+    # ── Win/loss performance tracking ─────────────────────────────────────────
+    wins:          int   = 0
+    losses:        int   = 0
+    _sum_win_pct:  float = 0.0   # cumulative % gain on winning trades
+    _sum_loss_pct: float = 0.0   # cumulative % loss on losing trades (positive number)
+
+    @property
+    def win_rate(self) -> float:
+        total = self.wins + self.losses
+        return self.wins / total if total > 0 else 0.0
+
+    @property
+    def expectancy(self) -> float:
+        """Expected % gain per trade = win_rate * avg_win_pct - loss_rate * avg_loss_pct."""
+        if self.wins + self.losses == 0:
+            return 0.0
+        avg_win  = self._sum_win_pct  / self.wins   if self.wins   > 0 else 0.0
+        avg_loss = self._sum_loss_pct / self.losses if self.losses > 0 else 0.0
+        return self.win_rate * avg_win - (1 - self.win_rate) * avg_loss
 
     async def buy(self, pid: str, price: float, frac: float,
                   trigger: str = "SCAN") -> Tuple[float, float]:
@@ -101,7 +186,11 @@ class _CNNBook:
             pos["avg_price"] = (pos["avg_price"] * pos["size"] + price * size) / tot
             pos["size"] = tot
         else:
-            self.positions[pid] = {"size": size, "avg_price": price}
+            self.positions[pid] = {
+                "size":       size,
+                "avg_price":  price,
+                "entry_time": time.time(),   # track for max-hold exit
+            }
         self.balance -= spend
         await self._save()
         await database.open_trade(
@@ -116,9 +205,19 @@ class _CNNBook:
             return 0.0
         pos = self.positions.pop(pid)
         proceeds = pos["size"] * price
-        pnl = proceeds - pos["size"] * pos["avg_price"]
-        self.balance += proceeds
+        pnl      = proceeds - pos["size"] * pos["avg_price"]
+        pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
+        self.balance      += proceeds
         self.realized_pnl += pnl
+
+        # Update win/loss counters
+        if pnl > 0:
+            self.wins         += 1
+            self._sum_win_pct += pct_pnl
+        elif pnl < 0:
+            self.losses         += 1
+            self._sum_loss_pct  += abs(pct_pnl)
+
         await self._save()
         await database.close_trade(
             agent=self._agent, product_id=pid, exit_price=price,
@@ -138,7 +237,7 @@ except ImportError:
     _TORCH = False
     logger.warning("PyTorch not found — CNN agent uses linear fallback")
 
-N_CHANNELS = 20
+N_CHANNELS = 27
 SEQ_LEN    = 60
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
 OLLAMA_URL = "http://localhost:11434"
@@ -148,33 +247,50 @@ _CACHE_TTL = 300
 # ── CNN-LSTM Model ────────────────────────────────────────────────────────────
 
 if _TORCH:
+    class GatedConv1d(nn.Module):
+        """
+        Gated Linear Unit conv block.
+        Two parallel conv paths — main and gate — multiplied together:
+            output = conv_main(x) * sigmoid(conv_gate(x))
+        The gate learns per-channel suppression weights: noisy or irrelevant
+        indicator channels are softly zeroed without manual feature engineering.
+        """
+        def __init__(self, in_ch: int, out_ch: int, kernel: int = 3, padding: int = 1):
+            super().__init__()
+            self.conv_main = nn.Conv1d(in_ch, out_ch, kernel, padding=padding)
+            self.conv_gate = nn.Conv1d(in_ch, out_ch, kernel, padding=padding)
+
+        def forward(self, x):
+            return self.conv_main(x) * torch.sigmoid(self.conv_gate(x))
+
     class SignalCNN(nn.Module):
         """
-        CNN-LSTM hybrid:
-          1. 4× Conv1D layers extract local temporal patterns
+        GLU-gated CNN-LSTM hybrid:
+          1. 4× GatedConv1d blocks — gate learns per-channel suppression
           2. 2-layer LSTM captures long-range dependencies
           3. FC head → sigmoid probability
+        arch tag "glu" written into checkpoint for backward-compat load.
         """
+        arch = "glu"
+
         def __init__(self, n_ch: int = N_CHANNELS):
             super().__init__()
-            # Convolutional feature extractor
-            self.c1  = nn.Conv1d(n_ch, 32,  3, padding=1)
-            self.c2  = nn.Conv1d(32,  64,  3, padding=1)
+            self.c1  = GatedConv1d(n_ch, 32)
+            self.c2  = GatedConv1d(32,   64)
             self.p2  = nn.MaxPool1d(2)           # 60 → 30
-            self.c3  = nn.Conv1d(64,  128, 3, padding=1)
+            self.c3  = GatedConv1d(64,  128)
             self.p3  = nn.MaxPool1d(2)           # 30 → 15
-            self.c4  = nn.Conv1d(128, 128, 3, padding=1)
-            # LSTM temporal reasoning
+            self.c4  = GatedConv1d(128, 128)
             self.lstm = nn.LSTM(128, 64, num_layers=2,
                                 batch_first=True, dropout=0.2)
             self.drop = nn.Dropout(0.3)
             self.fc   = nn.Linear(64, 1)
 
         def forward(self, x):
-            x = F.relu(self.c1(x))
-            x = F.relu(self.c2(x)); x = self.p2(x)
-            x = F.relu(self.c3(x)); x = self.p3(x)
-            x = F.relu(self.c4(x))
+            x = self.c1(x)
+            x = self.c2(x); x = self.p2(x)
+            x = self.c3(x); x = self.p3(x)
+            x = self.c4(x)
             x = x.permute(0, 2, 1)          # (B, seq, 128)
             x, _ = self.lstm(x)
             x = x[:, -1, :]                 # last timestep
@@ -200,9 +316,28 @@ class FeatureBuilder:
 
     def build(self, candles: List[Dict], ob: Dict,
               candles_5m: Optional[List[Dict]] = None,
+              btc_closes: Optional[List[float]] = None,
+              funding_rate: Optional[float] = None,
+              iv_rv20_spread: Optional[float] = None,
+              iv_rv60_spread: Optional[float] = None,
+              ls_sentiment: Optional[float] = None,
               T: int = SEQ_LEN) -> List[List[float]]:
         if not candles:
             return [[0.0] * T] * N_CHANNELS
+
+        # Pre-extract timestamps for time-of-day channels (Ch 22/23)
+        _hours = []
+        for c in candles:
+            ts = c.get("start") or c.get("time") or 0
+            try:
+                if isinstance(ts, str):
+                    # ISO format: 2025-01-06T10:00:00Z or 2025-01-06T10:00:00
+                    _hours.append(int(ts[11:13]))
+                else:
+                    # Unix timestamp (int or float)
+                    _hours.append(_dt.datetime.fromtimestamp(float(ts), _dt.timezone.utc).hour)
+            except Exception:
+                _hours.append(0)
 
         opens   = [c["open"]   for c in candles]
         highs   = [c["high"]   for c in candles]
@@ -228,8 +363,8 @@ class FeatureBuilder:
 
         # ── Ch 5: MACD histogram ──────────────────────────────────────────────
         macd_ch = [0.0] * len(closes)
-        if len(closes) >= 35:
-            for i in range(35, len(closes) + 1):
+        if len(closes) >= 16:   # fast MACD(5,13,3) needs slow+signal=16 bars
+            for i in range(16, len(closes) + 1):
                 _, _, h = _macd(closes[:i])
                 scale   = max(abs(closes[i - 1]), 1)
                 macd_ch[i - 1] = max(-1.0, min(1.0, h / scale * 1000))
@@ -340,6 +475,51 @@ class FeatureBuilder:
         vel_ch      = [vel_norm]     * len(closes)
         vol_z_ch    = [vol_z_norm]   * len(closes)
 
+        # ── Ch 20: Funding rate ───────────────────────────────────────────────
+        # Positive = longs pay shorts (bullish crowding); normalised to [-1,1]
+        # Typical range ±0.1%; clip at ±1% → / 0.01 gives [-1,1]
+        fr_val  = float(funding_rate) if funding_rate is not None else 0.0
+        fr_norm = max(-1.0, min(1.0, fr_val / 0.01))
+        fund_ch = [fr_norm] * len(closes)
+
+        # ── Ch 21: BTC return correlation (rolling 20 bars) ───────────────────
+        corr_ch = [0.0] * len(closes)
+        if btc_closes and len(btc_closes) >= 2 and len(closes) >= 2:
+            n_btc = min(len(btc_closes), len(closes))
+            asset_ret = [
+                (closes[i]     - closes[i - 1])    / max(closes[i - 1],    1e-9)
+                for i in range(1, n_btc)
+            ]
+            btc_ret = [
+                (btc_closes[i] - btc_closes[i - 1]) / max(btc_closes[i - 1], 1e-9)
+                for i in range(len(btc_closes) - n_btc + 1, len(btc_closes))
+            ]
+            roll = 20
+            for i in range(roll - 1, len(asset_ret)):
+                a = asset_ret[max(0, i - roll + 1): i + 1]
+                b = btc_ret[max(0, i - roll + 1):  i + 1]
+                n  = len(a)
+                if n < 5:
+                    continue
+                ma = sum(a) / n; mb = sum(b) / n
+                num = sum((a[j] - ma) * (b[j] - mb) for j in range(n))
+                da  = math.sqrt(sum((v - ma) ** 2 for v in a))
+                db  = math.sqrt(sum((v - mb) ** 2 for v in b))
+                corr = num / (da * db) if da > 0 and db > 0 else 0.0
+                corr_ch[i + 1] = max(-1.0, min(1.0, corr))
+
+        # ── Ch 22 & 23: Time-of-day sin/cos encoding ──────────────────────────
+        _2pi_24 = 2.0 * math.pi / 24.0
+        sin_ch  = [math.sin(_hours[i] * _2pi_24) for i in range(len(closes))]
+        cos_ch  = [math.cos(_hours[i] * _2pi_24) for i in range(len(closes))]
+
+        # ── Ch 24 & 25: IV/RV spread (Deribit — BTC/ETH only, 0.0 for others) ──
+        ivrv20_ch = [float(iv_rv20_spread) if iv_rv20_spread is not None else 0.0] * len(closes)
+        ivrv60_ch = [float(iv_rv60_spread) if iv_rv60_spread is not None else 0.0] * len(closes)
+
+        # ── Ch 26: Top-trader L/S sentiment (Binance futures, 0.0 if unavailable) ─
+        ls_ch = [float(ls_sentiment) if ls_sentiment is not None else 0.0] * len(closes)
+
         P = self._pad
         channels = [
             P(norm_c,                                  T),   # 0
@@ -362,6 +542,13 @@ class FeatureBuilder:
             P(fast_rsi_ch,                             T),   # 17
             P(vel_ch,                                  T),   # 18
             P(vol_z_ch,                                T),   # 19
+            P(fund_ch,                                 T),   # 20
+            P(corr_ch,                                 T),   # 21
+            P(sin_ch,                                  T),   # 22
+            P(cos_ch,                                  T),   # 23
+            P(ivrv20_ch,                               T),   # 24
+            P(ivrv60_ch,                               T),   # 25
+            P(ls_ch,                                   T),   # 26
         ]
         assert len(channels) == N_CHANNELS
         return channels
@@ -371,6 +558,29 @@ class FeatureBuilder:
             return channels
         return torch.tensor(channels, dtype=torch.float32)
 
+    @staticmethod
+    def get_learned_weights(model) -> Optional[List[float]]:
+        """
+        Extract per-channel importance from the first conv block's weights.
+        Works for both GatedConv1d (reads conv_main) and legacy Conv1d blocks.
+        Returns a list of N_CHANNELS floats that sum to 1.0.
+        """
+        if not _TORCH or model is None:
+            return None
+        try:
+            first = model.c1
+            # GatedConv1d: use main path weights
+            if isinstance(first, GatedConv1d):
+                w = first.conv_main.weight
+            else:
+                w = first.weight
+            # Mean absolute weight per input channel across all output filters and kernel positions
+            importance = w.abs().mean(dim=(0, 2)).detach().cpu().tolist()
+            total = sum(importance) or 1.0
+            return [v / total for v in importance]
+        except Exception:
+            return None
+
 
 # ── Ollama ────────────────────────────────────────────────────────────────────
 
@@ -379,7 +589,8 @@ async def _ollama_prob(product_id: str, context: str,
                        macd_h: float, bb_pos: float,
                        mfi_val: float, stoch_k: float,
                        cnn_prob: float,
-                       lessons: Optional[List[str]] = None) -> Optional[float]:
+                       lessons: Optional[List[str]] = None,
+                       fg_score: Optional[int] = None) -> Optional[float]:
     model  = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
     regime = "TRENDING" if adx_val >= config.adx_trend_threshold else "RANGING"
     lesson_block = ""
@@ -389,9 +600,22 @@ async def _ollama_prob(product_id: str, context: str,
             + "\n".join(f"  • {l}" for l in lessons)
             + "\n"
         )
+    if fg_score is not None:
+        if fg_score < 25:
+            fg_label = "Extreme Fear"
+        elif fg_score < 50:
+            fg_label = "Fear"
+        elif fg_score < 75:
+            fg_label = "Greed"
+        else:
+            fg_label = "Extreme Greed"
+        fg_line = f"Market sentiment (Fear & Greed): {fg_score}/100 — {fg_label}\n"
+    else:
+        fg_line = ""
     prompt = (
         f"You are a quantitative crypto trading analyst. "
         f"Estimate the probability (0.00-1.00) that {product_id} closes HIGHER in 4 hours.\n\n"
+        f"{fg_line}"
         f"Market regime: {regime} (ADX={adx_val:.1f})\n"
         f"RSI(14): {rsi_val:.1f} | MACD: {'bullish' if macd_h > 0 else 'bearish'} ({macd_h:+.5f})\n"
         f"Bollinger: {bb_pos:.0%} of band | MFI(14): {mfi_val:.1f} | StochRSI-K: {stoch_k:.1f}\n"
@@ -400,6 +624,7 @@ async def _ollama_prob(product_id: str, context: str,
         f'Respond with ONLY valid JSON: {{"probability": <0.00-1.00>}}'
     )
     try:
+        _t0 = time.perf_counter()
         async with httpx.AsyncClient(timeout=25) as client:
             resp = await client.post(
                 f"{OLLAMA_URL}/api/generate",
@@ -408,6 +633,11 @@ async def _ollama_prob(product_id: str, context: str,
             )
             resp.raise_for_status()
             text = resp.json().get("response", "")
+        _elapsed = time.perf_counter() - _t0
+        if _elapsed > 15:
+            logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s (SLOW)")
+        else:
+            logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s")
         prob = float(json.loads(text).get("probability", -1))
         if 0 <= prob <= 1:
             return prob
@@ -440,18 +670,41 @@ class CoinbaseCNNAgent:
         self.signals_executed: int = 0
         self.last_trained_at:  Optional[float] = None
         self.train_count:      int = 0
+        # ── LightGBM entry filter ───────────────────────────────────────────
+        self._lgbm             = LGBMFilter()
+        self._lgbm.load(_LGBM_MODEL_PATH)
+        self._lgbm_trades_seen: int = 0   # closed-trade count at last retrain
         if _TORCH:
             self.model = SignalCNN()
             self._load()
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
             f"model={'loaded' if self._exists() else 'random (untrained)'} | "
-            f"channels={N_CHANNELS}"
+            f"channels={N_CHANNELS} | lgbm={'ready' if self._lgbm.is_ready() else 'accumulating'}"
         )
 
     async def start(self) -> None:
         """Load persisted book state before first scan."""
         await self.book.load()
+        await self._lgbm_retrain_if_needed()
+
+    async def _lgbm_retrain_if_needed(self) -> None:
+        """Retrain LightGBM filter from cnn_scans + trades if enough new data exists."""
+        try:
+            rows = await database.get_lgbm_training_rows()
+            n = len(rows)
+            if n == self._lgbm_trades_seen:
+                return
+            metrics = self._lgbm.train(rows)
+            if metrics:
+                self._lgbm.save(_LGBM_MODEL_PATH)
+                self._lgbm_trades_seen = n
+                logger.info(
+                    f"LGBMFilter retrained: n={metrics['n_samples']} "
+                    f"win={metrics['win_rate']}% auc={metrics['auc']}"
+                )
+        except Exception as e:
+            logger.warning(f"LGBMFilter retrain failed: {e}")
 
     def _exists(self) -> bool:
         return os.path.exists(MODEL_PATH)
@@ -460,16 +713,31 @@ class CoinbaseCNNAgent:
         if not _TORCH or not self.model or not self._exists():
             return
         try:
-            self.model.load_state_dict(
-                torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
-            )
-            logger.info("CNN-LSTM model weights loaded from disk")
+            ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
+            # New format: {"arch": "glu", "state_dict": {...}}
+            # Legacy format: raw state_dict (no arch key)
+            if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                arch = ckpt.get("arch", "legacy")
+                if arch != getattr(self.model, "arch", "glu"):
+                    logger.warning(
+                        f"CNN checkpoint arch='{arch}' differs from model arch="
+                        f"'{getattr(self.model, 'arch', 'glu')}' — retraining recommended"
+                    )
+                self.model.load_state_dict(ckpt["state_dict"])
+            else:
+                # Legacy: plain state_dict — attempt load, warn on mismatch
+                self.model.load_state_dict(ckpt)
+            logger.info(f"CNN model loaded from disk (arch={getattr(self.model, 'arch', 'unknown')})")
         except Exception as e:
-            logger.warning(f"CNN model load failed (shape mismatch likely — retrain): {e}")
+            logger.warning(f"CNN model load failed (shape mismatch — retrain): {e}")
 
     def save_model(self):
         if _TORCH and self.model:
-            torch.save(self.model.state_dict(), MODEL_PATH)
+            torch.save(
+                {"arch": getattr(self.model, "arch", "glu"),
+                 "state_dict": self.model.state_dict()},
+                MODEL_PATH,
+            )
 
     def _cnn_prob(self, channels) -> float:
         if _TORCH and self.model:
@@ -515,6 +783,51 @@ class CoinbaseCNNAgent:
                 return p
         return fallback
 
+    async def _check_risk_exits(self) -> None:
+        """Check all open CNN positions for stop-loss or max hold time.
+
+        Runs at the top of every scan loop iteration so exits happen every 15 min
+        even if no new signal is generated.
+
+        Exit priority (stop-loss checked first):
+          1. Hard stop-loss : price dropped ≥ _CNN_STOP_LOSS_PCT (8%) below avg entry
+          2. Max hold time  : position held longer than _CNN_MAX_HOLD_SECS (48h)
+        """
+        for pid in list(self.book.positions.keys()):
+            pos = self.book.positions.get(pid)
+            if not pos:
+                continue
+
+            # Resolve current price — WS first, REST fallback
+            price = self._live_price(pid, 0.0)
+            if not price:
+                try:
+                    data  = await coinbase_client.get_product(pid)
+                    price = float(data.get("price", 0) or 0)
+                except Exception:
+                    pass
+            if not price:
+                continue   # no price available — skip safely
+
+            avg_price  = pos["avg_price"]
+            pct        = (price - avg_price) / avg_price
+            entry_time = pos.get("entry_time", time.time())
+            hold_secs  = time.time() - entry_time
+
+            trigger = None
+            if pct <= -_CNN_STOP_LOSS_PCT:
+                trigger = f"STOP_LOSS"
+            elif hold_secs >= _CNN_MAX_HOLD_SECS:
+                trigger = f"MAX_HOLD"
+
+            if trigger:
+                pnl = await self.book.sell(pid, price, trigger=trigger)
+                logger.info(
+                    f"CNN RISK EXIT {pid} @{price:.6f} | {trigger} | "
+                    f"pct={pct*100:+.2f}% hold={hold_secs/3600:.1f}h | "
+                    f"pnl=${pnl:+.2f} | balance=${self.book.balance:.2f}"
+                )
+
     async def generate_signal(
         self,
         product: Dict,
@@ -525,17 +838,26 @@ class CoinbaseCNNAgent:
         price = self._live_price(pid, product.get("price") or 0)
         if not price or price <= 0:
             return None
+        if price < MIN_PRICE:
+            logger.debug(f"CNN skip {pid}: price ${price:.8f} < MIN_PRICE ${MIN_PRICE}")
+            return None
+
+        # Default all indicator scalars so they're always defined regardless of
+        # which branch runs or whether an early return/exception occurs mid-branch.
+        cnn_prob = 0.5
+        adx_val  = float(config.adx_trend_threshold)
+        rsi_val  = 50.0;  macd_h = 0.0;  bb_pos = 0.5
+        mfi_val  = 50.0;  stoch_k = 50.0; atr_val = 0.0
+        vwap_price = price; vwap_d = 0.0
+        fast_rsi_val = vel_norm = vol_z_norm = 0.5
+        hurst = 0.5; di = 0.0; entropy = 0.5
+        closes: List[float] = []
+        ob = {}
 
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob = cached[0]
-            ob       = {}
-            # Use neutral indicator values for cached result
-            adx_val = config.adx_trend_threshold
-            rsi_val = 50.0; macd_h = 0.0; bb_pos = 0.5
-            mfi_val = 50.0; stoch_k = 50.0; atr_val = 0.0
-            vwap_price = price; vwap_d = 0.0
-            fast_rsi_val = vel_norm = vol_z_norm = 0.5
+            # Indicator values already defaulted to neutral above — cached path uses those
         else:
             candles = await database.get_candles(pid, limit=80)
             if len(candles) < 30:
@@ -559,7 +881,7 @@ class CoinbaseCNNAgent:
 
             # Compute fast scalars here (mirrors FeatureBuilder Ch 17-19)
             # so we can save them independently to the scan record.
-            fast_rsi_val = vel_norm = vol_z_norm = 0.0
+            fast_rsi_val = vel_norm = vol_z_norm = 0.0  # overwritten below if 5m data available
             c5m = candles_5m or []
             if len(c5m) >= 14:
                 c5    = [c["close"]  for c in c5m]
@@ -576,7 +898,59 @@ class CoinbaseCNNAgent:
                 v_z     = (v5[-1] - v_mean) / max(v_std, 1e-9)
                 vol_z_norm = max(-1.0, min(1.0, v_z / 3.0))
 
-            channels = self.fb.build(candles, ob, candles_5m=candles_5m)
+            # ── Fetch funding rate (Binance perp) ─────────────────────────────
+            funding_rate: Optional[float] = None
+            try:
+                # Convert Coinbase product_id (e.g. BTC-USD) → Binance symbol (BTCUSDT)
+                _bn_sym = pid.replace("-", "").replace("USD", "USDT")
+                async with httpx.AsyncClient(timeout=3.0) as _hx:
+                    _fr_resp = await _hx.get(
+                        "https://fapi.binance.com/fapi/v1/premiumIndex",
+                        params={"symbol": _bn_sym},
+                    )
+                if _fr_resp.status_code == 200:
+                    funding_rate = float(_fr_resp.json().get("lastFundingRate", 0) or 0)
+            except Exception as _fe:
+                logger.debug(f"Funding rate unavailable for {pid}: {_fe}")
+
+            # ── Fetch BTC hourly closes for correlation channel ────────────────
+            btc_closes: Optional[List[float]] = None
+            if pid != "BTC-USD":
+                try:
+                    btc_candles = await database.get_candles("BTC-USD", limit=80)
+                    if btc_candles:
+                        btc_closes = [c["close"] for c in btc_candles]
+                except Exception as _be:
+                    logger.debug(f"BTC closes unavailable: {_be}")
+
+            # ── Fetch Deribit IV + compute IV/RV spread (BTC/ETH only) ───────
+            iv_rv20_spread: Optional[float] = None
+            iv_rv60_spread: Optional[float] = None
+            try:
+                spot = closes[-1] if closes else 0.0
+                iv = await get_iv(pid, spot)
+                if iv is not None:
+                    rv20 = _realized_vol(closes, window=20)
+                    rv60 = _realized_vol(closes, window=60)
+                    spreads = compute_iv_rv_spreads(iv, rv20, rv60)
+                    iv_rv20_spread = spreads["iv_rv20_spread"]
+                    iv_rv60_spread = spreads["iv_rv60_spread"]
+            except Exception as _ive:
+                logger.debug(f"IV/RV spread unavailable for {pid}: {_ive}")
+
+            # ── Fetch top-trader L/S sentiment (Binance futures) ────────────
+            ls_sentiment: Optional[float] = None
+            try:
+                ls_sentiment = await get_ls_sentiment(pid)
+            except Exception as _lse:
+                logger.debug(f"L/S sentiment unavailable for {pid}: {_lse}")
+
+            channels = self.fb.build(
+                candles, ob, candles_5m=candles_5m,
+                btc_closes=btc_closes, funding_rate=funding_rate,
+                iv_rv20_spread=iv_rv20_spread, iv_rv60_spread=iv_rv60_spread,
+                ls_sentiment=ls_sentiment,
+            )
             cnn_prob = self._cnn_prob(channels)
 
             rsi_val            = _rsi(closes)
@@ -587,15 +961,22 @@ class CoinbaseCNNAgent:
             stoch_k, _         = _stoch_rsi(closes)
             atr_val            = _atr(highs, lows, closes)
             vwap_price, vwap_d = _vwap(highs, lows, closes, volumes)
+            hurst              = _hurst_exponent(closes)
+            di                 = _dissimilarity_index(closes)
+            entropy            = _shannon_entropy(closes)
 
             self._cache[pid] = (cnn_prob, time.time())
 
-        # ── Dynamic LLM/CNN blend based on ADX regime ─────────────────────────
-        trending = adx_val >= config.adx_trend_threshold
-        if trending:
-            cnn_w, llm_w = config.cnn_trending_cnn_w, config.cnn_trending_llm_w
+        # ── HMM regime detection → dynamic CNN/LLM blend ─────────────────────
+        hmm_regime, hmm_conf, _hmm_state = get_detector().predict(closes)
+        if hmm_regime == "UNKNOWN":
+            # Fallback to binary ADX gate when HMM not fitted yet
+            trending   = adx_val >= config.adx_trend_threshold
+            hmm_regime = "TRENDING" if trending else "RANGING"
+            hmm_conf   = 1.0
         else:
-            cnn_w, llm_w = config.cnn_ranging_cnn_w, config.cnn_ranging_llm_w
+            trending = hmm_regime == "TRENDING"
+        cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
 
         # Fetch most-recent Tech & Momentum decisions for this product
         # so the Ollama model can incorporate their votes into its reasoning.
@@ -610,7 +991,7 @@ class CoinbaseCNNAgent:
 
         vwap_side = "above" if vwap_d > 0 else "below"
         context = (
-            f"Price: ${price:,.4f} | Regime: {'TRENDING' if trending else 'RANGING'}\n"
+            f"Price: ${price:,.4f} | Regime: {hmm_regime} (conf={hmm_conf:.2f})\n"
             f"ADX(14): {adx_val:.1f} | RSI(14): {rsi_val:.1f} | MFI(14): {mfi_val:.1f}\n"
             f"MACD hist: {macd_h:+.6f} | Bollinger: {bb_pos:.2f} | StochRSI K: {stoch_k:.1f}\n"
             f"VWAP(20): ${vwap_price:,.4f} | Price {vwap_side} VWAP by {abs(vwap_d)*100:.2f}%\n"
@@ -625,18 +1006,44 @@ class CoinbaseCNNAgent:
         # Fetch outcome lessons so Ollama can learn from past signals
         lessons = await get_tracker().get_lessons(pid, limit=5)
 
+        # Fetch Fear & Greed score as soft context for Ollama (not a hard gate)
+        try:
+            fg_data  = await get_fear_greed().fetch()
+            fg_score: Optional[int] = fg_data.get("value")
+        except Exception:
+            fg_score = None
+
         cnn_dist = abs(cnn_prob - 0.5)
-        skip_llm = cnn_dist >= (config.llm_skip_threshold - 0.5)
+        # Multiplicative regime gate: skip Ollama when regime is ambiguous (random walk)
+        # AND price has deviated significantly from its SMA (DI high = unreliable features)
+        regime_ambiguous = _HURST_MR_THRESH < hurst < _HURST_TREND_THRESH
+        di_high          = di > _DI_SUPPRESS_THRESH
+        entropy_noisy    = entropy > _ENTROPY_SKIP_THRESH
+        skip_llm = (
+            cnn_dist >= (config.llm_skip_threshold - 0.5)
+            or (regime_ambiguous and di_high)
+            or entropy_noisy
+        )
         if skip_llm:
             llm_prob = None
-            logger.debug(
-                f"LLM skipped for {pid}: cnn_prob={cnn_prob:.3f} is decisive "
-                f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
-            )
+            if entropy_noisy:
+                logger.debug(
+                    f"LLM skipped for {pid}: entropy={entropy:.2f} > {_ENTROPY_SKIP_THRESH} (noise)"
+                )
+            elif regime_ambiguous and di_high:
+                logger.debug(
+                    f"LLM skipped for {pid}: regime ambiguous "
+                    f"(H={hurst:.2f} DI={di:.1f}% > {_DI_SUPPRESS_THRESH}%)"
+                )
+            else:
+                logger.debug(
+                    f"LLM skipped for {pid}: cnn_prob={cnn_prob:.3f} is decisive "
+                    f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
+                )
         else:
             llm_prob = await _ollama_prob(pid, context, adx_val, rsi_val,
                                           macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
-                                          lessons=lessons)
+                                          lessons=lessons, fg_score=fg_score)
 
         if llm_prob is not None:
             model_prob = cnn_w * cnn_prob + llm_w * llm_prob
@@ -744,21 +1151,66 @@ class CoinbaseCNNAgent:
         # ── Dry-run execution via _CNNBook (tracks positions + writes to trades table) ──
         if execute:
             if side == "BUY" and not self.book.has_position(pid):
-                frac = _CNN_MAX_FRAC * strength
-                spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
-                if spent > 0:
-                    self.signals_executed += 1
-                    signal["execution"] = {"success": True, "spent": round(spent, 2)}
+                # Hurst regime gate — suppress BUY in pure random-walk regime
+                hurst_ok = hurst >= _HURST_MR_THRESH
+
+                if not hurst_ok:
+                    signal["execution"] = {
+                        "success": False,
+                        "reason": f"Hurst={hurst:.2f} random-walk regime — no edge",
+                    }
                     logger.info(
-                        f"CNN BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
-                        f"spent=${spent:.2f} balance=${self.book.balance:.2f}"
+                        f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
                     )
                 else:
-                    signal["execution"] = {"success": False, "reason": "Insufficient balance"}
-                    logger.warning(
-                        f"CNN BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
-                        f"too low for frac={frac:.2f}"
-                    )
+                    # LightGBM entry filter — secondary gate trained on real outcomes
+                    from datetime import datetime as _dt
+                    _now_dt = _dt.utcnow()
+                    _lgbm_feat = {
+                        "cnn_prob":    cnn_prob,
+                        "rsi":         rsi_val,
+                        "adx":         adx_val,
+                        "strength":    strength,
+                        "macd":        macd_h,
+                        "mfi":         mfi_val,
+                        "stoch_k":     stoch_k,
+                        "hour_of_day": _now_dt.hour,
+                        "day_of_week": _now_dt.weekday(),
+                        "usd_open":    self.book.balance * min(_kelly_fraction(model_prob), _CNN_MAX_FRAC),
+                    }
+                    _lgbm_prob  = self._lgbm.predict(_lgbm_feat)
+                    _lgbm_allow = self._lgbm.allow_buy(_lgbm_feat)
+
+                    if not _lgbm_allow:
+                        signal["execution"] = {
+                            "success": False,
+                            "reason": f"LGBMFilter blocked: p(win)={_lgbm_prob:.2f}",
+                        }
+                        logger.info(
+                            f"CNN BUY {pid} blocked by LGBMFilter: "
+                            f"p(win)={_lgbm_prob:.2f}"
+                        )
+                    else:
+                        # Kelly Criterion sizing: use model_prob as win probability.
+                        # strength = (model_prob - 0.5)*2 is NOT a probability — passing
+                        # it to Kelly gave frac=0 for all signals below model_prob=0.75.
+                        frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
+                        spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
+                        if spent > 0:
+                            self.signals_executed += 1
+                            signal["execution"] = {"success": True, "spent": round(spent, 2)}
+                            logger.info(
+                                f"CNN BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
+                                f"kelly_frac={frac:.2f} spent=${spent:.2f} "
+                                f"H={hurst:.2f} DI={di:.1f}% "
+                                f"lgbm_p={_lgbm_prob:.2f} balance=${self.book.balance:.2f}"
+                            )
+                        else:
+                            signal["execution"] = {"success": False, "reason": "Insufficient balance"}
+                            logger.warning(
+                                f"CNN BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
+                                f"too low for kelly_frac={frac:.2f}"
+                            )
             elif side == "SELL" and self.book.has_position(pid):
                 pnl = await self.book.sell(pid, price, trigger="SCAN")
                 self.signals_executed += 1
@@ -818,15 +1270,24 @@ class CoinbaseCNNAgent:
         )
         while True:
             try:
+                self.last_scan_at = time.time()
                 self.next_scan_at = time.time() + interval
+
+                # Risk exits run every loop regardless of is_trading gate —
+                # stop-loss and max-hold must fire even when scanning is paused.
+                await self._check_risk_exits()
+
                 should_execute = is_trading_fn() if is_trading_fn else False
                 await self.scan_all(
                     execute        = should_execute,
                     order_executor = order_executor if should_execute else None,
                 )
-                self.last_scan_at = time.time()
                 self.scan_count  += 1
                 self.next_scan_at = time.time() + interval
+
+                # LightGBM retrain check — runs fast, only retrains when new closed trades exist
+                if self.scan_count % _LGBM_RETRAIN_EVERY == 0:
+                    await self._lgbm_retrain_if_needed()
 
                 # Auto-train after every N scans (aligned with new candle data)
                 if self.scan_count % train_every_n_scans == 0:
@@ -835,7 +1296,7 @@ class CoinbaseCNNAgent:
                         f"every {train_every_n_scans} scans)"
                     )
                     try:
-                        result = await self.train_on_history(epochs=20)
+                        result = await self.train_on_history(epochs=15)
                         if "error" in result:
                             logger.warning(f"CNN auto-train skipped: {result['error']}")
                         else:
@@ -843,7 +1304,9 @@ class CoinbaseCNNAgent:
                             self.train_count    += 1
                             logger.info(
                                 f"CNN auto-train done — {result['samples']} samples | "
-                                f"loss {result['initial_loss']:.4f} → {result['final_loss']:.4f}"
+                                f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
+                                f"val={result['final_val_loss']:.4f} | "
+                                f"fit={result['fit_status']}"
                             )
                     except Exception as te:
                         logger.error(f"CNN auto-train error: {te}")
@@ -854,33 +1317,179 @@ class CoinbaseCNNAgent:
                 logger.error(f"CNN loop error: {e}")
             await asyncio.sleep(interval)
 
-    async def train_on_history(self, epochs: int = 20) -> Dict:
+    async def train_on_history(self, epochs: int = 50) -> Dict:
+        """
+        Train the CNN on historical candle data with an 80/20 time-based train/val split.
+
+        Labels are true 4-hour forward returns: 1.0 if close[t+4] > close[t], else 0.0.
+        For each product, a sliding window of SEQ_LEN candles is stepped across all
+        available history, generating multiple samples per product.
+
+        Returns per-epoch train_loss and val_loss so the caller can detect:
+          - Underfitting : both losses stay high (> 0.65) after training
+          - Overfitting  : val_loss > train_loss by more than 20% in the final epoch
+        Samples are ordered chronologically — the last 20% (most recent) become
+        validation so there is no lookahead bias.
+        """
         if not _TORCH or not self.model:
             return {"error": "PyTorch not available"}
         import torch.optim as optim
+
+        _FORWARD_HOURS = 4   # predict whether close is higher 4 hours ahead
+
         products = await database.get_products()
         X_list, y_list = [], []
         for p in products:
-            candles = await database.get_candles(p["product_id"], limit=80)
-            if len(candles) < 30:
+            pid = p["product_id"]
+            # Prefer parquet history (years of data); fall back to recent SQLite candles
+            hist = load_history(pid)
+            if hist:
+                # Merge with recent SQLite bars so the latest live bars are included
+                live = await database.get_candles(pid, limit=200)
+                # Parquet uses "start"; SQLite uses "start_time" — normalise to "start"
+                for c in live:
+                    if "start_time" in c and "start" not in c:
+                        c["start"] = c["start_time"]
+                live_starts = {c["start"] for c in hist}
+                new_live    = [c for c in live if c["start"] not in live_starts]
+                candles     = sorted(hist + new_live, key=lambda c: c["start"])
+                logger.debug(
+                    f"Training {pid}: {len(hist)} parquet + {len(new_live)} live = {len(candles)} bars"
+                )
+            else:
+                candles = await database.get_candles(pid, limit=200)
+                # Normalise SQLite "start_time" → "start" for downstream code
+                for c in candles:
+                    if "start_time" in c and "start" not in c:
+                        c["start"] = c["start_time"]
+
+            n = len(candles)
+            if n < SEQ_LEN + _FORWARD_HOURS + 1:
                 continue
-            channels = self.fb.build(candles, {})
-            X_list.append(self.fb.to_tensor(channels))
             closes = [c["close"] for c in candles]
-            y_list.append(min(1.0, max(0.0, _rsi(closes) / 100.0)))
-        if len(X_list) < 3:
-            return {"error": f"Not enough data ({len(X_list)} samples)"}
-        X = torch.stack(X_list)
-        y = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1)
-        opt, losses = optim.Adam(self.model.parameters(), lr=1e-3), []
-        self.model.train()
-        for _ in range(epochs):
-            opt.zero_grad()
-            loss = F.binary_cross_entropy(self.model(X), y)
-            loss.backward(); opt.step()
-            losses.append(float(loss.item()))
+            # Slide window: window ends at index i, label uses close at i + _FORWARD_HOURS
+            for i in range(SEQ_LEN - 1, n - _FORWARD_HOURS):
+                window   = candles[i - SEQ_LEN + 1 : i + 1]   # SEQ_LEN bars ending at i
+                entry_px = closes[i]
+                exit_px  = closes[i + _FORWARD_HOURS]
+                if entry_px <= 0:
+                    continue
+                label = 1.0 if exit_px > entry_px else 0.0
+                channels = self.fb.build(window, {})
+                X_list.append(self.fb.to_tensor(channels))
+                y_list.append(label)
+
+        if len(X_list) < 4:
+            return {"error": f"Not enough data ({len(X_list)} samples, need ≥ 4)"}
+
+        # ── 80/20 time-ordered split (no shuffle — preserves temporal order) ──
+        split      = max(1, int(len(X_list) * 0.8))
+        X_all      = torch.stack(X_list)
+        y_all      = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1)
+        X_train, X_val = X_all[:split], X_all[split:]
+        y_train, y_val = y_all[:split], y_all[split:]
+
+        model     = self.model  # capture for thread closure
+        epoch_log: list = []   # [{epoch, train_loss, val_loss}]
+
+        def _sync_fit() -> None:
+            """Run the blocking PyTorch fit loop in a thread pool executor.
+
+            Called via run_in_executor so the asyncio event loop stays responsive
+            during training (prevents the backend from locking up on Train clicks).
+
+            Uses mini-batch SGD (batch_size=512) so each epoch contains many gradient
+            steps instead of one full-batch step — prevents the loss-barely-moves
+            UNDERFIT that occurs with full-batch Adam on 10k+ samples.
+            """
+            BATCH = 512
+            opt       = optim.Adam(model.parameters(), lr=3e-3, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=1e-5)
+            n_train   = X_train.shape[0]
+
+            model.train()
+            for ep in range(1, epochs + 1):
+                # ── Mini-batch training ───────────────────────────────────────
+                # Shuffle indices each epoch for stochastic gradient noise
+                perm = torch.randperm(n_train)
+                batch_losses = []
+                for start in range(0, n_train, BATCH):
+                    idx   = perm[start: start + BATCH]
+                    xb    = X_train[idx]
+                    yb    = y_train[idx]
+                    opt.zero_grad()
+                    loss  = F.binary_cross_entropy(model(xb), yb)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    opt.step()
+                    batch_losses.append(float(loss.item()))
+                scheduler.step()
+                train_loss_val = sum(batch_losses) / len(batch_losses)
+
+                # ── Validation (no gradient) ──────────────────────────────────
+                model.eval()
+                with torch.no_grad():
+                    val_loss = F.binary_cross_entropy(model(X_val), y_val)
+                model.train()
+
+                tl = round(train_loss_val,               6)
+                vl = round(float(val_loss.item()),        6)
+                epoch_log.append({"epoch": ep, "train_loss": tl, "val_loss": vl})
+                logger.debug(f"CNN train epoch {ep}/{epochs} | train={tl:.4f} val={vl:.4f}")
+
+        # Offload blocking compute to thread pool — keeps event loop free
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync_fit)
+
         self.save_model()
-        return {"epochs": epochs, "samples": len(X_list),
-                "channels": N_CHANNELS,
-                "initial_loss": round(losses[0], 6),
-                "final_loss":   round(losses[-1], 6)}
+
+        final       = epoch_log[-1]
+        initial_tl  = epoch_log[0]["train_loss"]
+        final_tl    = final["train_loss"]
+        final_vl    = final["val_loss"]
+
+        # ── Fit diagnosis ─────────────────────────────────────────────────────
+        overfit_gap = (final_vl - final_tl) / max(final_tl, 1e-9)
+        loss_drop = initial_tl - final_tl
+        if final_tl > 0.65 and loss_drop < 0.02:
+            fit_status = "UNDERFIT"
+            fit_advice = "Loss barely moved — try more epochs or more training data"
+        elif overfit_gap > 0.20:
+            fit_status = "OVERFIT"
+            fit_advice = (
+                f"Val loss {final_vl:.4f} is {overfit_gap*100:.0f}% above train loss "
+                f"{final_tl:.4f} — reduce epochs or collect more diverse candles"
+            )
+        else:
+            fit_status = "OK"
+            fit_advice = "Train and val loss are close — model is generalising well"
+
+        logger.info(
+            f"CNN training complete | {len(X_train)} train / {len(X_val)} val samples | "
+            f"train {initial_tl:.4f}→{final_tl:.4f} | val final={final_vl:.4f} | "
+            f"fit={fit_status} | {fit_advice}"
+        )
+
+        # ── Fit HMM regime detector on BTC history ───────────────────────────
+        try:
+            btc_hist = load_history("BTC-USD") or await database.get_candles("BTC-USD", limit=500)
+            if btc_hist:
+                btc_closes_all = [c["close"] for c in btc_hist]
+                get_detector().fit(btc_closes_all)
+        except Exception as _he:
+            logger.warning(f"HMM fit during training failed: {_he}")
+
+        return {
+            "epochs":       epochs,
+            "samples":      len(X_list),
+            "train_samples": len(X_train),
+            "val_samples":  len(X_val),
+            "channels":     N_CHANNELS,
+            "initial_loss": initial_tl,
+            "final_train_loss": final_tl,
+            "final_val_loss":   final_vl,
+            "overfit_gap_pct":  round(overfit_gap * 100, 1),
+            "fit_status":   fit_status,
+            "fit_advice":   fit_advice,
+            "epoch_log":    epoch_log,
+        }

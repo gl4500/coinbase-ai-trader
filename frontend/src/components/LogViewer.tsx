@@ -208,7 +208,7 @@ export default function LogViewer() {
 
                 {/* Time */}
                 <span className="flex-shrink-0 text-gray-500 text-xs pt-0.5">
-                  {new Date(e.time).toLocaleTimeString()}
+                  {new Date(e.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
 
                 {/* Logger */}

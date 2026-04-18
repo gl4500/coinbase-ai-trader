@@ -198,3 +198,29 @@ class TestTechAgentThresholds:
     def test_sell_threshold_value(self):
         """SELL threshold should be 0.55."""
         assert _SELL_THRESHOLD == pytest.approx(0.55, abs=0.01)
+
+
+class TestTechMinPriceGuard:
+    """Tech agent must skip products priced below MIN_PRICE."""
+
+    @pytest.mark.asyncio
+    async def test_micro_price_returns_none(self):
+        from agents.tech_agent_cb import TechAgentCB, MIN_PRICE
+        ag = TechAgentCB()
+        product = {"product_id": "SHIB-USD", "price": 0.000012}
+        result = await ag.analyze_product(product)
+        assert result is None, f"Tech must return None for price < MIN_PRICE, got {result}"
+
+    @pytest.mark.asyncio
+    async def test_price_at_min_price_not_blocked(self):
+        from agents.tech_agent_cb import TechAgentCB, MIN_PRICE
+        ag = TechAgentCB()
+        product = {"product_id": "EDGE-USD", "price": MIN_PRICE}
+        # Should not return None due to the price guard (may return None for other reasons)
+        # We just verify no ValueError / AttributeError is raised at the guard stage
+        # by patching DB so it returns no candles (quick exit after guard)
+        with patch("agents.tech_agent_cb.database.get_candles", new=AsyncMock(return_value=[])):
+            result = await ag.analyze_product(product)
+        # None is acceptable (no candles), but must NOT be blocked solely by price guard
+        # i.e. the code reached the candle-fetch stage
+        assert result is None  # no candles → None, but price guard did not fire

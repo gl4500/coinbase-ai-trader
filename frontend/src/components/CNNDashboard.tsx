@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Signal, Order } from '../App'
+import { buildAgentByProduct } from '../utils/agentByProduct'
+import type { AgentDecision } from '../utils/agentByProduct'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -134,21 +136,7 @@ function ProbBar({ value, color }: { value: number | null; color: string }) {
   )
 }
 
-// ── Sub-agent types ────────────────────────────────────────────────────────────
-
-interface AgentDecision {
-  id:         number
-  agent:      string        // TECH | MOMENTUM
-  product_id: string
-  side:       string        // BUY | SELL | HOLD
-  confidence: number
-  price:      number
-  score:      number | null
-  reasoning:  string | null
-  balance:    number | null
-  pnl:        number | null
-  created_at: string
-}
+// AgentDecision type is imported from ../utils/agentByProduct
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
@@ -160,6 +148,21 @@ interface Props {
 
 type SortKey = 'model_prob' | 'cnn_prob' | 'llm_prob' | 'strength' | 'adx' | 'rsi' | 'product_id' | 'scanned_at' | 'vwap_dist' | 'velocity'
 
+interface DryRunTrade {
+  id:            number
+  agent:         string
+  product_id:    string
+  entry_price:   number
+  exit_price:    number | null
+  size:          number
+  usd_open:      number
+  pnl:           number | null
+  trigger_open:  string
+  trigger_close: string | null
+  opened_at:     string
+  closed_at:     string | null
+}
+
 export default function CNNDashboard({ signals, orders, postJSON }: Props) {
   const [status,      setStatus]      = useState<CNNStatus | null>(null)
   const [scanning,    setScanning]    = useState(false)
@@ -167,20 +170,33 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
   const [trainResult, setTrainResult] = useState<string | null>(null)
   const [epochs,      setEpochs]      = useState(20)
   const [trainSecs,   setTrainSecs]   = useState(0)
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillResult, setBackfillResult] = useState<string | null>(null)
+  const [backfillDays, setBackfillDays] = useState(365)
+  const [backfillAll, setBackfillAll] = useState(false)
   const [statusMsg,   setStatusMsg]   = useState('')
   const [scans,       setScans]       = useState<CnnScan[]>([])
+  const [cnnTrades,   setCnnTrades]   = useState<DryRunTrade[]>([])
   const [search,      setSearch]      = useState('')
   const [sideFilter,  setSideFilter]  = useState<'ALL' | 'BUY' | 'SELL' | 'HOLD'>('ALL')
   const [sigFilter,   setSigFilter]   = useState<'ALL' | 'SIG' | 'NOSIG'>('ALL')
   const [sortKey,          setSortKey]          = useState<SortKey>('model_prob')
   const [sortAsc,          setSortAsc]          = useState(false)
   const [showScans,        setShowScans]        = useState(false)
+  const [showLegend,       setShowLegend]       = useState(false)
   const [agentDecisions,   setAgentDecisions]   = useState<AgentDecision[]>([])
 
   const fetchStatus = useCallback(async () => {
     try {
       const r = await fetch('/api/cnn/status')
       if (r.ok) setStatus(await r.json())
+    } catch {}
+  }, [])
+
+  const fetchTrades = useCallback(async () => {
+    try {
+      const r = await fetch('/api/trades?agent=CNN&limit=100')
+      if (r.ok) setCnnTrades(await r.json())
     } catch {}
   }, [])
 
@@ -193,9 +209,11 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
 
   useEffect(() => {
     fetchStatus()
-    const id = setInterval(fetchStatus, 15_000)
-    return () => clearInterval(id)
-  }, [fetchStatus])
+    fetchTrades()
+    const id1 = setInterval(fetchStatus, 15_000)
+    const id2 = setInterval(fetchTrades, 15_000)
+    return () => { clearInterval(id1); clearInterval(id2) }
+  }, [fetchStatus, fetchTrades])
 
   // Always fetch scans on mount so the header count is correct immediately
   useEffect(() => {
@@ -222,18 +240,8 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
     return () => clearInterval(id)
   }, [fetchAgentDecisions])
 
-  // Per-product lookup: latest Tech & Momentum decision (agentDecisions is newest-first)
-  const agentByProduct = useMemo(() => {
-    const map = new Map<string, { tech: AgentDecision | null; mom: AgentDecision | null }>()
-    for (const d of agentDecisions) {
-      const cur = map.get(d.product_id) ?? { tech: null, mom: null }
-      if (d.agent === 'TECH'     && cur.tech === null) cur.tech = d
-      if (d.agent === 'MOMENTUM' && cur.mom  === null) cur.mom  = d
-      map.set(d.product_id, cur)
-      if (cur.tech && cur.mom) continue  // both found, no need to keep scanning
-    }
-    return map
-  }, [agentDecisions])
+  // Per-product lookup: latest Tech, Momentum & Scalp decision (agentDecisions is newest-first)
+  const agentByProduct = useMemo(() => buildAgentByProduct(agentDecisions), [agentDecisions])
 
   // Filtered + sorted scans
   const filteredScans = useMemo(() => {
@@ -291,9 +299,12 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
       if (d.error) {
         setTrainResult(`Error: ${d.error}`)
       } else {
-        const elapsed = Math.floor((Date.now() - start) / 1000)
+        const elapsed  = Math.floor((Date.now() - start) / 1000)
+        const fitIcon  = d.fit_status === 'OK' ? '✅' : d.fit_status === 'OVERFIT' ? '⚠️ OVERFIT' : '⚠️ UNDERFIT'
         setTrainResult(
-          `Done — ${d.samples} samples | ${d.epochs} epochs | ${elapsed}s | loss ${d.initial_loss?.toFixed(4)} → ${d.final_loss?.toFixed(4)}`
+          `${fitIcon} | ${d.train_samples}t/${d.val_samples}v samples | ${d.epochs} epochs | ${elapsed}s | ` +
+          `train ${d.initial_loss?.toFixed(4)}→${d.final_train_loss?.toFixed(4)} | ` +
+          `val ${d.final_val_loss?.toFixed(4)} | ${d.fit_advice}`
         )
       }
     } catch {
@@ -301,6 +312,24 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
     } finally {
       clearInterval(ticker)
       setTraining(false)
+    }
+  }
+
+  const handleBackfill = async () => {
+    setBackfilling(true)
+    setBackfillResult(null)
+    try {
+      const r = await postJSON(`/api/history/backfill?days=${backfillDays}&all_coinbase=${backfillAll}`)
+      const d = await r.json()
+      if (d.status === 'started') {
+        setBackfillResult(`⏳ Backfill running in background — check Logs tab for progress`)
+      } else {
+        setBackfillResult(`✅ Done`)
+      }
+    } catch {
+      setBackfillResult('Backfill failed')
+    } finally {
+      setBackfilling(false)
     }
   }
 
@@ -450,11 +479,54 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
 
         {(statusMsg || trainResult) && (
           <span className={`text-xs px-3 py-1.5 rounded border ${
-            trainResult
-              ? 'text-green-300 bg-green-900/30 border-green-800'
-              : 'text-blue-300 bg-blue-900/30 border-blue-800 animate-pulse'
+            !trainResult
+              ? 'text-blue-300 bg-blue-900/30 border-blue-800 animate-pulse'
+              : trainResult.includes('OVERFIT') || trainResult.includes('UNDERFIT')
+                ? 'text-amber-300 bg-amber-900/30 border-amber-700'
+                : trainResult.startsWith('Error') || trainResult.includes('failed')
+                  ? 'text-red-300 bg-red-900/30 border-red-800'
+                  : 'text-green-300 bg-green-900/30 border-green-800'
           }`}>
             {statusMsg || trainResult}
+          </span>
+        )}
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-400">History days:</label>
+          <input
+            type="number"
+            min={7} max={730}
+            value={backfillDays}
+            disabled={backfilling}
+            onChange={e => setBackfillDays(Number(e.target.value))}
+            className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white text-center disabled:opacity-50"
+          />
+          <label className="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={backfillAll}
+              disabled={backfilling}
+              onChange={e => setBackfillAll(e.target.checked)}
+              className="accent-purple-500"
+            />
+            All Coinbase
+          </label>
+          <button
+            onClick={handleBackfill}
+            disabled={backfilling}
+            className="btn-secondary text-sm px-4 py-2 disabled:opacity-50"
+          >
+            {backfilling ? '⏳ Backfilling…' : '📥 Backfill History'}
+          </button>
+        </div>
+
+        {backfillResult && (
+          <span className={`text-xs px-3 py-1.5 rounded border ${
+            backfillResult.startsWith('✅')
+              ? 'text-green-300 bg-green-900/30 border-green-800'
+              : 'text-red-300 bg-red-900/30 border-red-800'
+          }`}>
+            {backfillResult}
           </span>
         )}
       </div>
@@ -473,7 +545,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
               <p className="text-gray-500 text-sm">No CNN signals yet — click Scan Now or wait for auto-scan</p>
             </div>
           ) : (
-            <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
+            <div className="space-y-3 max-h-[340px] overflow-y-auto pr-1">
               {cnnSignals.map(({ raw: s, cnnProb, llmProb, modelProb, rsi, macdHist, bbPos, obImb }) => (
                 <div key={s.id} className="card p-3">
                   {/* Header */}
@@ -558,62 +630,73 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
           )}
         </div>
 
-        {/* CNN Orders/Trades */}
+        {/* CNN Dry-Run Trades (from /api/trades?agent=CNN) */}
         <div>
           <h2 className="text-base font-bold text-white mb-3">
             Dry-Run Trades
-            <span className="text-sm text-gray-500 font-normal ml-2">({cnnOrders.length})</span>
+            <span className="text-sm text-gray-500 font-normal ml-2">({cnnTrades.length})</span>
           </h2>
-          {cnnOrders.length === 0 ? (
+          {cnnTrades.length === 0 ? (
             <div className="card text-center py-10">
               <p className="text-gray-500 text-sm">No trades yet — enable trading and run a scan</p>
             </div>
           ) : (
-            <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
-              {cnnOrders.map(o => (
-                <div key={o.order_id} className="card p-3 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded flex-shrink-0 ${
-                      o.side === 'BUY'
-                        ? 'bg-green-900/50 text-green-400 border border-green-800'
-                        : 'bg-red-900/50 text-red-400 border border-red-800'
-                    }`}>{o.side}</span>
-                    <span className="font-bold text-white text-sm truncate">{o.product_id}</span>
-                    <span className="text-xs text-gray-500 flex-shrink-0">{o.order_type}</span>
-                  </div>
-
-                  <div className="flex items-center gap-4 flex-shrink-0 text-right">
-                    <div>
-                      <div className="text-xs text-gray-500">Size</div>
-                      <div className="text-sm font-mono text-white">
-                        ${(o.quote_size ?? 0).toFixed(2)}
-                      </div>
+            <div className="space-y-2 max-h-[340px] overflow-y-auto pr-1">
+              {cnnTrades.map(t => {
+                const isOpen = t.closed_at == null
+                const pnlColor = t.pnl == null ? 'text-gray-400'
+                  : t.pnl >= 0 ? 'text-green-400' : 'text-red-400'
+                return (
+                  <div key={t.id} className="card p-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded flex-shrink-0 ${
+                        isOpen
+                          ? 'bg-green-900/50 text-green-400 border border-green-800'
+                          : 'bg-gray-800 text-gray-400 border border-gray-700'
+                      }`}>{isOpen ? 'OPEN' : 'CLOSED'}</span>
+                      <span className="font-bold text-white text-sm truncate">{t.product_id}</span>
+                      <span className="text-xs text-gray-500 flex-shrink-0">{t.trigger_open}</span>
                     </div>
-                    {o.price && (
+
+                    <div className="flex items-center gap-4 flex-shrink-0 text-right">
                       <div>
-                        <div className="text-xs text-gray-500">Price</div>
+                        <div className="text-xs text-gray-500">Spent</div>
+                        <div className="text-sm font-mono text-white">${t.usd_open.toFixed(2)}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-gray-500">Entry</div>
                         <div className="text-sm font-mono text-gray-300">
-                          ${o.price >= 1000
-                            ? o.price.toLocaleString('en-US', { maximumFractionDigits: 2 })
-                            : o.price.toFixed(4)}
+                          ${t.entry_price >= 1 ? t.entry_price.toFixed(4) : t.entry_price.toFixed(6)}
                         </div>
                       </div>
-                    )}
-                    <div>
-                      <div className="text-xs text-gray-500">Status</div>
-                      <div className={`text-xs font-medium ${
-                        o.status === 'dry_run' ? 'text-amber-400'
-                        : o.status === 'live'  ? 'text-green-400'
-                        : o.status === 'canceled' ? 'text-gray-500'
-                        : 'text-gray-400'
-                      }`}>{o.status}</div>
-                    </div>
-                    <div className="text-xs text-gray-600">
-                      {new Date(o.created_at).toLocaleTimeString()}
+                      {t.exit_price != null && (
+                        <div>
+                          <div className="text-xs text-gray-500">Exit</div>
+                          <div className="text-sm font-mono text-gray-300">
+                            ${t.exit_price >= 1 ? t.exit_price.toFixed(4) : t.exit_price.toFixed(6)}
+                          </div>
+                        </div>
+                      )}
+                      {t.pnl != null && (
+                        <div>
+                          <div className="text-xs text-gray-500">PnL</div>
+                          <div className={`text-sm font-mono font-bold ${pnlColor}`}>
+                            {t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(4)}
+                          </div>
+                        </div>
+                      )}
+                      {t.trigger_close && (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">
+                          {t.trigger_close}
+                        </span>
+                      )}
+                      <div className="text-xs text-gray-600">
+                        {new Date(t.opened_at).toLocaleTimeString()}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -677,10 +760,69 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
               </button>
 
               <span className="text-xs text-gray-600 ml-auto">{filteredScans.length} rows</span>
+              <button
+                onClick={() => setShowLegend(v => !v)}
+                className="text-xs text-blue-400 hover:text-blue-300 px-2 py-1.5 border border-blue-900 rounded hover:border-blue-700 flex-shrink-0"
+              >
+                {showLegend ? 'Hide guide' : 'Signal guide ?'}
+              </button>
             </div>
 
+            {/* Signal reference legend */}
+            {showLegend && (
+              <div className="mx-4 mb-3 rounded border border-gray-700 bg-gray-900/70 p-3 text-xs">
+                <div className="text-gray-300 font-semibold mb-2">Good signal conditions (BUY bias)</div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1.5">
+                  <div>
+                    <span className="text-gray-500 font-medium">VWAP Δ</span>
+                    <div className="text-gray-400 mt-0.5">Price vs. volume-weighted avg price</div>
+                    <div className="text-green-400">Negative (below VWAP) = potential support / value buy</div>
+                    <div className="text-red-400">Positive (above VWAP) = extended, chasing</div>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 font-medium">Vel 5m</span>
+                    <div className="text-gray-400 mt-0.5">5-min price momentum (–1 to +1)</div>
+                    <div className="text-green-400">+0.2 to +0.6 = rising with momentum</div>
+                    <div className="text-yellow-400">&gt; +0.8 = may be overextended</div>
+                    <div className="text-red-400">Negative = selling pressure</div>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 font-medium">ADX</span>
+                    <div className="text-gray-400 mt-0.5">Trend strength (0–100)</div>
+                    <div className="text-green-400">25–50 = strong trend (best for CNN signals)</div>
+                    <div className="text-yellow-400">50+ = very strong, may reverse</div>
+                    <div className="text-gray-500">&lt; 20 = ranging / choppy, avoid</div>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 font-medium">RSI</span>
+                    <div className="text-gray-400 mt-0.5">Relative strength (0–100)</div>
+                    <div className="text-green-400">&lt; 30 = oversold, strong BUY candidate</div>
+                    <div className="text-yellow-400">30–50 = recovering, moderate</div>
+                    <div className="text-red-400">&gt; 70 = overbought, avoid buying</div>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 font-medium">MFI</span>
+                    <div className="text-gray-400 mt-0.5">Money Flow Index — volume-weighted RSI</div>
+                    <div className="text-green-400">&lt; 20 = oversold with volume confirmation</div>
+                    <div className="text-yellow-400">20–50 = neutral to bullish flow</div>
+                    <div className="text-red-400">&gt; 80 = overbought, smart money exiting</div>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 font-medium">StochK</span>
+                    <div className="text-gray-400 mt-0.5">Stochastic RSI (0–100)</div>
+                    <div className="text-green-400">&lt; 20 and rising = oversold reversal signal</div>
+                    <div className="text-yellow-400">20–50 = early recovery zone</div>
+                    <div className="text-red-400">&gt; 80 = overbought, momentum fading</div>
+                  </div>
+                </div>
+                <div className="mt-2 pt-2 border-t border-gray-800 text-gray-600">
+                  Ideal BUY: RSI &lt; 35 · MFI &lt; 30 · StochK &lt; 25 rising · ADX 25–50 · Vel5m positive · Price below VWAP
+                </div>
+              </div>
+            )}
+
             {/* Table */}
-            <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
+            <div className="overflow-x-auto max-h-[360px] overflow-y-auto">
               <table className="w-full text-xs">
                 <thead className="sticky top-0 bg-gray-900 z-10">
                   <tr className="text-gray-500 border-b border-gray-800">
@@ -707,12 +849,13 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                     ))}
                     <th className="px-3 py-2 text-left text-purple-400">Tech</th>
                     <th className="px-3 py-2 text-left text-blue-400">Mom</th>
+                    <th className="px-3 py-2 text-left text-amber-400">Scalp</th>
                     <th className="px-3 py-2 text-left">Regime / Signal</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredScans.length === 0 ? (
-                    <tr><td colSpan={15} className="text-center py-8 text-gray-600">
+                    <tr><td colSpan={16} className="text-center py-8 text-gray-600">
                       No scans yet — run a scan first
                     </td></tr>
                   ) : filteredScans.map(s => {
@@ -876,6 +1019,34 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                                 {ag.pnl != null && (
                                   <span className={`font-mono text-xs ${ag.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                                     {ag.pnl >= 0 ? '+' : ''}${ag.pnl.toFixed(2)}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          )
+                        })()}
+
+                        {/* Scalp agent vote */}
+                        {(() => {
+                          const ag = agentByProduct.get(s.product_id)?.scalp ?? null
+                          if (!ag) return <td className="px-3 py-2 text-gray-700 font-mono text-xs">—</td>
+                          const isBuyS  = ag.side === 'BUY'
+                          const isSellS = ag.side === 'SELL'
+                          return (
+                            <td className="px-3 py-2">
+                              <div className="flex flex-col gap-0.5">
+                                <span className={`px-1.5 py-0.5 rounded text-xs font-bold w-fit ${
+                                  isBuyS  ? 'bg-green-900/50 text-green-400 border border-green-800' :
+                                  isSellS ? 'bg-red-900/50   text-red-400   border border-red-800'   :
+                                            'bg-gray-800     text-gray-500  border border-gray-700'
+                                }`}>{ag.side}</span>
+                                <span className={`font-mono text-xs ${isBuyS || isSellS ? 'text-amber-400' : 'text-gray-600'}`}>
+                                  {Math.round(ag.confidence * 100)}%
+                                  {ag.score != null ? ` s=${ag.score.toFixed(2)}` : ''}
+                                </span>
+                                {ag.pnl != null && (
+                                  <span className={`font-mono text-xs ${ag.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    {ag.pnl >= 0 ? '+' : ''}${ag.pnl.toFixed(4)}
                                   </span>
                                 )}
                               </div>

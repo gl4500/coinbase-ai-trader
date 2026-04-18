@@ -10,4 +10,8 @@ export default defineConfig({
       '/ws':  { target: 'ws://localhost:8001',   ws: true },
     },
   },
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
+  },
 })

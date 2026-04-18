@@ -1,0 +1,211 @@
+# ── Coinbase AI Trader — CI/CD Pipeline ─────────────────────────────────────────
+#
+# Triggered on: every push and PR to main/master
+#
+# Stages:
+#   1. secret-scan      — Gitleaks full-history scan (blocks everything)
+#   2. sast-python      — Bandit static analysis         ┐ run in
+#   3. test-backend     — pytest (fast tests only)        ┤ parallel after 1
+#   4. frontend-check   — TypeScript compile check        ┘
+#   5. frontend-build   — Vite production build (after 4)
+#   6. security-gate    — summarise; block on critical failures
+#   7. tag-release      — date-stamp tag on main push (after 2+3+5)
+
+name: CI — DevSecOps Pipeline
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, master]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION:   "20"
+
+jobs:
+
+  # ── 1. Secret scanning (Gitleaks — full history) ─────────────────────────────
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history — catches keys committed then "deleted"
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. Python SAST (Bandit) ───────────────────────────────────────────────────
+  sast-python:
+    name: Bandit SAST
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Bandit
+        run: pip install --quiet bandit==1.8.3
+      - name: Run Bandit
+        working-directory: backend
+        run: |
+          bandit -r . \
+            -x ./tests/ \
+            --severity-level medium \
+            --confidence-level medium \
+            --exit-zero \
+            -f json -o bandit-report.json
+          python -c "
+          import json, sys
+          r = json.load(open('bandit-report.json'))
+          issues = r.get('results', [])
+          if issues:
+              for i in issues:
+                  print(f\"[{i['issue_severity']}/{i['issue_confidence']}] {i['filename']}:{i['line_number']} — {i['issue_text']}\")
+              sys.exit(1)
+          print('Bandit: no findings')
+          "
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: backend/bandit-report.json
+
+  # ── 3. Backend tests (pytest — fast tests only, no torch/integration) ─────────
+  test-backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install backend dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install lightgbm scikit-learn
+      - name: Run test suite
+        env:
+          COINBASE_API_KEY_NAME:    "organizations/ci-test/apiKeys/ci-test-key"
+          COINBASE_API_PRIVATE_KEY: "stub"
+          APP_API_KEY:              "ci-test-api-key"
+          DRY_RUN:                  "true"
+          DATABASE_URL:             ":memory:"
+          LOG_LEVEL:                "WARNING"
+        run: |
+          pytest backend/tests \
+            -m "not slow and not integration" \
+            --cov=backend \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            -q
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ── 4. Frontend type-check ────────────────────────────────────────────────────
+  frontend-typecheck:
+    name: Frontend type-check
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: TypeScript compile check
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+  # ── 5. Frontend build ─────────────────────────────────────────────────────────
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    needs: frontend-typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Vite build
+        working-directory: frontend
+        run: npm run build
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  # ── 6. Security gate ──────────────────────────────────────────────────────────
+  security-gate:
+    name: Security gate
+    runs-on: ubuntu-latest
+    needs: [secret-scan, sast-python, test-backend, frontend-build]
+    if: always()
+    steps:
+      - name: Check all critical jobs passed
+        run: |
+          echo "=== CI Security Gate ==="
+          echo "secret-scan:     ${{ needs.secret-scan.result }}"
+          echo "sast-python:     ${{ needs.sast-python.result }}"
+          echo "test-backend:    ${{ needs.test-backend.result }}"
+          echo "frontend-build:  ${{ needs.frontend-build.result }}"
+          for result in \
+            "${{ needs.secret-scan.result }}" \
+            "${{ needs.sast-python.result }}" \
+            "${{ needs.test-backend.result }}" \
+            "${{ needs.frontend-build.result }}"; do
+            if [ "$result" = "failure" ]; then
+              echo "SECURITY GATE FAILED"
+              exit 1
+            fi
+          done
+          echo "SECURITY GATE PASSED"
+
+  # ── 7. Tag release (main push only) ──────────────────────────────────────────
+  tag-release:
+    name: Tag release
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test-backend, sast-python, frontend-build]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute next version
+        id: version
+        run: echo "tag=$(date -u +'%Y.%m.%d.%H%M')" >> "$GITHUB_OUTPUT"
+      - name: Create release tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              ref:   `refs/tags/${{ steps.version.outputs.tag }}`,
+              sha:   context.sha,
+            });
+            core.info(`Tagged ${{ steps.version.outputs.tag }}`);

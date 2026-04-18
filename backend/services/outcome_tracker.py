@@ -106,6 +106,7 @@ class OutcomeTracker:
         )
 
         try:
+            _t0 = time.perf_counter()
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.post(
                     f"{OLLAMA_URL}/api/generate",
@@ -114,6 +115,11 @@ class OutcomeTracker:
                 )
                 resp.raise_for_status()
                 text = resp.json().get("response", "")
+            _elapsed = time.perf_counter() - _t0
+            if _elapsed > 15:
+                logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s (SLOW)")
+            else:
+                logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s")
             prob = float(json.loads(text).get("probability", -1))
             if 0 <= prob <= 1:
                 logger.info(

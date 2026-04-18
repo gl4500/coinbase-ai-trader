@@ -62,7 +62,7 @@ class Config:
     cnn_ranging_cnn_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_CNN_W",      "0.40")))
     cnn_ranging_llm_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_LLM_W",      "0.60")))
     # How often to auto-train (in number of scans; default 4 = ~1 hour at 15-min scan interval)
-    cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "4")))
+    cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "8")))
 
     # ── Coinbase API hosts (read-only) ─────────────────────────────────────────
     coinbase_rest_url: str = "https://api.coinbase.com/api/v3/brokerage"

@@ -26,18 +26,24 @@ from typing import Dict, List, Optional, Tuple
 
 import database
 from clients import coinbase_client
-from agents.signal_generator import _rsi, _macd, _bollinger, _atr
+from agents.signal_generator import _rsi, _macd, _bollinger, _atr, _kelly_fraction
 from services.outcome_tracker import get_tracker
+from services.macro_signals import get_macro_service, MacroContext
 
 logger = logging.getLogger(__name__)
 
-_DRY_RUN_BALANCE = 1_000.0
-_BUY_THRESHOLD   = 0.55
-_SELL_THRESHOLD  = 0.55
-_MAX_POSITION_FRAC = 0.15    # max 15 % of portfolio per product
-_HARD_STOP_LOSS  = 0.05      # 5 % hard stop below avg entry price (real-time)
-_TAKE_PROFIT     = 0.20      # 20 % take-profit above avg entry price (real-time)
-_SCAN_INTERVAL   = 120       # 2 min — pure math, no Ollama dependency
+_DRY_RUN_BALANCE   = 1_000.0
+_BUY_THRESHOLD     = 0.55
+_SELL_THRESHOLD    = 0.55
+_MAX_POSITION_FRAC = 0.15    # max 15 % of portfolio per product (fallback cap)
+MIN_PRICE          = 0.01    # skip micro-priced tokens (unprofitable spreads)
+_TAKE_PROFIT       = 0.20    # 20 % take-profit above avg entry price (real-time)
+_SCAN_INTERVAL     = 120     # 2 min — pure math, no Ollama dependency
+
+# ATR-based trailing stop (replaces fixed _HARD_STOP_LOSS)
+_ATR_MULTIPLIER = 3.0    # stop distance = ATR × multiplier
+_ATR_STOP_MIN   = 0.015  # floor: never tighter than 1.5 % (prevent stop-hunting)
+_ATR_STOP_MAX   = 0.12   # ceiling: never wider than 12 % (limit max drawdown)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -99,9 +105,17 @@ class _Book:
             self.balance      = state["balance"]
             self.realized_pnl = state["realized_pnl"]
             self.positions    = state["positions"]
+
+            corrupt = [pid for pid, pos in self.positions.items()
+                       if pos.get("avg_price", 0) == 0]
+            for pid in corrupt:
+                del self.positions[pid]
+                logger.warning(f"{self._agent}: dropped corrupt position {pid} (avg_price=0)")
+
             logger.info(
                 f"{self._agent} state restored | balance=${self.balance:.2f} | "
                 f"pnl=${self.realized_pnl:+.2f} | positions={len(self.positions)}"
+                + (f" | dropped {len(corrupt)} corrupt" if corrupt else "")
             )
         else:
             logger.info(f"{self._agent} no saved state — starting fresh at ${self.balance:.2f}")
@@ -192,6 +206,34 @@ class TechAgentCB:
             self._tick_locks[pid] = asyncio.Lock()
         return self._tick_locks[pid]
 
+    # ── Macro adjustment helpers ──────────────────────────────────────────────
+
+    def _macro_adjusted_buy_score(self, sc: Dict, macro: MacroContext) -> float:
+        """Apply market-structure buy multiplier (funding rate, L/S ratio, OI)."""
+        return min(1.0, sc["buy_score"] * macro.buy_gate_multiplier())
+
+    def _macro_adjusted_sell_score(self, sc: Dict, macro: MacroContext) -> float:
+        """Apply market-structure sell multiplier. SELL is never strongly suppressed."""
+        return min(1.0, sc["sell_score"] * macro.sell_gate_multiplier())
+
+    def _compute_atr_stop(self, candles: List[Dict], entry_price: float) -> float:
+        """
+        Compute an ATR-based stop distance (as a fraction of price).
+        stop = ATR(14) × _ATR_MULTIPLIER / entry_price
+        Clamped to [_ATR_STOP_MIN, _ATR_STOP_MAX].
+        Returns _ATR_STOP_MIN when there is insufficient data.
+        """
+        if len(candles) < 15:
+            return _ATR_STOP_MIN
+        highs  = [c["high"]  for c in candles]
+        lows   = [c["low"]   for c in candles]
+        closes = [c["close"] for c in candles]
+        atr    = _atr(highs, lows, closes)
+        if atr <= 0 or entry_price <= 0:
+            return _ATR_STOP_MIN
+        raw = atr * _ATR_MULTIPLIER / entry_price
+        return max(_ATR_STOP_MIN, min(raw, _ATR_STOP_MAX))
+
     async def on_price_tick(self, pid: str, price: float) -> None:
         """
         Fires on every WS tick for pid.
@@ -209,7 +251,7 @@ class TechAgentCB:
                 async with lock:
                     if self.book.has_position(pid):
                         return
-                    frac = _MAX_POSITION_FRAC * sc["buy_score"]
+                    frac = min(_kelly_fraction(sc["buy_score"]), _MAX_POSITION_FRAC)
                     spent, _ = await self.book.buy(pid, price, frac, trigger="TICK_SIGNAL")
                     if spent > 0:
                         self.signals_buy += 1
@@ -262,9 +304,13 @@ class TechAgentCB:
                 confidence   = sc["sell_score"]
                 exit_trigger = "TICK_SIGNAL"
 
-            # 2. Hard stop-loss (5% below entry)
-            elif pct < -_HARD_STOP_LOSS:
-                exit_reason  = f"TECH HARD STOP [TICK]: {pct*100:.1f}% below entry ${avg_price:.4f}"
+            # 2. ATR-based stop-loss (adapts to volatility)
+            elif pct < -pos.get("atr_stop", _ATR_STOP_MIN):
+                atr_stop_pct = pos.get("atr_stop", _ATR_STOP_MIN) * 100
+                exit_reason  = (
+                    f"TECH ATR STOP [TICK]: {pct*100:.1f}% below entry "
+                    f"${avg_price:.4f} (stop={atr_stop_pct:.1f}%)"
+                )
                 confidence   = 0.95
                 exit_trigger = "TICK_STOP"
 
@@ -408,6 +454,8 @@ class TechAgentCB:
         price = self._live_price(pid, product.get("price", 0))
         if not price or price <= 0:
             return None
+        if price < MIN_PRICE:
+            return None
 
         candles = await database.get_candles(pid, limit=80)
         if len(candles) < 35:   # need enough for MACD(26) + buffer
@@ -417,8 +465,13 @@ class TechAgentCB:
         # Cache for real-time tick handler to reference between scans
         self._score_cache[pid] = sc
 
-        buy_score  = sc["buy_score"]
-        sell_score = sc["sell_score"]
+        # Fetch crypto market-structure macro (cached — negligible overhead)
+        macro = await get_macro_service().get_macro_context()
+
+        raw_buy    = sc["buy_score"]
+        raw_sell   = sc["sell_score"]
+        buy_score  = self._macro_adjusted_buy_score(sc, macro)
+        sell_score = self._macro_adjusted_sell_score(sc, macro)
         has_pos    = self.book.has_position(pid)
 
         side       = "HOLD"
@@ -433,20 +486,31 @@ class TechAgentCB:
             "stoch_k": sc["stoch_k"],
         }
 
+        macro_mult = macro.buy_gate_multiplier()
+
         if buy_score >= _BUY_THRESHOLD and not has_pos:
-            frac  = _MAX_POSITION_FRAC * buy_score
+            frac  = min(_kelly_fraction(raw_buy), _MAX_POSITION_FRAC)
             spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
             if spent > 0:
                 side       = "BUY"
                 confidence = buy_score
-                reasoning  = f"TECH BUY: {'; '.join(sc['buy_reasons'])} score={buy_score:.2f}"
+                atr_stop   = self._compute_atr_stop(candles, price)
+                self.book.positions[pid]["atr_stop"] = atr_stop
+                reasoning  = (
+                    f"TECH BUY: {'; '.join(sc['buy_reasons'])} score={raw_buy:.2f} "
+                    f"macro_adj={buy_score:.2f} frac={frac:.2f} "
+                    f"atr_stop={atr_stop*100:.1f}% macro={macro.regime_label()}"
+                )
                 self.signals_buy += 1
 
         elif sell_score >= _SELL_THRESHOLD and has_pos:
             pnl  = await self.book.sell(pid, price, trigger="SCAN")
             side       = "SELL"
             confidence = sell_score
-            reasoning  = f"TECH SELL: {'; '.join(sc['sell_reasons'])} score={sell_score:.2f} pnl=${pnl:+.2f}"
+            reasoning  = (
+                f"TECH SELL: {'; '.join(sc['sell_reasons'])} score={raw_sell:.2f} "
+                f"macro_adj={sell_score:.2f} pnl=${pnl:+.2f}"
+            )
             self.signals_sell += 1
 
         else:
@@ -454,7 +518,7 @@ class TechAgentCB:
             reasoning  = (
                 f"TECH HOLD RSI={sc['rsi']:.1f} MACD={sc['macd_h']:+.4f} "
                 f"Stoch={sc['stoch_k']:.0f} BB={sc['bb_pos']:.2f} "
-                f"buy={buy_score:.2f} sell={sell_score:.2f}"
+                f"raw_buy={raw_buy:.2f} adj_buy={buy_score:.2f} macro_mult={macro_mult:.2f}"
             )
 
         decision = {
@@ -463,7 +527,7 @@ class TechAgentCB:
             "side":       side,
             "confidence": round(confidence, 3),
             "price":      round(price, 6),
-            "score":      round(max(buy_score, sell_score), 3),
+            "score":      round(max(raw_buy, raw_sell), 3),
             "reasoning":  reasoning,
             "balance":    round(self.book.balance, 2),
             "pnl":        round(pnl, 4) if pnl is not None else None,
@@ -505,19 +569,20 @@ class TechAgentCB:
             await asyncio.sleep(0.05)
         return signals
 
-    async def run_loop(self, interval: int = _SCAN_INTERVAL) -> None:
+    async def run_loop(self, interval: int = _SCAN_INTERVAL, is_trading_fn=None) -> None:
         await self.start()   # restore persisted state before first scan
         logger.info(f"TechAgentCB loop started | interval={interval}s | balance=${self.book.balance:.2f}")
         while True:
             try:
-                sigs = await self.scan_all()
-                self.last_scan_at = time.time()
-                self.scan_count  += 1
-                logger.info(
-                    f"TechAgentCB scan #{self.scan_count} done | "
-                    f"signals={len(sigs)} | balance=${self.book.balance:.2f} | "
-                    f"pnl=${self.book.realized_pnl:+.2f}"
-                )
+                if is_trading_fn is None or is_trading_fn():
+                    sigs = await self.scan_all()
+                    self.last_scan_at = time.time()
+                    self.scan_count  += 1
+                    logger.info(
+                        f"TechAgentCB scan #{self.scan_count} done | "
+                        f"signals={len(sigs)} | balance=${self.book.balance:.2f} | "
+                        f"pnl=${self.book.realized_pnl:+.2f}"
+                    )
             except asyncio.CancelledError:
                 return
             except Exception as e:
