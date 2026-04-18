@@ -787,7 +787,15 @@ class TestKellySizingBug:
     Fix: call _kelly_fraction(model_prob) directly — model_prob IS a win probability.
     """
 
-    @pytest.mark.xfail(reason="Tests need mocks for Hurst gate + LightGBM filter added after these were written")
+    @staticmethod
+    def _make_tracker_mock():
+        """Return a MagicMock with async get_lessons and record methods."""
+        from unittest.mock import MagicMock
+        t = MagicMock()
+        t.get_lessons = AsyncMock(return_value=[])
+        t.record      = AsyncMock()
+        return t
+
     @pytest.mark.asyncio
     async def test_buy_frac_nonzero_at_model_prob_0_62(self, agent, product):
         """model_prob=0.62 → kelly_frac must be > 0 so book.buy() actually spends.
@@ -795,8 +803,9 @@ class TestKellySizingBug:
         Before fix: _kelly_fraction(strength=0.24) = 0 → frac passed to buy = 0.
         After fix:  _kelly_fraction(model_prob=0.62) = 0.24 → frac > 0 → trade executes.
         """
-        candles = _make_candles(80)
+        candles  = _make_candles(80)
         buy_mock = AsyncMock(return_value=(50.0, 1))
+        tracker  = self._make_tracker_mock()
 
         with (
             patch("agents.cnn_agent.database.get_candles",
@@ -809,7 +818,11 @@ class TestKellySizingBug:
                   new=AsyncMock(return_value={"bids": [], "asks": []})),
             patch("agents.cnn_agent._ollama_prob",  new=AsyncMock(return_value=0.62)),
             patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),  # above _HURST_MR_THRESH=0.45
+            patch("agents.cnn_agent.get_tracker",   return_value=tracker),
             patch.object(agent, "_cnn_prob",  return_value=0.62),
+            patch.object(agent._lgbm, "allow_buy", return_value=True),
+            patch.object(agent._lgbm, "predict",   return_value=0.7),
             patch.object(agent.book, "buy",   buy_mock),
             patch.object(agent.book, "has_position", return_value=False),
         ):
@@ -818,7 +831,7 @@ class TestKellySizingBug:
         assert sig is not None, "Signal should be generated at model_prob=0.62"
         assert sig["side"] == "BUY"
         buy_mock.assert_called_once()
-        # The third positional arg to buy() is frac — must be > 0 after fix
+        # Third positional arg to buy() is frac — must be > 0 after Kelly fix
         frac_passed = buy_mock.call_args[0][2]
         assert frac_passed > 0.0, (
             f"book.buy() called with frac={frac_passed:.4f} — kelly is still using "
@@ -828,7 +841,6 @@ class TestKellySizingBug:
         assert abs(frac_passed - 0.15) < 0.01, \
             f"Expected frac≈0.15 (capped), got {frac_passed:.4f}"
 
-    @pytest.mark.xfail(reason="Tests need mocks for Hurst gate + LightGBM filter added after these were written")
     @pytest.mark.asyncio
     async def test_buy_frac_nonzero_at_model_prob_0_65(self, agent, product):
         """model_prob=0.65 (above 0.60 threshold) → frac must be > 0.
@@ -836,8 +848,9 @@ class TestKellySizingBug:
         Before fix: strength=(0.65-0.5)*2=0.30 → kelly=max(0, 2*0.30-1)=0 → skipped.
         After fix:  kelly=max(0, 2*0.65-1)=0.30 → trade executes.
         """
-        candles = _make_candles(80)
+        candles  = _make_candles(80)
         buy_mock = AsyncMock(return_value=(65.0, 2))
+        tracker  = self._make_tracker_mock()
 
         with (
             patch("agents.cnn_agent.database.get_candles",
@@ -850,7 +863,11 @@ class TestKellySizingBug:
                   new=AsyncMock(return_value={"bids": [], "asks": []})),
             patch("agents.cnn_agent._ollama_prob",  new=AsyncMock(return_value=0.65)),
             patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=2)),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),  # above _HURST_MR_THRESH=0.45
+            patch("agents.cnn_agent.get_tracker",   return_value=tracker),
             patch.object(agent, "_cnn_prob",  return_value=0.65),
+            patch.object(agent._lgbm, "allow_buy", return_value=True),
+            patch.object(agent._lgbm, "predict",   return_value=0.7),
             patch.object(agent.book, "buy",   buy_mock),
             patch.object(agent.book, "has_position", return_value=False),
         ):
