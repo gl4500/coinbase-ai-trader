@@ -58,6 +58,7 @@ _CANDLE_SLEEP        = 60.0     # re-evaluate entry every 60 seconds
 _MIN_CANDLES         = 40               # minimum candle bars required for indicators
 _MAX_SCALP_PRODUCTS  = 10              # cap — don't scan the entire universe
 _MIN_PRICE           = 0.01            # skip micro-priced tokens (unprofitable spreads)
+_SL_COOLDOWN_SEC     = 300             # 5-min re-entry block after a stop-loss exit
 
 
 # ── Book ───────────────────────────────────────────────────────────────────────
@@ -310,6 +311,7 @@ class ScalpAgent:
         self._exit_task:  Optional[asyncio.Task] = None
         self.scan_count       = 0
         self.last_scan_at: Optional[float] = None
+        self._sl_cooldown: Dict[str, float] = {}  # pid -> timestamp of last SL exit
 
     # -- helpers -----------------------------------------------------------------
 
@@ -381,6 +383,13 @@ class ScalpAgent:
                 continue
             if self.book.position_count() >= _MAX_CONCURRENT:
                 break
+
+            # Cooldown: block re-entry for 5 min after a stop-loss exit
+            sl_ts = self._sl_cooldown.get(pid, 0)
+            if time.time() - sl_ts < _SL_COOLDOWN_SEC:
+                remaining = int(_SL_COOLDOWN_SEC - (time.time() - sl_ts))
+                logger.debug(f"SCALP {pid}: SL cooldown active — {remaining}s remaining")
+                continue
 
             data = await self._get_candles(pid)
             if not data:
@@ -465,6 +474,8 @@ class ScalpAgent:
 
             reason = _exit_reason(pos, price)
             if reason:
+                if reason == "SL":
+                    self._sl_cooldown[pid] = time.time()  # block re-entry for _SL_COOLDOWN_SEC
                 pnl = await self.book.sell(pid, price, trigger=reason)
                 confidence = 0.95 if reason in ("TP", "SL") else 0.80 if reason == "TRAIL" else 0.60
                 await database.save_agent_decision({

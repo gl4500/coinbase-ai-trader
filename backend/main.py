@@ -205,6 +205,8 @@ class AppState:
     ws_connections:  List[WebSocket]       = []
     is_trading:      bool                  = False
     dry_run:         bool                  = True
+    _balance_cache:  Optional[float]       = None   # cached live USD balance
+    _balance_cache_ts: float               = 0.0    # epoch of last fetch
 
 app_state = AppState()
 
@@ -370,14 +372,21 @@ app.add_middleware(
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
+_STATUS_BALANCE_TTL = 30.0   # refresh live balance at most every 30 s
+
 @app.get("/api/status")
 async def get_status():
+    import time as _time
     balance = None
     if config.has_credentials:
-        try:
-            balance = await coinbase_client.get_usd_balance()
-        except Exception:
-            pass
+        now = _time.time()
+        if now - app_state._balance_cache_ts >= _STATUS_BALANCE_TTL:
+            try:
+                app_state._balance_cache    = await coinbase_client.get_usd_balance()
+                app_state._balance_cache_ts = now
+            except Exception:
+                pass
+        balance = app_state._balance_cache
     dry_balance = (
         app_state.order_executor._dry_run_balance
         if app_state.order_executor and app_state.dry_run else None
