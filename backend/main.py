@@ -278,6 +278,33 @@ async def broadcast_state() -> None:
 # ── Training subprocess progress file ────────────────────────────────────────
 _TRAIN_PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "cnn_train_progress.json")
 _TRAIN_WORKER        = os.path.join(os.path.dirname(__file__), "train_worker.py")
+_TRAIN_LOG_FILE      = os.path.join(os.path.dirname(__file__), "logs", "cnn_training.log")
+
+# Watchdog thresholds for detecting a hung training subprocess.
+# train_worker.py only writes the progress file at start and end, so its mtime
+# is useless mid-run. We watch the training log mtime instead.
+_TRAIN_STALE_START_SECS = 1800   # 30 min grace after start before staleness applies
+_TRAIN_STALE_LOG_SECS   = 900    # 15 min without log writes = stuck
+
+
+def _is_training_stale(data: dict, log_mtime, now: float) -> bool:
+    """Return True when a 'running' training run should be considered hung.
+
+    Stale iff status='running', ran past the startup grace, and the training
+    log has not been updated for the log-staleness window. Missing log mtime
+    is treated as 'unknown' → not stale, to avoid false positives on a fresh
+    install where the log doesn't exist yet.
+    """
+    if data.get("status") != "running":
+        return False
+    started_at = data.get("started_at")
+    if started_at is None:
+        return False
+    if now - started_at < _TRAIN_STALE_START_SECS:
+        return False
+    if log_mtime is None:
+        return False
+    return now - log_mtime >= _TRAIN_STALE_LOG_SECS
 
 
 async def _train_progress_watcher() -> None:
@@ -324,7 +351,30 @@ async def _train_progress_watcher() -> None:
                     if app_state.cnn_agent:
                         app_state.cnn_agent.training_active = True
 
-            elif _status in ("completed", "failed") and app_state.train_status == "running":
+            if _status == "running":
+                _log_mtime = os.path.getmtime(_TRAIN_LOG_FILE) if os.path.exists(_TRAIN_LOG_FILE) else None
+                if _is_training_stale(_data, _log_mtime, _time.time()):
+                    _pid = _data.get("pid")
+                    logger.warning(
+                        f"Training PID {_pid} appears hung — "
+                        f"log unchanged for >{_TRAIN_STALE_LOG_SECS//60} min. "
+                        "Killing subprocess and marking failed."
+                    )
+                    if _pid:
+                        try:
+                            import subprocess as _sp
+                            _sp.run(["taskkill", "/F", "/T", "/PID", str(_pid)],
+                                    capture_output=True, text=True)
+                        except Exception as _ke:
+                            logger.warning(f"taskkill for PID {_pid} failed: {_ke}")
+                    _data["status"] = "failed"
+                    _data["result"] = {"error": "watchdog: log stale, subprocess killed"}
+                    with open(_TRAIN_PROGRESS_FILE, "w") as _wf:
+                        json.dump(_data, _wf)
+                    _status = "failed"
+                    # fall through to the status=failed transition branch below
+
+            if _status in ("completed", "failed") and app_state.train_status == "running":
                 # Training just finished — update state and reload model from disk
                 app_state.train_status = _status
                 app_state.train_result = _data.get("result")

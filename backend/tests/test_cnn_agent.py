@@ -1056,3 +1056,127 @@ class TestHMMStability:
 
         assert det._model == "SENTINEL", \
             "Degenerate-state model must not replace existing model"
+
+
+# ── Display bug regression tests ──────────────────────────────────────────────
+
+class TestRegimeLabelAndVWAPDisplay:
+    """
+    Two bugs observed in production (2026-04-19):
+
+    1. cnn_scans.regime stored "RANGING" while signals.reasoning said "CHAOTIC"
+       for the same scan. Caused by binary trending/ranging fallback discarding
+       the HMM's CHAOTIC label.
+
+    2. signals.reasoning printed "Price below VWAP by 27.98%" when the true
+       delta was 1.47%. Caused by multiplying the normalised vwap distance
+       (already divided by 0.05) by 100 instead of recomputing from prices.
+    """
+
+    @staticmethod
+    def _make_tracker_mock():
+        from unittest.mock import MagicMock
+        t = MagicMock()
+        t.get_lessons = AsyncMock(return_value=[])
+        t.record      = AsyncMock()
+        return t
+
+    @pytest.mark.asyncio
+    async def test_hmm_chaotic_label_is_stored_verbatim_in_cnn_scans(self, agent, product):
+        """When HMM detector returns CHAOTIC, save_cnn_scan must receive regime='CHAOTIC'."""
+        candles = _make_candles(80)
+        saved = {}
+
+        async def _capture(row):
+            saved.update(row)
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.71, 2))
+        })()
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",
+                  new=AsyncMock(side_effect=_capture)),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent.get_detector",
+                  return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",
+                  return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+        ):
+            await agent.generate_signal(product)
+
+        assert saved, "save_cnn_scan was not called"
+        assert saved.get("regime") == "CHAOTIC", (
+            f"Expected regime='CHAOTIC' (from HMM), "
+            f"got regime={saved.get('regime')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reasoning_vwap_percent_matches_actual_price_delta(self, agent, product):
+        """
+        VWAP % in reasoning text must match (price - vwap) / vwap * 100,
+        not the normalised vwap_d (which is dist/0.05).
+        """
+        candles = _make_candles(80)
+        captured_signal = {}
+
+        async def _capture_sig(row):
+            captured_signal.update(row)
+            return 1
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("TRENDING", 0.80, 0))
+        })()
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",
+                  new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(side_effect=_capture_sig)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent.get_detector",
+                  return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",
+                  return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+        ):
+            await agent.generate_signal(product)
+
+        reasoning = captured_signal.get("reasoning", "")
+        assert "Price" in reasoning and "VWAP" in reasoning, \
+            f"reasoning missing VWAP line: {reasoning[:200]}"
+
+        import re
+        m = re.search(r"Price (?:below|above) VWAP by ([0-9.]+)%", reasoning)
+        assert m, f"Could not parse VWAP percent from: {reasoning[:300]}"
+        displayed_pct = float(m.group(1))
+
+        m2 = re.search(r"VWAP\(20\):\s*\$?([0-9,.]+)", reasoning)
+        assert m2, f"Could not parse VWAP price from: {reasoning[:300]}"
+        vwap_price = float(m2.group(1).replace(",", ""))
+
+        price = product["price"]
+        expected_pct = abs(price - vwap_price) / vwap_price * 100
+
+        assert abs(displayed_pct - expected_pct) < 0.1, (
+            f"VWAP percent mismatch: displayed={displayed_pct:.4f}%, "
+            f"expected={expected_pct:.4f}% "
+            f"(price={price}, vwap={vwap_price})"
+        )

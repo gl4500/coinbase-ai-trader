@@ -1127,12 +1127,13 @@ class CoinbaseCNNAgent:
                 f"— {(av.get('reasoning') or '')[:70]}"
             )
 
-        vwap_side = "above" if vwap_d > 0 else "below"
+        vwap_pct_delta = ((price - vwap_price) / vwap_price * 100) if vwap_price else 0.0
+        vwap_side = "above" if vwap_pct_delta > 0 else "below"
         context = (
             f"Price: ${price:,.4f} | Regime: {hmm_regime} (conf={hmm_conf:.2f})\n"
             f"ADX(14): {adx_val:.1f} | RSI(14): {rsi_val:.1f} | MFI(14): {mfi_val:.1f}\n"
             f"MACD hist: {macd_h:+.6f} | Bollinger: {bb_pos:.2f} | StochRSI K: {stoch_k:.1f}\n"
-            f"VWAP(20): ${vwap_price:,.4f} | Price {vwap_side} VWAP by {abs(vwap_d)*100:.2f}%\n"
+            f"VWAP(20): ${vwap_price:,.4f} | Price {vwap_side} VWAP by {abs(vwap_pct_delta):.2f}%\n"
             f"OB imbalance: {ob.get('imbalance', 0):+.2f} | ATR(14): {atr_val:.4f}\n"
             f"CNN raw: {cnn_prob:.4f} | weights CNN={cnn_w} LLM={llm_w}"
             + (f"\nSub-agent votes:{agent_ctx}" if agent_ctx else "")
@@ -1221,7 +1222,7 @@ class CoinbaseCNNAgent:
             "side":        side,
             "strength":    round(strength, 3),
             "signal_gen":  passes,
-            "regime":      "TRENDING" if trending else "RANGING",
+            "regime":      hmm_regime,
             "adx":         round(adx_val, 1),
             "rsi":         round(rsi_val, 1),
             "macd":        round(macd_h, 6),
@@ -1244,7 +1245,7 @@ class CoinbaseCNNAgent:
             indicators={
                 "cnn_prob": round(cnn_prob, 4),
                 "adx":      round(adx_val, 1),
-                "regime":   "TRENDING" if trending else "RANGING",
+                "regime":   hmm_regime,
                 "rsi":      round(rsi_val, 1),
             },
         )
