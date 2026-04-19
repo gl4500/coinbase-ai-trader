@@ -57,17 +57,22 @@ jobs:
             -x ./tests/ \
             --severity-level medium \
             --confidence-level medium \
-            --exit-zero \
-            -f json -o bandit-report.json
+            -f json -o bandit-report.json || true
           python -c "
           import json, sys
           r = json.load(open('bandit-report.json'))
           issues = r.get('results', [])
+          highs = [i for i in issues if i['issue_severity'] == 'HIGH']
           if issues:
               for i in issues:
                   print(f\"[{i['issue_severity']}/{i['issue_confidence']}] {i['filename']}:{i['line_number']} — {i['issue_text']}\")
+          if highs:
+              print(f'Bandit: {len(highs)} HIGH severity finding(s) — blocking.')
               sys.exit(1)
-          print('Bandit: no findings')
+          elif issues:
+              print(f'Bandit: {len(issues)} MEDIUM finding(s) — non-blocking (review recommended).')
+          else:
+              print('Bandit: no findings')
           "
       - name: Upload Bandit report
         if: always()
@@ -91,15 +96,16 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install lightgbm scikit-learn
+          pip install pyarrow hmmlearn lightgbm scikit-learn
       - name: Run test suite
         env:
           COINBASE_API_KEY_NAME:    "organizations/ci-test/apiKeys/ci-test-key"
           COINBASE_API_PRIVATE_KEY: "stub"
           APP_API_KEY:              "ci-test-api-key"
           DRY_RUN:                  "true"
-          DATABASE_URL:             ":memory:"
+          DATABASE_URL:             "coinbase_ci_test.db"
           LOG_LEVEL:                "WARNING"
+          OLLAMA_MODEL:             "llama3.2:3b"
         run: |
           pytest backend/tests \
             -m "not slow and not integration" \
@@ -159,11 +165,28 @@ jobs:
           path: frontend/dist/
           retention-days: 7
 
-  # ── 6. Security gate ──────────────────────────────────────────────────────────
+  # ── 6. Python lint + format (ruff) ───────────────────────────────────────────
+  lint-python:
+    name: Ruff lint + format
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install ruff
+        run: pip install ruff==0.9.0
+      - name: Ruff lint
+        run: ruff check backend/ --output-format=github
+      - name: Ruff format check
+        run: ruff format --check backend/
+
+  # ── 7. Security gate ──────────────────────────────────────────────────────────
   security-gate:
     name: Security gate
     runs-on: ubuntu-latest
-    needs: [secret-scan, sast-python, test-backend, frontend-build]
+    needs: [secret-scan, sast-python, test-backend, frontend-build, lint-python]
     if: always()
     steps:
       - name: Check all critical jobs passed
@@ -173,11 +196,13 @@ jobs:
           echo "sast-python:     ${{ needs.sast-python.result }}"
           echo "test-backend:    ${{ needs.test-backend.result }}"
           echo "frontend-build:  ${{ needs.frontend-build.result }}"
+          echo "lint-python:     ${{ needs.lint-python.result }}"
           for result in \
             "${{ needs.secret-scan.result }}" \
             "${{ needs.sast-python.result }}" \
             "${{ needs.test-backend.result }}" \
-            "${{ needs.frontend-build.result }}"; do
+            "${{ needs.frontend-build.result }}" \
+            "${{ needs.lint-python.result }}"; do
             if [ "$result" = "failure" ]; then
               echo "SECURITY GATE FAILED"
               exit 1
@@ -190,7 +215,7 @@ jobs:
     name: Tag release
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [test-backend, sast-python, frontend-build]
+    needs: [test-backend, sast-python, frontend-build, lint-python]
     steps:
       - uses: actions/checkout@v4
         with:

@@ -64,6 +64,12 @@ class Config:
     # How often to auto-train (in number of scans; default 4 = ~1 hour at 15-min scan interval)
     cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "8")))
 
+    # ── History backfill schedule ──────────────────────────────────────────────
+    # How many hours between automatic incremental backfill runs (0 = disabled)
+    backfill_interval_hours: int  = field(default_factory=lambda: int(os.getenv("BACKFILL_INTERVAL_HOURS", "24")))
+    # How many days of history to fetch for a brand-new product
+    backfill_new_product_days: int = field(default_factory=lambda: int(os.getenv("BACKFILL_NEW_PRODUCT_DAYS", "365")))
+
     # ── Coinbase API hosts (read-only) ─────────────────────────────────────────
     coinbase_rest_url: str = "https://api.coinbase.com/api/v3/brokerage"
     coinbase_ws_url:   str = "wss://advanced-trade-ws.coinbase.com"   # public ticker channel

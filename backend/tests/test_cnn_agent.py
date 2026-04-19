@@ -462,7 +462,7 @@ class TestTrainOnHistory:
         ):
             result = await trained_agent.train_on_history(epochs=3)
 
-        assert result["fit_status"] in ("OK", "OVERFIT", "UNDERFIT")
+        assert result["fit_status"] in ("OK", "OVERFIT", "UNDERFIT", "REJECTED")
 
     @pytest.mark.asyncio
     async def test_losses_are_positive_floats(self, trained_agent):
@@ -617,15 +617,17 @@ class TestGatedConv1d:
         assert float(out.abs().max()) < 1e-3, "Gate should suppress output to ~0"
 
     def test_gate_passthrough_at_large_positive(self):
-        """When gate bias is extremely positive, output ≈ conv_main(x)."""
+        """When gate bias is extremely positive, output ≈ BN(conv_main(x))."""
         layer = self._layer()
         nn.init.constant_(layer.conv_gate.weight, 0.0)   # zero weights
         nn.init.constant_(layer.conv_gate.bias,   100.0)  # gate = sigmoid(100) ≈ 1
         x        = self._batch()
         out      = layer(x)
-        expected = layer.conv_main(x)
+        # GatedConv1d applies BatchNorm after the gate multiplication, so
+        # gate≈1 → out = BN(conv_main(x) × 1) = BN(conv_main(x))
+        expected = layer.bn(layer.conv_main(x))
         assert torch.allclose(out, expected, atol=1e-3), \
-            "Gate fully open → output should equal conv_main(x)"
+            "Gate fully open → output should equal BN(conv_main(x))"
 
     def test_output_shape_preserved(self):
         """Output shape matches (batch, out_ch, seq_len)."""
@@ -641,20 +643,21 @@ class TestGatedConv1d:
             "First conv block should be GatedConv1d"
 
     def test_signal_cnn_arch_tag(self):
-        """SignalCNN carries arch='glu' class attribute for checkpoint compat."""
-        assert SignalCNN.arch == "glu"
+        """SignalCNN carries arch='glu2' class attribute for checkpoint compat."""
+        assert SignalCNN.arch == "glu2"
 
     def test_end_to_end_train_and_predict(self):
         """Model trains one step without error and returns a probability in [0, 1]."""
         import torch.optim as optim
+        import torch.nn.functional as F
         model = SignalCNN(n_ch=N_CHANNELS)
         x     = torch.randn(4, N_CHANNELS, SEQ_LEN)
         y     = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
-        opt   = optim.Adam(model.parameters(), lr=1e-3)
+        opt   = optim.AdamW(model.parameters(), lr=1e-3)
         model.train()
         opt.zero_grad()
-        import torch.nn.functional as F
-        loss = F.binary_cross_entropy(model(x), y)
+        # Model outputs raw logits — use BCEWithLogitsLoss (numerically stable)
+        loss = F.binary_cross_entropy_with_logits(model(x), y)
         loss.backward()
         opt.step()
         prob = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
@@ -676,12 +679,12 @@ class TestGatedConv1d:
             assert torch.allclose(pa, pb), f"Weight mismatch at {na}"
 
     def test_save_load_arch_tag_preserved(self, tmp_path):
-        """Checkpoint arch tag is 'glu' after save."""
+        """Checkpoint arch tag is 'glu2' after save."""
         model = SignalCNN(n_ch=N_CHANNELS)
         path  = str(tmp_path / "test_model.pt")
         torch.save({"arch": model.arch, "state_dict": model.state_dict()}, path)
         ckpt  = torch.load(path, map_location="cpu", weights_only=False)
-        assert ckpt["arch"] == "glu"
+        assert ckpt["arch"] == "glu2"
 
     def test_get_learned_weights_sums_to_one(self):
         """FeatureBuilder.get_learned_weights() must return weights that sum to 1.0."""
@@ -900,3 +903,126 @@ class TestKellySizingBug:
             "This test documents the bug: passing strength instead of model_prob "
             "produces kelly=0 even for a valid BUY signal."
         )
+
+
+# ── Training framework tests ───────────────────────────────────────────────────
+
+class TestTrainingFramework:
+    """
+    Verify best-model tracking, early stopping, arch-mismatch guard,
+    and conditional checkpoint save.
+    """
+
+    @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_needs_retrain_flag_set_on_channel_mismatch(self, tmp_path):
+        """Loading a checkpoint with wrong n_channels sets _needs_retrain=True."""
+        import torch
+        from agents.cnn_agent import SignalCNN, N_CHANNELS, _EARLY_STOP_PATIENCE
+
+        agent = CoinbaseCNNAgent()
+        agent._needs_retrain = False
+
+        # Build a fake checkpoint claiming a different channel count
+        wrong_channels = N_CHANNELS + 5
+        ckpt_path = str(tmp_path / "bad_ckpt.pt")
+        torch.save(
+            {"arch": "glu", "n_channels": wrong_channels,
+             "state_dict": SignalCNN().state_dict()},
+            ckpt_path,
+        )
+
+        import agents.cnn_agent as ca
+        orig = ca.MODEL_PATH
+        ca.MODEL_PATH = ckpt_path
+        try:
+            agent._load()
+        finally:
+            ca.MODEL_PATH = orig
+
+        assert agent._needs_retrain is True, (
+            "_needs_retrain must be True after loading incompatible channel count"
+        )
+
+    @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+    @pytest.mark.asyncio
+    async def test_generate_signal_suppressed_when_needs_retrain(self):
+        """generate_signal returns None when _needs_retrain is True."""
+        agent = CoinbaseCNNAgent()
+        agent._needs_retrain = True
+
+        product = {"product_id": "BTC-USD", "price": 94000.0}
+        result = await agent.generate_signal(product, execute=False)
+        assert result is None, "Signal must be suppressed when model is incompatible"
+
+    @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+    def test_save_model_stores_n_channels(self, tmp_path):
+        """save_model() writes n_channels into the checkpoint."""
+        import torch
+        import agents.cnn_agent as ca
+
+        agent = CoinbaseCNNAgent()
+        ckpt_path = str(tmp_path / "test_ckpt.pt")
+        orig = ca.MODEL_PATH
+        ca.MODEL_PATH = ckpt_path
+        try:
+            agent.save_model(backup=False)
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        finally:
+            ca.MODEL_PATH = orig
+
+        assert "n_channels" in ckpt, "Checkpoint must contain n_channels key"
+        assert ckpt["n_channels"] == ca.N_CHANNELS
+
+    def test_best_loss_read_write_roundtrip(self, tmp_path):
+        """_read_best_loss / _write_best_loss survive a roundtrip."""
+        import agents.cnn_agent as ca
+        orig = ca._BEST_LOSS_PATH
+        ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
+        try:
+            assert CoinbaseCNNAgent._read_best_loss() == float("inf"), \
+                "Missing file should return inf"
+            CoinbaseCNNAgent._write_best_loss(0.4321)
+            assert abs(CoinbaseCNNAgent._read_best_loss() - 0.4321) < 1e-6
+        finally:
+            ca._BEST_LOSS_PATH = orig
+
+
+class TestHMMStability:
+    """HMM fit should keep old model on failure and warn on label flip."""
+
+    def test_fit_keeps_old_model_on_failure(self):
+        """If GaussianHMM raises, the old model is preserved."""
+        from services.hmm_regime import HMMRegimeDetector
+        import unittest.mock as mock
+
+        det = HMMRegimeDetector()
+        det._model = "SENTINEL"  # pretend we have an existing model
+
+        with mock.patch("hmmlearn.hmm.GaussianHMM") as MockHMM:
+            MockHMM.return_value.fit.side_effect = RuntimeError("numerical error")
+            result = det.fit(list(range(1, 400)))   # enough bars
+
+        assert det._model == "SENTINEL", \
+            "Existing model must not be cleared when fit raises"
+        assert result is False
+
+    def test_degenerate_states_rejected(self):
+        """Fit with identical-vol states should not replace the current model."""
+        from services.hmm_regime import HMMRegimeDetector
+        import unittest.mock as mock
+        import numpy as np
+
+        det = HMMRegimeDetector()
+        det._model = "SENTINEL"
+
+        fake_model = mock.MagicMock()
+        # All states have identical volatility → degenerate
+        fake_model.means_ = np.array([[0.0, 0.001], [0.0, 0.001], [0.0, 0.001]])
+
+        with mock.patch("hmmlearn.hmm.GaussianHMM") as MockHMM:
+            MockHMM.return_value = fake_model
+            fake_model.fit = mock.MagicMock()
+            result = det.fit(list(range(1, 400)))
+
+        assert det._model == "SENTINEL", \
+            "Degenerate-state model must not replace existing model"

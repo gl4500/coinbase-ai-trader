@@ -40,12 +40,14 @@ Install PyTorch (CUDA 12.x):
   pip install torch --index-url https://download.pytorch.org/whl/cu124
 """
 import asyncio
+import copy
 import datetime as _dt
 import json
 import logging
 import math
 import os
 import re
+import shutil
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -233,15 +235,29 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
     _TORCH = True
+    _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        logger.info(
+            "CUDA available — CNN will train/infer on GPU: %s",
+            torch.cuda.get_device_name(0),
+        )
+    else:
+        logger.info("CUDA not available — CNN will use CPU")
 except ImportError:
-    _TORCH = False
+    _TORCH  = False
+    _DEVICE = None
     logger.warning("PyTorch not found — CNN agent uses linear fallback")
 
-N_CHANNELS = 27
-SEQ_LEN    = 60
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
-OLLAMA_URL = "http://localhost:11434"
-_CACHE_TTL = 300
+N_CHANNELS      = 27
+SEQ_LEN         = 60
+MODEL_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
+_MODEL_BAK_PATH = MODEL_PATH + ".bak"
+_BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
+_CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
+_CKPT_EVERY     = 10   # save resume checkpoint every N epochs
+OLLAMA_URL      = "http://localhost:11434"
+_CACHE_TTL      = 300
+_EARLY_STOP_PATIENCE = 15   # stop if val_loss doesn't improve for this many epochs
 
 
 # ── CNN-LSTM Model ────────────────────────────────────────────────────────────
@@ -249,29 +265,28 @@ _CACHE_TTL = 300
 if _TORCH:
     class GatedConv1d(nn.Module):
         """
-        Gated Linear Unit conv block.
-        Two parallel conv paths — main and gate — multiplied together:
-            output = conv_main(x) * sigmoid(conv_gate(x))
-        The gate learns per-channel suppression weights: noisy or irrelevant
-        indicator channels are softly zeroed without manual feature engineering.
+        GLU conv block with BatchNorm. BatchNorm normalises activations so
+        gradients don't vanish through stacked gated layers.
         """
         def __init__(self, in_ch: int, out_ch: int, kernel: int = 3, padding: int = 1):
             super().__init__()
             self.conv_main = nn.Conv1d(in_ch, out_ch, kernel, padding=padding)
             self.conv_gate = nn.Conv1d(in_ch, out_ch, kernel, padding=padding)
+            self.bn        = nn.BatchNorm1d(out_ch)
 
         def forward(self, x):
-            return self.conv_main(x) * torch.sigmoid(self.conv_gate(x))
+            out = self.conv_main(x) * torch.sigmoid(self.conv_gate(x))
+            return self.bn(out)
 
     class SignalCNN(nn.Module):
         """
         GLU-gated CNN-LSTM hybrid:
-          1. 4× GatedConv1d blocks — gate learns per-channel suppression
+          1. 4× GatedConv1d blocks with BatchNorm — gate learns per-channel suppression
           2. 2-layer LSTM captures long-range dependencies
           3. FC head → sigmoid probability
-        arch tag "glu" written into checkpoint for backward-compat load.
+        arch tag "glu2" distinguishes from pre-BatchNorm checkpoints.
         """
-        arch = "glu"
+        arch = "glu2"
 
         def __init__(self, n_ch: int = N_CHANNELS):
             super().__init__()
@@ -292,15 +307,20 @@ if _TORCH:
             x = self.c3(x); x = self.p3(x)
             x = self.c4(x)
             x = x.permute(0, 2, 1)          # (B, seq, 128)
+            # flatten_parameters() fixes cuDNN LSTM inplace weight aliasing on CUDA
+            # without it the cuDNN kernel modifies weight_ih in-place during forward,
+            # incrementing the version counter and crashing backward()
+            self.lstm.flatten_parameters()
             x, _ = self.lstm(x)
             x = x[:, -1, :]                 # last timestep
             x = self.drop(x)
-            return torch.sigmoid(self.fc(x))
+            return self.fc(x)   # raw logits — sigmoid applied at loss/predict time
 
         def predict(self, tensor: "torch.Tensor") -> float:
             self.eval()
             with torch.no_grad():
-                return float(self.forward(tensor.unsqueeze(0)).item())
+                device = next(self.parameters()).device
+                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
 
 
 # ── Feature Builder ───────────────────────────────────────────────────────────
@@ -674,12 +694,20 @@ class CoinbaseCNNAgent:
         self._lgbm             = LGBMFilter()
         self._lgbm.load(_LGBM_MODEL_PATH)
         self._lgbm_trades_seen: int = 0   # closed-trade count at last retrain
+        # ── Model health flags ──────────────────────────────────────────────
+        # True when the on-disk checkpoint is incompatible with the current
+        # architecture (channel count changed).  Signals are suppressed until
+        # a fresh train run completes and saves a compatible checkpoint.
+        self._needs_retrain: bool = False
         if _TORCH:
-            self.model = SignalCNN()
+            self.model = SignalCNN().to(_DEVICE)
             self._load()
+        _status = "incompatible — signals suppressed until retrained" if self._needs_retrain else \
+                  ("loaded" if self._exists() else "random (untrained)")
+        _device_str = str(_DEVICE) if _TORCH else "n/a"
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
-            f"model={'loaded' if self._exists() else 'random (untrained)'} | "
+            f"device={_device_str} | model={_status} | "
             f"channels={N_CHANNELS} | lgbm={'ready' if self._lgbm.is_ready() else 'accumulating'}"
         )
 
@@ -714,30 +742,69 @@ class CoinbaseCNNAgent:
             return
         try:
             ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
-            # New format: {"arch": "glu", "state_dict": {...}}
-            # Legacy format: raw state_dict (no arch key)
             if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                arch = ckpt.get("arch", "legacy")
-                if arch != getattr(self.model, "arch", "glu"):
+                arch          = ckpt.get("arch", "legacy")
+                ckpt_channels = ckpt.get("n_channels", N_CHANNELS)
+
+                if ckpt_channels != N_CHANNELS:
                     logger.warning(
-                        f"CNN checkpoint arch='{arch}' differs from model arch="
-                        f"'{getattr(self.model, 'arch', 'glu')}' — retraining recommended"
+                        f"CNN checkpoint has {ckpt_channels} channels, model expects {N_CHANNELS} "
+                        f"— checkpoint incompatible. Signals suppressed until retrain completes."
                     )
+                    self._needs_retrain = True
+                    return
+
+                if arch != getattr(self.model, "arch", "glu2"):
+                    logger.warning(
+                        f"CNN checkpoint arch='{arch}' incompatible with current arch="
+                        f"'{getattr(self.model, 'arch', 'glu2')}' — signals suppressed until retrain."
+                    )
+                    self._needs_retrain = True
+                    return
+
                 self.model.load_state_dict(ckpt["state_dict"])
             else:
-                # Legacy: plain state_dict — attempt load, warn on mismatch
+                # Legacy plain state_dict — attempt load
                 self.model.load_state_dict(ckpt)
-            logger.info(f"CNN model loaded from disk (arch={getattr(self.model, 'arch', 'unknown')})")
-        except Exception as e:
-            logger.warning(f"CNN model load failed (shape mismatch — retrain): {e}")
-
-    def save_model(self):
-        if _TORCH and self.model:
-            torch.save(
-                {"arch": getattr(self.model, "arch", "glu"),
-                 "state_dict": self.model.state_dict()},
-                MODEL_PATH,
+            self.model.to(_DEVICE)
+            logger.info(
+                f"CNN model loaded from disk "
+                f"(arch={getattr(self.model, 'arch', 'unknown')}, device={_DEVICE})"
             )
+        except Exception as e:
+            logger.warning(
+                f"CNN model load failed: {e} — signals suppressed until retrain completes"
+            )
+            self._needs_retrain = True
+
+    def save_model(self, backup: bool = False):
+        if not (_TORCH and self.model):
+            return
+        if backup and os.path.exists(MODEL_PATH):
+            shutil.copy2(MODEL_PATH, _MODEL_BAK_PATH)
+        torch.save(
+            {
+                "arch":       getattr(self.model, "arch", "glu"),
+                "n_channels": N_CHANNELS,
+                "state_dict": self.model.state_dict(),
+            },
+            MODEL_PATH,
+        )
+
+    @staticmethod
+    def _read_best_loss() -> float:
+        try:
+            return float(open(_BEST_LOSS_PATH).read().strip())
+        except Exception:
+            return float("inf")
+
+    @staticmethod
+    def _write_best_loss(loss: float) -> None:
+        try:
+            with open(_BEST_LOSS_PATH, "w") as f:
+                f.write(str(loss))
+        except Exception:
+            pass
 
     def _cnn_prob(self, channels) -> float:
         if _TORCH and self.model:
@@ -834,6 +901,13 @@ class CoinbaseCNNAgent:
         execute: bool = False,
         order_executor=None,
     ) -> Optional[Dict]:
+        if self._needs_retrain:
+            logger.debug(
+                "CNN signal suppressed — checkpoint incompatible with current architecture. "
+                "Run retrain.py or trigger /api/cnn/train to generate a compatible model."
+            )
+            return None
+
         pid   = product["product_id"]
         price = self._live_price(pid, product.get("price") or 0)
         if not price or price <= 0:
@@ -1251,7 +1325,8 @@ class CoinbaseCNNAgent:
     async def run_loop(self, interval: int = 900,
                        train_every_n_scans: int = 4,
                        order_executor=None,
-                       is_trading_fn=None) -> None:
+                       is_trading_fn=None,
+                       broadcast_fn=None) -> None:
         """
         Scan every `interval` seconds (default 15 min).
         Auto-train every `train_every_n_scans` scans (default 4 = ~1 hour).
@@ -1285,6 +1360,13 @@ class CoinbaseCNNAgent:
                 self.scan_count  += 1
                 self.next_scan_at = time.time() + interval
 
+                # Push fresh state to all connected browser clients immediately
+                if broadcast_fn:
+                    try:
+                        await broadcast_fn()
+                    except Exception:
+                        pass
+
                 # LightGBM retrain check — runs fast, only retrains when new closed trades exist
                 if self.scan_count % _LGBM_RETRAIN_EVERY == 0:
                     await self._lgbm_retrain_if_needed()
@@ -1296,7 +1378,7 @@ class CoinbaseCNNAgent:
                         f"every {train_every_n_scans} scans)"
                     )
                     try:
-                        result = await self.train_on_history(epochs=15)
+                        result = await self.train_on_history(epochs=50)
                         if "error" in result:
                             logger.warning(f"CNN auto-train skipped: {result['error']}")
                         else:
@@ -1317,7 +1399,7 @@ class CoinbaseCNNAgent:
                 logger.error(f"CNN loop error: {e}")
             await asyncio.sleep(interval)
 
-    async def train_on_history(self, epochs: int = 50) -> Dict:
+    async def train_on_history(self, epochs: int = 50) -> Dict:  # noqa: C901
         """
         Train the CNN on historical candle data with an 80/20 time-based train/val split.
 
@@ -1334,19 +1416,23 @@ class CoinbaseCNNAgent:
         if not _TORCH or not self.model:
             return {"error": "PyTorch not available"}
         import torch.optim as optim
+        import time as _t
 
         _FORWARD_HOURS = 4   # predict whether close is higher 4 hours ahead
+        _train_start   = _t.time()
 
+        loop     = asyncio.get_event_loop()
         products = await database.get_products()
-        X_list, y_list = [], []
+
+        # ── Phase 1: collect candles (async DB calls stay on event loop) ──────
+        # load_history() is sync parquet I/O — run each in the thread pool so
+        # the event loop stays free to serve /api/cnn/train/status polls.
+        all_candle_sets: list = []
         for p in products:
-            pid = p["product_id"]
-            # Prefer parquet history (years of data); fall back to recent SQLite candles
-            hist = load_history(pid)
+            pid  = p["product_id"]
+            hist = await loop.run_in_executor(None, load_history, pid)
             if hist:
-                # Merge with recent SQLite bars so the latest live bars are included
                 live = await database.get_candles(pid, limit=200)
-                # Parquet uses "start"; SQLite uses "start_time" — normalise to "start"
                 for c in live:
                     if "start_time" in c and "start" not in c:
                         c["start"] = c["start_time"]
@@ -1354,103 +1440,246 @@ class CoinbaseCNNAgent:
                 new_live    = [c for c in live if c["start"] not in live_starts]
                 candles     = sorted(hist + new_live, key=lambda c: c["start"])
                 logger.debug(
-                    f"Training {pid}: {len(hist)} parquet + {len(new_live)} live = {len(candles)} bars"
+                    f"Training {pid}: {len(hist)} parquet + {len(new_live)} "
+                    f"live = {len(candles)} bars"
                 )
             else:
                 candles = await database.get_candles(pid, limit=200)
-                # Normalise SQLite "start_time" → "start" for downstream code
                 for c in candles:
                     if "start_time" in c and "start" not in c:
                         c["start"] = c["start_time"]
 
-            n = len(candles)
-            if n < SEQ_LEN + _FORWARD_HOURS + 1:
-                continue
-            closes = [c["close"] for c in candles]
-            # Slide window: window ends at index i, label uses close at i + _FORWARD_HOURS
-            for i in range(SEQ_LEN - 1, n - _FORWARD_HOURS):
-                window   = candles[i - SEQ_LEN + 1 : i + 1]   # SEQ_LEN bars ending at i
-                entry_px = closes[i]
-                exit_px  = closes[i + _FORWARD_HOURS]
-                if entry_px <= 0:
-                    continue
-                label = 1.0 if exit_px > entry_px else 0.0
-                channels = self.fb.build(window, {})
-                X_list.append(self.fb.to_tensor(channels))
-                y_list.append(label)
+            if len(candles) >= SEQ_LEN + _FORWARD_HOURS + 1:
+                all_candle_sets.append(candles)
+
+        # ── Phase 2: build tensors in thread pool ─────────────────────────────
+        # Sliding-window feature extraction + tensor stacking + GPU transfer are
+        # all CPU/GPU-bound and must NOT run on the event loop.
+        fb = self.fb  # capture FeatureBuilder for closure
+
+        _LABEL_THRESH = 0.003   # require ≥0.3% move to avoid noisy near-zero labels
+
+        def _build_dataset():
+            X_list, y_list = [], []
+            for candles in all_candle_sets:
+                closes = [c["close"] for c in candles]
+                n      = len(candles)
+                for i in range(SEQ_LEN - 1, n - _FORWARD_HOURS):
+                    entry_px = closes[i]
+                    exit_px  = closes[i + _FORWARD_HOURS]
+                    if entry_px <= 0:
+                        continue
+                    ret = (exit_px - entry_px) / entry_px
+                    # Skip samples in the dead-zone — not clearly up or down
+                    if abs(ret) < _LABEL_THRESH:
+                        continue
+                    label = 1.0 if ret > 0 else 0.0
+                    # Use last 12 hourly bars as 5m proxy so channels 17-19 are
+                    # non-zero during training, matching the inference distribution
+                    window   = candles[i - SEQ_LEN + 1: i + 1]
+                    proxy_5m = candles[max(0, i - 11): i + 1]
+                    channels = fb.build(window, {}, candles_5m=proxy_5m)
+                    X_list.append(fb.to_tensor(channels))
+                    y_list.append(label)
+            return X_list, y_list
+
+        X_list, y_list = await loop.run_in_executor(None, _build_dataset)
 
         if len(X_list) < 4:
             return {"error": f"Not enough data ({len(X_list)} samples, need ≥ 4)"}
 
+        # ── Class balance check ───────────────────────────────────────────────
+        n_pos = sum(1 for y in y_list if y == 1.0)
+        n_neg = len(y_list) - n_pos
+        if n_pos == 0 or n_neg == 0:
+            # Single-class dataset — weighting is undefined; fall back to balanced
+            logger.warning(
+                f"CNN dataset: only one class present (up={n_pos}, down={n_neg}) — "
+                "disabling class weighting (pos_weight=1.0)"
+            )
+            pos_weight_val = 1.0
+        else:
+            pos_weight_val = n_neg / n_pos   # >1 = more negatives (up-weight positives)
+        logger.info(
+            f"CNN dataset: {len(y_list)} samples | up={n_pos} ({100*n_pos/len(y_list):.1f}%) "
+            f"down={n_neg} ({100*n_neg/len(y_list):.1f}%) | pos_weight={pos_weight_val:.3f}"
+        )
+
         # ── 80/20 time-ordered split (no shuffle — preserves temporal order) ──
         split      = max(1, int(len(X_list) * 0.8))
-        X_all      = torch.stack(X_list)
-        y_all      = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1)
+        X_all      = torch.stack(X_list).to(_DEVICE)
+        y_all      = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
         X_train, X_val = X_all[:split], X_all[split:]
         y_train, y_val = y_all[:split], y_all[split:]
 
-        model     = self.model  # capture for thread closure
-        epoch_log: list = []   # [{epoch, train_loss, val_loss}]
+        model      = self.model  # capture for thread closure
+        epoch_log: list = []    # [{epoch, train_loss, val_loss}]
+        fit_box:   list = [{}]  # mutable container: {best_val_loss, stopped_epoch}
+        _pos_w     = torch.tensor([pos_weight_val], dtype=torch.float32).to(_DEVICE)
 
         def _sync_fit() -> None:
             """Run the blocking PyTorch fit loop in a thread pool executor.
 
-            Called via run_in_executor so the asyncio event loop stays responsive
-            during training (prevents the backend from locking up on Train clicks).
-
-            Uses mini-batch SGD (batch_size=512) so each epoch contains many gradient
-            steps instead of one full-batch step — prevents the loss-barely-moves
-            UNDERFIT that occurs with full-batch Adam on 10k+ samples.
+            - Batch size scales with dataset so gradient quality stays consistent
+            - ReduceLROnPlateau adapts to actual learning, not a fixed schedule
+            - Early stopping (patience=_EARLY_STOP_PATIENCE) prevents overtraining
+            - Best-model restore rolls weights back to lowest val_loss epoch
+            - Checkpoint saved every _CKPT_EVERY epochs for crash recovery
             """
-            BATCH = 512
-            opt       = optim.Adam(model.parameters(), lr=3e-3, weight_decay=1e-4)
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=1e-5)
-            n_train   = X_train.shape[0]
+            n_train = X_train.shape[0]
+
+            # Smaller batches → more gradient noise → better generalization on
+            # noisy financial signal (best practices: start at 32, scale with data)
+            if n_train >= 200_000:
+                BATCH = 256
+            elif n_train >= 50_000:
+                BATCH = 128
+            else:
+                BATCH = 64
+
+            # Scale initial LR with batch size (linear scaling rule, anchor = 64)
+            base_lr   = 1e-3 * (BATCH / 64) ** 0.5
+            patience  = _EARLY_STOP_PATIENCE
+            opt       = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                opt, mode="min", factor=0.5, patience=5, min_lr=1e-6,
+            )
+
+            best_val   = float("inf")
+            best_sd    = None
+            no_improve = 0
+            start_ep   = 1
+
+            # Resume from checkpoint if one exists from a previous interrupted run
+            if os.path.exists(_CKPT_PATH):
+                try:
+                    ckpt = torch.load(_CKPT_PATH, map_location=_DEVICE, weights_only=False)
+                    model.load_state_dict(ckpt["model_sd"])
+                    opt.load_state_dict(ckpt["opt_sd"])
+                    best_val   = ckpt.get("best_val", float("inf"))
+                    best_sd    = ckpt.get("best_sd")
+                    no_improve = ckpt.get("no_improve", 0)
+                    start_ep   = ckpt.get("epoch", 0) + 1
+                    epoch_log.extend(ckpt.get("epoch_log", []))
+                    logger.info(
+                        f"CNN fit resuming from checkpoint at epoch {start_ep} "
+                        f"(best_val={best_val:.4f})"
+                    )
+                except Exception as _ce:
+                    logger.warning(f"CNN checkpoint load failed, starting fresh: {_ce}")
+                    start_ep = 1
+
+            logger.info(
+                f"CNN fit started: n_train={n_train} batch={BATCH} "
+                f"lr={base_lr:.2e} epochs={epochs} start_ep={start_ep}"
+            )
 
             model.train()
-            for ep in range(1, epochs + 1):
+            for ep in range(start_ep, epochs + 1):
                 # ── Mini-batch training ───────────────────────────────────────
-                # Shuffle indices each epoch for stochastic gradient noise
                 perm = torch.randperm(n_train)
                 batch_losses = []
                 for start in range(0, n_train, BATCH):
-                    idx   = perm[start: start + BATCH]
-                    xb    = X_train[idx]
-                    yb    = y_train[idx]
+                    idx = perm[start: start + BATCH]
                     opt.zero_grad()
-                    loss  = F.binary_cross_entropy(model(xb), yb)
+                    loss = F.binary_cross_entropy_with_logits(
+                        model(X_train[idx]), y_train[idx], pos_weight=_pos_w
+                    )
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     opt.step()
                     batch_losses.append(float(loss.item()))
-                scheduler.step()
                 train_loss_val = sum(batch_losses) / len(batch_losses)
 
-                # ── Validation (no gradient) ──────────────────────────────────
+                # ── Validation ────────────────────────────────────────────────
                 model.eval()
                 with torch.no_grad():
-                    val_loss = F.binary_cross_entropy(model(X_val), y_val)
+                    vl_t = float(F.binary_cross_entropy_with_logits(
+                        model(X_val), y_val, pos_weight=_pos_w
+                    ).item())
                 model.train()
 
-                tl = round(train_loss_val,               6)
-                vl = round(float(val_loss.item()),        6)
-                epoch_log.append({"epoch": ep, "train_loss": tl, "val_loss": vl})
-                logger.debug(f"CNN train epoch {ep}/{epochs} | train={tl:.4f} val={vl:.4f}")
+                scheduler.step(vl_t)   # ReduceLROnPlateau monitors val_loss
+
+                tl = round(train_loss_val, 6)
+                vl = round(vl_t, 6)
+                current_lr = opt.param_groups[0]["lr"]
+                epoch_log.append({"epoch": ep, "train_loss": tl, "val_loss": vl, "lr": current_lr})
+                logger.debug(
+                    f"CNN train epoch {ep}/{epochs} | "
+                    f"train={tl:.4f} val={vl:.4f} lr={current_lr:.2e}"
+                )
+
+                # ── Best-model tracking ───────────────────────────────────────
+                if vl < best_val:
+                    best_val   = vl
+                    best_sd    = {k: v.cpu() for k, v in model.state_dict().items()}
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                    if no_improve >= patience:
+                        logger.info(
+                            f"CNN early stop at epoch {ep}/{epochs} "
+                            f"(no val improvement for {patience} epochs)"
+                        )
+                        break
+
+                # ── Crash-recovery checkpoint every N epochs ──────────────────
+                if ep % _CKPT_EVERY == 0:
+                    try:
+                        torch.save({
+                            "epoch":      ep,
+                            "model_sd":   {k: v.cpu() for k, v in model.state_dict().items()},
+                            "opt_sd":     opt.state_dict(),
+                            "best_val":   best_val,
+                            "best_sd":    best_sd,
+                            "no_improve": no_improve,
+                            "epoch_log":  epoch_log,
+                        }, _CKPT_PATH)
+                    except Exception as _sce:
+                        logger.warning(f"CNN checkpoint save failed: {_sce}")
+
+            # Restore best weights and ensure model stays on the right device
+            if best_sd is not None:
+                model.load_state_dict(best_sd)
+                model.to(_DEVICE)
+
+            # Clean up resume checkpoint — training finished normally
+            try:
+                if os.path.exists(_CKPT_PATH):
+                    os.remove(_CKPT_PATH)
+            except Exception:
+                pass
+
+            fit_box[0] = {"best_val_loss": best_val, "stopped_epoch": len(epoch_log)}
 
         # Offload blocking compute to thread pool — keeps event loop free
-        loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _sync_fit)
 
-        self.save_model()
+        best_val_loss  = fit_box[0].get("best_val_loss", float("inf"))
+        stopped_epoch  = fit_box[0].get("stopped_epoch", epochs)
 
-        final       = epoch_log[-1]
-        initial_tl  = epoch_log[0]["train_loss"]
-        final_tl    = final["train_loss"]
-        final_vl    = final["val_loss"]
+        final      = epoch_log[-1]
+        initial_tl = epoch_log[0]["train_loss"]
+        final_tl   = final["train_loss"]
+        final_vl   = final["val_loss"]
+
+        # ── AUC-ROC on validation set ─────────────────────────────────────────
+        val_auc = None
+        try:
+            from sklearn.metrics import roc_auc_score as _auc
+            model.eval()
+            with torch.no_grad():
+                _probs = torch.sigmoid(model(X_val)).cpu().numpy().flatten()
+            _labels = y_val.cpu().numpy().flatten()
+            val_auc = round(float(_auc(_labels, _probs)), 4)
+            logger.info(f"CNN val AUC-ROC: {val_auc:.4f}")
+        except Exception as _ae:
+            logger.debug(f"AUC-ROC skipped: {_ae}")
 
         # ── Fit diagnosis ─────────────────────────────────────────────────────
         overfit_gap = (final_vl - final_tl) / max(final_tl, 1e-9)
-        loss_drop = initial_tl - final_tl
+        loss_drop   = initial_tl - final_tl
         if final_tl > 0.65 and loss_drop < 0.02:
             fit_status = "UNDERFIT"
             fit_advice = "Loss barely moved — try more epochs or more training data"
@@ -1464,10 +1693,25 @@ class CoinbaseCNNAgent:
             fit_status = "OK"
             fit_advice = "Train and val loss are close — model is generalising well"
 
+        # ── Conditional save: only overwrite when new model is better ─────────
+        prev_best = self._read_best_loss()
+        if best_val_loss < prev_best:
+            self.save_model(backup=True)   # backs up existing .pt before overwriting
+            self._write_best_loss(best_val_loss)
+            self._needs_retrain = False
+            save_note = f"saved (val {prev_best:.4f} → {best_val_loss:.4f})"
+        else:
+            save_note = (
+                f"NOT saved — new val_loss {best_val_loss:.4f} >= "
+                f"previous best {prev_best:.4f}; keeping prior checkpoint"
+            )
+            fit_status = fit_status if fit_status != "OK" else "REJECTED"
+            fit_advice = save_note
+
         logger.info(
             f"CNN training complete | {len(X_train)} train / {len(X_val)} val samples | "
-            f"train {initial_tl:.4f}→{final_tl:.4f} | val final={final_vl:.4f} | "
-            f"fit={fit_status} | {fit_advice}"
+            f"train {initial_tl:.4f}→{final_tl:.4f} | val best={best_val_loss:.4f} | "
+            f"stopped_epoch={stopped_epoch}/{epochs} | fit={fit_status} | {save_note}"
         )
 
         # ── Fit HMM regime detector on BTC history ───────────────────────────
@@ -1479,17 +1723,34 @@ class CoinbaseCNNAgent:
         except Exception as _he:
             logger.warning(f"HMM fit during training failed: {_he}")
 
-        return {
-            "epochs":       epochs,
-            "samples":      len(X_list),
-            "train_samples": len(X_train),
-            "val_samples":  len(X_val),
-            "channels":     N_CHANNELS,
-            "initial_loss": initial_tl,
+        # True if the model file was written during this training run
+        _model_saved = os.path.exists(MODEL_PATH) and os.path.getmtime(MODEL_PATH) > _train_start
+
+        result = {
+            "epochs":           epochs,
+            "stopped_epoch":    stopped_epoch,
+            "samples":          len(X_list),
+            "train_samples":    len(X_train),
+            "val_samples":      len(X_val),
+            "label_pos_pct":    round(100 * n_pos / max(len(y_list), 1), 1),
+            "channels":         N_CHANNELS,
+            "arch":             getattr(self.model, "arch", "glu2"),
+            "initial_loss":     initial_tl,
             "final_train_loss": final_tl,
             "final_val_loss":   final_vl,
+            "best_val_loss":    round(best_val_loss, 6),
+            "val_auc":          val_auc,
             "overfit_gap_pct":  round(overfit_gap * 100, 1),
-            "fit_status":   fit_status,
-            "fit_advice":   fit_advice,
-            "epoch_log":    epoch_log,
+            "fit_status":       fit_status,
+            "fit_advice":       fit_advice,
+            "duration_secs":    int(_t.time() - _train_start),
+            "saved":            _model_saved,   # True = model file overwritten this run
+            "epoch_log":        epoch_log,
         }
+
+        try:
+            await database.save_training_session(result)
+        except Exception as _dbe:
+            logger.warning(f"Failed to save training session to DB: {_dbe}")
+
+        return result

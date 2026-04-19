@@ -128,7 +128,7 @@ def _npm_cmd() -> str:
     )
 
 
-def _is_url_up(url: str, timeout: float = 1.5) -> bool:
+def _is_url_up(url: str, timeout: float = 5.0) -> bool:
     try:
         urllib.request.urlopen(BACKEND_STATUS_URL, timeout=timeout)
         return True
@@ -533,13 +533,39 @@ class LauncherApp(tk.Tk):
     # ── Status loop ───────────────────────────────────────────────────────────
 
     def _start_status_loop(self):
+        _BE_FAIL_THRESH = 3
+        be_fail_count = 0
+
         def loop():
+            nonlocal be_fail_count
             while self._running:
                 be_up = _is_url_up(BACKEND_URL)
                 fe_up = _is_frontend_up()
                 self.after(0, self._update_status, be_up, fe_up)
+                if be_up:
+                    be_fail_count = 0
+                elif self._backend_proc and self._backend_proc.poll() is None:
+                    # Process alive but not accepting connections — WinError 64
+                    be_fail_count += 1
+                    if be_fail_count >= _BE_FAIL_THRESH:
+                        be_fail_count = 0
+                        self._queue_log(
+                            "warn",
+                            "Backend not responding (3 checks) — auto-restarting (WinError 64 recovery)…",
+                        )
+                        self.after(0, self._restart_backend)
+                else:
+                    be_fail_count = 0
                 time.sleep(1)
+
         threading.Thread(target=loop, daemon=True).start()
+
+    def _restart_backend(self):
+        self._log_line("warn", "Restarting backend…")
+        if self._backend_proc:
+            _kill_tree(self._backend_proc)
+            self._backend_proc = None
+        self._start_backend()
 
     def _update_status(self, be_up: bool, fe_up: bool):
         self.dot_ref_b.config(fg=GREEN if be_up else RED)

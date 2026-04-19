@@ -15,6 +15,7 @@ if os.path.isdir(_venv_site) and _venv_site not in sys.path:
 import asyncio
 import json
 import re as _re
+import time as _time
 import logging
 import subprocess
 import threading
@@ -26,6 +27,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
@@ -36,8 +38,12 @@ from clients import coinbase_client
 try:
     import torch as _torch
     _TORCH_AVAILABLE = True
+    _CUDA_AVAILABLE  = _torch.cuda.is_available()
+    _TORCH_DEVICE    = "cuda" if _CUDA_AVAILABLE else "cpu"
 except ImportError:
     _TORCH_AVAILABLE = False
+    _CUDA_AVAILABLE  = False
+    _TORCH_DEVICE    = "cpu"
 from agents.market_scanner import MarketScanner
 from agents.signal_generator import SignalGenerator
 from agents.order_executor import OrderExecutor
@@ -202,11 +208,18 @@ class AppState:
     momentum_task:   asyncio.Task          = None
     scalp_task:      asyncio.Task          = None
     outcome_task:    asyncio.Task          = None
+    backfill_task:   asyncio.Task          = None
     ws_connections:  List[WebSocket]       = []
     is_trading:      bool                  = False
     dry_run:         bool                  = True
     _balance_cache:  Optional[float]       = None   # cached live USD balance
     _balance_cache_ts: float               = 0.0    # epoch of last fetch
+    # ── CNN background training state ─────────────────────────────────────
+    train_status:       str                       = "idle"   # idle|running|completed|failed
+    train_started_at:   Optional[float]           = None
+    train_result:       Optional[Dict]            = None
+    train_proc:         Optional[subprocess.Popen] = None   # subprocess handle
+    train_watcher_task: Optional[asyncio.Task]    = None
 
 app_state = AppState()
 
@@ -262,6 +275,44 @@ async def broadcast_state() -> None:
     })
 
 
+# ── Training subprocess progress file ────────────────────────────────────────
+_TRAIN_PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "cnn_train_progress.json")
+_TRAIN_WORKER        = os.path.join(os.path.dirname(__file__), "train_worker.py")
+
+
+async def _train_progress_watcher() -> None:
+    """Watch cnn_train_progress.json every 5 s and sync app_state from it.
+
+    Detects when a training subprocess finishes and reloads the CNN model.
+    """
+    while True:
+        await asyncio.sleep(5)
+        try:
+            if not os.path.exists(_TRAIN_PROGRESS_FILE):
+                continue
+            with open(_TRAIN_PROGRESS_FILE) as _f:
+                _data = json.load(_f)
+            _status = _data.get("status", "idle")
+
+            if _status == "running" and app_state.train_status != "running":
+                # Backend restarted while subprocess was training — re-sync
+                app_state.train_status    = "running"
+                app_state.train_started_at = _data.get("started_at", _time.time())
+
+            elif _status in ("completed", "failed") and app_state.train_status == "running":
+                # Training just finished — update state and reload model from disk
+                app_state.train_status = _status
+                app_state.train_result = _data.get("result")
+                if _status == "completed":
+                    try:
+                        app_state.cnn_agent._load()
+                        logger.info("CNN model reloaded after subprocess training completed")
+                    except Exception as _le:
+                        logger.warning(f"CNN model reload failed: {_le}")
+        except Exception as _we:
+            logger.debug(f"Train progress watcher: {_we}")
+
+
 # ── Agent startup stagger delays (seconds) ────────────────────────────────────
 _TECH_START_DELAY     =  5   # CNN starts at 0; Tech after 5s
 _MOMENTUM_START_DELAY = 10   # Momentum after 10s
@@ -313,6 +364,7 @@ async def lifespan(app: FastAPI):
     app_state.scanner_task   = asyncio.create_task(app_state.scanner.run_loop())
     app_state.portfolio_task = asyncio.create_task(app_state.portfolio.run_loop())
     app_state.outcome_task   = asyncio.create_task(get_tracker().run_loop())
+    app_state.backfill_task  = asyncio.create_task(get_backfill().run_loop())
 
     # CNN loop — starts immediately
     app_state.cnn_task = asyncio.create_task(
@@ -320,6 +372,7 @@ async def lifespan(app: FastAPI):
             order_executor      = app_state.order_executor,
             is_trading_fn       = lambda: app_state.is_trading,
             train_every_n_scans = config.cnn_train_every_n_scans,
+            broadcast_fn        = broadcast_state,
         )
     )
 
@@ -338,7 +391,8 @@ async def lifespan(app: FastAPI):
 
     app_state.tech_task     = asyncio.create_task(_delayed_tech())
     app_state.momentum_task = asyncio.create_task(_delayed_momentum())
-    app_state.scalp_task    = asyncio.create_task(_delayed_scalp())
+    app_state.scalp_task          = asyncio.create_task(_delayed_scalp())
+    app_state.train_watcher_task  = asyncio.create_task(_train_progress_watcher())
 
     logger.info("Coinbase Trader ready — http://localhost:8001")
     logger.info(f"Credentials: {'OK' if config.has_credentials else 'MISSING'}")
@@ -352,7 +406,8 @@ async def lifespan(app: FastAPI):
     for task in [
         app_state.scanner_task, app_state.portfolio_task,
         app_state.cnn_task, app_state.tech_task, app_state.momentum_task,
-        app_state.scalp_task, app_state.outcome_task,
+        app_state.scalp_task, app_state.outcome_task, app_state.backfill_task,
+        app_state.train_watcher_task,
     ]:
         if task:
             task.cancel()
@@ -381,9 +436,13 @@ async def get_status():
     if config.has_credentials:
         now = _time.time()
         if now - app_state._balance_cache_ts >= _STATUS_BALANCE_TTL:
+            # Stamp BEFORE the await — prevents thundering herd when many
+            # concurrent requests arrive while the TTL has expired.
+            app_state._balance_cache_ts = now
             try:
-                app_state._balance_cache    = await coinbase_client.get_usd_balance()
-                app_state._balance_cache_ts = now
+                app_state._balance_cache = await asyncio.wait_for(
+                    coinbase_client.get_usd_balance(), timeout=3.0
+                )
             except Exception:
                 pass
         balance = app_state._balance_cache
@@ -504,6 +563,8 @@ async def get_cnn_status():
     )
     return {
         "torch_available":  _TORCH_AVAILABLE,
+        "cuda_available":   _CUDA_AVAILABLE,
+        "device":           _TORCH_DEVICE,
         "model_loaded":     agent._exists() if agent else False,
         "last_scan_at":     agent.last_scan_at  if agent else None,
         "next_scan_at":     agent.next_scan_at  if agent else None,
@@ -570,10 +631,80 @@ async def trigger_cnn_scan(
 
 @app.post("/api/cnn/train")
 async def trigger_cnn_training(
-    epochs: int = Query(20, ge=1, le=200),
+    epochs: int = Query(50, ge=1, le=500),
     _: None = Depends(verify_api_key),
 ):
-    return await app_state.cnn_agent.train_on_history(epochs=epochs)
+    """
+    Spawns train_worker.py as a subprocess so training survives backend restarts.
+    Poll GET /api/cnn/train/status for progress and results.
+    Returns 409 if a training run is already in progress.
+    """
+    # Check in-memory state first
+    if app_state.train_status == "running":
+        elapsed = int(_time.time() - (app_state.train_started_at or _time.time()))
+        return JSONResponse(
+            status_code=409,
+            content={"status": "running", "elapsed_secs": elapsed,
+                     "detail": "Training already in progress"},
+        )
+    # Also check progress file — catches case where backend restarted mid-training
+    if os.path.exists(_TRAIN_PROGRESS_FILE):
+        try:
+            with open(_TRAIN_PROGRESS_FILE) as _f:
+                _pd = json.load(_f)
+            if _pd.get("status") == "running":
+                app_state.train_status    = "running"
+                app_state.train_started_at = _pd.get("started_at", _time.time())
+                return JSONResponse(
+                    status_code=409,
+                    content={"status": "running", "detail": "Training subprocess already running"},
+                )
+        except Exception:
+            pass
+
+    app_state.train_status    = "running"
+    app_state.train_started_at = _time.time()
+    app_state.train_result    = None
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, _TRAIN_WORKER, "--epochs", str(epochs)],
+            cwd=os.path.dirname(__file__),
+        )
+        app_state.train_proc = proc
+        logger.info(f"CNN training subprocess started — PID {proc.pid}, epochs={epochs}")
+    except Exception as exc:
+        app_state.train_status = "failed"
+        app_state.train_result = {"error": str(exc)}
+        raise HTTPException(status_code=500, detail=f"Failed to start training worker: {exc}")
+
+    return {"status": "started", "epochs": epochs}
+
+
+@app.get("/api/cnn/train/status")
+async def cnn_train_status():
+    """Poll this endpoint after POST /api/cnn/train to get progress and results."""
+    if os.path.exists(_TRAIN_PROGRESS_FILE):
+        try:
+            with open(_TRAIN_PROGRESS_FILE) as _f:
+                _data = json.load(_f)
+            _status     = _data.get("status", "idle")
+            _started_at = _data.get("started_at", app_state.train_started_at)
+            _elapsed    = (
+                int(_time.time() - _started_at) if _started_at and _status == "running" else 0
+            )
+            return {"status": _status, "elapsed_secs": _elapsed, "result": _data.get("result")}
+        except Exception:
+            pass
+    # Fallback to in-memory state (no progress file yet)
+    elapsed = int(_time.time() - app_state.train_started_at) if app_state.train_started_at else 0
+    return {"status": app_state.train_status, "elapsed_secs": elapsed, "result": app_state.train_result}
+
+
+@app.get("/api/cnn/training-history")
+async def get_training_history(limit: int = Query(50, le=200)):
+    """Return all persisted CNN training sessions, newest first."""
+    return await database.get_training_sessions(limit=limit)
 
 
 # ── History Backfill ──────────────────────────────────────────────────────────
@@ -729,21 +860,51 @@ async def get_balance():
     if not config.has_credentials:
         return {"usd_balance": None, "message": "No credentials configured"}
     try:
+        import time as _time
         accounts = await coinbase_client.get_accounts()
-        return {"accounts": accounts, "usd_balance": await coinbase_client.get_usd_balance()}
+        # Derive USD balance from already-fetched accounts — avoids a second get_accounts() call
+        usd = next(
+            (float(a["available"]) for a in accounts if a.get("currency") == "USD"),
+            0.0,
+        )
+        # Refresh the shared status cache so /api/status doesn't need a separate call
+        app_state._balance_cache    = usd
+        app_state._balance_cache_ts = _time.time()
+        return {"accounts": accounts, "usd_balance": usd}
     except Exception as e:
         return {"error": str(e)}
 
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
+def _tail_lines(path: str, n: int) -> List[str]:
+    """Return the last n lines of a file by seeking from the end — O(result) not O(file)."""
+    BLOCK = 65536
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        buf = b""
+        lines_found = 0
+        pos = size
+        while pos > 0 and lines_found <= n:
+            read = min(BLOCK, pos)
+            pos -= read
+            f.seek(pos)
+            chunk = f.read(read)
+            buf = chunk + buf
+            lines_found = buf.count(b"\n")
+        raw = buf.decode("utf-8", errors="replace").splitlines()
+    return raw[-n:] if len(raw) > n else raw
+
+
 def _read_log_file(path: str, min_level: int, limit: int) -> List[Dict]:
-    """Read and parse the rotating log file, return newest-first entries."""
+    """Read and parse the rotating log file, return newest-first entries.
+    Reads only the tail of the file — O(limit) not O(file size)."""
     entries: List[Dict] = []
     if not os.path.exists(path):
         return entries
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+        # Over-read by 10× to account for HOLD entries filtered by min_level
+        lines = _tail_lines(path, limit * 10)
         current: Optional[Dict] = None
         for line in lines:
             line = line.rstrip("\n")
@@ -757,7 +918,6 @@ def _read_log_file(path: str, min_level: int, limit: int) -> List[Dict]:
                 else:
                     current = None
             elif current:
-                # Continuation line (e.g. traceback)
                 current["message"] += "\n" + line
         if current:
             entries.append(current)
@@ -843,17 +1003,19 @@ async def get_agent_status():
     # REST fallback: for held products with no WS price, fetch via product endpoint and seed WS state
     if ws and all_held_pids:
         no_price = [pid for pid in all_held_pids if not ws.get_price(pid)]
-        for pid in no_price:
-            try:
-                prod = await coinbase_client.get_product(pid)
-                price_str = prod.get("price") if prod else None
-                if price_str:
-                    rest_price = float(price_str)
-                    ws.state[pid] = {"product_id": pid, "price": rest_price,
-                                     "bid": None, "ask": None, "volume_24h": 0.0, "pct_change": 0.0}
-                    logger.debug(f"REST price fallback: {pid} = {rest_price}")
-            except Exception as _e:
-                logger.debug(f"REST price fallback failed for {pid}: {_e}")
+        if no_price:
+            async def _fetch_price(pid: str) -> None:
+                try:
+                    prod = await coinbase_client.get_product(pid)
+                    price_str = prod.get("price") if prod else None
+                    if price_str:
+                        rest_price = float(price_str)
+                        ws.state[pid] = {"product_id": pid, "price": rest_price,
+                                         "bid": None, "ask": None, "volume_24h": 0.0, "pct_change": 0.0}
+                        logger.debug(f"REST price fallback: {pid} = {rest_price}")
+                except Exception as _e:
+                    logger.debug(f"REST price fallback failed for {pid}: {_e}")
+            await asyncio.gather(*[_fetch_price(pid) for pid in no_price])
 
     for st in (tech_status, mom_status, cnn_status, scalp_status):
         positions = st.get("positions", {})
@@ -901,29 +1063,36 @@ async def get_performance():
     async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
         db.row_factory = aiosqlite.Row
 
-        # Monthly closed-trade aggregates
+        # Monthly closed-trade aggregates — single-pass using window functions
+        # (avoids 2 correlated subqueries per month that caused full-table rescans)
         cursor = await db.execute("""
+            WITH ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY strftime('%Y-%m', closed_at)
+                        ORDER BY closed_at ASC
+                    ) AS rn_asc,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY strftime('%Y-%m', closed_at)
+                        ORDER BY closed_at DESC
+                    ) AS rn_desc
+                FROM trades
+                WHERE closed_at IS NOT NULL
+            )
             SELECT
-                strftime('%Y-%m', closed_at)          AS month,
-                COUNT(*)                               AS trades,
-                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) AS losses,
-                ROUND(SUM(pnl), 2)                    AS total_pnl,
-                ROUND(AVG(pct_pnl), 2)                AS avg_pct_pnl,
-                ROUND(AVG(CASE WHEN pnl > 0  THEN pnl END), 4)  AS avg_win,
-                ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END), 4)  AS avg_loss,
-                MIN(balance_after)                     AS low_balance,
-                MAX(balance_after)                     AS high_balance,
-                (SELECT balance_after FROM trades t2
-                 WHERE strftime('%Y-%m', t2.closed_at) = strftime('%Y-%m', t.closed_at)
-                   AND t2.closed_at IS NOT NULL
-                 ORDER BY t2.closed_at ASC LIMIT 1)   AS open_balance,
-                (SELECT balance_after FROM trades t2
-                 WHERE strftime('%Y-%m', t2.closed_at) = strftime('%Y-%m', t.closed_at)
-                   AND t2.closed_at IS NOT NULL
-                 ORDER BY t2.closed_at DESC LIMIT 1)  AS close_balance
-            FROM trades t
-            WHERE closed_at IS NOT NULL
+                strftime('%Y-%m', closed_at)                          AS month,
+                COUNT(*)                                               AS trades,
+                SUM(CASE WHEN pnl > 0  THEN 1 ELSE 0 END)             AS wins,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END)             AS losses,
+                ROUND(SUM(pnl), 2)                                     AS total_pnl,
+                ROUND(AVG(pct_pnl), 2)                                 AS avg_pct_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0  THEN pnl END), 4)        AS avg_win,
+                ROUND(AVG(CASE WHEN pnl <= 0 THEN pnl END), 4)        AS avg_loss,
+                MIN(balance_after)                                     AS low_balance,
+                MAX(balance_after)                                     AS high_balance,
+                MAX(CASE WHEN rn_asc  = 1 THEN balance_after END)     AS open_balance,
+                MAX(CASE WHEN rn_desc = 1 THEN balance_after END)     AS close_balance
+            FROM ranked
             GROUP BY month
             ORDER BY month ASC
         """)
@@ -1045,11 +1214,20 @@ async def get_agent_decisions(
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     app_state.ws_connections.append(ws)
-    await broadcast_state()
+    try:
+        await broadcast_state()
+    except Exception as _e:
+        logger.debug(f"WS initial broadcast failed: {_e}")
     try:
         while True:
             await asyncio.sleep(5)
-            await broadcast_state()
+            try:
+                await broadcast_state()
+            except Exception as _be:
+                # DB contention / transient error — log and keep the socket alive.
+                # Do NOT let this propagate: an unhandled exception here closes the
+                # WS connection, causing the frontend to show "Offline".
+                logger.debug(f"WS broadcast error (socket kept alive): {_be}")
     except WebSocketDisconnect:
         pass
     finally:

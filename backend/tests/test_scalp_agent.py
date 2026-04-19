@@ -605,3 +605,74 @@ class TestSLCooldown:
         )
         assert not skip_due_to_cooldown, \
             "Expired cooldown should not block re-entry"
+
+
+class TestWSDisconnectGuard:
+    """_scan_entries must refuse to open positions when WS has no live price."""
+
+    @pytest.mark.asyncio
+    async def test_no_entry_when_ws_returns_none(self):
+        """If _live_price returns None (WS disconnected), no buy must be placed."""
+        ag = ScalpAgent()
+        pid = "POPCAT-USD"
+
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = None   # WS disconnected / no tick yet
+        ag._ws = ws_mock
+
+        # Candles that would otherwise score >= _MIN_SCORE
+        import math
+        closes = [0.05 - i * 0.0001 for i in range(120)]
+        candles_raw = [
+            {"product_id": pid, "close": c, "high": c + 0.001,
+             "low": c - 0.001, "volume": 5000.0, "start_time": i}
+            for i, c in enumerate(closes)
+        ]
+        tracked = [{"product_id": pid, "price": closes[-1]}]
+        buy_mock = AsyncMock()
+        ag.book.buy = buy_mock
+
+        with (
+            patch("agents.scalp_agent.database.get_products",
+                  new=AsyncMock(return_value=tracked)),
+            patch("agents.scalp_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles_raw)),
+            patch("agents.scalp_agent.database.save_agent_decision", new=AsyncMock()),
+        ):
+            await ag._scan_entries()
+
+        buy_mock.assert_not_called(), \
+            "book.buy must not be called when WS has no live price"
+
+    @pytest.mark.asyncio
+    async def test_no_entry_when_ws_returns_zero(self):
+        """If _live_price returns 0 (stale/bad WS state), no buy must be placed."""
+        ag = ScalpAgent()
+        pid = "POPCAT-USD"
+
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = 0.0   # zero price = bad state
+        ag._ws = ws_mock
+
+        import math
+        closes = [0.05 - i * 0.0001 for i in range(120)]
+        candles_raw = [
+            {"product_id": pid, "close": c, "high": c + 0.001,
+             "low": c - 0.001, "volume": 5000.0, "start_time": i}
+            for i, c in enumerate(closes)
+        ]
+        tracked = [{"product_id": pid, "price": closes[-1]}]
+        buy_mock = AsyncMock()
+        ag.book.buy = buy_mock
+
+        with (
+            patch("agents.scalp_agent.database.get_products",
+                  new=AsyncMock(return_value=tracked)),
+            patch("agents.scalp_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles_raw)),
+            patch("agents.scalp_agent.database.save_agent_decision", new=AsyncMock()),
+        ):
+            await ag._scan_entries()
+
+        buy_mock.assert_not_called(), \
+            "book.buy must not be called when WS price is 0"

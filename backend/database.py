@@ -4,6 +4,7 @@ All timestamps stored as UTC ISO strings.
 """
 import aiosqlite
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -14,8 +15,23 @@ DB_PATH = config.database_url
 _DB_TIMEOUT = 30   # seconds to wait for a locked DB before raising OperationalError
 
 
+@asynccontextmanager
+async def _db():
+    """Open a DB connection with a C-level busy_timeout pragma.
+
+    aiosqlite's Python-level timeout= applies only when opening the file;
+    it does not retry individual write operations when the DB is locked by
+    another concurrent writer.  PRAGMA busy_timeout is handled by the SQLite
+    C library and applies to every subsequent lock acquisition on this
+    connection — the correct fix for 'database is locked' under concurrency.
+    """
+    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as conn:
+        await conn.execute("PRAGMA busy_timeout=30000")
+        yield conn
+
+
 async def init_db() -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         # WAL mode: multiple readers + one writer can coexist; prevents most lock errors
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=30000")   # 30s in milliseconds
@@ -163,6 +179,10 @@ async def init_db() -> None:
                 ON agent_decisions(product_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_agent_decisions_agent
                 ON agent_decisions(agent, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_decisions_created_at
+                ON agent_decisions(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_decisions_side_created
+                ON agent_decisions(side, created_at DESC);
 
             CREATE TABLE IF NOT EXISTS signal_outcomes (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +227,28 @@ async def init_db() -> None:
                 ON trades(agent, opened_at DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_open
                 ON trades(agent, product_id) WHERE closed_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_trades_closed_at
+                ON trades(closed_at DESC);
+
+            CREATE TABLE IF NOT EXISTS cnn_training_sessions (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                trained_at          TEXT NOT NULL,
+                arch                TEXT NOT NULL,
+                channels            INTEGER NOT NULL,
+                epochs_requested    INTEGER NOT NULL,
+                stopped_epoch       INTEGER NOT NULL,
+                train_samples       INTEGER NOT NULL,
+                val_samples         INTEGER NOT NULL,
+                initial_train_loss  REAL NOT NULL,
+                final_train_loss    REAL NOT NULL,
+                final_val_loss      REAL NOT NULL,
+                best_val_loss       REAL NOT NULL,
+                overfit_gap_pct     REAL NOT NULL,
+                fit_status          TEXT NOT NULL,
+                fit_advice          TEXT NOT NULL,
+                duration_secs       INTEGER NOT NULL,
+                saved               INTEGER NOT NULL DEFAULT 0
+            );
         """)
         await db.commit()
 
@@ -233,7 +275,7 @@ def _now() -> str:
 # ── Products ──────────────────────────────────────────────────────────────────
 
 async def upsert_product(p: Dict) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT INTO products
                (product_id, base_currency, quote_currency, display_name,
@@ -260,7 +302,7 @@ async def upsert_product(p: Dict) -> None:
 
 
 async def get_products(tracked_only: bool = False, limit: int = 100) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         where = "WHERE is_tracked = 1" if tracked_only else ""
         cursor = await db.execute(
@@ -270,7 +312,7 @@ async def get_products(tracked_only: bool = False, limit: int = 100) -> List[Dic
 
 
 async def get_product(product_id: str) -> Optional[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM products WHERE product_id = ?", (product_id,)
@@ -280,7 +322,7 @@ async def get_product(product_id: str) -> Optional[Dict]:
 
 
 async def set_product_tracked(product_id: str, tracked: bool) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE products SET is_tracked = ? WHERE product_id = ?",
             (1 if tracked else 0, product_id)
@@ -290,7 +332,7 @@ async def set_product_tracked(product_id: str, tracked: bool) -> None:
 
 async def update_product_price(product_id: str, price: float,
                                 pct_change: float = 0.0) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE products SET price=?, price_pct_change_24h=?, last_updated=? "
             "WHERE product_id=?",
@@ -302,7 +344,7 @@ async def update_product_price(product_id: str, price: float,
 # ── Candles ───────────────────────────────────────────────────────────────────
 
 async def save_candles(product_id: str, candles: List[Dict]) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.executemany(
             """INSERT OR IGNORE INTO candles
                (product_id, start_time, open, high, low, close, volume)
@@ -314,7 +356,7 @@ async def save_candles(product_id: str, candles: List[Dict]) -> None:
 
 
 async def candle_count(product_id: str) -> int:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         cursor = await db.execute(
             "SELECT COUNT(*) FROM candles WHERE product_id=?", (product_id,)
         )
@@ -323,7 +365,7 @@ async def candle_count(product_id: str) -> int:
 
 
 async def get_candles(product_id: str, limit: int = 100) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM candles WHERE product_id=? ORDER BY start_time DESC LIMIT ?",
@@ -336,7 +378,7 @@ async def get_candles(product_id: str, limit: int = 100) -> List[Dict]:
 # ── Signals ───────────────────────────────────────────────────────────────────
 
 async def save_signal(signal: Dict) -> int:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         cursor = await db.execute(
             """INSERT INTO signals
                (product_id, signal_type, side, price, strength, rsi, macd,
@@ -355,7 +397,7 @@ async def save_signal(signal: Dict) -> int:
 
 
 async def mark_signal_acted(signal_id: int, order_id: str) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE signals SET acted=1, order_id=? WHERE id=?", (order_id, signal_id)
         )
@@ -363,7 +405,7 @@ async def mark_signal_acted(signal_id: int, order_id: str) -> None:
 
 
 async def get_signals(limit: int = 50, signal_type_prefix: Optional[str] = None) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         if signal_type_prefix:
             cursor = await db.execute(
@@ -380,7 +422,7 @@ async def get_signals(limit: int = 50, signal_type_prefix: Optional[str] = None)
 # ── Orders ────────────────────────────────────────────────────────────────────
 
 async def save_order(order: Dict) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT OR REPLACE INTO orders
                (order_id, product_id, side, order_type, price, base_size,
@@ -399,7 +441,7 @@ async def save_order(order: Dict) -> None:
 async def update_order_status(order_id: str, status: str,
                                filled_size: float = 0,
                                avg_fill_price: Optional[float] = None) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             "UPDATE orders SET status=?, filled_size=?, avg_fill_price=?, updated_at=? "
             "WHERE order_id=?",
@@ -409,7 +451,7 @@ async def update_order_status(order_id: str, status: str,
 
 
 async def get_orders(status: Optional[str] = None, limit: int = 100) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         if status:
             cursor = await db.execute(
@@ -426,7 +468,7 @@ async def get_orders(status: Optional[str] = None, limit: int = 100) -> List[Dic
 # ── Positions ─────────────────────────────────────────────────────────────────
 
 async def upsert_position(pos: Dict) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT INTO positions
                (product_id, base_currency, side, size, avg_price, current_price,
@@ -447,7 +489,7 @@ async def upsert_position(pos: Dict) -> None:
 
 
 async def get_positions() -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM positions WHERE size > 0 ORDER BY current_value DESC"
@@ -456,7 +498,7 @@ async def get_positions() -> List[Dict]:
 
 
 async def delete_position(product_id: str) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute("DELETE FROM positions WHERE product_id=?", (product_id,))
         await db.commit()
 
@@ -464,7 +506,7 @@ async def delete_position(product_id: str) -> None:
 # ── CNN Scans ─────────────────────────────────────────────────────────────────
 
 async def save_cnn_scan(scan: Dict) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT INTO cnn_scans
                (product_id, price, cnn_prob, llm_prob, model_prob,
@@ -492,7 +534,7 @@ async def get_cnn_scans(
     product_id: Optional[str] = None,
     scan_run: Optional[str] = None,   # ISO prefix e.g. "2026-04-11T19"
 ) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         clauses, params = [], []
         if product_id:
@@ -511,7 +553,7 @@ async def get_cnn_scans(
 # ── Agent Decisions (Tech / Momentum) ────────────────────────────────────────
 
 async def save_agent_decision(d: Dict) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT INTO agent_decisions
                (agent, product_id, side, confidence, price, score,
@@ -530,7 +572,7 @@ async def save_agent_decision(d: Dict) -> None:
 async def save_agent_state(agent: str, balance: float, realized_pnl: float,
                             positions: Dict, high_water: Dict) -> None:
     import json
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT INTO agent_state
                (agent, balance, realized_pnl, positions_json, high_water_json, updated_at)
@@ -549,7 +591,7 @@ async def save_agent_state(agent: str, balance: float, realized_pnl: float,
 
 async def load_agent_state(agent: str) -> Optional[Dict]:
     import json
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM agent_state WHERE agent = ?", (agent,)
@@ -566,7 +608,7 @@ async def load_agent_state(agent: str) -> Optional[Dict]:
 async def purge_old_decisions(days: int = 7) -> int:
     """Delete agent_decisions rows older than `days` days. Returns deleted count."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         cur = await db.execute(
             "DELETE FROM agent_decisions WHERE created_at < ?", (cutoff,)
         )
@@ -580,7 +622,7 @@ async def get_agent_decisions(
     limit: int = 20,
     signals_only: bool = False,
 ) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         clauses, params = [], []
         if product_id:
@@ -605,7 +647,7 @@ async def open_trade(
     size: float, usd_open: float, trigger_open: str, balance_after: float,
 ) -> int:
     """Insert an open trade row. Returns the new trade id."""
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         cursor = await db.execute(
             """INSERT INTO trades
                (agent, product_id, entry_price, size, usd_open,
@@ -626,7 +668,7 @@ async def close_trade(
     usd_close = exit_price * size
     pct_pnl   = (pnl / (usd_close - pnl)) * 100 if (usd_close - pnl) > 0 else 0.0
     now       = _now()
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         # Find the most recent open trade for this agent+product
         cursor = await db.execute(
             """SELECT id, opened_at FROM trades
@@ -671,7 +713,7 @@ async def close_trade_by_id(trade_id: int, trigger_close: str = "RECONCILE") -> 
     """Force-close a specific trade row by its primary key (used for reconciliation)."""
     from datetime import datetime, timezone
     now = _now()
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """UPDATE trades SET
                pnl=0, trigger_close=?, closed_at=?
@@ -688,7 +730,7 @@ async def get_lgbm_training_rows() -> List[Dict]:
 
     Returns list of dicts with keys matching data.lgbm_filter._FEATURES + 'pnl'.
     """
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
             SELECT
@@ -721,7 +763,7 @@ async def get_trades(
     closed_only: bool = False,
     limit: int = 100,
 ) -> List[Dict]:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         clauses, params = [], []
         if agent:
@@ -744,7 +786,7 @@ async def get_trades(
 # ── Portfolio summary ─────────────────────────────────────────────────────────
 
 async def get_portfolio_summary() -> Dict:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         cursor = await db.execute(
             "SELECT COUNT(*), SUM(current_value), SUM(initial_value), SUM(cash_pnl) "
             "FROM positions WHERE size > 0"
@@ -764,7 +806,7 @@ async def get_portfolio_summary() -> Dict:
 # ── Signal Outcomes (Outcome Tracker) ────────────────────────────────────────
 
 async def insert_signal_outcome(d: Dict) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """INSERT INTO signal_outcomes
                (source, product_id, side, confidence, entry_price,
@@ -783,7 +825,7 @@ async def insert_signal_outcome(d: Dict) -> None:
 async def get_pending_outcomes() -> List[Dict]:
     """Return all rows whose check_after has passed and are still unresolved."""
     import time as _time
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM signal_outcomes WHERE outcome IS NULL AND check_after <= ? "
@@ -800,7 +842,7 @@ async def resolve_signal_outcome(
     outcome: str,
     lesson_text: str,
 ) -> None:
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+    async with _db() as db:
         await db.execute(
             """UPDATE signal_outcomes
                SET exit_price=?, pct_change=?, outcome=?,
@@ -811,15 +853,69 @@ async def resolve_signal_outcome(
         await db.commit()
 
 
-async def get_recent_lessons(product_id: str, limit: int = 5) -> List[str]:
-    """Return up to `limit` recent lesson strings for this product."""
-    async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
+async def get_recent_lessons(
+    product_id: str,
+    limit: int = 5,
+    max_age_days: int = 30,
+) -> List[str]:
+    """Return up to `limit` recent lesson strings for this product.
+
+    max_age_days: lessons older than this are excluded so stale regime-specific
+    outcomes don't mislead Ollama in changed market conditions.
+    """
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """SELECT lesson_text FROM signal_outcomes
                WHERE product_id=? AND lesson_text IS NOT NULL
+                 AND checked_at >= datetime('now', ?)
                ORDER BY checked_at DESC LIMIT ?""",
-            (product_id, limit)
+            (product_id, f"-{max_age_days} days", limit)
         )
         rows = await cursor.fetchall()
         return [r["lesson_text"] for r in rows]
+
+
+# ── CNN Training History ───────────────────────────────────────────────────────
+
+async def save_training_session(r: Dict) -> None:
+    async with _db() as db:
+        await db.execute(
+            """INSERT INTO cnn_training_sessions
+               (trained_at, arch, channels, epochs_requested, stopped_epoch,
+                train_samples, val_samples, initial_train_loss, final_train_loss,
+                final_val_loss, best_val_loss, overfit_gap_pct, fit_status,
+                fit_advice, duration_secs, saved)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                _now(),
+                r.get("arch", "glu2"),
+                r.get("channels", 0),
+                r.get("epochs", 0),
+                r.get("stopped_epoch", 0),
+                r.get("train_samples", 0),
+                r.get("val_samples", 0),
+                r.get("initial_loss", 0.0),
+                r.get("final_train_loss", 0.0),
+                r.get("final_val_loss", 0.0),
+                r.get("best_val_loss", 0.0),
+                r.get("overfit_gap_pct", 0.0),
+                r.get("fit_status", ""),
+                r.get("fit_advice", ""),
+                r.get("duration_secs", 0),
+                1 if r.get("saved") else 0,
+            ),
+        )
+        await db.commit()
+
+
+async def get_training_sessions(limit: int = 50) -> List[Dict]:
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """SELECT * FROM cnn_training_sessions
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]

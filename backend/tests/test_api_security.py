@@ -157,3 +157,53 @@ class TestDryRunLock:
         # Reset
         os.environ["DRY_RUN"] = "true"
         importlib.reload(cfg)
+
+
+# ── Balance endpoint ──────────────────────────────────────────────────────────
+
+class TestBalanceEndpoint:
+    """GET /api/balance must call get_accounts exactly once, not twice."""
+
+    @pytest.mark.asyncio
+    async def test_balance_calls_get_accounts_once(self, app):
+        """Verify /api/balance does not double-call get_accounts (old bug: called
+        get_accounts directly then again inside get_usd_balance)."""
+        fake_accounts = [
+            {"currency": "USD",  "available": 500.0, "hold": 0.0},
+            {"currency": "BTC",  "available": 0.001,  "hold": 0.0},
+        ]
+        with patch(
+            "main.coinbase_client.get_accounts",
+            new_callable=AsyncMock,
+            return_value=fake_accounts,
+        ) as mock_accounts:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.get("/api/balance")
+
+        assert mock_accounts.call_count == 1, (
+            f"/api/balance called get_accounts {mock_accounts.call_count}x — expected exactly 1"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["usd_balance"] == 500.0
+
+    @pytest.mark.asyncio
+    async def test_balance_returns_usd_from_accounts(self, app):
+        """usd_balance in response matches the USD account's available field."""
+        fake_accounts = [
+            {"currency": "ETH",  "available": 0.5,    "hold": 0.0},
+            {"currency": "USD",  "available": 999.99, "hold": 0.0},
+        ]
+        with patch(
+            "main.coinbase_client.get_accounts",
+            new_callable=AsyncMock,
+            return_value=fake_accounts,
+        ):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.get("/api/balance")
+
+        assert resp.json()["usd_balance"] == pytest.approx(999.99)

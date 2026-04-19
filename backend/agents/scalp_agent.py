@@ -420,10 +420,13 @@ class ScalpAgent:
                 )
                 continue
 
-            # Use live tick price if available, else last candle close
-            price = self._live_price(pid) or closes[-1]
+            # Require a live WS price — never enter on stale candle close.
+            # If WS is disconnected, _live_price returns None and _check_exits
+            # already skips all positions (can't monitor them), so opening new
+            # ones would create unmonitored exposure.
+            price = self._live_price(pid)
             if not price or price < _MIN_PRICE:
-                logger.debug(f"SCALP {pid}: live price ${price} below MIN_PRICE — skip")
+                logger.debug(f"SCALP {pid}: no live WS price (${price}) — skip entry")
                 continue
             atr7  = _atr(highs, lows, closes, period=7)
 

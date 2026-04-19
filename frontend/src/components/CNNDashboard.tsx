@@ -18,6 +18,8 @@ interface DrawdownStatus {
 
 interface CNNStatus {
   torch_available:  boolean
+  cuda_available:   boolean
+  device:           string
   model_loaded:     boolean
   last_scan_at:     number | null   // unix timestamp
   next_scan_at:     number | null
@@ -164,11 +166,12 @@ interface DryRunTrade {
 }
 
 export default function CNNDashboard({ signals, orders, postJSON }: Props) {
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [status,      setStatus]      = useState<CNNStatus | null>(null)
   const [scanning,    setScanning]    = useState(false)
   const [training,    setTraining]    = useState(false)
   const [trainResult, setTrainResult] = useState<string | null>(null)
-  const [epochs,      setEpochs]      = useState(20)
+  const [epochs,      setEpochs]      = useState(50)
   const [trainSecs,   setTrainSecs]   = useState(0)
   const [backfilling, setBackfilling] = useState(false)
   const [backfillResult, setBackfillResult] = useState<string | null>(null)
@@ -185,6 +188,72 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
   const [showScans,        setShowScans]        = useState(false)
   const [showLegend,       setShowLegend]       = useState(false)
   const [agentDecisions,   setAgentDecisions]   = useState<AgentDecision[]>([])
+
+  const startTrainPoll = useCallback(() => {
+    if (pollRef.current !== null) clearInterval(pollRef.current)
+    let errStreak = 0
+    const MAX_ERR = 5
+    const poll = setInterval(async () => {
+      try {
+        const r = await postJSON('/api/cnn/train/status', { method: 'GET' })
+        const d = await r.json()
+        errStreak = 0
+        setTrainSecs(d.elapsed_secs ?? 0)
+
+        if (d.status === 'idle') {
+          clearInterval(poll)
+          setTraining(false)
+          setTrainResult('Training state lost — backend was restarted while training. Check VRAM/logs; model may still be training.')
+          return
+        }
+
+        if (d.status === 'completed' || d.status === 'failed') {
+          clearInterval(poll)
+          setTraining(false)
+          const res = d.result ?? {}
+          if (d.status === 'failed' || res.error) {
+            setTrainResult(`Error: ${res.error ?? 'unknown'}`)
+          } else {
+            const fitIcon = res.fit_status === 'OK'       ? '✅'
+              : res.fit_status === 'REJECTED'             ? '⏭ REJECTED (no improvement)'
+              : res.fit_status === 'OVERFIT'              ? '⚠️ OVERFIT'
+              :                                             '⚠️ UNDERFIT'
+            setTrainResult(
+              `${fitIcon} | ${res.train_samples}t/${res.val_samples}v samples | ` +
+              `stopped ep ${res.stopped_epoch}/${res.epochs} | ${d.elapsed_secs}s | ` +
+              `train ${res.initial_loss?.toFixed(4)}→${res.final_train_loss?.toFixed(4)} | ` +
+              `best val ${res.best_val_loss?.toFixed(4)} | ${res.fit_advice}`
+            )
+          }
+        }
+      } catch {
+        errStreak++
+        if (errStreak >= MAX_ERR) {
+          clearInterval(poll)
+          setTraining(false)
+          setTrainResult(`Poll failed ${MAX_ERR}× in a row — backend may be unreachable. Training may still be running on GPU; check /api/cnn/train/status manually.`)
+        }
+      }
+    }, 3000)
+    pollRef.current = poll
+    return poll
+  }, [postJSON])
+
+  // On mount, check if training is already running (e.g. user switched tabs mid-training)
+  // and resume the counter + polling automatically.
+  useEffect(() => {
+    postJSON('/api/cnn/train/status', { method: 'GET' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.status === 'running') {
+          setTraining(true)
+          setTrainSecs(d.elapsed_secs ?? 0)
+          startTrainPoll()
+        }
+      })
+      .catch(() => {})
+    return () => { if (pollRef.current !== null) clearInterval(pollRef.current) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -210,7 +279,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
   useEffect(() => {
     fetchStatus()
     fetchTrades()
-    const id1 = setInterval(fetchStatus, 15_000)
+    const id1 = setInterval(fetchStatus, 5_000)
     const id2 = setInterval(fetchTrades, 15_000)
     return () => { clearInterval(id1); clearInterval(id2) }
   }, [fetchStatus, fetchTrades])
@@ -223,7 +292,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
   // While panel is open, also poll every 30s for new rows
   useEffect(() => {
     if (!showScans) return
-    const id = setInterval(fetchScans, 30_000)
+    const id = setInterval(fetchScans, 10_000)
     return () => clearInterval(id)
   }, [showScans, fetchScans])
 
@@ -287,32 +356,26 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
     setStatusMsg('')
     setTrainSecs(0)
 
-    // Elapsed-time ticker
-    const start = Date.now()
-    const ticker = setInterval(() => {
-      setTrainSecs(Math.floor((Date.now() - start) / 1000))
-    }, 1000)
-
     try {
+      // Fire-and-forget: POST returns immediately with {"status":"started"}
       const r = await postJSON(`/api/cnn/train?epochs=${epochs}`)
       const d = await r.json()
-      if (d.error) {
-        setTrainResult(`Error: ${d.error}`)
-      } else {
-        const elapsed  = Math.floor((Date.now() - start) / 1000)
-        const fitIcon  = d.fit_status === 'OK' ? '✅' : d.fit_status === 'OVERFIT' ? '⚠️ OVERFIT' : '⚠️ UNDERFIT'
-        setTrainResult(
-          `${fitIcon} | ${d.train_samples}t/${d.val_samples}v samples | ${d.epochs} epochs | ${elapsed}s | ` +
-          `train ${d.initial_loss?.toFixed(4)}→${d.final_train_loss?.toFixed(4)} | ` +
-          `val ${d.final_val_loss?.toFixed(4)} | ${d.fit_advice}`
-        )
+
+      if (d.status === 'running') {
+        // Already running — adopt its elapsed time and keep polling
+        setTrainSecs(d.elapsed_secs ?? 0)
+      } else if (d.status !== 'started') {
+        setTrainResult(`Error: ${d.detail ?? JSON.stringify(d)}`)
+        setTraining(false)
+        return
       }
     } catch {
-      setTrainResult('Training failed')
-    } finally {
-      clearInterval(ticker)
+      setTrainResult('Failed to start training')
       setTraining(false)
+      return
     }
+
+    startTrainPoll()  // stores interval in pollRef; cleaned up on unmount
   }
 
   const handleBackfill = async () => {
@@ -372,7 +435,11 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
         <StatCard
           label="Model"
           value={status?.model_loaded ? 'Loaded' : 'Untrained'}
-          sub={status?.torch_available ? 'PyTorch ✓' : 'Linear fallback'}
+          sub={
+            !status?.torch_available ? 'Linear fallback' :
+            status?.cuda_available   ? `GPU · ${status.device}` :
+                                       'CPU · no CUDA'
+          }
           color={status?.model_loaded ? 'text-green-400' : 'text-amber-400'}
         />
       </div>
