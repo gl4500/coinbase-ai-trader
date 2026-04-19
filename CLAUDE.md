@@ -183,6 +183,23 @@ Relevant memory files for this repo:
 
 ---
 
+## Required Skills — Invoke Before Acting
+
+These trigger clauses are binding. Invoke the matching skill via the `Skill` tool before the action, not after.
+
+| Trigger | Skill |
+|---|---|
+| Writing or modifying code | `superpowers:test-driven-development` |
+| Proposing a fix for a bug or failing test | `superpowers:systematic-debugging` |
+| Claiming work complete, or before committing | `superpowers:verification-before-completion` |
+| Touching anything under `frontend/` | `frontend-design` |
+| Receiving any code-review feedback | `superpowers:receiving-code-review` |
+| Before requesting review on a completed change | `superpowers:requesting-code-review` |
+
+A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list at the start of every session so it is always in context.
+
+---
+
 ## Architecture Quick Reference
 
 - **Backend:** FastAPI + asyncio, port 8000
