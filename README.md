@@ -5,8 +5,8 @@ AI-powered crypto trading system for [Coinbase Advanced Trade](https://www.coinb
 ## Stack
 - **Backend**: FastAPI + Python, SQLite via aiosqlite, JWT/ES256 CDP auth
 - **Frontend**: React + TypeScript + Vite + Tailwind CSS
-- **AI**: 1D CNN (PyTorch) + Ollama (qwen2.5:7b) for signal generation
-- **Indicators**: RSI(14), EMA cross(9/21), MACD(12,26,9), Bollinger Bands(20,2)
+- **AI**: 27-channel CNN-LSTM (PyTorch, GLU arch) + Ollama (llama3.1:8b) for signal generation
+- **Indicators**: RSI(14), EMA(9/21), MACD(5,13,3), Bollinger Bands, ADX, MFI, StochRSI, VWAP, OBV, funding rate, L/S ratio, IV/RV spread
 - **Data**: Coinbase Advanced Trade REST + WebSocket streams
 
 ## Quick Start
@@ -62,11 +62,19 @@ Always start in dry-run mode to validate signal logic.
 ```
 Coinbase REST API ──► MarketScanner ──► SQLite DB
                            │                │
-  Coinbase WebSocket ──► WSSubscriber   SignalGenerator ──► OrderExecutor
+  Coinbase WebSocket ──► WSSubscriber   SignalGenerator
                            │                │
-                      PortfolioTracker   CoinbaseCNNAgent (CNN + Ollama)
-                           │
-             FastAPI (/api/*) ──► React Frontend (WebSocket)
+                      PortfolioTracker   ┌──┴──────────────────────────┐
+                                         │  CoinbaseCNNAgent (27-ch)   │
+                                         │  TechAgentCB                │
+                                         │  MomentumAgentCB            │
+                                         │  ScalpAgent                 │
+                                         │  MacroSignalService         │
+                                         └──────────────┬──────────────┘
+                                                        │
+                                             OrderExecutor (dry-run / live)
+                                                        │
+                             FastAPI (/api/*) ──► React Frontend (WebSocket)
 ```
 
 ## API Reference
@@ -84,4 +92,10 @@ Coinbase REST API ──► MarketScanner ──► SQLite DB
 | `/api/trading/enable` | POST | Enable trading |
 | `/api/trading/disable` | POST | Pause trading |
 | `/api/scanner/run` | POST | Trigger market scan |
+| `/api/cnn/status` | GET | CNN agent state, win/loss stats |
+| `/api/cnn/scan` | POST | Trigger CNN scan |
+| `/api/cnn/train` | POST | Trigger CNN training |
+| `/api/performance` | GET | Monthly P&L, rolling 30d, $50k projection |
+| `/api/backfill` | POST | Backfill historical OHLCV data |
+| `/api/backfill/status` | GET | Sample counts per symbol |
 | `/ws` | WS | Real-time state broadcast |

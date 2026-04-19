@@ -38,14 +38,14 @@ Format: reverse-chronological by session date.
 
 ---
 
-## [Session 28] — 2026-04-18 — Macro Signal History Backfill + CNN 15-Channel
+## [Session 28] — 2026-04-18 — N_CHANNELS 24→27 (Macro Crypto Channels)
 
-- **`data/macro_history.py`** (new) — `MacroHistoryStore` persists macro env to `__MACRO__.parquet`. 17-col schema, 5 macro channels: vix_norm, gld_5d, tlt_5d, spy_5d, breadth.
-- **`backfill_macro_history()`** — fetches GLD/TLT/UUP/USO/SPY/IWM/QQQ from Alpaca + ^VIX/^TNX from yfinance. Idempotent.
-- **CNN N_CHANNELS 10→15** — 5 macro channels added. Degrades to 10ch gracefully when macro data absent.
-- **POST `/api/backfill/macro`** — new endpoint; returns `{status, days, rows_added}`.
-- **Bug**: `symbols_with_data()` returned `"__MACRO__"` as a symbol → KeyError on `return_1d`. Fixed: `not f.startswith("__")` filter.
-- **Tests**: 16 tests in `test_macro_history.py`.
+- **Channel 24**: IV/RV20 spread — Deribit implied vol minus 20-day realized vol, clipped [-1,1]. High IV = fear = bearish.
+- **Channel 25**: IV/RV60 spread — same against 60-day realized vol.
+- **Channel 26**: Binance top-trader long/short sentiment ratio, normalised to [-1,1].
+- **N_CHANNELS 24→27** — backward-compat load: checkpoint channel mismatch sets `_needs_retrain=True`.
+- **`test_bsm_integration.py`** updated — all shape assertions reflect 27-channel tensor.
+- **Note**: macro channels (funding rate Ch20, L/S Ch26) are baked into the CNN input tensor — the model trains on them, not just gates at decision time.
 
 ---
 
