@@ -105,7 +105,7 @@ jobs:
           DRY_RUN:                  "true"
           DATABASE_URL:             "coinbase_ci_test.db"
           LOG_LEVEL:                "WARNING"
-          OLLAMA_MODEL:             "llama3.2:3b"
+          OLLAMA_MODEL:             "llama3.1:8b"
         run: |
           pytest backend/tests \
             -m "not slow and not integration" \

@@ -15,7 +15,6 @@ of what actually happened to previous signals on this product.
 import asyncio
 import json
 import logging
-import os
 import re
 import time
 from typing import Dict, List, Optional
@@ -24,6 +23,7 @@ import httpx
 
 import database
 from clients import coinbase_client
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ class OutcomeTracker:
         else:
             lesson_block = "\n\nNo past outcomes recorded yet for this asset."
 
-        model  = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+        model  = config.ollama_model
         prompt = (
             f"{source} agent just signaled {side} for {product_id} "
             f"at ${price:,.4f}\n"

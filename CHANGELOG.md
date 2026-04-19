@@ -7,7 +7,7 @@ Format: reverse-chronological by session date.
 
 ## [Session 30] — 2026-04-19 — Doc/Code Audit Fixes
 
-Post-audit cleanup after reviewing README, REBUILD_STANDARD, CLAUDE.md, CHANGELOG, and `backend/` against actual code.
+Post-audit cleanup after reviewing README, REBUILD_STANDARD, CLAUDE.md, CHANGELOG, and `backend/` against actual code. A follow-up code review surfaced deeper issues (see Session 30.1).
 
 ### Documentation
 - **README.md** — `/api/backfill` → `/api/history/backfill`, `/api/backfill/status` → `/api/history/status` (endpoints were renamed but docs were stale).
@@ -16,11 +16,36 @@ Post-audit cleanup after reviewing README, REBUILD_STANDARD, CLAUDE.md, CHANGELO
 
 ### Code
 - **CNN cache type hint** (`cnn_agent.py:691`) — was `Dict[str, Tuple[float, float]]` (2-tuple); runtime stores 3-tuple `(cnn_prob, timestamp, indicators_dict)` at line 1101 and per CLAUDE.md invariant. Type hint now matches reality.
-- **OLLAMA_MODEL fallback default** (3 sites: `cnn_agent.py:622`, `signal_generator.py:396`, `outcome_tracker.py:97`) — fallback was `qwen2.5:7b`; current configured model is `llama3.1:8b`. Fallback now matches docs so misconfigured environments route to the documented model.
+- **OLLAMA_MODEL fallback default** (3 sites) — fallback was `qwen2.5:7b`; updated to `llama3.1:8b` (later superseded by centralization in Session 30.1).
 
 ### TDD
-- `test_cnn_agent.py::test_cache_skips_fetch` — added explicit 3-tuple length assertion.
-- `test_signal_improvements.py::TestOllamaModelFallback` — 3 new tests verify each of the 3 module sites uses `llama3.1:8b` as fallback string.
+- `test_cnn_agent.py::test_cache_skips_fetch` — added 3-tuple length assertion (later replaced by a non-tautological test in Session 30.1).
+- `test_signal_improvements.py::TestOllamaModelFallback` — 3 source-scraping tests (replaced with behavior test in Session 30.1).
+
+---
+
+## [Session 30.1] — 2026-04-19 — Review Follow-Up: OLLAMA_MODEL Centralization + Stronger Tests
+
+Code-reviewer feedback on Session 30: swapping one hardcoded fallback for another doesn't satisfy CLAUDE.md invariant 7 ("never hardcode a model name"); the source-scraping fallback tests were brittle; the cache `len == 3` assertion was tautological.
+
+### Config
+- **`config.Config.ollama_model`** — new field `os.getenv("OLLAMA_MODEL", "llama3.1:8b")`. Single source of truth for the default, honoring env override when set.
+
+### Code
+- **Three OLLAMA_MODEL sites** now read `config.ollama_model` instead of calling `os.getenv` directly:
+  - `agents/cnn_agent.py:622`
+  - `agents/signal_generator.py:396`
+  - `services/outcome_tracker.py:97` (also added `from config import config` import; removed now-unused `import os`)
+
+### TDD
+- **`TestOllamaModelFallback` (brittle source scraping) removed.**
+- **`TestOllamaModelConfig` added** (2 tests): default fallback when env unset; env override honored. Behavior test against the config object — immune to formatting changes.
+- **`test_cache_write_produces_three_tuple` added** — calls `generate_signal` on an empty cache, asserts the *written* value at line 1101 is a 3-tuple of `(float, float, dict)`. Real regression guard for invariant #2.
+- **`test_cache_skips_fetch` cleanup** — tautological `len == 3` assertion (on a locally-constructed tuple) removed; the test again focuses on cache-hit skip behavior only.
+
+### Stale model references
+- **`.github/workflows/ci.yml:108`** — `OLLAMA_MODEL: llama3.2:3b` → `llama3.1:8b`.
+- **`cnn_agent_decision_tree.html:180, 346`** — `llama3.2:3b` → `llama3.1:8b`.
 
 ---
 

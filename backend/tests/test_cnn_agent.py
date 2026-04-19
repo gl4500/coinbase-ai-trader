@@ -251,7 +251,6 @@ class TestCoinbaseCNNAgent:
         """Second call within TTL reuses cached CNN prob — no candle fetch."""
         import time
         agent._cache["BTC-USD"] = (0.75, time.time(), {})
-        assert len(agent._cache["BTC-USD"]) == 3, "CNN cache invariant: 3-tuple (prob, ts, indicators)"
 
         mock_get_candles = AsyncMock(return_value=_make_candles(80))
         with (
@@ -267,6 +266,36 @@ class TestCoinbaseCNNAgent:
             await agent.generate_signal(product)
 
         mock_get_candles.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_write_produces_three_tuple(self, agent, product):
+        """CNN cache invariant #2: write path stores (cnn_prob, timestamp, indicators_dict)."""
+        assert "BTC-USD" not in agent._cache
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=_make_candles(80))),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.75, 0, 0))),
+            patch.object(agent, "_cnn_prob", return_value=0.75),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=3)),
+        ):
+            await agent.generate_signal(product)
+
+        cached = agent._cache.get("BTC-USD")
+        assert cached is not None, "generate_signal should populate cache on miss"
+        assert len(cached) == 3, f"cache entry must be 3-tuple, got {len(cached)}-tuple"
+        cnn_prob, ts, indicators = cached
+        assert isinstance(cnn_prob, float)
+        assert isinstance(ts, float)
+        assert isinstance(indicators, dict)
 
     @pytest.mark.asyncio
     async def test_scan_all_empty(self, agent):

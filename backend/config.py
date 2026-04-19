@@ -64,6 +64,10 @@ class Config:
     # How often to auto-train (in number of scans; default 4 = ~1 hour at 15-min scan interval)
     cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "8")))
 
+    # ── Ollama LLM ─────────────────────────────────────────────────────────────
+    # Central default so every module reads the same model (CLAUDE.md invariant 7).
+    ollama_model:         str  = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
+
     # ── History backfill schedule ──────────────────────────────────────────────
     # How many hours between automatic incremental backfill runs (0 = disabled)
     backfill_interval_hours: int  = field(default_factory=lambda: int(os.getenv("BACKFILL_INTERVAL_HOURS", "24")))

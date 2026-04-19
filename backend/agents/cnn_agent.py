@@ -619,7 +619,7 @@ async def _ollama_prob(product_id: str, context: str,
                        lessons: Optional[List[str]] = None,
                        fg_score: Optional[int] = None
                        ) -> tuple[Optional[float], int, int]:
-    model  = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+    model  = config.ollama_model
     regime = "TRENDING" if adx_val >= config.adx_trend_threshold else "RANGING"
     lesson_block = ""
     if lessons:
