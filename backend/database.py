@@ -289,6 +289,7 @@ async def upsert_product(p: Dict) -> None:
                  high_24h=excluded.high_24h,
                  low_24h=excluded.low_24h,
                  spread=excluded.spread,
+                 is_tracked=excluded.is_tracked,
                  last_updated=excluded.last_updated""",
             (
                 p["product_id"], p["base_currency"], p["quote_currency"],

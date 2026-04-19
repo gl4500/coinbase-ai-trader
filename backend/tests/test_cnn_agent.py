@@ -250,7 +250,7 @@ class TestCoinbaseCNNAgent:
     async def test_cache_skips_fetch(self, agent, product):
         """Second call within TTL reuses cached CNN prob — no candle fetch."""
         import time
-        agent._cache["BTC-USD"] = (0.75, time.time())
+        agent._cache["BTC-USD"] = (0.75, time.time(), {})
 
         mock_get_candles = AsyncMock(return_value=_make_candles(80))
         with (

@@ -37,7 +37,7 @@ _BUY_THRESHOLD     = 0.55
 _SELL_THRESHOLD    = 0.55
 _MAX_POSITION_FRAC = 0.15    # max 15 % of portfolio per product (fallback cap)
 MIN_PRICE          = 0.01    # skip micro-priced tokens (unprofitable spreads)
-_TAKE_PROFIT       = 0.20    # 20 % take-profit above avg entry price (real-time)
+_TAKE_PROFIT       = 0.06    # 6 % take-profit above avg entry price (real-time)
 _SCAN_INTERVAL     = 120     # 2 min — pure math, no Ollama dependency
 
 # ATR-based trailing stop (replaces fixed _HARD_STOP_LOSS)

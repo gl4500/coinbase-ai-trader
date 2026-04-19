@@ -1,0 +1,129 @@
+========================================
+  COINBASE TRADER — POWERSHELL COMMANDS
+========================================
+
+ For troubleshooting specifically, the critical ones are:
+
+  # 1. Is the backend alive?
+  Invoke-RestMethod 'http://localhost:8001/api/cnn/status' | Select-Object device, cuda_available, training_active,
+  train_status, scan_count
+
+  # 2. Is training stuck / PID dead?
+  Get-Content 'C:\Users\gl450\polymarket_app\backend\cnn_train_progress.json'
+
+  # 3. Clear stale training lock
+  $f = 'C:\Users\gl450\polymarket_app\backend\cnn_train_progress.json'
+  $d = Get-Content $f | ConvertFrom-Json; $d.status = 'failed'; $d | ConvertTo-Json -Compress | Set-Content $f
+
+  # 4. Recent errors in log
+  Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\backend.log' -Tail 100 | Select-String -Pattern
+  "ERROR|WARNING"
+
+  # 5. Are products tracked?
+  Invoke-RestMethod 'http://localhost:8001/api/products?tracked=true&limit=5'
+
+  # 6. Are CNN scans writing to DB?
+  Invoke-RestMethod 'http://localhost:8001/api/cnn/scans?limit=3'
+
+  # 7. GPU utilization
+  nvidia-smi
+
+── STATUS ───────────────────────────────────────────────────────────────────
+
+# Full app status
+Invoke-RestMethod 'http://localhost:8001/api/status'
+
+# CNN agent status
+Invoke-RestMethod 'http://localhost:8001/api/cnn/status'
+
+# CNN training / device info
+Invoke-RestMethod 'http://localhost:8001/api/cnn/status' | Select-Object device, cuda_available, training_active, train_status, scan_count
+
+── CNN SCANS & SIGNALS ──────────────────────────────────────────────────────
+
+# Latest 5 CNN scans (raw)
+Invoke-RestMethod 'http://localhost:8001/api/cnn/scans?limit=5'
+
+# Latest scans — key columns only
+Invoke-RestMethod 'http://localhost:8001/api/cnn/scans?limit=10' | Select-Object product_id, side, cnn_prob, model_prob, llm_prob, scanned_at
+
+# Scans for a specific product
+Invoke-RestMethod 'http://localhost:8001/api/cnn/scans?limit=10&product_id=BTC-USD'
+
+# BUY signals only (filter client-side)
+Invoke-RestMethod 'http://localhost:8001/api/cnn/scans?limit=50' | Where-Object { $_.side -eq 'BUY' }
+
+── PRODUCTS ─────────────────────────────────────────────────────────────────
+
+# All tracked products (top 5 by volume)
+Invoke-RestMethod 'http://localhost:8001/api/products?tracked=true&limit=5'
+
+# All products (tracked + untracked)
+Invoke-RestMethod 'http://localhost:8001/api/products?limit=10'
+
+# Tracked product count in DB
+& python -c "import sqlite3; db=sqlite3.connect(r'C:\Users\gl450\polymarket_app\backend\coinbase.db'); print('tracked:', db.execute('SELECT COUNT(*) FROM products WHERE is_tracked=1').fetchone()[0]); db.close()"
+
+── TRAINING ─────────────────────────────────────────────────────────────────
+
+# Check training progress file
+Get-Content 'C:\Users\gl450\polymarket_app\backend\cnn_train_progress.json'
+
+# Trigger CNN training (POST)
+Invoke-RestMethod -Method Post 'http://localhost:8001/api/cnn/train'
+
+# Check if training PID is still alive
+$pid = (Get-Content 'C:\Users\gl450\polymarket_app\backend\cnn_train_progress.json' | ConvertFrom-Json).pid
+Get-Process -Id $pid -ErrorAction SilentlyContinue | Select-Object Id, CPU, WorkingSet
+
+# Clear stale training lock (if subprocess died but file says "running")
+# (Edit the file manually or use the Write-Content below)
+$f = 'C:\Users\gl450\polymarket_app\backend\cnn_train_progress.json'
+$d = Get-Content $f | ConvertFrom-Json
+$d.status = 'failed'
+$d | ConvertTo-Json -Compress | Set-Content $f
+
+── LOGS ─────────────────────────────────────────────────────────────────────
+
+# Tail backend log (last 50 lines)
+Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\backend.log' -Tail 50
+
+# Filter log for CNN activity
+Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\backend.log' -Tail 100 | Select-String -Pattern "CNN|BUY|SELL|scan|train|epoch"
+
+# Filter log for device / GPU info
+Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\backend.log' -Tail 100 | Select-String -Pattern "cuda|cpu|device|GPU|training|epoch"
+
+# Filter log for errors
+Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\backend.log' -Tail 100 | Select-String -Pattern "ERROR|WARNING|exception"
+
+# CNN training log (device, epochs, loss — separate from backend.log)
+Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\cnn_training.log' -Tail 50
+Get-Content 'C:\Users\gl450\polymarket_app\backend\logs\cnn_training.log' -Tail 100 | Select-String -Pattern "cuda|cpu|device|GPU|epoch|loss"
+
+── GPU ──────────────────────────────────────────────────────────────────────
+
+# Live GPU utilization
+nvidia-smi
+
+# Watch GPU every 2 seconds
+while ($true) { nvidia-smi; Start-Sleep 2; Clear-Host }
+
+── PROCESSES ────────────────────────────────────────────────────────────────
+
+# Find launcher, backend, training processes
+Get-Process | Where-Object { $_.Name -match 'python' } | Select-Object Id, CPU, WorkingSet, Name
+
+# Kill training subprocess by PID (replace 12345 with actual PID)
+Stop-Process -Id 12345 -Force
+
+── DATABASE ─────────────────────────────────────────────────────────────────
+
+# Find which DB has the products table
+python C:\Users\gl450\polymarket_app\find_products_db.py
+
+# CNN scan count in DB
+& python -c "import sqlite3; db=sqlite3.connect(r'C:\Users\gl450\polymarket_app\backend\coinbase.db'); print('cnn_scans:', db.execute('SELECT COUNT(*) FROM cnn_scans').fetchone()[0]); db.close()"
+
+# Most recent CNN scans from DB directly
+& python -c "import sqlite3; db=sqlite3.connect(r'C:\Users\gl450\polymarket_app\backend\coinbase.db'); [print(r) for r in db.execute('SELECT product_id, side, cnn_prob, scanned_at FROM cnn_scans ORDER BY scanned_at DESC LIMIT 5').fetchall()]; db.close()"

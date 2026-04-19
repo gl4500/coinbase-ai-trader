@@ -30,7 +30,7 @@ from agents.cnn_agent import CoinbaseCNNAgent, _CNNBook, _CNN_STOP_LOSS_PCT, _CN
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _book_with_position(pid: str, avg_price: float, size: float = 10.0,
-                         entry_time: float = None) -> _CNNBook:
+                         entry_time: float = None, peak_price: float = None) -> _CNNBook:
     """Return a _CNNBook pre-loaded with one open position (no DB calls)."""
     book = _CNNBook()
     book.balance = 1000.0
@@ -38,6 +38,7 @@ def _book_with_position(pid: str, avg_price: float, size: float = 10.0,
         "size":       size,
         "avg_price":  avg_price,
         "entry_time": entry_time or time.time(),
+        "peak_price": peak_price or avg_price,
     }
     return book
 
@@ -143,11 +144,12 @@ class TestCNNStopLoss:
 
     @pytest.mark.asyncio
     async def test_stop_loss_does_not_fire_at_5pct_loss(self):
-        """Position down 5% (below threshold) → no exit."""
+        """Position down 5% from entry but only 1% from peak → no exit triggered."""
         agent = CoinbaseCNNAgent()
         entry   = 1000.0
-        current = entry * (1 - 0.05)   # -5% → above -8% threshold
-        agent.book = _book_with_position("SOL-USD", avg_price=entry)
+        current = entry * (1 - 0.05)   # -5% from entry → above -8% hard stop
+        # peak_price just above current so pct_from_peak ≈ -1%, below 3% ATR floor
+        agent.book = _book_with_position("SOL-USD", avg_price=entry, peak_price=current * 1.01)
 
         sell_mock = AsyncMock(return_value=0.0)
         ws_mock   = MagicMock()
@@ -192,10 +194,10 @@ class TestCNNMaxHoldTime:
 
     @pytest.mark.asyncio
     async def test_max_hold_fires_at_49_hours(self):
-        """Position held 49h → _check_risk_exits must close it."""
+        """Position held beyond max-hold window → _check_risk_exits must close it."""
         agent     = CoinbaseCNNAgent()
         entry     = 500.0
-        old_entry = time.time() - (49 * 3600)   # 49h ago
+        old_entry = time.time() - (_CNN_MAX_HOLD_SECS + 3600)  # 1h past limit
         agent.book = _book_with_position("DOT-USD", avg_price=entry,
                                           entry_time=old_entry)
 
@@ -214,7 +216,7 @@ class TestCNNMaxHoldTime:
 
     @pytest.mark.asyncio
     async def test_max_hold_does_not_fire_at_47_hours(self):
-        """Position held 47h → still within window, must not exit."""
+        """Position held 47h → well within 7-day window, must not exit."""
         agent     = CoinbaseCNNAgent()
         entry     = 500.0
         recent_entry = time.time() - (47 * 3600)
@@ -232,10 +234,10 @@ class TestCNNMaxHoldTime:
         sell_mock.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_max_hold_constant_is_48_hours(self):
-        """_CNN_MAX_HOLD_SECS must equal 48 * 3600."""
-        assert _CNN_MAX_HOLD_SECS == 48 * 3600, (
-            f"Max hold is {_CNN_MAX_HOLD_SECS/3600:.0f}h — expected 48h."
+    async def test_max_hold_constant_is_7_days(self):
+        """_CNN_MAX_HOLD_SECS must equal 7 * 24 * 3600 (trailing stop replaced 48h limit)."""
+        assert _CNN_MAX_HOLD_SECS == 7 * 24 * 3600, (
+            f"Max hold is {_CNN_MAX_HOLD_SECS/3600:.0f}h — expected 168h (7 days)."
         )
 
     @pytest.mark.asyncio

@@ -295,14 +295,41 @@ async def _train_progress_watcher() -> None:
             _status = _data.get("status", "idle")
 
             if _status == "running" and app_state.train_status != "running":
-                # Backend restarted while subprocess was training — re-sync
-                app_state.train_status    = "running"
-                app_state.train_started_at = _data.get("started_at", _time.time())
+                # Backend restarted while subprocess was training — re-sync,
+                # but first verify the PID is still alive (guards against stale
+                # "running" files left by a crashed subprocess).
+                _pid = _data.get("pid")
+                _pid_alive = False
+                if _pid:
+                    try:
+                        import psutil as _psutil
+                        _pid_alive = _psutil.pid_exists(int(_pid))
+                    except ImportError:
+                        import subprocess as _sp
+                        _r = _sp.run(["tasklist", "/FI", f"PID eq {_pid}"], capture_output=True, text=True)
+                        _pid_alive = str(_pid) in _r.stdout
+                if not _pid_alive:
+                    logger.warning(
+                        f"Train progress file shows 'running' but PID {_pid} is gone — "
+                        "marking failed and clearing training_active"
+                    )
+                    _data["status"] = "failed"
+                    with open(_TRAIN_PROGRESS_FILE, "w") as _wf:
+                        json.dump(_data, _wf)
+                    if app_state.cnn_agent:
+                        app_state.cnn_agent.training_active = False
+                else:
+                    app_state.train_status    = "running"
+                    app_state.train_started_at = _data.get("started_at", _time.time())
+                    if app_state.cnn_agent:
+                        app_state.cnn_agent.training_active = True
 
             elif _status in ("completed", "failed") and app_state.train_status == "running":
                 # Training just finished — update state and reload model from disk
                 app_state.train_status = _status
                 app_state.train_result = _data.get("result")
+                if app_state.cnn_agent:
+                    app_state.cnn_agent.training_active = False
                 if _status == "completed":
                     try:
                         app_state.cnn_agent._load()
@@ -367,12 +394,33 @@ async def lifespan(app: FastAPI):
     app_state.backfill_task  = asyncio.create_task(get_backfill().run_loop())
 
     # CNN loop — starts immediately
+    async def _auto_train_subprocess():
+        """Spawn train_worker subprocess for auto-train — mirrors the UI Train button."""
+        if app_state.train_status == "running":
+            logger.info("CNN auto-train skipped — training subprocess already running")
+            return
+        app_state.train_status     = "running"
+        app_state.train_started_at = _time.time()
+        app_state.train_result     = None
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, _TRAIN_WORKER, "--epochs", "50"],
+                cwd=os.path.dirname(__file__),
+            )
+            app_state.train_proc = proc
+            app_state.cnn_agent.training_active = True
+            logger.info(f"CNN auto-train subprocess started — PID {proc.pid}")
+        except Exception as exc:
+            app_state.train_status = "failed"
+            logger.error(f"CNN auto-train subprocess failed to start: {exc}")
+
     app_state.cnn_task = asyncio.create_task(
         app_state.cnn_agent.run_loop(
             order_executor      = app_state.order_executor,
             is_trading_fn       = lambda: app_state.is_trading,
             train_every_n_scans = config.cnn_train_every_n_scans,
             broadcast_fn        = broadcast_state,
+            auto_train_fn       = _auto_train_subprocess,
         )
     )
 
@@ -584,6 +632,13 @@ async def get_cnn_status():
         "losses":           agent.book.losses      if agent else 0,
         "win_rate":         round(agent.book.win_rate * 100, 1) if agent else 0.0,
         "expectancy_pct":   round(agent.book.expectancy, 3)     if agent else 0.0,
+        # LLM token usage
+        "llm_calls":           agent.llm_calls           if agent else 0,
+        "llm_prompt_tokens":   agent.llm_prompt_tokens   if agent else 0,
+        "llm_response_tokens": agent.llm_response_tokens if agent else 0,
+        "llm_total_tokens":    (agent.llm_prompt_tokens + agent.llm_response_tokens) if agent else 0,
+        "training_active":     agent.training_active     if agent else False,
+        "train_status":        app_state.train_status,
     }
 
 
@@ -672,6 +727,8 @@ async def trigger_cnn_training(
             cwd=os.path.dirname(__file__),
         )
         app_state.train_proc = proc
+        if app_state.cnn_agent:
+            app_state.cnn_agent.training_active = True
         logger.info(f"CNN training subprocess started — PID {proc.pid}, epochs={epochs}")
     except Exception as exc:
         app_state.train_status = "failed"

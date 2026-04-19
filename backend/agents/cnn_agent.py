@@ -72,8 +72,14 @@ from services.hmm_regime import get_detector, regime_blend
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
 _CNN_MAX_FRAC        = 0.15    # max 15% of portfolio per position
-_CNN_STOP_LOSS_PCT   = 0.08    # 8% hard stop-loss below avg entry price
-_CNN_MAX_HOLD_SECS   = 48 * 3600  # 48 hour max hold time
+_CNN_STOP_LOSS_PCT    = 0.08    # 8% hard stop-loss below avg entry price
+_CNN_ATR_TRAIL_MULT   = 2.0     # trailing stop = ATR(14) × multiplier below peak
+_CNN_ATR_TRAIL_MIN    = 0.03    # floor: never tighter than 3% (prevents stop-hunting)
+_CNN_ATR_TRAIL_MAX    = 0.15    # ceiling: never wider than 15% (limits max give-back)
+_CNN_MAX_HOLD_SECS    = 7 * 24 * 3600  # 7-day max-hold — last resort for flat/forgotten positions
+# Positions missing entry_time (opened before that field existed) are treated
+# as if they were opened _CNN_LEGACY_HOLD_SECS ago — triggers max-hold exit promptly.
+_CNN_LEGACY_HOLD_SECS = _CNN_MAX_HOLD_SECS + 1  # exceeds max-hold, forces exit on next check
 MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unprofitable spreads)
 _LGBM_RETRAIN_EVERY  = 50      # retrain LightGBM after every N new closed trades
 _LGBM_MODEL_PATH     = os.path.join(os.path.dirname(__file__), "..", "data", "lgbm_filter.pkl")
@@ -191,7 +197,8 @@ class _CNNBook:
             self.positions[pid] = {
                 "size":       size,
                 "avg_price":  price,
-                "entry_time": time.time(),   # track for max-hold exit
+                "entry_time": time.time(),
+                "peak_price": price,
             }
         self.balance -= spend
         await self._save()
@@ -610,7 +617,8 @@ async def _ollama_prob(product_id: str, context: str,
                        mfi_val: float, stoch_k: float,
                        cnn_prob: float,
                        lessons: Optional[List[str]] = None,
-                       fg_score: Optional[int] = None) -> Optional[float]:
+                       fg_score: Optional[int] = None
+                       ) -> tuple[Optional[float], int, int]:
     model  = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
     regime = "TRENDING" if adx_val >= config.adx_trend_threshold else "RANGING"
     lesson_block = ""
@@ -652,23 +660,26 @@ async def _ollama_prob(product_id: str, context: str,
                       "stream": False, "format": "json"},
             )
             resp.raise_for_status()
-            text = resp.json().get("response", "")
+            raw      = resp.json()
+            text     = raw.get("response", "")
+            prompt_t = raw.get("prompt_eval_count", 0)
+            resp_t   = raw.get("eval_count", 0)
         _elapsed = time.perf_counter() - _t0
         if _elapsed > 15:
             logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s (SLOW)")
         else:
-            logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s")
+            logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s tokens=in:{prompt_t}/out:{resp_t}")
         prob = float(json.loads(text).get("probability", -1))
         if 0 <= prob <= 1:
-            return prob
+            return prob, prompt_t, resp_t
     except Exception:
         try:
             m = re.search(r"\b0\.\d{2,4}\b", text)
             if m:
-                return float(m.group())
+                return float(m.group()), 0, 0
         except Exception:
             pass
-    return None
+    return None, 0, 0
 
 
 # ── CNN-LSTM Agent ─────────────────────────────────────────────────────────────
@@ -690,6 +701,10 @@ class CoinbaseCNNAgent:
         self.signals_executed: int = 0
         self.last_trained_at:  Optional[float] = None
         self.train_count:      int = 0
+        # ── LLM token tracking ─────────────────────────────────────────────
+        self.llm_calls:          int = 0
+        self.llm_prompt_tokens:  int = 0
+        self.llm_response_tokens: int = 0
         # ── LightGBM entry filter ───────────────────────────────────────────
         self._lgbm             = LGBMFilter()
         self._lgbm.load(_LGBM_MODEL_PATH)
@@ -699,6 +714,9 @@ class CoinbaseCNNAgent:
         # architecture (channel count changed).  Signals are suppressed until
         # a fresh train run completes and saves a compatible checkpoint.
         self._needs_retrain: bool = False
+        # Set by main.py when a training subprocess is running — causes scans
+        # to skip Ollama (GPU is saturated by training, LLM calls hang).
+        self.training_active: bool = False
         if _TORCH:
             self.model = SignalCNN().to(_DEVICE)
             self._load()
@@ -794,7 +812,8 @@ class CoinbaseCNNAgent:
     @staticmethod
     def _read_best_loss() -> float:
         try:
-            return float(open(_BEST_LOSS_PATH).read().strip())
+            v = float(open(_BEST_LOSS_PATH).read().strip())
+            return v if v > 0.0 else float("inf")   # 0.0 is corrupted — treat as unset
         except Exception:
             return float("inf")
 
@@ -851,14 +870,16 @@ class CoinbaseCNNAgent:
         return fallback
 
     async def _check_risk_exits(self) -> None:
-        """Check all open CNN positions for stop-loss or max hold time.
+        """Check all open CNN positions for stop-loss, trailing stop, or max hold time.
 
         Runs at the top of every scan loop iteration so exits happen every 15 min
         even if no new signal is generated.
 
-        Exit priority (stop-loss checked first):
-          1. Hard stop-loss : price dropped ≥ _CNN_STOP_LOSS_PCT (8%) below avg entry
-          2. Max hold time  : position held longer than _CNN_MAX_HOLD_SECS (48h)
+        Exit priority:
+          1. Hard stop-loss   : price dropped ≥ _CNN_STOP_LOSS_PCT (8%) below avg entry
+          2. Trailing stop    : price fell ≥ _CNN_TRAIL_PCT (6%) below the session peak
+          3. Max hold time    : position held longer than _CNN_MAX_HOLD_SECS (7 days)
+          4. Legacy position  : no entry_time recorded → exit on next check
         """
         for pid in list(self.book.positions.keys()):
             pos = self.book.positions.get(pid)
@@ -877,21 +898,50 @@ class CoinbaseCNNAgent:
                 continue   # no price available — skip safely
 
             avg_price  = pos["avg_price"]
-            pct        = (price - avg_price) / avg_price
-            entry_time = pos.get("entry_time", time.time())
-            hold_secs  = time.time() - entry_time
+            pct_entry  = (price - avg_price) / avg_price
+
+            # Update peak price — ratchets up, never down
+            peak_price = pos.get("peak_price") or avg_price
+            if price > peak_price:
+                peak_price = price
+                pos["peak_price"] = peak_price
+
+            pct_from_peak = (price - peak_price) / peak_price
+
+            # Compute ATR-based trail distance for this product
+            trail_pct = _CNN_ATR_TRAIL_MIN  # fallback if candles unavailable
+            try:
+                candles = await database.get_candles(pid, limit=20)
+                if len(candles) >= 15:
+                    highs  = [c["high"]  for c in candles]
+                    lows   = [c["low"]   for c in candles]
+                    closes = [c["close"] for c in candles]
+                    atr    = _atr(highs, lows, closes)
+                    if atr > 0 and peak_price > 0:
+                        raw = atr * _CNN_ATR_TRAIL_MULT / peak_price
+                        trail_pct = max(_CNN_ATR_TRAIL_MIN, min(raw, _CNN_ATR_TRAIL_MAX))
+            except Exception:
+                pass
+
+            # Positions without entry_time are legacy — treat as already overdue
+            entry_time = pos.get("entry_time")
+            hold_secs  = _CNN_LEGACY_HOLD_SECS if entry_time is None else time.time() - entry_time
 
             trigger = None
-            if pct <= -_CNN_STOP_LOSS_PCT:
-                trigger = f"STOP_LOSS"
+            if pct_entry <= -_CNN_STOP_LOSS_PCT:
+                trigger = "STOP_LOSS"
+            elif pct_from_peak <= -trail_pct:
+                trigger = "TRAIL_STOP"
             elif hold_secs >= _CNN_MAX_HOLD_SECS:
-                trigger = f"MAX_HOLD"
+                trigger = "MAX_HOLD" if entry_time else "LEGACY_EXIT"
 
             if trigger:
                 pnl = await self.book.sell(pid, price, trigger=trigger)
                 logger.info(
                     f"CNN RISK EXIT {pid} @{price:.6f} | {trigger} | "
-                    f"pct={pct*100:+.2f}% hold={hold_secs/3600:.1f}h | "
+                    f"entry={pct_entry*100:+.2f}% peak={peak_price:.6f} "
+                    f"trail={pct_from_peak*100:+.2f}% (atr_trail={trail_pct*100:.1f}%) "
+                    f"hold={hold_secs/3600:.1f}h | "
                     f"pnl=${pnl:+.2f} | balance=${self.book.balance:.2f}"
                 )
 
@@ -930,8 +980,17 @@ class CoinbaseCNNAgent:
 
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
-            cnn_prob = cached[0]
-            # Indicator values already defaulted to neutral above — cached path uses those
+            cnn_prob, _, _cached_ind = cached
+            adx_val      = _cached_ind.get("adx_val",      adx_val)
+            rsi_val      = _cached_ind.get("rsi_val",      rsi_val)
+            macd_h       = _cached_ind.get("macd_h",       macd_h)
+            mfi_val      = _cached_ind.get("mfi_val",      mfi_val)
+            stoch_k      = _cached_ind.get("stoch_k",      stoch_k)
+            atr_val      = _cached_ind.get("atr_val",      atr_val)
+            vwap_d       = _cached_ind.get("vwap_d",       vwap_d)
+            fast_rsi_val = _cached_ind.get("fast_rsi_val", fast_rsi_val)
+            vel_norm     = _cached_ind.get("vel_norm",     vel_norm)
+            vol_z_norm   = _cached_ind.get("vol_z_norm",   vol_z_norm)
         else:
             candles = await database.get_candles(pid, limit=80)
             if len(candles) < 30:
@@ -1039,7 +1098,12 @@ class CoinbaseCNNAgent:
             di                 = _dissimilarity_index(closes)
             entropy            = _shannon_entropy(closes)
 
-            self._cache[pid] = (cnn_prob, time.time())
+            self._cache[pid] = (cnn_prob, time.time(), {
+                "adx_val": adx_val, "rsi_val": rsi_val, "macd_h": macd_h,
+                "mfi_val": mfi_val, "stoch_k": stoch_k, "atr_val": atr_val,
+                "vwap_d": vwap_d, "fast_rsi_val": fast_rsi_val,
+                "vel_norm": vel_norm, "vol_z_norm": vol_z_norm,
+            })
 
         # ── HMM regime detection → dynamic CNN/LLM blend ─────────────────────
         hmm_regime, hmm_conf, _hmm_state = get_detector().predict(closes)
@@ -1097,10 +1161,13 @@ class CoinbaseCNNAgent:
             cnn_dist >= (config.llm_skip_threshold - 0.5)
             or (regime_ambiguous and di_high)
             or entropy_noisy
+            or self.training_active
         )
         if skip_llm:
             llm_prob = None
-            if entropy_noisy:
+            if self.training_active:
+                logger.debug(f"LLM skipped for {pid}: training subprocess active (GPU busy)")
+            elif entropy_noisy:
                 logger.debug(
                     f"LLM skipped for {pid}: entropy={entropy:.2f} > {_ENTROPY_SKIP_THRESH} (noise)"
                 )
@@ -1115,9 +1182,12 @@ class CoinbaseCNNAgent:
                     f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
                 )
         else:
-            llm_prob = await _ollama_prob(pid, context, adx_val, rsi_val,
-                                          macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
-                                          lessons=lessons, fg_score=fg_score)
+            llm_prob, _pt, _rt = await _ollama_prob(pid, context, adx_val, rsi_val,
+                                                     macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
+                                                     lessons=lessons, fg_score=fg_score)
+            self.llm_calls           += 1
+            self.llm_prompt_tokens   += _pt
+            self.llm_response_tokens += _rt
 
         if llm_prob is not None:
             model_prob = cnn_w * cnn_prob + llm_w * llm_prob
@@ -1326,7 +1396,8 @@ class CoinbaseCNNAgent:
                        train_every_n_scans: int = 4,
                        order_executor=None,
                        is_trading_fn=None,
-                       broadcast_fn=None) -> None:
+                       broadcast_fn=None,
+                       auto_train_fn=None) -> None:
         """
         Scan every `interval` seconds (default 15 min).
         Auto-train every `train_every_n_scans` scans (default 4 = ~1 hour).
@@ -1378,18 +1449,22 @@ class CoinbaseCNNAgent:
                         f"every {train_every_n_scans} scans)"
                     )
                     try:
-                        result = await self.train_on_history(epochs=50)
-                        if "error" in result:
-                            logger.warning(f"CNN auto-train skipped: {result['error']}")
+                        if auto_train_fn is not None:
+                            # Spawn subprocess (non-blocking) — same path as UI Train button
+                            await auto_train_fn()
                         else:
-                            self.last_trained_at = time.time()
-                            self.train_count    += 1
-                            logger.info(
-                                f"CNN auto-train done — {result['samples']} samples | "
-                                f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
-                                f"val={result['final_val_loss']:.4f} | "
-                                f"fit={result['fit_status']}"
-                            )
+                            result = await self.train_on_history(epochs=50)
+                            if "error" in result:
+                                logger.warning(f"CNN auto-train skipped: {result['error']}")
+                            else:
+                                self.last_trained_at = time.time()
+                                self.train_count    += 1
+                                logger.info(
+                                    f"CNN auto-train done — {result['samples']} samples | "
+                                    f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
+                                    f"val={result['final_val_loss']:.4f} | "
+                                    f"fit={result['fit_status']}"
+                                )
                     except Exception as te:
                         logger.error(f"CNN auto-train error: {te}")
 
@@ -1427,6 +1502,8 @@ class CoinbaseCNNAgent:
         # ── Phase 1: collect candles (async DB calls stay on event loop) ──────
         # load_history() is sync parquet I/O — run each in the thread pool so
         # the event loop stays free to serve /api/cnn/train/status polls.
+        _phase1_start = _t.time()
+        logger.info(f"CNN training phase 1/3: loading candles for {len(products)} products")
         all_candle_sets: list = []
         for p in products:
             pid  = p["product_id"]
@@ -1452,16 +1529,25 @@ class CoinbaseCNNAgent:
             if len(candles) >= SEQ_LEN + _FORWARD_HOURS + 1:
                 all_candle_sets.append(candles)
 
+        _phase1_secs = _t.time() - _phase1_start
+        logger.info(
+            f"CNN training phase 1/3 done: {len(all_candle_sets)} products with data "
+            f"in {_phase1_secs:.1f}s"
+        )
+
         # ── Phase 2: build tensors in thread pool ─────────────────────────────
         # Sliding-window feature extraction + tensor stacking + GPU transfer are
         # all CPU/GPU-bound and must NOT run on the event loop.
+        _phase2_start = _t.time()
+        logger.info(f"CNN training phase 2/3: building feature tensors (sliding window)")
         fb = self.fb  # capture FeatureBuilder for closure
 
         _LABEL_THRESH = 0.003   # require ≥0.3% move to avoid noisy near-zero labels
 
         def _build_dataset():
             X_list, y_list = [], []
-            for candles in all_candle_sets:
+            n_products = len(all_candle_sets)
+            for prod_idx, candles in enumerate(all_candle_sets, 1):
                 closes = [c["close"] for c in candles]
                 n      = len(candles)
                 for i in range(SEQ_LEN - 1, n - _FORWARD_HOURS):
@@ -1481,9 +1567,19 @@ class CoinbaseCNNAgent:
                     channels = fb.build(window, {}, candles_5m=proxy_5m)
                     X_list.append(fb.to_tensor(channels))
                     y_list.append(label)
+                if prod_idx % 10 == 0 or prod_idx == n_products:
+                    logger.info(
+                        f"CNN dataset build: {prod_idx}/{n_products} products, "
+                        f"{len(X_list):,} samples so far"
+                    )
             return X_list, y_list
 
         X_list, y_list = await loop.run_in_executor(None, _build_dataset)
+        _phase2_secs = _t.time() - _phase2_start
+        logger.info(
+            f"CNN training phase 2/3 done: {len(X_list):,} samples built "
+            f"in {_phase2_secs:.1f}s ({_phase2_secs/60:.1f} min)"
+        )
 
         if len(X_list) < 4:
             return {"error": f"Not enough data ({len(X_list)} samples, need ≥ 4)"}
@@ -1744,6 +1840,9 @@ class CoinbaseCNNAgent:
             "fit_status":       fit_status,
             "fit_advice":       fit_advice,
             "duration_secs":    int(_t.time() - _train_start),
+            "phase1_secs":      int(_phase1_secs),
+            "phase2_secs":      int(_phase2_secs),
+            "phase3_secs":      int(_t.time() - _train_start - _phase1_secs - _phase2_secs),
             "saved":            _model_saved,   # True = model file overwritten this run
             "epoch_log":        epoch_log,
         }
