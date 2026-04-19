@@ -96,6 +96,6 @@ Coinbase REST API ──► MarketScanner ──► SQLite DB
 | `/api/cnn/scan` | POST | Trigger CNN scan |
 | `/api/cnn/train` | POST | Trigger CNN training |
 | `/api/performance` | GET | Monthly P&L, rolling 30d, $50k projection |
-| `/api/backfill` | POST | Backfill historical OHLCV data |
-| `/api/backfill/status` | GET | Sample counts per symbol |
+| `/api/history/backfill` | POST | Backfill historical OHLCV data |
+| `/api/history/status` | GET | Sample counts per symbol |
 | `/ws` | WS | Real-time state broadcast |

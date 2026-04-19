@@ -619,7 +619,7 @@ async def _ollama_prob(product_id: str, context: str,
                        lessons: Optional[List[str]] = None,
                        fg_score: Optional[int] = None
                        ) -> tuple[Optional[float], int, int]:
-    model  = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+    model  = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
     regime = "TRENDING" if adx_val >= config.adx_trend_threshold else "RANGING"
     lesson_block = ""
     if lessons:
@@ -688,7 +688,7 @@ class CoinbaseCNNAgent:
     def __init__(self, ws_subscriber=None):
         self.ws     = ws_subscriber
         self.fb     = FeatureBuilder()
-        self._cache: Dict[str, Tuple[float, float]] = {}
+        self._cache: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
         self.model: Optional["SignalCNN"] = None
         self.book   = _CNNBook()          # dry-run portfolio — tracks positions + trades table
         # ── Runtime stats ──────────────────────────────────────────────────

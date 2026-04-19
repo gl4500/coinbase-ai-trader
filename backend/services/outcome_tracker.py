@@ -94,7 +94,7 @@ class OutcomeTracker:
         else:
             lesson_block = "\n\nNo past outcomes recorded yet for this asset."
 
-        model  = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+        model  = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
         prompt = (
             f"{source} agent just signaled {side} for {product_id} "
             f"at ${price:,.4f}\n"

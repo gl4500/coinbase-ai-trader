@@ -6,7 +6,7 @@ TDD tests for 6 CNN/signal improvements:
 3. RSI overbought 78       — momentum agent threshold updated
 4. Funding rate channel    — Ch 20 present in FeatureBuilder output
 5. BTC correlation channel — Ch 21 present in FeatureBuilder output
-6. Time-of-day channels    — Ch 22 (sin) and Ch 23 (cos) present; N_CHANNELS=24
+6. Time-of-day channels    — Ch 22 (sin) and Ch 23 (cos) present; N_CHANNELS=27
 
 Written before implementation (TDD).
 """
@@ -310,3 +310,33 @@ class TestNewChannels:
         channels = FeatureBuilder().build(candles, ob, T=SEQ_LEN)
         assert len(channels) == 27
         assert all(v == 0.0 for v in channels[20]), "No funding → Ch 20 all 0"
+
+
+class TestOllamaModelFallback:
+    """OLLAMA_MODEL fallback must match the documented default across modules.
+
+    Docs/.env set OLLAMA_MODEL=llama3.1:8b; when the env var is missing, all
+    code paths must agree on the same fallback string so behavior stays
+    consistent. A stale fallback (e.g. qwen2.5:7b) silently routes traffic
+    to a different model if the env is ever unset.
+    """
+
+    EXPECTED = 'os.getenv("OLLAMA_MODEL", "llama3.1:8b")'
+    ALT      = '__import__("os").getenv("OLLAMA_MODEL", "llama3.1:8b")'
+
+    def _read(self, rel_path: str) -> str:
+        path = os.path.join(BACKEND, rel_path)
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def test_cnn_agent_fallback(self):
+        src = self._read("agents/cnn_agent.py")
+        assert self.EXPECTED in src, "cnn_agent.py OLLAMA_MODEL fallback must be llama3.1:8b"
+
+    def test_signal_generator_fallback(self):
+        src = self._read("agents/signal_generator.py")
+        assert self.ALT in src, "signal_generator.py OLLAMA_MODEL fallback must be llama3.1:8b"
+
+    def test_outcome_tracker_fallback(self):
+        src = self._read("services/outcome_tracker.py")
+        assert self.EXPECTED in src, "outcome_tracker.py OLLAMA_MODEL fallback must be llama3.1:8b"

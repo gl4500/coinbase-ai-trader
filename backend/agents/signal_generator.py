@@ -393,7 +393,7 @@ def _stoch_rsi(closes: List[float],
 # ── Ollama LLM ────────────────────────────────────────────────────────────────
 
 async def _llm_confirm(product_id: str, side: str, context: str) -> Optional[str]:
-    model = __import__("os").getenv("OLLAMA_MODEL", "qwen2.5:7b")
+    model = __import__("os").getenv("OLLAMA_MODEL", "llama3.1:8b")
     prompt = (
         f"You are a crypto trading analyst. A {side} signal was detected for {product_id}.\n"
         f"Context:\n{context}\n\n"

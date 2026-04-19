@@ -5,6 +5,25 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 30] — 2026-04-19 — Doc/Code Audit Fixes
+
+Post-audit cleanup after reviewing README, REBUILD_STANDARD, CLAUDE.md, CHANGELOG, and `backend/` against actual code.
+
+### Documentation
+- **README.md** — `/api/backfill` → `/api/history/backfill`, `/api/backfill/status` → `/api/history/status` (endpoints were renamed but docs were stale).
+- **CHANGELOG.md Session 27** — same endpoint path correction.
+- **test_signal_improvements.py** — docstring said `N_CHANNELS=24`; updated to `27` to match actual constant.
+
+### Code
+- **CNN cache type hint** (`cnn_agent.py:691`) — was `Dict[str, Tuple[float, float]]` (2-tuple); runtime stores 3-tuple `(cnn_prob, timestamp, indicators_dict)` at line 1101 and per CLAUDE.md invariant. Type hint now matches reality.
+- **OLLAMA_MODEL fallback default** (3 sites: `cnn_agent.py:622`, `signal_generator.py:396`, `outcome_tracker.py:97`) — fallback was `qwen2.5:7b`; current configured model is `llama3.1:8b`. Fallback now matches docs so misconfigured environments route to the documented model.
+
+### TDD
+- `test_cnn_agent.py::test_cache_skips_fetch` — added explicit 3-tuple length assertion.
+- `test_signal_improvements.py::TestOllamaModelFallback` — 3 new tests verify each of the 3 module sites uses `llama3.1:8b` as fallback string.
+
+---
+
 ## [Session 29] — 2026-04-19
 
 ### CNN Risk Management Overhaul
@@ -52,8 +71,8 @@ Format: reverse-chronological by session date.
 ## [Session 27] — 2026-04-18 — Historical Signal Backfill
 
 - **`data/history_backfill.py`** (new) — fetches daily OHLCV from Alpaca (Stooq fallback), computes `return_1d`, `return_5d`, `rv_20d`, `rv_60d`. Idempotent.
-- **POST `/api/backfill`** — manual trigger; `days` param (30–1825, default 365).
-- **GET `/api/backfill/status`** — returns sample counts per symbol + `ready_to_train` bool.
+- **POST `/api/history/backfill`** — manual trigger; `days` param (30–1825, default 365).
+- **GET `/api/history/status`** — returns sample counts per symbol + `ready_to_train` bool.
 - **Auto-backfill at startup** — fires background backfill when total samples < `MIN_TRAIN_SAMPLES` (100).
 - **15 TDD tests** in `tests/test_history_backfill.py`.
 
