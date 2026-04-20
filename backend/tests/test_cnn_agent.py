@@ -29,6 +29,7 @@ from agents.cnn_agent import (
     N_CHANNELS,
     SEQ_LEN,
 )
+import agents.cnn_agent as _cnn_mod
 
 try:
     import torch
@@ -1180,3 +1181,15 @@ class TestRegimeLabelAndVWAPDisplay:
             f"expected={expected_pct:.4f}% "
             f"(price={price}, vwap={vwap_price})"
         )
+
+
+class TestPhase2LogCadence:
+    """Phase-2 dataset build must log often enough to keep the watchdog quiet.
+
+    Phase 2 takes ~10-13 min per 10 products. Logging every 10 products risks
+    slipping past the 30-min log-stale window when one product is slower than
+    usual. Cadence of every 5 products gives ~5-6 min between log lines.
+    """
+
+    def test_phase2_log_every_is_5(self):
+        assert _cnn_mod._PHASE2_LOG_EVERY == 5

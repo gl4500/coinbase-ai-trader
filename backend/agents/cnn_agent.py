@@ -257,6 +257,8 @@ except ImportError:
 
 N_CHANNELS      = 27
 SEQ_LEN         = 60
+
+_PHASE2_LOG_EVERY = 5  # log dataset-build progress every N products (watchdog)
 MODEL_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
@@ -1568,7 +1570,7 @@ class CoinbaseCNNAgent:
                     channels = fb.build(window, {}, candles_5m=proxy_5m)
                     X_list.append(fb.to_tensor(channels))
                     y_list.append(label)
-                if prod_idx % 10 == 0 or prod_idx == n_products:
+                if prod_idx % _PHASE2_LOG_EVERY == 0 or prod_idx == n_products:
                     logger.info(
                         f"CNN dataset build: {prod_idx}/{n_products} products, "
                         f"{len(X_list):,} samples so far"
