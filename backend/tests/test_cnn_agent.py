@@ -1193,3 +1193,62 @@ class TestPhase2LogCadence:
 
     def test_phase2_log_every_is_5(self):
         assert _cnn_mod._PHASE2_LOG_EVERY == 5
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestDatasetCache:
+    """Phase-2 tensor build takes 30-40 min. Rerunning every hour re-does
+    identical work because the inputs barely change. Cache X/y to disk keyed
+    by a fingerprint of the inputs so only truly-new data forces a rebuild."""
+
+    def _candles(self, n=5, start_ts=1000, start_close=100.0):
+        return [
+            {"time": start_ts + i * 3600, "open": start_close + i,
+             "high": start_close + i + 1, "low": start_close + i - 1,
+             "close": start_close + i, "volume": 1000.0}
+            for i in range(n)
+        ]
+
+    def test_fingerprint_stable_across_calls(self):
+        sets = [self._candles(10), self._candles(15, start_ts=2000)]
+        fp1 = _cnn_mod._dataset_fingerprint(sets, 60, 4, 0.003, 27)
+        fp2 = _cnn_mod._dataset_fingerprint(sets, 60, 4, 0.003, 27)
+        assert fp1 == fp2 and isinstance(fp1, str) and len(fp1) == 64
+
+    def test_fingerprint_changes_when_candles_grow(self):
+        sets = [self._candles(10)]
+        fp_a = _cnn_mod._dataset_fingerprint(sets, 60, 4, 0.003, 27)
+        sets_b = [self._candles(11)]
+        fp_b = _cnn_mod._dataset_fingerprint(sets_b, 60, 4, 0.003, 27)
+        assert fp_a != fp_b
+
+    def test_fingerprint_changes_when_params_change(self):
+        sets = [self._candles(10)]
+        fp_a = _cnn_mod._dataset_fingerprint(sets, 60, 4, 0.003, 27)
+        fp_b = _cnn_mod._dataset_fingerprint(sets, 60, 8, 0.003, 27)
+        fp_c = _cnn_mod._dataset_fingerprint(sets, 120, 4, 0.003, 27)
+        assert fp_a != fp_b and fp_a != fp_c and fp_b != fp_c
+
+    def test_cache_miss_on_missing_file(self, tmp_path):
+        assert _cnn_mod._load_dataset_cache(
+            str(tmp_path / "no_such.pt"), "any-fp"
+        ) is None
+
+    def test_cache_roundtrip(self, tmp_path):
+        import torch
+        path = str(tmp_path / "cache.pt")
+        X = [torch.zeros(27, 60), torch.ones(27, 60)]
+        y = [0.0, 1.0]
+        _cnn_mod._save_dataset_cache(path, "fp-abc", X, y)
+        got = _cnn_mod._load_dataset_cache(path, "fp-abc")
+        assert got is not None
+        X_got, y_got = got
+        assert len(X_got) == 2 and len(y_got) == 2
+        assert torch.equal(X_got[0], X[0]) and torch.equal(X_got[1], X[1])
+        assert y_got == [0.0, 1.0]
+
+    def test_cache_miss_on_fingerprint_mismatch(self, tmp_path):
+        import torch
+        path = str(tmp_path / "cache.pt")
+        _cnn_mod._save_dataset_cache(path, "fp-old", [torch.zeros(27, 60)], [0.0])
+        assert _cnn_mod._load_dataset_cache(path, "fp-new") is None

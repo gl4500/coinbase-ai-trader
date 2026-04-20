@@ -260,6 +260,55 @@ SEQ_LEN         = 60
 
 _PHASE2_LOG_EVERY = 5  # log dataset-build progress every N products (watchdog)
 MODEL_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
+_DATASET_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_dataset_cache.pt")
+
+
+def _dataset_fingerprint(all_candle_sets, seq_len, forward_hours,
+                         label_thresh, n_channels) -> str:
+    """Stable SHA-256 over inputs that affect the built X/y tensors.
+
+    Two runs with the same fingerprint are guaranteed to produce identical
+    datasets; any change (new candles, different horizon, new label
+    threshold, different channel count) produces a different hex digest.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    h.update(f"{seq_len}|{forward_hours}|{label_thresh}|{n_channels}".encode())
+    for candles in all_candle_sets:
+        if not candles:
+            h.update(b"|empty")
+            continue
+        first, last = candles[0], candles[-1]
+        h.update(
+            f"|{len(candles)}|{first.get('time')}|{last.get('time')}|"
+            f"{last.get('close')}".encode()
+        )
+    return h.hexdigest()
+
+
+def _load_dataset_cache(path: str, fingerprint: str):
+    """Return (X_list, y_list) on fingerprint hit; None on miss or error."""
+    if not os.path.exists(path):
+        return None
+    try:
+        import torch
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as _le:
+        logger.warning(f"CNN dataset cache load failed: {_le}")
+        return None
+    if not isinstance(blob, dict) or blob.get("fingerprint") != fingerprint:
+        return None
+    return blob.get("X"), blob.get("y")
+
+
+def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
+    """Atomically save X/y lists + fingerprint to disk."""
+    import torch
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    torch.save({"fingerprint": fingerprint, "X": X_list, "y": y_list}, tmp)
+    os.replace(tmp, path)
+
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
 _CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
@@ -1548,6 +1597,20 @@ class CoinbaseCNNAgent:
         _LABEL_THRESH = 0.003   # require ≥0.3% move to avoid noisy near-zero labels
 
         def _build_dataset():
+            fp = _dataset_fingerprint(
+                all_candle_sets, SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH, N_CHANNELS
+            )
+            cached = _load_dataset_cache(_DATASET_CACHE_PATH, fp)
+            if cached is not None:
+                X_c, y_c = cached
+                logger.info(
+                    f"CNN dataset cache HIT: {len(X_c):,} samples loaded from disk "
+                    f"(fingerprint={fp[:12]}…) — skipping phase-2 build"
+                )
+                return X_c, y_c
+            logger.info(
+                f"CNN dataset cache MISS (fingerprint={fp[:12]}…) — building from scratch"
+            )
             X_list, y_list = [], []
             n_products = len(all_candle_sets)
             for prod_idx, candles in enumerate(all_candle_sets, 1):
@@ -1575,6 +1638,14 @@ class CoinbaseCNNAgent:
                         f"CNN dataset build: {prod_idx}/{n_products} products, "
                         f"{len(X_list):,} samples so far"
                     )
+            try:
+                _save_dataset_cache(_DATASET_CACHE_PATH, fp, X_list, y_list)
+                logger.info(
+                    f"CNN dataset cached to disk: {len(X_list):,} samples "
+                    f"(fingerprint={fp[:12]}…)"
+                )
+            except Exception as _se:
+                logger.warning(f"CNN dataset cache save failed (non-fatal): {_se}")
             return X_list, y_list
 
         X_list, y_list = await loop.run_in_executor(None, _build_dataset)
