@@ -5,6 +5,34 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 31] — 2026-04-20 — CNN Training Watchdog + Dataset Cache
+
+Every CNN auto-train subprocess was being killed by the log-stale watchdog before it ever reached phase 3 (actual training). Three coordinated fixes.
+
+### Root cause
+`train_worker.py` phase-2 dataset build (sliding-window feature extraction over 100 products × ~300 k samples) is CPU-bound Python and logged progress every 10 products — at ~10–13 min per 10 products, the gap between log lines was right at the 15-min watchdog threshold. One slow product → log stale → watchdog kills subprocess → auto-restart → same thing repeats.
+
+### Change 1 — Raise watchdog window to 30 min
+- `backend/main.py:287` — `_TRAIN_STALE_LOG_SECS` 900 → 1800.
+- Tests in `backend/tests/test_train_watchdog.py` extended: assert new constant + explicit test that 20-min log idle is NOT stale.
+
+### Change 2 — Halve phase-2 log cadence
+- `backend/agents/cnn_agent.py` — new module constant `_PHASE2_LOG_EVERY = 5` (was hard-coded 10 inline). Log cadence now ~5–6 min between lines, well inside the 30-min window.
+- Test: `TestPhase2LogCadence::test_phase2_log_every_is_5`.
+
+### Change 3 — Cache phase-2 dataset to disk
+- New module-level helpers in `backend/agents/cnn_agent.py`: `_dataset_fingerprint`, `_load_dataset_cache`, `_save_dataset_cache`. Stored at `backend/cnn_dataset_cache.pt` (gitignored via `backend/*.pt`).
+- Fingerprint SHA-256 over `(SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH, N_CHANNELS)` + per-product `(count, first_ts, last_ts, last_close)`. Any change → miss → rebuild.
+- `_build_dataset` closure now checks cache first; on hit returns cached tensors and skips the entire sliding-window loop. On miss builds as before and saves before returning. Save failure is non-fatal.
+- Expected impact: first post-fix run still spends 30–40 min in phase 2 (cache miss), subsequent runs load in seconds until new candles arrive.
+- Tests: `TestDatasetCache` class with 6 tests covering fingerprint determinism, parameter sensitivity, round-trip I/O, and mismatch/miss handling.
+
+### TDD
+- RED verified for each change before implementation (constant assertions + helper attribute misses).
+- GREEN full suite: **406 passed**.
+
+---
+
 ## [Session 30.3] — 2026-04-19 — Momentum Agent: Mirror TechAgent Risk Controls
 
 Three coordinated changes to `backend/agents/momentum_agent_cb.py` so the momentum agent's exit logic matches TechAgent's proven behavior.
