@@ -5,6 +5,35 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 30.3] — 2026-04-19 — Momentum Agent: Mirror TechAgent Risk Controls
+
+Three coordinated changes to `backend/agents/momentum_agent_cb.py` so the momentum agent's exit logic matches TechAgent's proven behavior.
+
+### Change 1 — Macro regime multiplier on SELL score
+Added `_macro_adjusted_buy_score` and `_macro_adjusted_sell_score` methods mirroring `tech_agent_cb.py:209-217`. `analyze_product` now fetches `MacroContext` and passes both scores through `buy_gate_multiplier()` / `sell_gate_multiplier()` before comparing to thresholds. Short-squeeze regimes (crowded shorts, very negative funding) now scale the SELL score down to [0.5, 1.0], avoiding selling into lows. `mom_s < -_MOMENTUM_THRESH` escape hatch preserved.
+
+### Change 2 — ATR(14)-based stop replaces fixed trail + hard stop
+- Removed `_TRAILING_STOP = 0.03` and `_HARD_STOP_LOSS = 0.05`.
+- Added `_ATR_MULTIPLIER = 3.0`, `_ATR_STOP_MIN = 0.015`, `_ATR_STOP_MAX = 0.12`.
+- New `_compute_atr_stop(candles, entry_price)` method (mirrors `tech_agent_cb.py:219-235`): stop = ATR(14) × 3.0 / entry, clamped to [1.5 %, 12 %]. Falls back to `_ATR_STOP_MIN` when data insufficient or entry ≤ 0.
+- SCAN BUY stores `atr_stop` on the position dict.
+- TICK handler compares `pct < -pos.get("atr_stop", _ATR_STOP_MIN)` instead of `_HARD_STOP_LOSS`.
+- Removed `_check_trailing_stop` and the trailing-stop branch in `analyze_product`.
+- TICK BUY path also stores `_ATR_STOP_MIN` as a safety floor until the next scan refreshes it.
+
+### Change 3 — SELL threshold 0.30 → 0.55
+Matches TechAgent's `_SELL_THRESHOLD = 0.55`. Filters the noisy 0.30–0.55 SELL band where momentum's SELL signals performed poorly. Inverted the stale `test_thresholds_asymmetric` (BUY > SELL) to `test_sell_threshold_raised_to_match_tech` since the new design intentionally makes SELL the stricter bar.
+
+### TDD
+- New test classes `TestMomentumMacroRegime` (6 tests) and `TestMomentumATRStop` (5 tests) in `backend/tests/test_momentum_agent_cb.py`.
+- Red phase watched: `AttributeError: 'MomentumAgentCB' object has no attribute '_macro_adjusted_sell_score'`, `ImportError: _ATR_STOP_MIN`, `AssertionError: 0.3 == 0.55`.
+- Green: all 41 momentum tests pass. Full suite: **397 passed**.
+
+### Rationale
+User observed the momentum SELL regime was regime-agnostic (fired the same in short-squeeze as in overheated markets) and wanted parity with tech. Reducing SELL aggressiveness in short-crowded regimes + raising the confidence bar should cut false exits that tech has already eliminated.
+
+---
+
 ## [Session 30.2] — 2026-04-19 — Unblock LLM: Training Watchdog + Signal Display Fixes
 
 ### Bug A — LLM suppression

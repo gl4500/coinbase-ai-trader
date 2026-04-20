@@ -13,8 +13,8 @@ Scoring:
   Volume ratio  0.05
 
 BUY  threshold : score >= 0.30  AND  VW-momentum > 0
-SELL threshold : score >= 0.30  OR   5d ROC < -2 %
-Trailing stop : 3 % from high-water mark
+SELL threshold : score >= 0.55  OR   5d ROC < -2 %
+Stop : ATR(14) × 3.0 / entry_price, clamped [1.5 %, 12 %] (stored on position)
 
 Dry-run balance: $1,000  (mirrors CNN/OrderExecutor)
 Decisions saved to `agent_decisions` table for CNN context.
@@ -27,7 +27,8 @@ from typing import Dict, List, Optional, Tuple
 
 import database
 from clients import coinbase_client
-from agents.signal_generator import _adx, _mfi, _rsi
+from agents.signal_generator import _adx, _atr, _mfi, _rsi
+from services.macro_signals import MacroContext, get_macro_service
 from services.outcome_tracker import get_tracker
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,11 @@ _DRY_RUN_BALANCE   = 1_000.0
 _BUY_THRESHOLD     = 0.45   # raised from 0.30 — eliminates weak entries (was 34% win rate)
 _RSI_OVERBOUGHT    = 65.0   # block buys when RSI ≥ 65 (overbought — high loss rate)
 _ADX_MIN_TREND     = 20.0   # require confirmed trend before entering
-_SELL_THRESHOLD    = 0.30
-_TRAILING_STOP     = 0.03    # 3 % trailing stop from high-water mark
+_SELL_THRESHOLD    = 0.55   # mirrors TechAgent — filter noisy SELL signals
 MIN_PRICE          = 0.01    # skip micro-priced tokens (unprofitable spreads)
-_HARD_STOP_LOSS    = 0.05    # 5 % hard stop below avg entry price (real-time)
+_ATR_MULTIPLIER    = 3.0     # stop distance = ATR(14) × multiplier
+_ATR_STOP_MIN      = 0.015   # floor: never tighter than 1.5 %
+_ATR_STOP_MAX      = 0.12    # ceiling: never wider than 12 %
 _TAKE_PROFIT       = 0.20    # 20 % take-profit above avg entry price (real-time)
 _MOMENTUM_SHORT    = 5       # 5-bar ROC
 _MOMENTUM_MID      = 10      # 10-bar ROC
@@ -236,6 +238,8 @@ class MomentumAgentCB:
                     self._high_water[pid] = price
                     spent, _ = await self.book.buy(pid, price, frac, self._high_water, trigger="TICK_SIGNAL")
                     if spent > 0:
+                        if pid in self.book.positions:
+                            self.book.positions[pid]["atr_stop"] = _ATR_STOP_MIN
                         self.signals_buy += 1
                         self._score_cache.pop(pid, None)   # consumed
                         reasoning = (
@@ -278,18 +282,16 @@ class MomentumAgentCB:
             exit_reason  = None
             exit_trigger = "TICK_SIGNAL"
 
-            # 1. Trailing stop (3% from high-water)
-            if self._check_trailing_stop(pid, price):
-                hw = self._high_water.get(pid, avg_price)
-                exit_reason  = f"MOMENTUM TRAIL STOP [TICK]: fell from ${hw:.4f} ({pct*100:+.1f}%)"
+            # 1. ATR-based stop (stored on position at BUY)
+            atr_stop = pos.get("atr_stop", _ATR_STOP_MIN)
+            if pct < -atr_stop:
+                exit_reason  = (
+                    f"MOMENTUM ATR STOP [TICK]: {pct*100:.1f}% below entry "
+                    f"${avg_price:.4f} (stop={atr_stop*100:.1f}%)"
+                )
                 exit_trigger = "TICK_STOP"
 
-            # 2. Hard stop-loss (5% below entry)
-            elif pct < -_HARD_STOP_LOSS:
-                exit_reason  = f"MOMENTUM HARD STOP [TICK]: {pct*100:.1f}% below entry ${avg_price:.4f}"
-                exit_trigger = "TICK_STOP"
-
-            # 3. Take-profit (20% above entry)
+            # 2. Take-profit (20% above entry)
             elif pct > _TAKE_PROFIT:
                 exit_reason  = f"MOMENTUM TAKE PROFIT [TICK]: +{pct*100:.1f}% above entry ${avg_price:.4f}"
                 exit_trigger = "TICK_PROFIT"
@@ -323,23 +325,31 @@ class MomentumAgentCB:
                 return p
         return fallback
 
-    # ── Trailing stop check ────────────────────────────────────────────────────
+    # ── ATR-based stop ─────────────────────────────────────────────────────────
 
-    def _check_trailing_stop(self, pid: str, price: float) -> bool:
-        """Update high-water mark; return True if trailing stop triggered."""
-        if not self.book.has_position(pid):
-            return False
-        if pid not in self._high_water or price > self._high_water[pid]:
-            self._high_water[pid] = price
-            return False
-        drawdown = (self._high_water[pid] - price) / self._high_water[pid]
-        if drawdown > _TRAILING_STOP:
-            logger.info(
-                f"MomentumAgentCB trailing stop {pid}: "
-                f"fell {drawdown*100:.1f}% from ${self._high_water[pid]:.4f}"
-            )
-            return True
-        return False
+    def _compute_atr_stop(self, candles: List[Dict], entry_price: float) -> float:
+        """
+        ATR(14) × _ATR_MULTIPLIER / entry_price, clamped to [MIN, MAX].
+        Returns _ATR_STOP_MIN when insufficient data or zero entry price.
+        """
+        if len(candles) < 15:
+            return _ATR_STOP_MIN
+        highs  = [c["high"]  for c in candles]
+        lows   = [c["low"]   for c in candles]
+        closes = [c["close"] for c in candles]
+        atr    = _atr(highs, lows, closes)
+        if atr <= 0 or entry_price <= 0:
+            return _ATR_STOP_MIN
+        raw = atr * _ATR_MULTIPLIER / entry_price
+        return max(_ATR_STOP_MIN, min(raw, _ATR_STOP_MAX))
+
+    # ── Macro-adjusted score helpers ───────────────────────────────────────────
+
+    def _macro_adjusted_buy_score(self, sc: Dict, macro: MacroContext) -> float:
+        return min(1.0, sc["buy_score"] * macro.buy_gate_multiplier())
+
+    def _macro_adjusted_sell_score(self, sc: Dict, macro: MacroContext) -> float:
+        return min(1.0, sc["sell_score"] * macro.sell_gate_multiplier())
 
     # ── Scoring ────────────────────────────────────────────────────────────────
 
@@ -451,8 +461,9 @@ class MomentumAgentCB:
         # Cache for real-time tick handler to reference between scans
         self._score_cache[pid] = sc
 
-        buy_score  = sc["buy_score"]
-        sell_score = sc["sell_score"]
+        macro      = await get_macro_service().get_macro_context()
+        buy_score  = self._macro_adjusted_buy_score(sc, macro)
+        sell_score = self._macro_adjusted_sell_score(sc, macro)
         has_pos    = self.book.has_position(pid)
 
         side       = "HOLD"
@@ -460,29 +471,22 @@ class MomentumAgentCB:
         pnl        = None
         reasoning  = ""
 
-        # ── Trailing stop (takes priority) ────────────────────────────────────
-        if has_pos and self._check_trailing_stop(pid, price):
-            hw_price = self._high_water.get(pid, price)
-            pnl = await self.book.sell(pid, price, self._high_water, trigger="SCAN_STOP")
-            self._high_water.pop(pid, None)
-            side       = "SELL"
-            confidence = 0.90
-            reasoning  = (
-                f"MOMENTUM TRAIL STOP: fell from ${hw_price:.4f} "
-                f"pnl=${pnl:+.2f}"
-            )
-            self.signals_sell += 1
-
-        elif (buy_score >= _BUY_THRESHOLD and not has_pos and sc["vw_mom"] > 0
+        if (buy_score >= _BUY_THRESHOLD and not has_pos and sc["vw_mom"] > 0
               and sc.get("rsi", 50.0) < _RSI_OVERBOUGHT
               and sc.get("adx", 0.0) >= _ADX_MIN_TREND):
             frac = _MAX_POSITION_FRAC * buy_score
             self._high_water[pid] = price
             spent, _ = await self.book.buy(pid, price, frac, self._high_water, trigger="SCAN")
             if spent > 0:
+                atr_stop = self._compute_atr_stop(candles, price)
+                if pid in self.book.positions:
+                    self.book.positions[pid]["atr_stop"] = atr_stop
                 side       = "BUY"
                 confidence = buy_score
-                reasoning  = f"MOMENTUM BUY: {'; '.join(sc['buy_reasons'])} score={buy_score:.2f}"
+                reasoning  = (
+                    f"MOMENTUM BUY: {'; '.join(sc['buy_reasons'])} score={buy_score:.2f} "
+                    f"atr_stop={atr_stop*100:.1f}%"
+                )
                 self.signals_buy += 1
             else:
                 self._high_water.pop(pid, None)
@@ -564,7 +568,7 @@ class MomentumAgentCB:
         await self.start()   # restore persisted state before first scan
         logger.info(
             f"MomentumAgentCB loop started | interval={interval}s | "
-            f"balance=${self.book.balance:.2f} | trailing_stop={_TRAILING_STOP*100:.0f}%"
+            f"balance=${self.book.balance:.2f} | atr_stop=[{_ATR_STOP_MIN*100:.1f}%, {_ATR_STOP_MAX*100:.0f}%]"
         )
         while True:
             try:

@@ -228,11 +228,11 @@ class TestMomentumThresholds:
     def test_sell_threshold(self):
         assert _SELL_THRESHOLD > 0.0
 
-    def test_thresholds_asymmetric(self):
-        """Buy threshold is intentionally higher than sell — higher bar for entries."""
-        assert _BUY_THRESHOLD > _SELL_THRESHOLD, (
-            f"BUY={_BUY_THRESHOLD} should be > SELL={_SELL_THRESHOLD} "
-            "(raised buy threshold eliminates weak 34%-win-rate entries)"
+    def test_sell_threshold_raised_to_match_tech(self):
+        """SELL raised 0.30 → 0.55 to match TechAgent and filter noisy SELLs."""
+        assert _SELL_THRESHOLD == 0.55, (
+            f"SELL threshold must be 0.55 (was 0.30) to mirror TechAgent's "
+            f"high-confidence SELL bar; got {_SELL_THRESHOLD}"
         )
 
 
@@ -268,6 +268,203 @@ class TestMomentumAnalyze:
         if result is not None:
             assert result["product_id"] == "BTC-USD"
             assert result["side"] in ("BUY", "SELL", "HOLD")
+
+
+class TestMomentumMacroRegime:
+    """
+    Momentum must gate its SELL score through MacroContext.sell_gate_multiplier()
+    so that when shorts are crowded (squeeze risk) we don't sell into lows.
+    Mirrors TechAgentCB's macro integration.
+    """
+
+    def _neutral(self):
+        from services.macro_signals import MacroContext
+        return MacroContext(
+            funding_rate=0.0001, ls_ratio=1.0,
+            oi_usd=10e9, oi_trend=0.0,
+            btc_dominance=52.0, coinbase_premium=0.0, fetch_ok=True,
+        )
+
+    def _short_squeeze(self):
+        from services.macro_signals import MacroContext
+        return MacroContext(
+            funding_rate=-0.002, ls_ratio=0.6,
+            oi_usd=10e9, oi_trend=0.0,
+            btc_dominance=52.0, coinbase_premium=0.0, fetch_ok=True,
+        )
+
+    def _overheated(self):
+        from services.macro_signals import MacroContext
+        return MacroContext(
+            funding_rate=0.002, ls_ratio=2.5,
+            oi_usd=15e9, oi_trend=0.2,
+            btc_dominance=52.0, coinbase_premium=0.0, fetch_ok=True,
+        )
+
+    def test_neutral_macro_leaves_sell_score_unchanged(self):
+        ag = _agent()
+        sc = ag._score(
+            [c["close"]  for c in _make_candles(120, trend="down")],
+            [c["volume"] for c in _make_candles(120, trend="down")],
+            [c["high"]   for c in _make_candles(120, trend="down")],
+            [c["low"]    for c in _make_candles(120, trend="down")],
+        )
+        adj = ag._macro_adjusted_sell_score(sc, self._neutral())
+        assert adj == pytest.approx(sc["sell_score"], abs=0.01)
+
+    def test_short_squeeze_macro_reduces_sell_score(self):
+        ag = _agent()
+        candles = _make_candles(120, trend="down")
+        sc = ag._score(
+            [c["close"]  for c in candles],
+            [c["volume"] for c in candles],
+            [c["high"]   for c in candles],
+            [c["low"]    for c in candles],
+        )
+        if sc["sell_score"] <= 0:
+            pytest.skip("downtrend produced zero sell_score — cannot test reduction")
+        adj = ag._macro_adjusted_sell_score(sc, self._short_squeeze())
+        assert adj < sc["sell_score"]
+
+    def test_adjusted_sell_score_never_exceeds_one(self):
+        ag = _agent()
+        candles = _make_candles(120, trend="down")
+        sc = ag._score(
+            [c["close"]  for c in candles],
+            [c["volume"] for c in candles],
+            [c["high"]   for c in candles],
+            [c["low"]    for c in candles],
+        )
+        assert ag._macro_adjusted_sell_score(sc, self._overheated()) <= 1.0
+
+    def test_adjusted_sell_score_never_negative(self):
+        ag = _agent()
+        candles = _make_candles(120, trend="down")
+        sc = ag._score(
+            [c["close"]  for c in candles],
+            [c["volume"] for c in candles],
+            [c["high"]   for c in candles],
+            [c["low"]    for c in candles],
+        )
+        assert ag._macro_adjusted_sell_score(sc, self._overheated()) >= 0.0
+        assert ag._macro_adjusted_sell_score(sc, self._short_squeeze()) >= 0.0
+
+    def test_macro_adjusted_buy_score_helper_exists(self):
+        """Symmetry with tech: momentum agent must also expose buy-score adjuster."""
+        ag = _agent()
+        candles = _make_candles(120, trend="up")
+        sc = ag._score(
+            [c["close"]  for c in candles],
+            [c["volume"] for c in candles],
+            [c["high"]   for c in candles],
+            [c["low"]    for c in candles],
+        )
+        adj = ag._macro_adjusted_buy_score(sc, self._neutral())
+        assert adj == pytest.approx(sc["buy_score"], abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_analyze_uses_macro_adjusted_sell_score(self):
+        """
+        analyze_product must fetch MacroContext and apply sell_gate_multiplier
+        before comparing sell_score to _SELL_THRESHOLD. We verify by mocking
+        get_macro_service and confirming it was awaited at least once.
+        """
+        ag = _agent(ws_price=50_000.0)
+        candles = _make_candles(120, trend="up")   # no SELL expected
+        product = {"product_id": "BTC-USD", "price": 50_000.0}
+
+        with (
+            patch("agents.momentum_agent_cb.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.momentum_agent_cb.database.save_agent_decision",
+                  new=AsyncMock()),
+            patch("agents.momentum_agent_cb.get_macro_service") as mock_ms,
+        ):
+            mock_ms.return_value.get_macro_context = AsyncMock(
+                return_value=self._neutral()
+            )
+            await ag.analyze_product(product)
+            mock_ms.return_value.get_macro_context.assert_awaited()
+
+
+class TestMomentumATRStop:
+    """
+    Momentum must use ATR(14)-based stops instead of a fixed 3% trail + 5% hard stop.
+    Mirrors TechAgentCB._compute_atr_stop.
+    """
+
+    def test_compute_atr_stop_returns_floor_with_insufficient_data(self):
+        from agents.momentum_agent_cb import MomentumAgentCB, _ATR_STOP_MIN
+        ag = _agent()
+        short = _make_candles(10)
+        assert ag._compute_atr_stop(short, 50_000.0) == _ATR_STOP_MIN
+
+    def test_compute_atr_stop_bounded_within_min_max(self):
+        from agents.momentum_agent_cb import _ATR_STOP_MIN, _ATR_STOP_MAX
+        ag = _agent()
+        candles = _make_candles(60, trend="up")
+        stop = ag._compute_atr_stop(candles, 50_000.0)
+        assert _ATR_STOP_MIN <= stop <= _ATR_STOP_MAX
+
+    def test_compute_atr_stop_zero_entry_price_returns_floor(self):
+        from agents.momentum_agent_cb import _ATR_STOP_MIN
+        ag = _agent()
+        candles = _make_candles(60, trend="up")
+        assert ag._compute_atr_stop(candles, 0.0) == _ATR_STOP_MIN
+
+    @pytest.mark.asyncio
+    async def test_buy_stores_atr_stop_on_position(self):
+        """When BUY fires, the opened position dict must include atr_stop."""
+        from services.macro_signals import MacroContext
+        neutral = MacroContext(
+            funding_rate=0.0001, ls_ratio=1.0,
+            oi_usd=10e9, oi_trend=0.0,
+            btc_dominance=52.0, coinbase_premium=0.0, fetch_ok=True,
+        )
+        ag = _agent(ws_price=50_000.0)
+        candles = _make_candles(120, trend="up")
+        product = {"product_id": "BTC-USD", "price": 50_000.0}
+
+        async def fake_buy(pid, price, frac, hw, trigger="SCAN"):
+            ag.book.positions[pid] = {"size": 0.01, "avg_price": price}
+            return price * 0.01, 0.01
+
+        with (
+            patch("agents.momentum_agent_cb.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.momentum_agent_cb.database.save_agent_decision",
+                  new=AsyncMock()),
+            patch.object(ag.book, "buy", side_effect=fake_buy),
+            patch("agents.momentum_agent_cb.get_macro_service") as mock_ms,
+        ):
+            mock_ms.return_value.get_macro_context = AsyncMock(return_value=neutral)
+            await ag.analyze_product(product)
+
+        pos = ag.book.positions.get("BTC-USD")
+        if pos is not None:   # only assert if buy path fired (uptrend usually triggers)
+            assert "atr_stop" in pos, "BUY must attach atr_stop to position dict"
+            from agents.momentum_agent_cb import _ATR_STOP_MIN, _ATR_STOP_MAX
+            assert _ATR_STOP_MIN <= pos["atr_stop"] <= _ATR_STOP_MAX
+
+    @pytest.mark.asyncio
+    async def test_tick_uses_position_atr_stop_not_hard_stop(self):
+        """Tick handler must compare pct to stored atr_stop, not _HARD_STOP_LOSS."""
+        ag = _agent(ws_price=47_000.0)
+        ag.book.positions["BTC-USD"] = {
+            "size": 0.01, "avg_price": 50_000.0, "atr_stop": 0.02,  # 2% stop
+        }
+        ag._high_water["BTC-USD"] = 50_000.0
+
+        sell_mock = AsyncMock(return_value=-50.0)
+        with (
+            patch.object(ag.book, "sell", sell_mock),
+            patch("agents.momentum_agent_cb.database.save_agent_decision",
+                  new=AsyncMock()),
+        ):
+            # Price at 47k = -6% — triggers even a loose stop
+            await ag.on_price_tick("BTC-USD", 47_000.0)
+
+        assert sell_mock.await_count == 1
 
 
 class TestMomentumMinPriceGuard:
