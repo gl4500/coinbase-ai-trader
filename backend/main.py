@@ -284,7 +284,9 @@ _TRAIN_LOG_FILE      = os.path.join(os.path.dirname(__file__), "logs", "cnn_trai
 # train_worker.py only writes the progress file at start and end, so its mtime
 # is useless mid-run. We watch the training log mtime instead.
 _TRAIN_STALE_START_SECS = 1800   # 30 min grace after start before staleness applies
-_TRAIN_STALE_LOG_SECS   = 900    # 15 min without log writes = stuck
+_TRAIN_STALE_LOG_SECS   = 1800   # 30 min without log writes = stuck (phase-2 dataset
+                                 # build logs every 10-13 min per 10 products, so the
+                                 # old 15-min window tripped on normal cadence)
 
 
 def _is_training_stale(data: dict, log_mtime, now: float) -> bool:

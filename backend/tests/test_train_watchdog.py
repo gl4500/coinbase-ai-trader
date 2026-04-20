@@ -50,13 +50,24 @@ class TestTrainingStaleness:
         assert _fn()(data, log_mtime=now - 60, now=now) is False
 
     def test_running_with_stale_log_after_grace_is_stale(self):
-        # Ran for 2 hours, last log 30 minutes ago, log-staleness = 15 min.
+        # Ran for 2 hours, last log 45 minutes ago → past the 30-min window.
         now = 1_000_000.0
         data = {"status": "running", "started_at": now - 2 * 3600}
-        assert _fn()(data, log_mtime=now - 30 * 60, now=now) is True
+        assert _fn()(data, log_mtime=now - 45 * 60, now=now) is True
 
     def test_missing_log_mtime_is_not_stale(self):
         # Can't determine → don't kill.
         now = 1_000_000.0
         data = {"status": "running", "started_at": now - 2 * 3600}
         assert _fn()(data, log_mtime=None, now=now) is False
+
+    def test_log_stale_threshold_is_30_min(self):
+        import main
+        assert main._TRAIN_STALE_LOG_SECS == 1800
+
+    def test_running_log_idle_20m_is_not_stale(self):
+        # Phase-2 dataset build logs every ~10-13 min; 20 min idle must NOT trip
+        # the watchdog under the new 30-min threshold.
+        now = 1_000_000.0
+        data = {"status": "running", "started_at": now - 2 * 3600}
+        assert _fn()(data, log_mtime=now - 20 * 60, now=now) is False
