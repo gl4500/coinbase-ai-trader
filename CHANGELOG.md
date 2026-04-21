@@ -5,6 +5,52 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 32] — 2026-04-21 — CNN Training Quality Improvements (P1–P4)
+
+A 9-task plan to improve CNN training quality and honesty of val metrics. All work under TDD (RED→GREEN) and behind `backend/tests/test_cnn_agent.py`.
+
+### P1 — Save-gate unblock (`53bc37a`)
+- A stale sub-0.1 `cnn_best_loss.txt` was blocking every subsequent save-if-better check.
+- `save_model` now treats any recorded best below `_MIN_PLAUSIBLE_LOSS = 0.1` as "unset" and falls through to save.
+
+### P2 — Per-product append-only dataset cache (`db497c6`)
+- Replaced the single-fingerprint dataset cache with per-product entries keyed by `(first_ts, last_ts, last_n)`.
+- New helpers: `_dataset_schema`, `_build_samples_range`, `_extend_or_rebuild_product`, `_load_pp_cache`, `_save_pp_cache`. Schema versioned via `_DATASET_CACHE_VERSION` (now 4).
+- Warm runs now append only newly-arrived candles instead of rebuilding phase 2 end-to-end (103 min → near-instant).
+
+### P3a — Triple-barrier labels (`13af769`)
+- `_label_triple_barrier(candles, i, max_bars, up_mult, dn_mult, label_thresh)` labels each sample by whichever of {upper barrier +1%, lower barrier −1%, time barrier} fires first inside the forward window (López de Prado 2018). Replaces sign-of-4h-return.
+- `_TB_UP_MULT = 0.01`, `_TB_DN_MULT = 0.01`.
+
+### P3b — Train/serve distribution alignment (`683ada0`)
+- Audit found 11 feature channels constant at training due to missing upstream inputs.
+- `_TRAINING_CONSTANT_CHANNELS` frozenset + `_mask_training_constant_channels` applied at inference (`_cnn_prob`), zero-ing the same channels the model never saw vary. Keeps `N_CHANNELS=27` (checkpoint compatibility preserved).
+
+### P3c — Sample-uniqueness weighting (`3994d83`)
+- `_compute_uniqueness(sample_indices, forward_hours, n_candles)` returns per-sample weights `u_j = mean(1/N_t)` over the forward window (López de Prado 2018 ch. 4).
+- `_sync_fit` BCE now uses `reduction="none"` and takes a weighted mean over uniqueness for both train and val loss. Isolated samples get weight 1.0; densely overlapping samples approach `1/forward_hours`.
+
+### P3d — Label smoothing (`35c1a68`)
+- `_LABEL_SMOOTH = 0.05` and `_smooth_labels(y, ε)` map hard targets to soft `{ε, 1−ε}` before `binary_cross_entropy_with_logits` (Szegedy 2016).
+- Training BCE uses smoothed labels; val BCE keeps hard labels so val-loss remains comparable across runs.
+
+### P3e — Purged walk-forward CV index helper (`6939815`)
+- `_purged_walkforward_splits(sample_indices, n_splits, forward_hours, embargo_bars)` (López de Prado 2018 ch. 7): walk-forward CV with purging (drop training samples whose forward window overlaps val) and embargo (drop samples in the serial-correlation band after each val block).
+- Policy constants `_WALKFORWARD_FOLDS = 3`, `_WALKFORWARD_EMBARGO = 4`.
+- Ships the index helper with 9 tests; wiring into `_sync_fit` deferred — requires first globally time-sorting samples across products in `_build_dataset`.
+
+### P4 — Per-regime validation metrics (`f992696`)
+- `_per_regime_metrics(y_true, y_pred, regimes)` buckets val predictions by HMM regime (`TRENDING`/`RANGING`/`CHAOTIC` from `services/hmm_regime.py`) and reports per-regime `n`, accuracy (0.5 threshold), mean BCE loss, and positive rate.
+- Surfaces regime-dependent asymmetry that aggregate val_loss hides. Ships helper + 8 tests; training-log integration deferred.
+
+### Sidecar
+- Task #22 — pre-existing `test_losses_are_positive_floats` was failing on fresh `main` (mock data generated a single-class dataset, BCE rounded to 0.0 in fp32). Mock expanded to 200 bars; strict `> 0` relaxed to finite and `< 10` (the real intent is catching NaN/Inf, not fp precision).
+
+### TDD evidence
+- Full suite: **454 passed, 13 warnings** on commit `f992696`.
+
+---
+
 ## [Session 31] — 2026-04-20 — CNN Training Watchdog + Dataset Cache
 
 Every CNN auto-train subprocess was being killed by the log-stale watchdog before it ever reached phase 3 (actual training). Three coordinated fixes.

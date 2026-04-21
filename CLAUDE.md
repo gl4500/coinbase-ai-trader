@@ -222,6 +222,10 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 6. Auto-train must run in subprocess, never block the async scan loop
 7. `OLLAMA_MODEL` must be read from env in every module — never hardcode a model name
 8. `__MACRO__.parquet` uses `__`-prefixed filename — `symbols_with_data()` must filter `__`-prefixed entries
+9. **Dataset cache is per-product append-only** — entry schema `{first_ts, last_ts, last_n, X, y, indices}`. Schema changes to seq_len/forward_hours/label_thresh/n_channels require bumping `_DATASET_CACHE_VERSION`.
+10. **Training BCE uses smoothed labels; validation BCE uses hard labels** — changing either breaks run-to-run val_loss comparability.
+11. **Inference must mask `_TRAINING_CONSTANT_CHANNELS` before forward pass** — `_cnn_prob` calls `_mask_training_constant_channels` to prevent train/serve distribution skew. Removing this requires retraining without affected channels.
+12. **BCE uses `reduction="none"` + uniqueness-weighted mean** — never `reduction="mean"` on overlapping forward-window samples.
 
 ---
 
