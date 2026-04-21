@@ -864,7 +864,9 @@ class CoinbaseCNNAgent:
     def _read_best_loss() -> float:
         try:
             v = float(open(_BEST_LOSS_PATH).read().strip())
-            return v if v > 0.0 else float("inf")   # 0.0 is corrupted — treat as unset
+            # BCE at chance ≈ 0.693; anything below 0.1 is a stale/corrupted
+            # sentinel (historic bug: content=1e-06 rejected every trained model).
+            return v if v >= 0.1 else float("inf")
         except Exception:
             return float("inf")
 

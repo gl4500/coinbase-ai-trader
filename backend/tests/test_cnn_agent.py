@@ -1017,6 +1017,29 @@ class TestTrainingFramework:
         finally:
             ca._BEST_LOSS_PATH = orig
 
+    def test_best_loss_stale_tiny_value_treated_as_unset(self, tmp_path):
+        """A stale tiny value (< 0.1) in cnn_best_loss.txt must be treated as unset.
+
+        Rationale: BCE loss at chance is ~0.693; a legitimate best_val_loss will
+        not be below 0.1. Without this guard, a corrupted/stale file (the real
+        bug: content=1e-06) causes every trained model to be rejected at save
+        time because best_val_loss >= 1e-06 always.
+        """
+        import agents.cnn_agent as ca
+        orig = ca._BEST_LOSS_PATH
+        ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
+        try:
+            with open(ca._BEST_LOSS_PATH, "w") as f:
+                f.write("1e-06")
+            assert CoinbaseCNNAgent._read_best_loss() == float("inf"), \
+                "Stale sub-0.1 value must be treated as unset so real models can save"
+            with open(ca._BEST_LOSS_PATH, "w") as f:
+                f.write("0.5")
+            assert abs(CoinbaseCNNAgent._read_best_loss() - 0.5) < 1e-6, \
+                "Realistic values >= 0.1 must be preserved"
+        finally:
+            ca._BEST_LOSS_PATH = orig
+
 
 class TestHMMStability:
     """HMM fit should keep old model on failure and warn on label flip."""
