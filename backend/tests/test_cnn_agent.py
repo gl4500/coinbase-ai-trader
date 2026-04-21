@@ -1594,3 +1594,54 @@ class TestTrainingConstantChannelMask:
         snapshot = [ch[:] for ch in channels]
         _cnn_mod._mask_training_constant_channels(channels)
         assert channels == snapshot, "input list must not be mutated"
+
+
+# ── Sample-uniqueness weighting (P3c) ─────────────────────────────────────────
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestSampleUniqueness:
+    """P3c — down-weight overlapping samples when training.
+
+    Forward windows of length forward_hours share causal data across
+    neighboring samples. López de Prado's sample-uniqueness assigns each
+    sample a weight = mean(1/N_t) over its forward window, where N_t is the
+    count of concurrent samples whose forward window includes time t.
+    """
+
+    def test_single_isolated_sample_has_weight_one(self):
+        # N_t = 1 for every t in the sample's forward window → u = 1.0
+        assert _cnn_mod._compute_uniqueness([10], 4, 100) == [1.0]
+
+    def test_two_disjoint_samples_have_weight_one(self):
+        # Sample 10's forward window [11..14] is disjoint from sample 30's
+        # [31..34], so neither sample shares any future bar with the other.
+        assert _cnn_mod._compute_uniqueness([10, 30], 4, 100) == [1.0, 1.0]
+
+    def test_two_adjacent_samples_share_weight(self):
+        # Samples 10 and 11, h=4.
+        # Sample 10 window [11..14], sample 11 window [12..15].
+        # N_11=1, N_12=N_13=N_14=2, N_15=1.
+        # u_10 = mean(1, 1/2, 1/2, 1/2) = 0.625
+        # u_11 = mean(1/2, 1/2, 1/2, 1) = 0.625
+        w = _cnn_mod._compute_uniqueness([10, 11], 4, 100)
+        assert abs(w[0] - 0.625) < 1e-9
+        assert abs(w[1] - 0.625) < 1e-9
+
+    def test_uniform_interior_approaches_1_over_h(self):
+        # Long consecutive run: interior samples have u ≈ 1/h.
+        h = 4
+        indices = list(range(59, 180))
+        w = _cnn_mod._compute_uniqueness(indices, h, 200)
+        interior = w[20:100]   # skip boundary effects
+        mean_w = sum(interior) / len(interior)
+        assert abs(mean_w - 1.0 / h) < 0.01
+
+    def test_empty_indices_returns_empty(self):
+        assert _cnn_mod._compute_uniqueness([], 4, 100) == []
+
+    def test_weights_clamped_at_out_of_range_t(self):
+        # Last samples may have forward bars beyond n — those t's are skipped
+        # from the average, not counted with N_t=0 (which would div-by-zero).
+        w = _cnn_mod._compute_uniqueness([96], 4, 100)   # window [97..100], t=100 out-of-range
+        # Only t=97,98,99 in range; all have N_t=1 → u=1.0
+        assert w == [1.0]

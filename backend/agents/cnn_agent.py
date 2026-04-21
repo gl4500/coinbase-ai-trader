@@ -341,14 +341,42 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # (seq_len / forward_hours / label_thresh / n_channels) still invalidate the
 # whole cache, but day-to-day ticking touches at most a handful of samples
 # per product.
-# Version 3 = triple-barrier labels (P3a) replacing sign-of-4h-return.
-_DATASET_CACHE_VERSION = 3
+# Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
+# López-de-Prado sample-uniqueness weighting (P3c).
+_DATASET_CACHE_VERSION = 4
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
 # first inside the forward window — cuts label noise vs. sign-of-final-return.
 _TB_UP_MULT = 0.01   # +1% upper barrier
 _TB_DN_MULT = 0.01   # -1% lower barrier
+
+
+def _compute_uniqueness(sample_indices, forward_hours: int, n_candles: int):
+    """Per-sample weight = mean(1/N_t) over the forward window [i+1..i+h].
+
+    N_t counts how many samples have a forward window that includes time t;
+    time points beyond n_candles are dropped from the average rather than
+    counted as N_t=0. Isolated samples get weight 1.0; densely overlapping
+    samples approach 1/forward_hours. See López de Prado 2018 ch. 4.
+    """
+    if not sample_indices:
+        return []
+    N = [0] * n_candles
+    for i in sample_indices:
+        for t in range(i + 1, i + forward_hours + 1):
+            if 0 <= t < n_candles:
+                N[t] += 1
+    weights = []
+    for i in sample_indices:
+        terms = 0.0
+        count = 0
+        for t in range(i + 1, i + forward_hours + 1):
+            if 0 <= t < n_candles and N[t] > 0:
+                terms += 1.0 / N[t]
+                count += 1
+        weights.append(terms / count if count else 0.0)
+    return weights
 
 
 def _label_triple_barrier(candles, i: int, max_bars: int,
@@ -411,15 +439,17 @@ def _dataset_schema(seq_len: int, forward_hours: int,
 def _build_samples_range(candles, i_start: int, i_end: int,
                          fb, seq_len: int, forward_hours: int,
                          label_thresh: float):
-    """Build (X, y) for sliding-window indices i in [i_start, i_end).
+    """Build (X, y, indices) for sliding-window indices i in [i_start, i_end).
 
     Labels use triple-barrier (P3a): upper barrier (+_TB_UP_MULT), lower
     barrier (-_TB_DN_MULT), or time barrier at i+forward_hours. Dead-zone
     samples (time barrier && |final_ret| < label_thresh) are skipped.
+    The returned `indices` list records the candle index i that produced
+    each retained sample — needed for uniqueness weighting (P3c).
     """
-    X_list, y_list = [], []
+    X_list, y_list, idx_list = [], [], []
     if i_end <= i_start:
-        return X_list, y_list
+        return X_list, y_list, idx_list
     for i in range(i_start, i_end):
         label = _label_triple_barrier(
             candles, i, forward_hours, _TB_UP_MULT, _TB_DN_MULT, label_thresh
@@ -431,7 +461,8 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         channels = fb.build(window, {}, candles_5m=proxy_5m)
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
-    return X_list, y_list
+        idx_list.append(i)
+    return X_list, y_list, idx_list
 
 
 def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
@@ -455,18 +486,20 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
     last_ts  = candles[-1].get("start") or candles[-1].get("time")
 
     def _full_rebuild():
-        X, y = _build_samples_range(
+        X, y, idx = _build_samples_range(
             candles, seq_len - 1, n - forward_hours,
             fb, seq_len, forward_hours, label_thresh,
         )
         return {
             "first_ts": first_ts, "last_ts": last_ts, "last_n": n,
-            "X": X, "y": y,
+            "X": X, "y": y, "indices": idx,
         }
 
     if (entry is None
             or entry.get("first_ts") != first_ts
-            or int(entry.get("last_n", 0)) > n):
+            or int(entry.get("last_n", 0)) > n
+            or "indices" not in entry):
+        # Missing "indices" ⇒ v<4 cache; full rebuild reseeds it.
         return _full_rebuild(), "rebuild"
 
     last_n = int(entry["last_n"])
@@ -475,7 +508,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
 
     i_start = max(seq_len - 1, last_n - forward_hours)
     i_end   = n - forward_hours
-    X_new, y_new = _build_samples_range(
+    X_new, y_new, idx_new = _build_samples_range(
         candles, i_start, i_end,
         fb, seq_len, forward_hours, label_thresh,
     )
@@ -485,6 +518,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         "last_n":   n,
         "X":        list(entry.get("X", [])) + X_new,
         "y":        list(entry.get("y", [])) + y_new,
+        "indices":  list(entry.get("indices", [])) + idx_new,
     }, "append"
 
 
@@ -1820,7 +1854,7 @@ class CoinbaseCNNAgent:
                 logger.info(
                     f"CNN dataset per-product cache empty — building from scratch"
                 )
-            X_list, y_list = [], []
+            X_list, y_list, w_list = [], [], []
             hits = appends = rebuilds = skips = 0
             for prod_idx, (pid, candles) in enumerate(all_candle_sets, 1):
                 entry, status = _extend_or_rebuild_product(
@@ -1840,6 +1874,12 @@ class CoinbaseCNNAgent:
                 cache[pid] = entry
                 X_list.extend(entry["X"])
                 y_list.extend(entry["y"])
+                # Per-product uniqueness weight = mean(1/N_t) over forward
+                # window (P3c). Compute fresh each dataset assembly so cache
+                # updates don't drift.
+                w_list.extend(_compute_uniqueness(
+                    entry.get("indices", []), _FORWARD_HOURS, int(entry["last_n"])
+                ))
                 if prod_idx % _PHASE2_LOG_EVERY == 0 or prod_idx == n_products:
                     logger.info(
                         f"CNN dataset build: {prod_idx}/{n_products} products, "
@@ -1856,9 +1896,9 @@ class CoinbaseCNNAgent:
                 )
             except Exception as _se:
                 logger.warning(f"CNN dataset cache save failed (non-fatal): {_se}")
-            return X_list, y_list
+            return X_list, y_list, w_list
 
-        X_list, y_list = await loop.run_in_executor(None, _build_dataset)
+        X_list, y_list, w_list = await loop.run_in_executor(None, _build_dataset)
         _phase2_secs = _t.time() - _phase2_start
         logger.info(
             f"CNN training phase 2/3 done: {len(X_list):,} samples built "
@@ -1889,8 +1929,14 @@ class CoinbaseCNNAgent:
         split      = max(1, int(len(X_list) * 0.8))
         X_all      = torch.stack(X_list).to(_DEVICE)
         y_all      = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
+        # Per-sample uniqueness weight (P3c). Fallback to 1.0 if upstream
+        # couldn't produce a weight list (e.g. legacy code path).
+        if not w_list or len(w_list) != len(X_list):
+            w_list = [1.0] * len(X_list)
+        w_all      = torch.tensor(w_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
         X_train, X_val = X_all[:split], X_all[split:]
         y_train, y_val = y_all[:split], y_all[split:]
+        w_train, w_val = w_all[:split], w_all[split:]
 
         model      = self.model  # capture for thread closure
         epoch_log: list = []    # [{epoch, train_loss, val_loss}]
@@ -1962,9 +2008,15 @@ class CoinbaseCNNAgent:
                 for start in range(0, n_train, BATCH):
                     idx = perm[start: start + BATCH]
                     opt.zero_grad()
-                    loss = F.binary_cross_entropy_with_logits(
-                        model(X_train[idx]), y_train[idx], pos_weight=_pos_w
+                    # Per-sample BCE with uniqueness weights (P3c). reduction=
+                    # 'none' gives a [B,1] tensor; multiply element-wise by the
+                    # sample weights, then take the weighted mean.
+                    per_sample = F.binary_cross_entropy_with_logits(
+                        model(X_train[idx]), y_train[idx],
+                        pos_weight=_pos_w, reduction="none",
                     )
+                    wi   = w_train[idx]
+                    loss = (per_sample * wi).sum() / wi.sum().clamp(min=1e-9)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     opt.step()
@@ -1974,9 +2026,13 @@ class CoinbaseCNNAgent:
                 # ── Validation ────────────────────────────────────────────────
                 model.eval()
                 with torch.no_grad():
-                    vl_t = float(F.binary_cross_entropy_with_logits(
-                        model(X_val), y_val, pos_weight=_pos_w
-                    ).item())
+                    val_per_sample = F.binary_cross_entropy_with_logits(
+                        model(X_val), y_val, pos_weight=_pos_w, reduction="none",
+                    )
+                    vl_t = float(
+                        (val_per_sample * w_val).sum()
+                        / w_val.sum().clamp(min=1e-9)
+                    )
                 model.train()
 
                 scheduler.step(vl_t)   # ReduceLROnPlateau monitors val_loss
