@@ -1645,3 +1645,38 @@ class TestSampleUniqueness:
         w = _cnn_mod._compute_uniqueness([96], 4, 100)   # window [97..100], t=100 out-of-range
         # Only t=97,98,99 in range; all have N_t=1 → u=1.0
         assert w == [1.0]
+
+
+# ── Label smoothing (P3d) ─────────────────────────────────────────────────────
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestLabelSmoothing:
+    """P3d — soften hard targets {0,1} to {ε, 1-ε} before BCE.
+
+    Szegedy 2016 (Inception-v3): label smoothing penalises over-confident
+    predictions and acts as regularisation. The mapping is y' = y*(1-2ε)+ε
+    so y=0 → ε and y=1 → 1-ε; values already in the interior are left near
+    their input.
+    """
+
+    def test_eps_zero_is_identity(self):
+        import torch
+        y = torch.tensor([[0.0], [1.0], [0.5]])
+        got = _cnn_mod._smooth_labels(y, 0.0)
+        assert torch.allclose(got, y)
+
+    def test_endpoints_pulled_toward_centre(self):
+        import torch
+        y = torch.tensor([[0.0], [1.0]])
+        got = _cnn_mod._smooth_labels(y, 0.05)
+        assert torch.allclose(got, torch.tensor([[0.05], [0.95]]), atol=1e-7)
+
+    def test_midpoint_unchanged(self):
+        import torch
+        y = torch.tensor([[0.5]])
+        got = _cnn_mod._smooth_labels(y, 0.05)
+        assert torch.allclose(got, y)
+
+    def test_default_smoothing_constant_is_0_05(self):
+        # The module-level default must match the plan (ε=0.05).
+        assert _cnn_mod._LABEL_SMOOTH == 0.05

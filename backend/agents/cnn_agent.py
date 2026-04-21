@@ -351,6 +351,16 @@ _DATASET_CACHE_VERSION = 4
 _TB_UP_MULT = 0.01   # +1% upper barrier
 _TB_DN_MULT = 0.01   # -1% lower barrier
 
+# Label smoothing (P3d). Szegedy et al. 2016 Inception-v3: replace hard
+# targets {0,1} with soft {ε, 1-ε} so BCE stops pushing logits to ±∞ and
+# the model doesn't become over-confident on noisy financial labels.
+_LABEL_SMOOTH = 0.05
+
+
+def _smooth_labels(y, eps: float):
+    """Map hard binary labels to soft: y' = y*(1-2ε)+ε. y=0→ε, y=1→1-ε, y=0.5→0.5."""
+    return y * (1.0 - 2.0 * eps) + eps
+
 
 def _compute_uniqueness(sample_indices, forward_hours: int, n_candles: int):
     """Per-sample weight = mean(1/N_t) over the forward window [i+1..i+h].
@@ -2008,11 +2018,13 @@ class CoinbaseCNNAgent:
                 for start in range(0, n_train, BATCH):
                     idx = perm[start: start + BATCH]
                     opt.zero_grad()
-                    # Per-sample BCE with uniqueness weights (P3c). reduction=
-                    # 'none' gives a [B,1] tensor; multiply element-wise by the
-                    # sample weights, then take the weighted mean.
+                    # Per-sample BCE with uniqueness weights (P3c) and label
+                    # smoothing (P3d). reduction='none' gives a [B,1] tensor;
+                    # smooth the training targets so BCE stops pushing logits
+                    # to ±∞, then take the uniqueness-weighted mean.
                     per_sample = F.binary_cross_entropy_with_logits(
-                        model(X_train[idx]), y_train[idx],
+                        model(X_train[idx]),
+                        _smooth_labels(y_train[idx], _LABEL_SMOOTH),
                         pos_weight=_pos_w, reduction="none",
                     )
                     wi   = w_train[idx]
