@@ -1680,3 +1680,122 @@ class TestLabelSmoothing:
     def test_default_smoothing_constant_is_0_05(self):
         # The module-level default must match the plan (ε=0.05).
         assert _cnn_mod._LABEL_SMOOTH == 0.05
+
+
+# ── Walk-forward purged K-fold CV (P3e) ───────────────────────────────────────
+
+class TestPurgedWalkforwardSplits:
+    """P3e — walk-forward CV with purging and embargo.
+
+    López de Prado 2018 ch. 7: time-series CV must (a) go forward-only (never
+    train on the future and validate on the past) and (b) purge training
+    samples whose forward label window overlaps the validation fold, plus (c)
+    embargo a gap of bars immediately after the validation fold so nothing
+    leaks in via serial correlation.
+
+    `_purged_walkforward_splits(sample_indices, n_splits, forward_hours,
+    embargo_bars)` returns a list of (train_idx, val_idx) pairs where
+    train_idx/val_idx are positions into `sample_indices` (not raw candle
+    indices). Folds are walk-forward: fold k trains on the first k chunks
+    and validates on chunk k+1.
+    """
+
+    def test_returns_n_splits_folds(self):
+        idx = list(range(100))
+        folds = _cnn_mod._purged_walkforward_splits(idx, n_splits=3, forward_hours=4, embargo_bars=2)
+        assert len(folds) == 3
+
+    def test_folds_are_walkforward_and_disjoint_on_val(self):
+        # Val sets should be consecutive, disjoint, and cover the tail.
+        idx = list(range(120))
+        folds = _cnn_mod._purged_walkforward_splits(idx, n_splits=3, forward_hours=4, embargo_bars=2)
+        vals = [v for (_t, v) in folds]
+        # Each val set contiguous and sorted
+        for v in vals:
+            assert list(v) == sorted(v)
+        # Val sets disjoint
+        flat = [p for v in vals for p in v]
+        assert len(flat) == len(set(flat))
+        # Walk-forward: every val index in fold k < every val index in fold k+1
+        for a, b in zip(vals, vals[1:]):
+            assert max(a) < min(b)
+
+    def test_train_set_is_strictly_earlier_than_val(self):
+        # Walk-forward guarantee: training samples precede validation samples.
+        idx = list(range(100))
+        folds = _cnn_mod._purged_walkforward_splits(idx, n_splits=3, forward_hours=4, embargo_bars=0)
+        for train, val in folds:
+            if not train or not val:
+                continue
+            assert max(train) < min(val)
+
+    def test_purging_drops_overlapping_forward_windows(self):
+        # A training sample at candle i has forward window (i, i+forward_hours].
+        # If i + forward_hours >= first_val_candle, it must be purged.
+        # Use candle indices 0..99; val starts around position 66 with n_splits=3.
+        sample_indices = list(range(100))  # sample j maps to candle index j
+        folds = _cnn_mod._purged_walkforward_splits(
+            sample_indices, n_splits=3, forward_hours=4, embargo_bars=0,
+        )
+        for train_pos, val_pos in folds:
+            if not train_pos or not val_pos:
+                continue
+            first_val_candle = sample_indices[val_pos[0]]
+            for pos in train_pos:
+                cand = sample_indices[pos]
+                assert cand + 4 < first_val_candle, (
+                    f"sample at candle {cand} has forward window ending at "
+                    f"{cand + 4}, overlapping val start {first_val_candle}"
+                )
+
+    def test_embargo_drops_samples_just_after_val(self):
+        # In walk-forward CV the *next* fold's training set must skip the
+        # embargo window immediately following the previous val block.
+        sample_indices = list(range(120))
+        folds = _cnn_mod._purged_walkforward_splits(
+            sample_indices, n_splits=3, forward_hours=0, embargo_bars=5,
+        )
+        # Inspect fold 2's training set — it should not include any candle
+        # within embargo_bars of fold 1's val end (plus the purge window).
+        train1, val1 = folds[1]
+        train2, val2 = folds[2]
+        val1_end = sample_indices[val1[-1]]
+        for pos in train2:
+            cand = sample_indices[pos]
+            if cand <= val1_end:
+                continue  # this sample predates val1, embargo doesn't apply
+            # Samples in the embargo band (val1_end, val1_end+embargo] must be dropped
+            assert cand > val1_end + 5
+
+    def test_embargo_zero_keeps_samples_adjacent_to_val(self):
+        sample_indices = list(range(60))
+        folds = _cnn_mod._purged_walkforward_splits(
+            sample_indices, n_splits=3, forward_hours=0, embargo_bars=0,
+        )
+        # With no purge/embargo, training sets grow monotonically.
+        train_sizes = [len(t) for (t, _v) in folds]
+        assert train_sizes == sorted(train_sizes)
+
+    def test_sparse_sample_indices_respected(self):
+        # Samples at candles [0, 10, 20, ..., 90] — ensure purge uses candle
+        # distance, not sample position distance.
+        sparse = list(range(0, 100, 10))  # 10 samples at candles 0,10,...,90
+        folds = _cnn_mod._purged_walkforward_splits(
+            sparse, n_splits=3, forward_hours=15, embargo_bars=0,
+        )
+        for train_pos, val_pos in folds:
+            if not train_pos or not val_pos:
+                continue
+            first_val_candle = sparse[val_pos[0]]
+            for pos in train_pos:
+                cand = sparse[pos]
+                assert cand + 15 < first_val_candle
+
+    def test_empty_input_returns_empty_folds(self):
+        folds = _cnn_mod._purged_walkforward_splits([], n_splits=3, forward_hours=4, embargo_bars=2)
+        assert folds == [([], []), ([], []), ([], [])]
+
+    def test_n_splits_one_raises(self):
+        # Walk-forward CV with only 1 split is meaningless.
+        with pytest.raises(ValueError):
+            _cnn_mod._purged_walkforward_splits([0, 1, 2], n_splits=1, forward_hours=4, embargo_bars=0)

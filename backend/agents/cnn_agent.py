@@ -362,6 +362,84 @@ def _smooth_labels(y, eps: float):
     return y * (1.0 - 2.0 * eps) + eps
 
 
+def _purged_walkforward_splits(
+    sample_indices,
+    n_splits: int,
+    forward_hours: int,
+    embargo_bars: int,
+):
+    """Walk-forward CV with purging and embargo (López de Prado 2018 ch. 7).
+
+    Time-series CV must go forward-only (never train on the future) AND purge
+    training samples whose forward label window overlaps the validation fold,
+    plus embargo a gap of bars immediately after the val block so nothing
+    leaks via serial correlation.
+
+    Args:
+      sample_indices: candle indices of samples in time order.
+      n_splits: number of folds (>= 2). Fold k trains on all samples strictly
+        before the purge boundary of val block k, validates on val block k.
+      forward_hours: length of the forward label window — any training sample
+        at candle `i` where `i + forward_hours >= first_val_candle` is purged.
+      embargo_bars: bars after each val block reserved from training in
+        subsequent folds (serial-correlation guard).
+
+    Returns:
+      List of (train_positions, val_positions) tuples, length n_splits.
+      Positions index into `sample_indices`, not raw candle indices.
+    """
+    if n_splits < 2:
+        raise ValueError("n_splits must be >= 2 for walk-forward CV")
+    n = len(sample_indices)
+    if n == 0:
+        return [([], []) for _ in range(n_splits)]
+    # Carve the tail into n_splits contiguous val blocks; earlier positions
+    # serve as the (purged, embargoed) training pool.
+    start = int(n * 0.5)  # first half is pure training seed, tail split K ways
+    block = max(1, (n - start) // n_splits)
+    folds = []
+    for k in range(n_splits):
+        v_lo = start + k * block
+        v_hi = start + (k + 1) * block if k < n_splits - 1 else n
+        val_pos = list(range(v_lo, v_hi))
+        if not val_pos:
+            folds.append(([], []))
+            continue
+        first_val_candle = sample_indices[v_lo]
+        # Collect training positions: strictly earlier than val, no forward-window
+        # overlap with val start, and outside the embargo of any prior val block.
+        train_pos = []
+        for pos in range(v_lo):
+            cand = sample_indices[pos]
+            # Purge: forward window of this sample must end before first val candle
+            if cand + forward_hours >= first_val_candle:
+                continue
+            # Embargo: skip bars in the band (prev_val_end, prev_val_end+embargo]
+            embargoed = False
+            for j in range(k):
+                pv_lo = start + j * block
+                pv_hi = start + (j + 1) * block if j < n_splits - 1 else n
+                if pv_lo >= v_lo:
+                    break
+                prev_val_end = sample_indices[pv_hi - 1]
+                if prev_val_end < cand <= prev_val_end + embargo_bars:
+                    embargoed = True
+                    break
+            if embargoed:
+                continue
+            train_pos.append(pos)
+        folds.append((train_pos, val_pos))
+    return folds
+
+
+# Walk-forward CV folds (P3e). n=1 disables CV (keeps legacy 80/20 split).
+# n=3 = three chronological folds covering the last 50% of samples; each
+# fold purges train samples whose forward window overlaps val and embargoes
+# _WALKFORWARD_EMBARGO bars after each val block.
+_WALKFORWARD_FOLDS = 3
+_WALKFORWARD_EMBARGO = 4  # bars (= forward_hours, conservative default)
+
+
 def _compute_uniqueness(sample_indices, forward_hours: int, n_candles: int):
     """Per-sample weight = mean(1/N_t) over the forward window [i+1..i+h].
 
