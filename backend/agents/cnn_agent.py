@@ -309,6 +309,137 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
     torch.save({"fingerprint": fingerprint, "X": X_list, "y": y_list}, tmp)
     os.replace(tmp, path)
 
+
+# ── Per-product append-only dataset cache (P2) ────────────────────────────────
+# The fingerprint cache above treats the whole universe as one blob: a single
+# new candle on any product forces the full 103-minute phase-2 rebuild. The
+# per-product layer below stores one entry per product and appends only the
+# samples that rely on candles beyond the previous `last_n`. Schema changes
+# (seq_len / forward_hours / label_thresh / n_channels) still invalidate the
+# whole cache, but day-to-day ticking touches at most a handful of samples
+# per product.
+_DATASET_CACHE_VERSION = 2
+
+
+def _dataset_schema(seq_len: int, forward_hours: int,
+                    label_thresh: float, n_channels: int) -> dict:
+    return {
+        "version":       _DATASET_CACHE_VERSION,
+        "seq_len":       seq_len,
+        "forward_hours": forward_hours,
+        "label_thresh":  label_thresh,
+        "n_channels":    n_channels,
+    }
+
+
+def _build_samples_range(candles, i_start: int, i_end: int,
+                         fb, seq_len: int, forward_hours: int,
+                         label_thresh: float):
+    """Build (X, y) for sliding-window indices i in [i_start, i_end).
+
+    Sample at index i uses candles[i] as entry and candles[i+forward_hours]
+    as exit. Samples in the dead-zone (|ret| < label_thresh) are skipped, so
+    returned lists can be shorter than (i_end - i_start).
+    """
+    X_list, y_list = [], []
+    if i_end <= i_start:
+        return X_list, y_list
+    closes = [c["close"] for c in candles]
+    for i in range(i_start, i_end):
+        entry_px = closes[i]
+        exit_px  = closes[i + forward_hours]
+        if entry_px <= 0:
+            continue
+        ret = (exit_px - entry_px) / entry_px
+        if abs(ret) < label_thresh:
+            continue
+        label    = 1.0 if ret > 0 else 0.0
+        window   = candles[i - seq_len + 1: i + 1]
+        proxy_5m = candles[max(0, i - 11): i + 1]
+        channels = fb.build(window, {}, candles_5m=proxy_5m)
+        X_list.append(fb.to_tensor(channels))
+        y_list.append(label)
+    return X_list, y_list
+
+
+def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
+                               forward_hours: int, label_thresh: float):
+    """Return (new_entry, status) for one product's per-product cache slot.
+
+    status ∈ {"skip", "hit", "append", "rebuild"}
+      • skip    → candles too short for even one sample; entry is None
+      • hit     → cache was already up to date
+      • append  → new candles extended the entry with incremental samples
+      • rebuild → entry was missing or misaligned; full rebuild
+
+    Append path runs only when entry["first_ts"] matches AND last_n fits
+    inside the new candle series (last_n <= len(candles)).
+    """
+    n = len(candles)
+    if n < seq_len + forward_hours + 1:
+        return None, "skip"
+
+    first_ts = candles[0].get("start") or candles[0].get("time")
+    last_ts  = candles[-1].get("start") or candles[-1].get("time")
+
+    def _full_rebuild():
+        X, y = _build_samples_range(
+            candles, seq_len - 1, n - forward_hours,
+            fb, seq_len, forward_hours, label_thresh,
+        )
+        return {
+            "first_ts": first_ts, "last_ts": last_ts, "last_n": n,
+            "X": X, "y": y,
+        }
+
+    if (entry is None
+            or entry.get("first_ts") != first_ts
+            or int(entry.get("last_n", 0)) > n):
+        return _full_rebuild(), "rebuild"
+
+    last_n = int(entry["last_n"])
+    if last_n == n:
+        return entry, "hit"
+
+    i_start = max(seq_len - 1, last_n - forward_hours)
+    i_end   = n - forward_hours
+    X_new, y_new = _build_samples_range(
+        candles, i_start, i_end,
+        fb, seq_len, forward_hours, label_thresh,
+    )
+    return {
+        "first_ts": first_ts,
+        "last_ts":  last_ts,
+        "last_n":   n,
+        "X":        list(entry.get("X", [])) + X_new,
+        "y":        list(entry.get("y", [])) + y_new,
+    }, "append"
+
+
+def _load_pp_cache(path: str, schema: dict):
+    """Return cached {pid: entry} dict when schema matches; None otherwise."""
+    if not os.path.exists(path):
+        return None
+    try:
+        import torch
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as _le:
+        logger.warning(f"CNN per-product cache load failed: {_le}")
+        return None
+    if not isinstance(blob, dict) or blob.get("schema") != schema:
+        return None
+    products = blob.get("products")
+    return products if isinstance(products, dict) else None
+
+
+def _save_pp_cache(path: str, schema: dict, products: dict) -> None:
+    """Atomically save {schema, products} to disk."""
+    import torch
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    torch.save({"schema": schema, "products": products}, tmp)
+    os.replace(tmp, path)
+
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
 _CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
@@ -1558,7 +1689,7 @@ class CoinbaseCNNAgent:
         # the event loop stays free to serve /api/cnn/train/status polls.
         _phase1_start = _t.time()
         logger.info(f"CNN training phase 1/3: loading candles for {len(products)} products")
-        all_candle_sets: list = []
+        all_candle_sets: list = []   # [(pid, candles)] — pid needed for per-product cache
         for p in products:
             pid  = p["product_id"]
             hist = await loop.run_in_executor(None, load_history, pid)
@@ -1581,7 +1712,7 @@ class CoinbaseCNNAgent:
                         c["start"] = c["start_time"]
 
             if len(candles) >= SEQ_LEN + _FORWARD_HOURS + 1:
-                all_candle_sets.append(candles)
+                all_candle_sets.append((pid, candles))
 
         _phase1_secs = _t.time() - _phase1_start
         logger.info(
@@ -1599,52 +1730,54 @@ class CoinbaseCNNAgent:
         _LABEL_THRESH = 0.003   # require ≥0.3% move to avoid noisy near-zero labels
 
         def _build_dataset():
-            fp = _dataset_fingerprint(
-                all_candle_sets, SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH, N_CHANNELS
-            )
-            cached = _load_dataset_cache(_DATASET_CACHE_PATH, fp)
-            if cached is not None:
-                X_c, y_c = cached
-                logger.info(
-                    f"CNN dataset cache HIT: {len(X_c):,} samples loaded from disk "
-                    f"(fingerprint={fp[:12]}…) — skipping phase-2 build"
-                )
-                return X_c, y_c
-            logger.info(
-                f"CNN dataset cache MISS (fingerprint={fp[:12]}…) — building from scratch"
-            )
-            X_list, y_list = [], []
+            # Per-product append-only cache (P2). Schema change on any of
+            # seq_len / forward_hours / label_thresh / n_channels invalidates
+            # everything; otherwise only new candles per product cost work.
+            schema = _dataset_schema(SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH, N_CHANNELS)
+            cache  = _load_pp_cache(_DATASET_CACHE_PATH, schema) or {}
             n_products = len(all_candle_sets)
-            for prod_idx, candles in enumerate(all_candle_sets, 1):
-                closes = [c["close"] for c in candles]
-                n      = len(candles)
-                for i in range(SEQ_LEN - 1, n - _FORWARD_HOURS):
-                    entry_px = closes[i]
-                    exit_px  = closes[i + _FORWARD_HOURS]
-                    if entry_px <= 0:
-                        continue
-                    ret = (exit_px - entry_px) / entry_px
-                    # Skip samples in the dead-zone — not clearly up or down
-                    if abs(ret) < _LABEL_THRESH:
-                        continue
-                    label = 1.0 if ret > 0 else 0.0
-                    # Use last 12 hourly bars as 5m proxy so channels 17-19 are
-                    # non-zero during training, matching the inference distribution
-                    window   = candles[i - SEQ_LEN + 1: i + 1]
-                    proxy_5m = candles[max(0, i - 11): i + 1]
-                    channels = fb.build(window, {}, candles_5m=proxy_5m)
-                    X_list.append(fb.to_tensor(channels))
-                    y_list.append(label)
+            if cache:
+                logger.info(
+                    f"CNN dataset per-product cache loaded: "
+                    f"{len(cache)} products in cache, {n_products} to process"
+                )
+            else:
+                logger.info(
+                    f"CNN dataset per-product cache empty — building from scratch"
+                )
+            X_list, y_list = [], []
+            hits = appends = rebuilds = skips = 0
+            for prod_idx, (pid, candles) in enumerate(all_candle_sets, 1):
+                entry, status = _extend_or_rebuild_product(
+                    cache.get(pid), candles, fb,
+                    SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH,
+                )
+                if status == "skip":
+                    skips += 1
+                elif status == "hit":
+                    hits += 1
+                elif status == "append":
+                    appends += 1
+                else:
+                    rebuilds += 1
+                if entry is None:
+                    continue
+                cache[pid] = entry
+                X_list.extend(entry["X"])
+                y_list.extend(entry["y"])
                 if prod_idx % _PHASE2_LOG_EVERY == 0 or prod_idx == n_products:
                     logger.info(
                         f"CNN dataset build: {prod_idx}/{n_products} products, "
-                        f"{len(X_list):,} samples so far"
+                        f"{len(X_list):,} samples so far "
+                        f"(hits={hits}, appends={appends}, rebuilds={rebuilds})"
                     )
             try:
-                _save_dataset_cache(_DATASET_CACHE_PATH, fp, X_list, y_list)
+                _save_pp_cache(_DATASET_CACHE_PATH, schema, cache)
                 logger.info(
-                    f"CNN dataset cached to disk: {len(X_list):,} samples "
-                    f"(fingerprint={fp[:12]}…)"
+                    f"CNN dataset cached to disk: {len(X_list):,} samples across "
+                    f"{len(cache)} products "
+                    f"(hits={hits}, appends={appends}, rebuilds={rebuilds}, "
+                    f"skipped={skips})"
                 )
             except Exception as _se:
                 logger.warning(f"CNN dataset cache save failed (non-fatal): {_se}")
