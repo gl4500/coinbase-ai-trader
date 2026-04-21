@@ -258,6 +258,29 @@ except ImportError:
 N_CHANNELS      = 27
 SEQ_LEN         = 60
 
+# Channels whose values are constant-zero during training because the
+# training loop (train_on_history) calls fb.build(window, {}, candles_5m=...)
+# without the upstream inputs that populate them (empty order book, no
+# funding_rate, no iv_rv*, no ls_sentiment, no btc_closes, hourly proxy for
+# 5m). The model therefore learned nothing useful from these channels; at
+# inference we zero them too so the input distribution matches what the
+# model actually saw during training (P3b).
+_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 15, 17, 18, 19, 20, 21, 24, 25, 26})
+
+
+def _mask_training_constant_channels(channels):
+    """Return a new channel list with channels in _TRAINING_CONSTANT_CHANNELS
+    replaced by all-zero sequences of the same length. Input is not mutated.
+    """
+    if not channels:
+        return channels
+    T = len(channels[0]) if channels[0] else 0
+    zero = [0.0] * T
+    return [
+        list(zero) if idx in _TRAINING_CONSTANT_CHANNELS else ch
+        for idx, ch in enumerate(channels)
+    ]
+
 _PHASE2_LOG_EVERY = 5  # log dataset-build progress every N products (watchdog)
 MODEL_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
 _DATASET_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_dataset_cache.pt")
@@ -1059,6 +1082,9 @@ class CoinbaseCNNAgent:
             pass
 
     def _cnn_prob(self, channels) -> float:
+        # Align inference input with the training distribution — zero out the
+        # channels that were constant-zero at training (P3b).
+        channels = _mask_training_constant_channels(channels)
         if _TORCH and self.model:
             return self.model.predict(self.fb.to_tensor(channels))
         return self._linear(channels)

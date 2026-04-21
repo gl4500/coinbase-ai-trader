@@ -1551,3 +1551,46 @@ class TestTripleBarrierLabels:
             candles, 0, self._MAX, self._UP, self._DN, self._THR
         )
         assert got is None
+
+
+# ── Training/inference distribution alignment (P3b) ───────────────────────────
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestTrainingConstantChannelMask:
+    """P3b — align training and inference input distributions.
+
+    Training calls fb.build(window, {}, candles_5m=proxy_5m) without
+    btc_closes / funding_rate / iv_rv* / ls_sentiment / orderbook, so a known
+    subset of channels is constant-zero during training. At inference those
+    channels receive real data, but the model learned nothing useful from
+    them because their training-time gradient was zero. Zeroing them at
+    inference keeps the inference distribution aligned with what the model
+    actually learned — cuts train/serve skew without retraining.
+    """
+
+    def test_mask_set_covers_expected_channels(self):
+        # These channels require inputs that training never provides.
+        expected = {10, 11, 15, 17, 18, 19, 20, 21, 24, 25, 26}
+        assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
+
+    def test_mask_zeros_designated_channels(self):
+        channels = [[float(i + 0.1)] * SEQ_LEN for i in range(N_CHANNELS)]
+        masked   = _cnn_mod._mask_training_constant_channels(channels)
+        assert len(masked) == N_CHANNELS
+        for idx, ch in enumerate(masked):
+            assert len(ch) == SEQ_LEN
+            if idx in _cnn_mod._TRAINING_CONSTANT_CHANNELS:
+                assert all(v == 0.0 for v in ch), \
+                    f"channel {idx} should be zeroed after masking"
+            else:
+                # Informative channels are preserved unchanged.
+                assert ch == channels[idx], f"channel {idx} was altered"
+
+    def test_mask_handles_empty_channels(self):
+        assert _cnn_mod._mask_training_constant_channels([]) == []
+
+    def test_mask_does_not_mutate_input(self):
+        channels = [[1.0] * SEQ_LEN for _ in range(N_CHANNELS)]
+        snapshot = [ch[:] for ch in channels]
+        _cnn_mod._mask_training_constant_channels(channels)
+        assert channels == snapshot, "input list must not be mutated"
