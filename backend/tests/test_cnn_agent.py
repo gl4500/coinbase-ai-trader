@@ -1799,3 +1799,77 @@ class TestPurgedWalkforwardSplits:
         # Walk-forward CV with only 1 split is meaningless.
         with pytest.raises(ValueError):
             _cnn_mod._purged_walkforward_splits([0, 1, 2], n_splits=1, forward_hours=4, embargo_bars=0)
+
+
+# ── Per-regime validation metrics (P4) ────────────────────────────────────────
+
+class TestPerRegimeMetrics:
+    """P4 — break validation metrics out by HMM regime.
+
+    An overall val_loss mean hides whether the model works everywhere. A model
+    can be accurate in TRENDING regimes and worse-than-random in CHAOTIC
+    regimes while showing a respectable aggregate. `_per_regime_metrics`
+    buckets (y_true, y_pred) pairs by regime label and returns per-regime
+    n, accuracy, BCE loss, and positive rate.
+    """
+
+    def test_all_in_one_regime(self):
+        y_true = [1.0, 0.0, 1.0, 0.0]
+        y_pred = [0.9, 0.1, 0.8, 0.2]
+        regimes = ["TRENDING"] * 4
+        got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
+        assert set(got.keys()) == {"TRENDING"}
+        assert got["TRENDING"]["n"] == 4
+        assert got["TRENDING"]["acc"] == 1.0
+        assert abs(got["TRENDING"]["pos_rate"] - 0.5) < 1e-9
+
+    def test_multiple_regimes_partitioned(self):
+        y_true = [1.0, 0.0, 1.0, 0.0]
+        y_pred = [0.9, 0.1, 0.9, 0.1]
+        regimes = ["TRENDING", "TRENDING", "CHAOTIC", "CHAOTIC"]
+        got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
+        assert got["TRENDING"]["n"] == 2
+        assert got["CHAOTIC"]["n"] == 2
+        assert got["TRENDING"]["acc"] == 1.0
+        assert got["CHAOTIC"]["acc"] == 1.0
+
+    def test_accuracy_uses_0_5_threshold(self):
+        y_true = [1.0, 1.0, 0.0, 0.0]
+        y_pred = [0.51, 0.49, 0.49, 0.51]  # only 2 of 4 cross threshold correctly
+        regimes = ["RANGING"] * 4
+        got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
+        assert got["RANGING"]["acc"] == 0.5
+
+    def test_loss_is_finite_and_nonnegative(self):
+        y_true = [1.0, 0.0]
+        y_pred = [0.7, 0.3]
+        regimes = ["CHAOTIC", "CHAOTIC"]
+        got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
+        assert got["CHAOTIC"]["loss"] >= 0.0
+        import math
+        assert math.isfinite(got["CHAOTIC"]["loss"])
+
+    def test_pos_rate_reflects_label_balance(self):
+        y_true = [1.0, 1.0, 1.0, 0.0]
+        y_pred = [0.6, 0.6, 0.6, 0.4]
+        regimes = ["TRENDING"] * 4
+        got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
+        assert abs(got["TRENDING"]["pos_rate"] - 0.75) < 1e-9
+
+    def test_empty_input_returns_empty_dict(self):
+        got = _cnn_mod._per_regime_metrics([], [], [])
+        assert got == {}
+
+    def test_mismatched_lengths_raises(self):
+        with pytest.raises(ValueError):
+            _cnn_mod._per_regime_metrics([1.0, 0.0], [0.5], ["TRENDING", "CHAOTIC"])
+
+    def test_unknown_regime_label_is_preserved(self):
+        # If a regime string we don't recognise comes in, it's still bucketed
+        # (the helper is oblivious to the canonical TRENDING/RANGING/CHAOTIC set).
+        y_true = [1.0]
+        y_pred = [0.9]
+        regimes = ["UNKNOWN"]
+        got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
+        assert "UNKNOWN" in got
+        assert got["UNKNOWN"]["n"] == 1

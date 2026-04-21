@@ -440,6 +440,61 @@ _WALKFORWARD_FOLDS = 3
 _WALKFORWARD_EMBARGO = 4  # bars (= forward_hours, conservative default)
 
 
+def _per_regime_metrics(y_true, y_pred, regimes):
+    """Group (y_true, y_pred) pairs by regime label and compute per-group
+    n, accuracy (0.5 threshold), mean BCE loss, and positive rate (P4).
+
+    Overall aggregate val metrics hide regime-dependent behaviour — a model
+    may be accurate in TRENDING regimes and worse-than-random in CHAOTIC
+    regimes while showing a respectable mean. Breaking out by HMM regime
+    (see services/hmm_regime.py) surfaces that asymmetry.
+
+    Args:
+      y_true: iterable of 0.0/1.0 labels.
+      y_pred: iterable of probabilities in [0, 1] (post-sigmoid).
+      regimes: iterable of regime strings (e.g. "TRENDING"/"RANGING"/"CHAOTIC").
+
+    Returns:
+      dict[regime_str, {"n", "acc", "loss", "pos_rate"}]
+    """
+    import math
+    y_true = list(y_true)
+    y_pred = list(y_pred)
+    regimes = list(regimes)
+    if not (len(y_true) == len(y_pred) == len(regimes)):
+        raise ValueError(
+            f"length mismatch: y_true={len(y_true)}, y_pred={len(y_pred)}, "
+            f"regimes={len(regimes)}"
+        )
+    if not y_true:
+        return {}
+    buckets: dict = {}
+    for yt, yp, r in zip(y_true, y_pred, regimes):
+        buckets.setdefault(r, {"yt": [], "yp": []})
+        buckets[r]["yt"].append(float(yt))
+        buckets[r]["yp"].append(float(yp))
+    out: dict = {}
+    EPS = 1e-12  # log clamp to avoid log(0) when prediction is exactly 0 or 1
+    for r, b in buckets.items():
+        yt_list = b["yt"]
+        yp_list = b["yp"]
+        n = len(yt_list)
+        correct = sum(1 for yt, yp in zip(yt_list, yp_list) if (yp >= 0.5) == (yt >= 0.5))
+        loss = -sum(
+            yt * math.log(max(min(yp, 1.0 - EPS), EPS))
+            + (1.0 - yt) * math.log(max(min(1.0 - yp, 1.0 - EPS), EPS))
+            for yt, yp in zip(yt_list, yp_list)
+        ) / n
+        pos_rate = sum(1 for yt in yt_list if yt >= 0.5) / n
+        out[r] = {
+            "n": n,
+            "acc": correct / n,
+            "loss": loss,
+            "pos_rate": pos_rate,
+        }
+    return out
+
+
 def _compute_uniqueness(sample_indices, forward_hours: int, n_candles: int):
     """Per-sample weight = mean(1/N_t) over the forward window [i+1..i+h].
 
