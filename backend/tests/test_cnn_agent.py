@@ -1433,3 +1433,121 @@ class TestPerProductDatasetCache:
         assert _cnn_mod._load_pp_cache(
             str(tmp_path / "no_such.pt"), schema
         ) is None
+
+
+# ── Triple-barrier labeling (P3a) ─────────────────────────────────────────────
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestTripleBarrierLabels:
+    """P3a — replace sign-of-4h-return with López-de-Prado triple-barrier.
+
+    The sign-of-return label is noisy: a 3% up-spike that retraces to 0 gets
+    labeled 0 (flat), which contradicts what the model should predict. The
+    triple-barrier labels by whichever of three events happens first inside
+    the forward window: upper barrier hit (1), lower barrier hit (0), or
+    time barrier expiration (sign of final close move, with dead-zone skip).
+    """
+
+    _UP  = 0.01   # +1% upper barrier
+    _DN  = 0.01   # -1% lower barrier
+    _MAX = 4      # forward window bars
+    _THR = 0.003
+
+    def _bar(self, o, h, l, c, ts=0):
+        return {"open": o, "high": h, "low": l, "close": c,
+                "volume": 1000.0, "start": ts}
+
+    def test_upper_barrier_hit_first_labels_up(self):
+        # entry=100, upper=101, lower=99. Bar 1 hits high 102 first.
+        candles = [
+            self._bar(100, 100, 100, 100, ts=0),
+            self._bar(100, 102, 99.5, 101.5, ts=1),
+            self._bar(101, 101, 100, 100, ts=2),
+            self._bar(100, 101, 99,   99.5, ts=3),
+            self._bar(99.5, 100, 98,  98.5, ts=4),
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got == 1.0
+
+    def test_lower_barrier_hit_first_labels_down(self):
+        # entry=100, upper=101, lower=99. Bar 1 lows 97 first.
+        candles = [
+            self._bar(100, 100, 100, 100, ts=0),
+            self._bar(100, 100.5, 97, 98.5, ts=1),
+            self._bar(98.5, 99, 98, 98.2, ts=2),
+            self._bar(98.2, 99, 97, 97.5, ts=3),
+            self._bar(97.5, 98, 96, 96.8, ts=4),
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got == 0.0
+
+    def test_time_barrier_up_with_move_above_thresh(self):
+        # No intra-bar barrier hit (highs < 101, lows > 99), but final close
+        # moves > +0.3% → label 1.0.
+        candles = [
+            self._bar(100, 100, 100, 100, ts=0),
+            self._bar(100, 100.5, 99.5, 100.2, ts=1),
+            self._bar(100.2, 100.8, 99.8, 100.5, ts=2),
+            self._bar(100.5, 100.9, 100.1, 100.6, ts=3),
+            self._bar(100.6, 100.9, 100.3, 100.8, ts=4),   # final close = 100.8
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got == 1.0
+
+    def test_time_barrier_down_with_move_below_thresh(self):
+        # No barrier hit, final close moves < -0.3% → label 0.0.
+        candles = [
+            self._bar(100, 100, 100, 100, ts=0),
+            self._bar(100, 100.5, 99.5, 99.8, ts=1),
+            self._bar(99.8, 100.2, 99.2, 99.5, ts=2),
+            self._bar(99.5, 99.9, 99.1, 99.3, ts=3),
+            self._bar(99.3, 99.9, 99.0, 99.2, ts=4),     # final close = 99.2
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got == 0.0
+
+    def test_time_barrier_dead_zone_returns_none(self):
+        # No barrier, final close within ±0.3% of entry → skip.
+        candles = [
+            self._bar(100, 100, 100, 100, ts=0),
+            self._bar(100, 100.3, 99.7, 100.05, ts=1),
+            self._bar(100.05, 100.4, 99.8, 100.1, ts=2),
+            self._bar(100.1, 100.3, 99.9, 100.05, ts=3),
+            self._bar(100.05, 100.3, 99.8, 100.1, ts=4),   # final close = 100.1 → 0.10% < 0.3%
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got is None
+
+    def test_both_barriers_same_bar_use_close_direction(self):
+        # Bar 1 touches both upper (102) and lower (97) — tie broken by close.
+        # close=102 > entry=100 → label 1.0.
+        candles = [
+            self._bar(100, 100, 100, 100, ts=0),
+            self._bar(100, 102, 97, 102, ts=1),
+            self._bar(102, 103, 101, 102, ts=2),
+            self._bar(102, 103, 101, 102, ts=3),
+            self._bar(102, 103, 101, 102, ts=4),
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got == 1.0
+
+    def test_invalid_entry_price_returns_none(self):
+        candles = [self._bar(0, 0, 0, 0, ts=0)] + [
+            self._bar(100, 101, 99, 100, ts=k) for k in range(1, 5)
+        ]
+        got = _cnn_mod._label_triple_barrier(
+            candles, 0, self._MAX, self._UP, self._DN, self._THR
+        )
+        assert got is None

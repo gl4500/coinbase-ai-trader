@@ -318,7 +318,60 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # (seq_len / forward_hours / label_thresh / n_channels) still invalidate the
 # whole cache, but day-to-day ticking touches at most a handful of samples
 # per product.
-_DATASET_CACHE_VERSION = 2
+# Version 3 = triple-barrier labels (P3a) replacing sign-of-4h-return.
+_DATASET_CACHE_VERSION = 3
+
+# Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
+# whichever of {upper barrier hit, lower barrier hit, time barrier} fires
+# first inside the forward window — cuts label noise vs. sign-of-final-return.
+_TB_UP_MULT = 0.01   # +1% upper barrier
+_TB_DN_MULT = 0.01   # -1% lower barrier
+
+
+def _label_triple_barrier(candles, i: int, max_bars: int,
+                          up_mult: float, dn_mult: float,
+                          label_thresh: float):
+    """Return 1.0, 0.0, or None for the triple-barrier label at index i.
+
+    Scans candles[i+1 .. i+max_bars] and returns:
+      - 1.0  if the upper barrier (high >= entry*(1+up_mult)) hits first
+      - 0.0  if the lower barrier (low  <= entry*(1-dn_mult)) hits first
+      - sign of close move at the time-barrier bar, if neither fired
+      - None if entry price invalid or final move is inside ±label_thresh
+    When both barriers are touched in the same bar the close direction
+    breaks the tie.
+    """
+    n = len(candles)
+    if i < 0 or i >= n:
+        return None
+    entry = candles[i]["close"]
+    if entry <= 0:
+        return None
+    upper = entry * (1.0 + up_mult)
+    lower = entry * (1.0 - dn_mult)
+    end   = min(n - 1, i + max_bars)
+    for k in range(i + 1, end + 1):
+        c  = candles[k]
+        hi = c["high"]; lo = c["low"]
+        hit_up = hi >= upper
+        hit_dn = lo <= lower
+        if hit_up and hit_dn:
+            cls = c["close"]
+            if cls > entry:
+                return 1.0
+            if cls < entry:
+                return 0.0
+            return None
+        if hit_up:
+            return 1.0
+        if hit_dn:
+            return 0.0
+    # Time barrier — use sign of close move vs. dead-zone threshold.
+    exit_px = candles[end]["close"]
+    ret     = (exit_px - entry) / entry
+    if abs(ret) < label_thresh:
+        return None
+    return 1.0 if ret > 0 else 0.0
 
 
 def _dataset_schema(seq_len: int, forward_hours: int,
@@ -337,23 +390,19 @@ def _build_samples_range(candles, i_start: int, i_end: int,
                          label_thresh: float):
     """Build (X, y) for sliding-window indices i in [i_start, i_end).
 
-    Sample at index i uses candles[i] as entry and candles[i+forward_hours]
-    as exit. Samples in the dead-zone (|ret| < label_thresh) are skipped, so
-    returned lists can be shorter than (i_end - i_start).
+    Labels use triple-barrier (P3a): upper barrier (+_TB_UP_MULT), lower
+    barrier (-_TB_DN_MULT), or time barrier at i+forward_hours. Dead-zone
+    samples (time barrier && |final_ret| < label_thresh) are skipped.
     """
     X_list, y_list = [], []
     if i_end <= i_start:
         return X_list, y_list
-    closes = [c["close"] for c in candles]
     for i in range(i_start, i_end):
-        entry_px = closes[i]
-        exit_px  = closes[i + forward_hours]
-        if entry_px <= 0:
+        label = _label_triple_barrier(
+            candles, i, forward_hours, _TB_UP_MULT, _TB_DN_MULT, label_thresh
+        )
+        if label is None:
             continue
-        ret = (exit_px - entry_px) / entry_px
-        if abs(ret) < label_thresh:
-            continue
-        label    = 1.0 if ret > 0 else 0.0
         window   = candles[i - seq_len + 1: i + 1]
         proxy_5m = candles[max(0, i - 11): i + 1]
         channels = fb.build(window, {}, candles_5m=proxy_5m)
