@@ -5,6 +5,30 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 34] — 2026-04-22 — Isolate real `_BEST_LOSS_PATH` + `MODEL_PATH` from `TestTrainOnHistory*` tests
+
+### Root cause
+Incident: the CNN training subprocess at 2026-04-21 20:41 UTC saved a model with `best_val_loss=0.6888` even though the previous best on disk was 0.6684 — the save gate (`best_val_loss < prev_best`) should have rejected it. Investigation found the gate was reading `inf` for `prev_best`, meaning `cnn_best_loss.txt` had been reset to a stale sentinel just before the run.
+
+`TestTrainOnHistory` (8 tests) and `TestTrainOnHistoryNonBlocking` (2 tests) in `backend/tests/test_cnn_agent.py` call the real `agent.train_on_history()` with `database.get_products`/`get_candles` mocked but **without** patching `_BEST_LOSS_PATH`, `MODEL_PATH`, or `_MODEL_BAK_PATH`. On synthetic sinusoidal data, `best_val_loss` rounds to ~0.0 in fp32; `_write_best_loss(0.0)` then clobbers `backend/cnn_best_loss.txt` and `save_model(backup=True)` clobbers both `backend/cnn_model.pt` and `backend/cnn_model.pt.bak`. The pre-commit hook runs the full test suite on every Python-file commit, so this poisoning happened repeatedly — visible in `backend/logs/cnn_training.log` as multiple `val inf → X` saves and `prior best 0.0000` rejections since 2026-04-19.
+
+### Fix (TDD)
+- `tests/test_cnn_agent.py`:
+  - New RED guard tests `TestTrainOnHistory::test_production_paths_are_isolated` and `TestTrainOnHistoryNonBlocking::test_production_paths_are_isolated` — assert `ca._BEST_LOSS_PATH` and `ca.MODEL_PATH` don't resolve to the real `backend/cnn_*` files at test-run time.
+  - Added autouse class-level fixture `_isolate_model_paths(tmp_path, monkeypatch)` to both classes that redirects `ca._BEST_LOSS_PATH`, `ca.MODEL_PATH`, and `ca._MODEL_BAK_PATH` into `tmp_path`.
+- No production code changed. `save_model` / `_write_best_loss` / `_read_best_loss` behavior is untouched.
+
+### Blast radius
+- `backend/cnn_model.pt.bak` at mtime 2026-04-21 20:18 was the backup written when the test run during this session's earlier commit (Session 33) triggered a fake save — it holds a synthetic-data checkpoint, not the prior production model. The live `backend/cnn_model.pt` (mtime 20:41) is the real 0.6888 subprocess save; `backend/cnn_best_loss.txt` (0.688838) matches it, so production state is internally consistent — just regressed from 0.6684. Future legit training runs will beat 0.6888 and restore forward progress.
+
+### Verify
+```
+.venv/Scripts/python.exe -m pytest backend/tests/test_cnn_agent.py --tb=short -q
+```
+→ 118/118 green (includes 2 new guard tests). Production files' mtimes unchanged after the run, proving the fixture prevents the clobber.
+
+---
+
 ## [Session 33] — 2026-04-21 — Persist val_auc + precision/recall at production BUY threshold
 
 Audit of the last 14 training runs (log-scraped, since `val_auc` was never persisted) found Spearman ρ ≈ +0.11 between `best_val_loss` rank and `val_auc` rank — the two metrics essentially disagree on which checkpoint is best. Before switching the save gate from `best_val_loss < prev_best` to anything else, we need the candidate metrics in the DB so gate-choice alternatives can be validated against live outcomes empirically.

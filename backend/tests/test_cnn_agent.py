@@ -353,6 +353,37 @@ class TestCoinbaseCNNAgent:
 class TestTrainOnHistory:
     """train_on_history: 80/20 split, val loss, fit diagnosis."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_model_paths(self, tmp_path, monkeypatch):
+        """Redirect best-loss + checkpoint paths into tmp_path so real
+        train_on_history calls cannot clobber backend/cnn_best_loss.txt
+        or backend/cnn_model.pt. See test_production_paths_are_isolated."""
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
+        monkeypatch.setattr(ca, "MODEL_PATH",      str(tmp_path / "cnn_model.pt"))
+        monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
+
+    def test_production_paths_are_isolated(self):
+        """Guard: these tests call real train_on_history which writes the
+        best-loss file and saves the .pt checkpoint. _BEST_LOSS_PATH and
+        MODEL_PATH MUST be redirected to tmp_path by an autouse fixture,
+        otherwise every pre-commit run clobbers production state.
+
+        Incident 2026-04-21: cnn_best_loss.txt was repeatedly reset to 0.0
+        by these tests, and cnn_model.pt.bak was overwritten with a
+        synthetic-data checkpoint.
+        """
+        import agents.cnn_agent as ca
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        prod_loss = os.path.abspath(os.path.join(backend_dir, "cnn_best_loss.txt"))
+        prod_ckpt = os.path.abspath(os.path.join(backend_dir, "cnn_model.pt"))
+        assert os.path.abspath(ca._BEST_LOSS_PATH) != prod_loss, (
+            "_BEST_LOSS_PATH points at production file; add autouse fixture."
+        )
+        assert os.path.abspath(ca.MODEL_PATH) != prod_ckpt, (
+            "MODEL_PATH points at production file; add autouse fixture."
+        )
+
     def _make_sqlite_candles(self, n: int = 80, start: float = 50000.0) -> list:
         """Candles using SQLite column name 'start_time' (not 'start')."""
         candles = []
@@ -743,6 +774,29 @@ class TestGatedConv1d:
 class TestTrainOnHistoryNonBlocking:
     """train_on_history must offload the PyTorch fit loop to a thread executor
     so that other coroutines can run while training is in progress."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_model_paths(self, tmp_path, monkeypatch):
+        """Redirect best-loss + checkpoint paths into tmp_path so real
+        train_on_history calls cannot clobber backend/cnn_best_loss.txt
+        or backend/cnn_model.pt. See test_production_paths_are_isolated."""
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
+        monkeypatch.setattr(ca, "MODEL_PATH",      str(tmp_path / "cnn_model.pt"))
+        monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
+
+    def test_production_paths_are_isolated(self):
+        """Guard: see TestTrainOnHistory.test_production_paths_are_isolated."""
+        import agents.cnn_agent as ca
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        prod_loss = os.path.abspath(os.path.join(backend_dir, "cnn_best_loss.txt"))
+        prod_ckpt = os.path.abspath(os.path.join(backend_dir, "cnn_model.pt"))
+        assert os.path.abspath(ca._BEST_LOSS_PATH) != prod_loss, (
+            "_BEST_LOSS_PATH points at production file; add autouse fixture."
+        )
+        assert os.path.abspath(ca.MODEL_PATH) != prod_ckpt, (
+            "MODEL_PATH points at production file; add autouse fixture."
+        )
 
     def _make_products_and_candles(self, n_products: int = 6):
         import math
