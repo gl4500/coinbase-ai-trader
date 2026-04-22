@@ -5,6 +5,27 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 33] — 2026-04-21 — Persist val_auc + precision/recall at production BUY threshold
+
+Audit of the last 14 training runs (log-scraped, since `val_auc` was never persisted) found Spearman ρ ≈ +0.11 between `best_val_loss` rank and `val_auc` rank — the two metrics essentially disagree on which checkpoint is best. Before switching the save gate from `best_val_loss < prev_best` to anything else, we need the candidate metrics in the DB so gate-choice alternatives can be validated against live outcomes empirically.
+
+### Scope (instrumentation only; save gate unchanged)
+- `database.py`: added `val_auc`, `val_precision_at_thresh`, `val_recall_at_thresh`, `val_threshold` to `cnn_training_sessions` (nullable REAL). Added ALTER TABLE migrations so existing DBs upgrade in place. Extended `save_training_session` INSERT to persist the new fields (defaulting to NULL when the caller doesn't provide them).
+- `agents/cnn_agent.py`:
+  - New module-level helper `_precision_recall_at_threshold(probs, labels, threshold)` — returns `(precision, recall)`, each Optional[float]. Uses strict `>` to match the production gate `model_prob > config.cnn_buy_threshold` at cnn_agent.py:1637. `precision=None` when no preds above threshold; `recall=None` when no positive labels.
+  - `train_on_history` now hoists the val-set sigmoid pass above the AUC block so AUC and precision/recall share the same `_probs_list`/`_labels_list`. After AUC, computes precision/recall at `config.cnn_buy_threshold` (default 0.60) and logs both. Added `val_precision_at_thresh`, `val_recall_at_thresh`, `val_threshold` to the `result` dict.
+- `tests/test_cnn_agent.py`: new `TestPrecisionRecallAtThreshold` (8 cases: empty, length mismatch, all-below with/without positives, perfect classifier, mixed known values, strict-threshold boundary, sell-side threshold).
+- `tests/test_database.py`: new `TestCNNTrainingSessions` (3 round-trip cases: val_auc persists, precision/recall/threshold persist, fields default to NULL when absent).
+
+### Next steps (deferred)
+- Observe 10–20 fresh training runs with the new metrics in the DB.
+- Evaluate whether `val_auc` or `val_precision_at_thresh` correlates better with post-deployment 4h outcome win rate in `signal_outcomes`.
+- Only then propose a composite gate (e.g., `val_precision_at_thresh ↑` with `val_loss < 0.693` floor).
+
+Verify: `cd backend && python -m pytest tests/test_cnn_agent.py::TestPrecisionRecallAtThreshold tests/test_database.py::TestCNNTrainingSessions -v` → 11/11 green. Full suite `tests/test_cnn_agent.py tests/test_database.py` → 142/142 green.
+
+---
+
 ## [Session 32] — 2026-04-21 — CNN Training Quality Improvements (P1–P4)
 
 A 9-task plan to improve CNN training quality and honesty of val metrics. All work under TDD (RED→GREEN) and behind `backend/tests/test_cnn_agent.py`.

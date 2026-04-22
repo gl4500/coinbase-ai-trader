@@ -1873,3 +1873,74 @@ class TestPerRegimeMetrics:
         got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
         assert "UNKNOWN" in got
         assert got["UNKNOWN"]["n"] == 1
+
+
+class TestPrecisionRecallAtThreshold:
+    """_precision_recall_at_threshold mirrors the production BUY gate.
+
+    The CNN signal fires BUY when model_prob > config.cnn_buy_threshold
+    (cnn_agent.py:1637). To evaluate whether a checkpoint would produce
+    profitable BUY signals on the val set, we need precision/recall at
+    that same threshold — not AUC (all thresholds) or BCE (calibration).
+    """
+
+    def test_empty_returns_none_none(self):
+        p, r = _cnn_mod._precision_recall_at_threshold([], [], 0.60)
+        assert p is None and r is None
+
+    def test_length_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            _cnn_mod._precision_recall_at_threshold([0.7, 0.4], [1.0], 0.60)
+
+    def test_all_below_threshold_with_positives(self):
+        # No predictions above threshold → precision undefined (None).
+        # Positives exist but none caught → recall = 0.0.
+        probs  = [0.1, 0.2, 0.3]
+        labels = [1.0, 0.0, 1.0]
+        p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
+        assert p is None, "precision should be None when no preds above threshold"
+        assert r == 0.0
+
+    def test_all_below_threshold_no_positives(self):
+        # No preds above, no actual positives → both undefined.
+        probs  = [0.1, 0.2, 0.3]
+        labels = [0.0, 0.0, 0.0]
+        p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
+        assert p is None
+        assert r is None
+
+    def test_perfect_classifier(self):
+        probs  = [0.9, 0.8, 0.1, 0.2]
+        labels = [1.0, 1.0, 0.0, 0.0]
+        p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
+        assert p == 1.0
+        assert r == 1.0
+
+    def test_mixed_known_values(self):
+        # probs > 0.5: [0.7, 0.8] → labels [1, 0] → TP=1, FP=1, FN=1
+        # precision = 1/(1+1) = 0.5, recall = 1/(1+1) = 0.5
+        probs  = [0.7, 0.4, 0.8, 0.3]
+        labels = [1.0, 1.0, 0.0, 0.0]
+        p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.50)
+        assert p == 0.5
+        assert r == 0.5
+
+    def test_strict_greater_than_threshold(self):
+        # Matches cnn_agent.py:1637 `model_prob > config.cnn_buy_threshold` (strict).
+        # A prob EXACTLY at the threshold must NOT count as a positive prediction.
+        probs  = [0.60, 0.60]
+        labels = [1.0, 0.0]
+        p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
+        assert p is None, "prob == threshold should not count as above (gate is strict >)"
+        assert r == 0.0
+
+    def test_threshold_045_for_sell_side(self):
+        # Symmetric SELL gate is model_prob < 0.40; if we want a P/R view of
+        # BUY-like signals at a lower threshold (e.g. exploratory), helper
+        # must still work with any threshold in (0, 1).
+        probs  = [0.50, 0.46, 0.44]
+        labels = [1.0, 0.0, 1.0]
+        p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.45)
+        # Above 0.45: [0.50, 0.46] → labels [1, 0] → TP=1, FP=1, FN=1
+        assert p == 0.5
+        assert r == 0.5

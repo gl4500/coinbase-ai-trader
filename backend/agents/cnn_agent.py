@@ -495,6 +495,51 @@ def _per_regime_metrics(y_true, y_pred, regimes):
     return out
 
 
+def _precision_recall_at_threshold(probs, labels, threshold):
+    """Precision and recall at a fixed probability threshold on the val set.
+
+    Mirrors the production BUY gate: `model_prob > config.cnn_buy_threshold`
+    (cnn_agent.py:1637 — strict >). A training session that scores high here
+    would generate high-quality BUY signals at live inference time, which is
+    what we actually care about — more than BCE (calibration) or AUC
+    (all-threshold ranking).
+
+    Args:
+      probs: iterable of probabilities in [0, 1] (post-sigmoid).
+      labels: iterable of 0.0/1.0 truth labels.
+      threshold: gate threshold; a prediction counts as positive when prob > threshold.
+
+    Returns:
+      (precision, recall) where each is a float in [0, 1] or None.
+      precision is None when no predictions exceed the threshold.
+      recall is None when the val set contains no positive labels.
+    """
+    probs  = list(probs)
+    labels = list(labels)
+    if len(probs) != len(labels):
+        raise ValueError(
+            f"length mismatch: probs={len(probs)}, labels={len(labels)}"
+        )
+    if not probs:
+        return (None, None)
+    tp = fp = fn = 0
+    total_pos = 0
+    for p, y in zip(probs, labels):
+        is_pos = float(y) >= 0.5
+        predicted = float(p) > threshold
+        if is_pos:
+            total_pos += 1
+        if predicted and is_pos:
+            tp += 1
+        elif predicted and not is_pos:
+            fp += 1
+        elif not predicted and is_pos:
+            fn += 1
+    precision = tp / (tp + fp) if (tp + fp) > 0 else None
+    recall    = tp / total_pos if total_pos > 0 else None
+    return (precision, recall)
+
+
 def _compute_uniqueness(sample_indices, forward_hours: int, n_candles: int):
     """Per-sample weight = mean(1/N_t) over the forward window [i+1..i+h].
 
@@ -2245,18 +2290,48 @@ class CoinbaseCNNAgent:
         final_tl   = final["train_loss"]
         final_vl   = final["val_loss"]
 
-        # ── AUC-ROC on validation set ─────────────────────────────────────────
+        # ── Validation probabilities (used for AUC, precision, recall) ───────
         val_auc = None
+        val_precision_at_thresh = None
+        val_recall_at_thresh    = None
+        val_threshold = float(config.cnn_buy_threshold)
+        _probs_list = None
+        _labels_list = None
         try:
-            from sklearn.metrics import roc_auc_score as _auc
             model.eval()
             with torch.no_grad():
-                _probs = torch.sigmoid(model(X_val)).cpu().numpy().flatten()
-            _labels = y_val.cpu().numpy().flatten()
-            val_auc = round(float(_auc(_labels, _probs)), 4)
-            logger.info(f"CNN val AUC-ROC: {val_auc:.4f}")
-        except Exception as _ae:
-            logger.debug(f"AUC-ROC skipped: {_ae}")
+                _probs_list = torch.sigmoid(model(X_val)).cpu().numpy().flatten().tolist()
+            _labels_list = y_val.cpu().numpy().flatten().tolist()
+        except Exception as _pe:
+            logger.debug(f"val-set probability pass skipped: {_pe}")
+
+        # ── AUC-ROC on validation set ─────────────────────────────────────────
+        if _probs_list is not None and _labels_list is not None:
+            try:
+                from sklearn.metrics import roc_auc_score as _auc
+                val_auc = round(float(_auc(_labels_list, _probs_list)), 4)
+                logger.info(f"CNN val AUC-ROC: {val_auc:.4f}")
+            except Exception as _ae:
+                logger.debug(f"AUC-ROC skipped: {_ae}")
+
+        # ── Precision/Recall at production BUY threshold ──────────────────────
+        # Mirrors `model_prob > config.cnn_buy_threshold` gate in _fire_signal.
+        # Persisted so gate-choice alternatives can be compared empirically over
+        # multiple training runs before any change to the save gate itself.
+        if _probs_list is not None and _labels_list is not None:
+            try:
+                _p, _r = _precision_recall_at_threshold(
+                    _probs_list, _labels_list, val_threshold,
+                )
+                val_precision_at_thresh = round(_p, 4) if _p is not None else None
+                val_recall_at_thresh    = round(_r, 4) if _r is not None else None
+                logger.info(
+                    f"CNN val P/R @ {val_threshold:.2f}: "
+                    f"precision={val_precision_at_thresh} "
+                    f"recall={val_recall_at_thresh}"
+                )
+            except Exception as _pre:
+                logger.debug(f"precision/recall skipped: {_pre}")
 
         # ── Fit diagnosis ─────────────────────────────────────────────────────
         overfit_gap = (final_vl - final_tl) / max(final_tl, 1e-9)
@@ -2321,6 +2396,9 @@ class CoinbaseCNNAgent:
             "final_val_loss":   final_vl,
             "best_val_loss":    round(best_val_loss, 6),
             "val_auc":          val_auc,
+            "val_precision_at_thresh": val_precision_at_thresh,
+            "val_recall_at_thresh":    val_recall_at_thresh,
+            "val_threshold":           val_threshold,
             "overfit_gap_pct":  round(overfit_gap * 100, 1),
             "fit_status":       fit_status,
             "fit_advice":       fit_advice,

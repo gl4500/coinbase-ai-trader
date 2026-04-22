@@ -297,3 +297,73 @@ class TestPortfolio:
         run(db.delete_position("SOL-USD"))
         positions = run(db.get_positions())
         assert all(p["product_id"] != "SOL-USD" for p in positions)
+
+
+# ── CNN Training Sessions ────────────────────────────────────────────────────
+
+class TestCNNTrainingSessions:
+    """save_training_session must persist all training metrics, including the
+    instrumentation added to compare gate choices (val_auc, precision/recall
+    at the production BUY threshold). Without persistence we can't evaluate
+    whether a different save gate would pick better checkpoints.
+    """
+
+    def _base_result(self) -> dict:
+        return {
+            "epochs":             50,
+            "stopped_epoch":      17,
+            "train_samples":      100_000,
+            "val_samples":        25_000,
+            "channels":           27,
+            "arch":               "glu2",
+            "initial_loss":       0.693,
+            "final_train_loss":   0.42,
+            "final_val_loss":     0.81,
+            "best_val_loss":      0.66,
+            "overfit_gap_pct":    92.0,
+            "fit_status":         "OVERFIT",
+            "fit_advice":         "train/val divergence",
+            "duration_secs":      380,
+            "saved":              False,
+        }
+
+    def test_persists_val_auc(self, db, run):
+        r = self._base_result()
+        r["val_auc"] = 0.6527
+        run(db.save_training_session(r))
+        import sqlite3
+        cur = sqlite3.connect(db.DB_PATH).execute(
+            "SELECT val_auc FROM cnn_training_sessions ORDER BY id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert abs(row[0] - 0.6527) < 1e-6
+
+    def test_persists_precision_recall_and_threshold(self, db, run):
+        r = self._base_result()
+        r["val_precision_at_thresh"] = 0.58
+        r["val_recall_at_thresh"]    = 0.31
+        r["val_threshold"]           = 0.60
+        run(db.save_training_session(r))
+        import sqlite3
+        cur = sqlite3.connect(db.DB_PATH).execute(
+            "SELECT val_precision_at_thresh, val_recall_at_thresh, val_threshold "
+            "FROM cnn_training_sessions ORDER BY id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert abs(row[0] - 0.58) < 1e-6
+        assert abs(row[1] - 0.31) < 1e-6
+        assert abs(row[2] - 0.60) < 1e-6
+
+    def test_persists_none_when_missing(self, db, run):
+        # New fields must be nullable: old callers that don't pass them still work.
+        r = self._base_result()
+        run(db.save_training_session(r))
+        import sqlite3
+        cur = sqlite3.connect(db.DB_PATH).execute(
+            "SELECT val_auc, val_precision_at_thresh, val_recall_at_thresh, val_threshold "
+            "FROM cnn_training_sessions ORDER BY id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        assert row == (None, None, None, None)

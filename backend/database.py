@@ -231,23 +231,27 @@ async def init_db() -> None:
                 ON trades(closed_at DESC);
 
             CREATE TABLE IF NOT EXISTS cnn_training_sessions (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                trained_at          TEXT NOT NULL,
-                arch                TEXT NOT NULL,
-                channels            INTEGER NOT NULL,
-                epochs_requested    INTEGER NOT NULL,
-                stopped_epoch       INTEGER NOT NULL,
-                train_samples       INTEGER NOT NULL,
-                val_samples         INTEGER NOT NULL,
-                initial_train_loss  REAL NOT NULL,
-                final_train_loss    REAL NOT NULL,
-                final_val_loss      REAL NOT NULL,
-                best_val_loss       REAL NOT NULL,
-                overfit_gap_pct     REAL NOT NULL,
-                fit_status          TEXT NOT NULL,
-                fit_advice          TEXT NOT NULL,
-                duration_secs       INTEGER NOT NULL,
-                saved               INTEGER NOT NULL DEFAULT 0
+                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                trained_at               TEXT NOT NULL,
+                arch                     TEXT NOT NULL,
+                channels                 INTEGER NOT NULL,
+                epochs_requested         INTEGER NOT NULL,
+                stopped_epoch            INTEGER NOT NULL,
+                train_samples            INTEGER NOT NULL,
+                val_samples              INTEGER NOT NULL,
+                initial_train_loss       REAL NOT NULL,
+                final_train_loss         REAL NOT NULL,
+                final_val_loss           REAL NOT NULL,
+                best_val_loss            REAL NOT NULL,
+                overfit_gap_pct          REAL NOT NULL,
+                fit_status               TEXT NOT NULL,
+                fit_advice               TEXT NOT NULL,
+                duration_secs            INTEGER NOT NULL,
+                saved                    INTEGER NOT NULL DEFAULT 0,
+                val_auc                  REAL,
+                val_precision_at_thresh  REAL,
+                val_recall_at_thresh     REAL,
+                val_threshold            REAL
             );
         """)
         await db.commit()
@@ -258,6 +262,10 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN fast_rsi REAL",
             "ALTER TABLE cnn_scans ADD COLUMN velocity REAL",
             "ALTER TABLE cnn_scans ADD COLUMN vol_z REAL",
+            "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
+            "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
+            "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
+            "ALTER TABLE cnn_training_sessions ADD COLUMN val_threshold REAL",
         ]:
             try:
                 await db.execute(sql)
@@ -886,8 +894,9 @@ async def save_training_session(r: Dict) -> None:
                (trained_at, arch, channels, epochs_requested, stopped_epoch,
                 train_samples, val_samples, initial_train_loss, final_train_loss,
                 final_val_loss, best_val_loss, overfit_gap_pct, fit_status,
-                fit_advice, duration_secs, saved)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                fit_advice, duration_secs, saved,
+                val_auc, val_precision_at_thresh, val_recall_at_thresh, val_threshold)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 _now(),
                 r.get("arch", "glu2"),
@@ -905,6 +914,10 @@ async def save_training_session(r: Dict) -> None:
                 r.get("fit_advice", ""),
                 r.get("duration_secs", 0),
                 1 if r.get("saved") else 0,
+                r.get("val_auc"),
+                r.get("val_precision_at_thresh"),
+                r.get("val_recall_at_thresh"),
+                r.get("val_threshold"),
             ),
         )
         await db.commit()
