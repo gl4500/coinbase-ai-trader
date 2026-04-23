@@ -5,6 +5,42 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 35] — 2026-04-23 — LGBM pnl-weighted training (Task #43)
+
+### Root cause
+Task #39 CNN-unblock investigation showed that `LGBM_GATE_THRESHOLD=0.35` override was
+not enough: `backend/logs/backend.log` on 2026-04-23 recorded 148 consecutive
+`CNN BUY ... blocked by LGBMFilter: p(win)=0.15–0.17` entries, zero `CNN BOOK BUY`.
+The LGBM was trained on 208 closed CNN trades with a 23.1% win rate using binary
+`pnl>0` labels, so predictions collapsed into a narrow 0.15–0.17 band for every BUY —
+no threshold <0.17 would unblock without also breaking the gate's ranking value.
+
+### Fix (TDD)
+Weight training samples by `|pnl|` so large winners/losers dominate learning and
+near-zero noise trades contribute minimally.
+
+- `backend/data/lgbm_filter.py`:
+  - New `_sample_weights(rows) -> np.ndarray` returning `max(|pnl|, 1e-3)` per row
+    (floor prevents LightGBM dropping 0-weight rows).
+  - `train()` now computes `w = _sample_weights(rows)`, splits it 80/20 with X/y, and
+    forwards `sample_weight=w_tr` + `eval_sample_weight=[w_val]` to `LGBMClassifier.fit`.
+- `backend/tests/test_lgbm_filter.py`:
+  - New `TestLGBMFilterPnlWeighting` class (3 tests): helper-returns-|pnl|,
+    zero-pnl-floored-above-0, fit-receives-sample-weight.
+
+### Verify
+```
+.venv/Scripts/python.exe -m pytest backend/tests/test_lgbm_filter.py -v
+```
+→ 19/19 green (16 existing + 3 new).
+
+### Next
+Task #44: force retrain on restart so the new label weighting actually produces a
+fresh `.pkl`. Task #45: watch `backend.log` for the first `CNN BOOK BUY` to confirm
+the gate opens on strong winners without blanket-passing weak ones.
+
+---
+
 ## [Session 34] — 2026-04-22 — Isolate real `_BEST_LOSS_PATH` + `MODEL_PATH` from `TestTrainOnHistory*` tests
 
 ### Root cause
