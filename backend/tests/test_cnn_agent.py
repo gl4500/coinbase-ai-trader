@@ -1355,7 +1355,8 @@ class TestPerProductDatasetCache:
 
     class _FakeFB:
         """Minimal FeatureBuilder shim: 1-channel window of closes."""
-        def build(self, window, _idx, candles_5m=None, btc_closes=None):
+        def build(self, window, _idx, candles_5m=None, btc_closes=None,
+                  funding_rate=None):
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
                 closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
@@ -1724,6 +1725,89 @@ class TestBuildSamplesRangeBtcCloses:
         assert entry is not None and entry["X"]
         assert any(abs(v) > 1e-6 for v in self._ch21(entry["X"][0])), \
             "Rebuild path must forward btc_closes to _build_samples_range"
+
+
+# ── Ch 20: Funding rate wired through training pipeline (#54) ─────────────────
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestBuildSamplesRangeFundingRates:
+    """#54 — wire time-varying funding rate into the training sample builder.
+
+    FeatureBuilder.build accepts a scalar funding_rate that it broadcasts across
+    the window. For training we pick the rate active at each sample's candle
+    index from an aligned list. Caller-side Binance historical fetch lands in
+    a follow-up commit; this test class covers the plumbing only.
+    """
+
+    def setup_method(self):
+        self.fb = FeatureBuilder()
+
+    def _ch20(self, x):
+        return x[20].tolist() if hasattr(x[20], "tolist") else list(x[20])
+
+    def test_default_no_funding_rates_leaves_channel_20_zero(self):
+        candles = _make_candles(80)
+        X, _y, _idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+        )
+        assert len(X) >= 1
+        assert all(abs(v) < 1e-9 for v in self._ch20(X[0])), \
+            "Ch 20 must be zero when funding_rates not supplied"
+
+    def test_constant_funding_rates_broadcast_to_channel_20(self):
+        candles = _make_candles(80)
+        funding_rates = [0.0005] * len(candles)  # +0.05% every bar
+        X, _y, _idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+            funding_rates=funding_rates,
+        )
+        # fr_norm = clip(0.0005 / 0.01, -1, 1) = 0.05
+        expected = 0.05
+        ch20 = self._ch20(X[0])
+        assert all(abs(v - expected) < 1e-5 for v in ch20), \
+            f"Ch 20 expected ~{expected}, got {ch20[:3]}"
+
+    def test_funding_rate_selected_per_sample_index(self):
+        """For each sample at candle index i, fb.build must receive funding_rates[i]."""
+        candles = _make_candles(80)
+        funding_rates = [float(i) / 10000.0 for i in range(len(candles))]  # 0..0.0079
+        X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+            funding_rates=funding_rates,
+        )
+        i0 = idx[0]
+        expected = max(-1.0, min(1.0, funding_rates[i0] / 0.01))
+        ch20 = self._ch20(X[0])
+        assert all(abs(v - expected) < 1e-5 for v in ch20), \
+            f"Ch 20 at sample idx={i0} expected {expected}, got {ch20[0]}"
+
+    def test_funding_rates_clipped_at_plus_minus_one(self):
+        """Funding_rate above 0.01 should clip to 1.0 after normalisation."""
+        candles = _make_candles(80)
+        funding_rates = [0.05] * len(candles)  # absurdly high +5% → clips to +1.0
+        X, _y, _idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+            funding_rates=funding_rates,
+        )
+        ch20 = self._ch20(X[0])
+        assert all(abs(v - 1.0) < 1e-5 for v in ch20), "Ch 20 must clip at +1.0"
+
+    def test_extend_or_rebuild_plumbs_funding_rates_on_rebuild(self):
+        candles = _make_candles(80)
+        funding_rates = [0.0005] * len(candles)
+        entry, status = _cnn_mod._extend_or_rebuild_product(
+            None, candles, self.fb, SEQ_LEN, 4, 0.003,
+            funding_rates=funding_rates,
+        )
+        assert status == "rebuild"
+        assert entry is not None and entry["X"]
+        ch20 = self._ch20(entry["X"][0])
+        assert all(abs(v - 0.05) < 1e-5 for v in ch20), \
+            "Rebuild path must forward funding_rates to _build_samples_range"
 
 
 # ── Sample-uniqueness weighting (P3c) ─────────────────────────────────────────

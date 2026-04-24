@@ -5,6 +5,42 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 37] — 2026-04-24 — Wire funding rates through training sample builder (Task #54)
+
+### Context
+Continuing Group 2 remediation from Task #53. Ch 20 (funding rate) is already
+fetched at inference time from Binance `/fapi/v1/premiumIndex` (cnn_agent.py
+:1541-1550), but training always saw 0.0 because `_build_samples_range` never
+received a per-sample rate. Result: train/serve skew — the model learned the
+channel was a constant zero and the mask zeroes it at inference to preserve
+the invariant.
+
+### Change
+`_build_samples_range` and `_extend_or_rebuild_product` now accept an optional
+`funding_rates: Optional[List[float]]` (aligned 1:1 with `candles`). Per sample
+at candle index `i`, `funding_rates[i]` is forwarded to `fb.build(..., funding_rate=...)`
+which clips to ±1.0 after `/0.01` normalisation and broadcasts across the
+window. `FeatureBuilder.build` already supported the scalar kwarg; only the
+training-time plumbing was missing.
+
+### Behavior (deliberately unchanged this session)
+The caller in `_build_dataset` still passes `None` — no training distribution
+change yet. Tasks #55/#56/#57 will fetch Binance historical funding at the
+call site, shrink `_TRAINING_CONSTANT_CHANNELS`, and bump `_DATASET_CACHE_VERSION`
+in one coordinated change to avoid train/serve skew.
+
+### Tests
+`TestBuildSamplesRangeFundingRates` (5 tests, `backend/tests/test_cnn_agent.py`):
+- `test_default_no_funding_rates_leaves_channel_20_zero` — regression
+- `test_constant_funding_rates_broadcast_to_channel_20` — end-to-end normalise/broadcast
+- `test_funding_rate_selected_per_sample_index` — per-sample index alignment
+- `test_funding_rates_clipped_at_plus_minus_one` — clipping boundary
+- `test_extend_or_rebuild_plumbs_funding_rates_on_rebuild` — cache-rebuild path
+`_FakeFB.build` in `TestPerProductDatasetCache` gains `funding_rate=None` kwarg.
+Module total: 125 → 130 tests.
+
+---
+
 ## [Session 37] — 2026-04-24 — Wire BTC closes through training sample builder (Task #53)
 
 ### Context

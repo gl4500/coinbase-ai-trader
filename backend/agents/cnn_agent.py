@@ -637,7 +637,8 @@ def _dataset_schema(seq_len: int, forward_hours: int,
 def _build_samples_range(candles, i_start: int, i_end: int,
                          fb, seq_len: int, forward_hours: int,
                          label_thresh: float,
-                         btc_closes: Optional[List[float]] = None):
+                         btc_closes: Optional[List[float]] = None,
+                         funding_rates: Optional[List[float]] = None):
     """Build (X, y, indices) for sliding-window indices i in [i_start, i_end).
 
     Labels use triple-barrier (P3a): upper barrier (+_TB_UP_MULT), lower
@@ -650,6 +651,12 @@ def _build_samples_range(candles, i_start: int, i_end: int,
     and time-aligned 1:1. Each sample at candle index i receives the slice
     btc_closes[i - seq_len + 1 : i + 1] so FeatureBuilder.build can populate
     Ch 21 (rolling BTC-return correlation) during training (#53).
+
+    When `funding_rates` is provided (same length, time-aligned), each sample
+    at candle index i forwards the scalar funding_rates[i] to fb.build so
+    Ch 20 (funding rate) is populated with the rate active at that sample's
+    timestamp (#54). Rates should be the raw per-period rate (e.g. 0.0001
+    for +0.01%); normalisation/clipping happens inside fb.build.
     """
     X_list, y_list, idx_list = [], [], []
     if i_end <= i_start:
@@ -664,7 +671,9 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         proxy_5m = candles[max(0, i - 11): i + 1]
         btc_win  = (btc_closes[i - seq_len + 1: i + 1]
                     if btc_closes is not None else None)
-        channels = fb.build(window, {}, candles_5m=proxy_5m, btc_closes=btc_win)
+        fr_val   = funding_rates[i] if funding_rates is not None else None
+        channels = fb.build(window, {}, candles_5m=proxy_5m,
+                            btc_closes=btc_win, funding_rate=fr_val)
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
         idx_list.append(i)
@@ -673,7 +682,8 @@ def _build_samples_range(candles, i_start: int, i_end: int,
 
 def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
                                forward_hours: int, label_thresh: float,
-                               btc_closes: Optional[List[float]] = None):
+                               btc_closes: Optional[List[float]] = None,
+                               funding_rates: Optional[List[float]] = None):
     """Return (new_entry, status) for one product's per-product cache slot.
 
     status ∈ {"skip", "hit", "append", "rebuild"}
@@ -687,6 +697,8 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
 
     `btc_closes` is forwarded verbatim (aligned 1:1 with `candles`) to
     `_build_samples_range` for both rebuild and append paths (#53).
+    `funding_rates` is forwarded verbatim (aligned 1:1 with `candles`) to
+    `_build_samples_range` for both rebuild and append paths (#54).
     """
     n = len(candles)
     if n < seq_len + forward_hours + 1:
@@ -700,6 +712,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
             candles, seq_len - 1, n - forward_hours,
             fb, seq_len, forward_hours, label_thresh,
             btc_closes=btc_closes,
+            funding_rates=funding_rates,
         )
         return {
             "first_ts": first_ts, "last_ts": last_ts, "last_n": n,
@@ -723,6 +736,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         candles, i_start, i_end,
         fb, seq_len, forward_hours, label_thresh,
         btc_closes=btc_closes,
+        funding_rates=funding_rates,
     )
     return {
         "first_ts": first_ts,
