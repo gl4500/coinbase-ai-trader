@@ -5,6 +5,49 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 36] — 2026-04-23 — Inference-time regime gate (Task #52, Option C)
+
+### Root cause
+Phase-1 overfit investigation (Sessions 34–35) closed with "signal-limited, not
+capacity-limited" — tiny 5k-param model flat-lined at val_loss 0.72, matching
+prod. Live BUY outcomes on 193 closed CNN trades revealed **inverse regime
+calibration**: the CNN is most confident in TRENDING (avg cnn_prob 0.925) where
+it is least accurate (44.3% wr), and least confident in CHAOTIC (0.703) where
+the real edge lives (58.5% wr). Training learns from high-ADX TRENDING gradients
+but those trends have exhausted by entry time.
+
+### Fix (TDD)
+Non-destructive inference-time gate — block CNN BUY execution when
+`hmm_regime != "CHAOTIC"`. Captures the 14pp winrate edge without retraining.
+
+- `backend/agents/cnn_agent.py`:
+  - New module-level helper `_regime_gate_enabled()` reading `CNN_REGIME_GATE`
+    env (default `"on"`, set to `"off"` for emergency unblock). Read at call
+    time so operational toggle does not require reload.
+  - BUY execution path in `generate_signal`: inserted regime gate between the
+    existing Hurst check and the LGBM filter. When gate is on and
+    `hmm_regime != "CHAOTIC"`, `signal["execution"]` is set to
+    `{"success": False, "reason": "Regime <X> — CNN BUY edge is CHAOTIC only"}`.
+- `backend/tests/test_cnn_agent.py`:
+  - New `TestInferenceRegimeGate` class (3 tests):
+    `test_buy_blocked_when_regime_is_trending`,
+    `test_buy_allowed_when_regime_is_chaotic`,
+    `test_regime_gate_disabled_via_env`.
+
+### Verification
+- RED: `test_buy_blocked_when_regime_is_trending` failed — book.buy called once
+  in TRENDING (no gate yet).
+- GREEN: all 3 gate tests pass; 121/121 `test_cnn_agent.py` tests green, no
+  regressions.
+
+### Follow-up
+- Task #40 (val_loss ceiling fix) remains open — gate is a signal-side
+  workaround, not a root cause fix.
+- If CHAOTIC BUY winrate holds above baseline after 2–3 days of live traffic,
+  begin Option A (backfill 11 masked training channels).
+
+---
+
 ## [Session 35] — 2026-04-23 — LGBM pnl-weighted training (Task #43)
 
 ### Root cause

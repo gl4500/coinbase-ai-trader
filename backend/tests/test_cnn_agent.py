@@ -1998,3 +1998,142 @@ class TestPrecisionRecallAtThreshold:
         # Above 0.45: [0.50, 0.46] → labels [1, 0] → TP=1, FP=1, FN=1
         assert p == 0.5
         assert r == 0.5
+
+
+# ── Inference-time regime gate (Option C) ─────────────────────────────────────
+
+class TestInferenceRegimeGate:
+    """Option C — block BUY when HMM regime is not CHAOTIC.
+
+    Phase-1 live data (2026-04-23): BUYs in CHAOTIC won 58.5% vs 44.3% in
+    TRENDING and 45.7% in RANGING. The CNN is most confident in TRENDING
+    (avg cnn_prob 0.925) but least accurate there — classic inverse
+    calibration. Gate keeps the CHAOTIC edge and blocks the losing regimes.
+    Env-overridable via CNN_REGIME_GATE=off for emergency unblock.
+    """
+
+    @staticmethod
+    def _make_tracker_mock():
+        from unittest.mock import MagicMock
+        t = MagicMock()
+        t.get_lessons = AsyncMock(return_value=[])
+        t.record      = AsyncMock()
+        return t
+
+    @pytest.mark.asyncio
+    async def test_buy_blocked_when_regime_is_trending(self, agent, product):
+        """TRENDING regime → BUY signal returned but book.buy is NOT called."""
+        candles  = _make_candles(80)
+        buy_mock = AsyncMock(return_value=(0.0, 0))
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("TRENDING", 0.80, 0))
+        })()
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),
+            patch("agents.cnn_agent.get_detector",    return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",     return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob",          return_value=0.82),
+            patch.object(agent._lgbm, "allow_buy",    return_value=True),
+            patch.object(agent._lgbm, "predict",      return_value=0.7),
+            patch.object(agent.book, "buy",           buy_mock),
+            patch.object(agent.book, "has_position",  return_value=False),
+        ):
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        buy_mock.assert_not_called()
+        assert sig["execution"]["success"] is False
+        reason = sig["execution"]["reason"].lower()
+        assert "regime" in reason or "chaotic" in reason, (
+            f"Expected reason to mention regime/CHAOTIC, got: {sig['execution']['reason']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_buy_allowed_when_regime_is_chaotic(self, agent, product):
+        """CHAOTIC regime + all other gates open → book.buy IS called."""
+        candles  = _make_candles(80)
+        buy_mock = AsyncMock(return_value=(50.0, 1))
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.70, 2))
+        })()
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),
+            patch("agents.cnn_agent.get_detector",    return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",     return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob",          return_value=0.82),
+            patch.object(agent._lgbm, "allow_buy",    return_value=True),
+            patch.object(agent._lgbm, "predict",      return_value=0.7),
+            patch.object(agent.book, "buy",           buy_mock),
+            patch.object(agent.book, "has_position",  return_value=False),
+        ):
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        buy_mock.assert_called_once()
+        assert sig["execution"]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_regime_gate_disabled_via_env(self, agent, product, monkeypatch):
+        """CNN_REGIME_GATE=off → BUY executes even in TRENDING."""
+        monkeypatch.setenv("CNN_REGIME_GATE", "off")
+        # Reload module-level flag by re-reading env at call site.
+        # Production code must read the flag each call, not at import time.
+        candles  = _make_candles(80)
+        buy_mock = AsyncMock(return_value=(50.0, 1))
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("TRENDING", 0.80, 0))
+        })()
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),
+            patch("agents.cnn_agent.get_detector",    return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",     return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob",          return_value=0.82),
+            patch.object(agent._lgbm, "allow_buy",    return_value=True),
+            patch.object(agent._lgbm, "predict",      return_value=0.7),
+            patch.object(agent.book, "buy",           buy_mock),
+            patch.object(agent.book, "has_position",  return_value=False),
+        ):
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        buy_mock.assert_called_once()
+        assert sig["execution"]["success"] is True

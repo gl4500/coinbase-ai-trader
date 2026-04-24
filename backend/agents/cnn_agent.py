@@ -89,6 +89,16 @@ _DI_SUPPRESS_THRESH  = 5.0     # DI > this % → price far from SMA, suppress Ol
 _ENTROPY_SKIP_THRESH = 0.85    # entropy > this → signal is noise, skip entirely
 
 
+def _regime_gate_enabled() -> bool:
+    """CNN BUY regime gate — on by default. Set CNN_REGIME_GATE=off to disable.
+
+    Phase-1 (2026-04-23) live data: CHAOTIC BUYs won 58.5% vs 44.3% in TRENDING
+    and 45.7% in RANGING. Gate blocks BUY unless HMM regime is CHAOTIC.
+    Read at call time (not import time) so env changes take effect without reload.
+    """
+    return os.getenv("CNN_REGIME_GATE", "on").strip().lower() != "off"
+
+
 class _CNNBook:
     """Lightweight dry-run portfolio book for the CNN agent.
     Mirrors the _Book classes in tech_agent_cb / momentum_agent_cb so that
@@ -1787,6 +1797,16 @@ class CoinbaseCNNAgent:
                     }
                     logger.info(
                         f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
+                    )
+                elif _regime_gate_enabled() and hmm_regime != "CHAOTIC":
+                    # Phase-1 finding: CNN BUY edge is CHAOTIC-only (58.5% wr) —
+                    # TRENDING/RANGING BUYs win 44-46%. Set CNN_REGIME_GATE=off to disable.
+                    signal["execution"] = {
+                        "success": False,
+                        "reason": f"Regime {hmm_regime} — CNN BUY edge is CHAOTIC only",
+                    }
+                    logger.info(
+                        f"CNN BUY {pid} suppressed: regime={hmm_regime} != CHAOTIC"
                     )
                 else:
                     # LightGBM entry filter — secondary gate trained on real outcomes
