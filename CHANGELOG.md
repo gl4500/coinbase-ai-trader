@@ -5,6 +5,50 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 37] — 2026-04-24 — 5-minute candle backfill (Task #55)
+
+### Context
+Group 3 remediation: Ch 15 (ADX), 17 (fast RSI), 18 (velocity), 19 (volume-Z)
+are computed at inference from real 5-minute candles but trained on a 12-bar
+slice of hourly bars treated as a proxy. That proxy is what drove Session 32's
+decision to mask these four channels in `_TRAINING_CONSTANT_CHANNELS`. Before
+the mask can shrink (Task #57) we need real historical 5m candles persisted
+per product; this session lands the fetch layer.
+
+### Change
+`services/history_backfill.py` gains a parallel 5-minute path without altering
+any existing hourly behaviour:
+- `_FIVE_MINUTE_BAR_SECS = 300` / `_FIVE_MINUTE_GRANULARITY = "FIVE_MINUTE"`
+- `_parquet_path_5m(pid)` → `backend/data/history/5m/{pid}.parquet`
+  (separate namespace so hourly parquets are never overwritten)
+- `load_5m_history(pid)` — analog of `load_history`
+- `backfill_product_5m(pid, days=30)` — analog of `backfill_product`
+- `_fetch_range` gains a `granularity: str = _GRANULARITY` kwarg
+- Internals factored: `_load_from_path` / `_save_to_path` / `_backfill_to_path`
+  now power both hourly and 5m; existing `load_history` / `_save_history` /
+  `backfill_product` become thin wrappers
+
+Default `days=30` yields ~8640 bars per product (~29 paged requests, ~12s each
+at `_REQ_DELAY=0.35`). Callers scale up as the retrain plan demands.
+
+### Behavior (deliberately unchanged this session)
+Nothing calls `backfill_product_5m` yet — no change to the `run_loop` or
+startup path. Task #56 will wire the loader into `_build_samples_range`;
+Task #57 will add a startup-time 5m backfill trigger before flipping the mask.
+
+### Tests
+New file `backend/tests/test_history_backfill.py` (11 tests):
+- `TestFiveMinuteParquetPath` (3) — path separation, distinct from hourly
+- `TestLoad5mHistory` (3) — empty case, roundtrip, hourly/5m isolation
+- `TestBackfillProduct5m` (4) — FIVE_MINUTE granularity passed through,
+  writes to 5m path only, 5-minute pagination window (not hourly), incremental
+- `TestFetchRangeGranularityParam` (1) — signature accepts granularity kwarg
+
+No live API calls; `_fetch_range` mocked with AsyncMock in every async test.
+CLAUDE.md coverage table line for this module is now actually backed by a file.
+
+---
+
 ## [Session 37] — 2026-04-24 — Wire funding rates through training sample builder (Task #54)
 
 ### Context

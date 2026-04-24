@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 _HISTORY_DIR  = os.path.join(os.path.dirname(__file__), "..", "data", "history")
 _GRANULARITY  = "ONE_HOUR"
 _BAR_SECS     = 3600          # seconds per hourly bar
+_FIVE_MINUTE_GRANULARITY = "FIVE_MINUTE"
+_FIVE_MINUTE_BAR_SECS    = 300          # seconds per 5-minute bar
 _MAX_PER_REQ  = 300           # Coinbase max bars per request
 _REQ_DELAY    = 0.35          # seconds between requests (rate-limit friendly)
 
@@ -51,13 +53,14 @@ def _parquet_path(product_id: str) -> str:
     return os.path.join(_HISTORY_DIR, f"{safe}.parquet")
 
 
-def load_history(product_id: str) -> List[Dict]:
-    """
-    Load all stored candles for product_id from parquet.
-    Returns list of dicts (start, open, high, low, close, volume), oldest first.
-    Returns [] if no file exists.
-    """
-    path = _parquet_path(product_id)
+def _parquet_path_5m(product_id: str) -> str:
+    """5-minute candle parquet path — separate namespace under history/5m/."""
+    safe = product_id.replace("/", "_")
+    return os.path.join(_HISTORY_DIR, "5m", f"{safe}.parquet")
+
+
+def _load_from_path(path: str) -> List[Dict]:
+    """Read a parquet candle file by absolute path; [] if missing."""
     if not os.path.exists(path):
         return []
     table = pq.read_table(path)
@@ -77,10 +80,9 @@ def load_history(product_id: str) -> List[Dict]:
     return sorted(candles, key=lambda c: c["start"])
 
 
-def _save_history(product_id: str, candles: List[Dict]) -> None:
-    """Write full deduplicated candle list to parquet (overwrites)."""
-    os.makedirs(_HISTORY_DIR, exist_ok=True)
-    # Deduplicate by start timestamp, keep latest value
+def _save_to_path(path: str, candles: List[Dict]) -> None:
+    """Write full deduplicated candle list to an absolute parquet path."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     seen: Dict[int, Dict] = {}
     for c in candles:
         seen[c["start"]] = c
@@ -96,13 +98,33 @@ def _save_history(product_id: str, candles: List[Dict]) -> None:
         },
         schema=_SCHEMA,
     )
-    pq.write_table(table, _parquet_path(product_id), compression="snappy")
+    pq.write_table(table, path, compression="snappy")
+
+
+def load_history(product_id: str) -> List[Dict]:
+    """
+    Load all stored hourly candles for product_id from parquet.
+    Returns list of dicts (start, open, high, low, close, volume), oldest first.
+    Returns [] if no file exists.
+    """
+    return _load_from_path(_parquet_path(product_id))
+
+
+def load_5m_history(product_id: str) -> List[Dict]:
+    """Load all stored 5-minute candles for product_id. [] if no file (#55)."""
+    return _load_from_path(_parquet_path_5m(product_id))
+
+
+def _save_history(product_id: str, candles: List[Dict]) -> None:
+    """Write full deduplicated hourly candle list to parquet (overwrites)."""
+    _save_to_path(_parquet_path(product_id), candles)
 
 
 async def _fetch_range(
     product_id: str,
     start_ts: int,
     end_ts: int,
+    granularity: str = _GRANULARITY,
 ) -> List[Dict]:
     """Fetch one page (≤300 bars) between start_ts and end_ts from Coinbase."""
     try:
@@ -114,7 +136,7 @@ async def _fetch_range(
         params = {
             "start":       str(start_ts),
             "end":         str(end_ts),
-            "granularity": _GRANULARITY,
+            "granularity": granularity,
         }
         hdrs = _auth_headers("GET", f"/api/v3/brokerage/products/{product_id}/candles") \
                if config.has_credentials else {}
@@ -138,22 +160,19 @@ async def _fetch_range(
         return []
 
 
-async def backfill_product(
+async def _backfill_to_path(
     product_id: str,
-    days: int = 365,
+    days: int,
+    granularity: str,
+    bar_secs: int,
+    path: str,
 ) -> Dict:
-    """
-    Backfill one product.  Fetches at most `days` of hourly history.
-    Incremental: skips bars already stored.
-    Returns {"product_id", "new_bars", "total_bars", "oldest_ts"}.
-    """
-    existing  = load_history(product_id)
+    """Core backfill loop — granularity/path agnostic (#55)."""
+    existing  = _load_from_path(path)
     known_set = {c["start"] for c in existing}
 
-    # Determine fetch window
     now        = int(time.time())
     target_start = now - days * 86400
-    # If we already have data, only fetch from the last known bar onwards
     fetch_end  = now
     fetch_start = target_start if not known_set else max(target_start, max(known_set))
 
@@ -161,8 +180,8 @@ async def backfill_product(
     window_end = fetch_end
 
     while window_end > fetch_start:
-        window_start = max(fetch_start, window_end - _MAX_PER_REQ * _BAR_SECS)
-        page = await _fetch_range(product_id, window_start, window_end)
+        window_start = max(fetch_start, window_end - _MAX_PER_REQ * bar_secs)
+        page = await _fetch_range(product_id, window_start, window_end, granularity=granularity)
         new  = [c for c in page if c["start"] not in known_set]
         all_new.extend(new)
         known_set.update(c["start"] for c in new)
@@ -174,14 +193,14 @@ async def backfill_product(
 
     if all_new:
         merged = existing + all_new
-        _save_history(product_id, merged)
+        _save_to_path(path, merged)
         total  = len({c["start"] for c in merged})
     else:
         total = len(existing)
 
     oldest = min(known_set) if known_set else None
     logger.info(
-        f"Backfill {product_id}: +{len(all_new)} new bars | "
+        f"Backfill {product_id} [{granularity}]: +{len(all_new)} new bars | "
         f"{total} total | oldest={oldest}"
     )
     return {
@@ -190,6 +209,34 @@ async def backfill_product(
         "total_bars": total,
         "oldest_ts":  oldest,
     }
+
+
+async def backfill_product(
+    product_id: str,
+    days: int = 365,
+) -> Dict:
+    """
+    Backfill one product's hourly history. Fetches at most `days` back.
+    Incremental: skips bars already stored.
+    Returns {"product_id", "new_bars", "total_bars", "oldest_ts"}.
+    """
+    return await _backfill_to_path(
+        product_id, days, _GRANULARITY, _BAR_SECS, _parquet_path(product_id)
+    )
+
+
+async def backfill_product_5m(
+    product_id: str,
+    days: int = 30,
+) -> Dict:
+    """Backfill one product's 5-minute history (#55). Same shape as hourly.
+
+    Default days=30 (~8640 bars, ~29 paged requests). Callers scale up as needed.
+    """
+    return await _backfill_to_path(
+        product_id, days, _FIVE_MINUTE_GRANULARITY, _FIVE_MINUTE_BAR_SECS,
+        _parquet_path_5m(product_id),
+    )
 
 
 class HistoryBackfill:
