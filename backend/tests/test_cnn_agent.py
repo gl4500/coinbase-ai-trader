@@ -1355,7 +1355,7 @@ class TestPerProductDatasetCache:
 
     class _FakeFB:
         """Minimal FeatureBuilder shim: 1-channel window of closes."""
-        def build(self, window, _idx, candles_5m=None):
+        def build(self, window, _idx, candles_5m=None, btc_closes=None):
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
                 closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
@@ -1648,6 +1648,82 @@ class TestTrainingConstantChannelMask:
         snapshot = [ch[:] for ch in channels]
         _cnn_mod._mask_training_constant_channels(channels)
         assert channels == snapshot, "input list must not be mutated"
+
+
+# ── Ch 21: BTC correlation wired through training pipeline (#53) ──────────────
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
+class TestBuildSamplesRangeBtcCloses:
+    """#53 — wire BTC-USD closes through the training sample builder.
+
+    FeatureBuilder.build already accepts btc_closes and computes Ch 21 (rolling
+    BTC-return correlation) correctly. The gap was that _build_samples_range
+    passed nothing, so every training sample saw Ch 21 = 0.
+    """
+
+    def setup_method(self):
+        self.fb = FeatureBuilder()
+
+    def _ch21(self, x):
+        return x[21].tolist() if hasattr(x[21], "tolist") else list(x[21])
+
+    def test_default_no_btc_closes_leaves_channel_21_zero(self):
+        candles = _make_candles(80)
+        X, _y, _idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+        )
+        assert len(X) >= 1
+        assert all(abs(v) < 1e-9 for v in self._ch21(X[0])), \
+            "Ch 21 must be zero when btc_closes not supplied"
+
+    def test_aligned_btc_closes_populate_channel_21(self):
+        candles = _make_candles(80)
+        # BTC series with distinct movement → non-trivial rolling correlation
+        btc_closes = [50000.0 + 1000 * math.sin(i / 7.0) for i in range(len(candles))]
+        X, _y, _idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+            btc_closes=btc_closes,
+        )
+        assert len(X) >= 1
+        ch21 = self._ch21(X[0])
+        assert any(abs(v) > 1e-6 for v in ch21), \
+            "Ch 21 must have non-zero rolling corr values once btc_closes is wired"
+
+    def test_btc_closes_sliced_per_window(self):
+        """Each sample at candle index i must receive btc_closes[i-seq_len+1 : i+1]."""
+        candles = _make_candles(80)
+        btc_closes = [50000.0 + float(i) for i in range(len(candles))]
+        X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            self.fb, SEQ_LEN, 4, 0.003,
+            btc_closes=btc_closes,
+        )
+        assert len(X) >= 1
+        i0 = idx[0]
+        window = candles[i0 - SEQ_LEN + 1 : i0 + 1]
+        btc_window = btc_closes[i0 - SEQ_LEN + 1 : i0 + 1]
+        expected = self.fb.build(window, {}, btc_closes=btc_window)
+        actual = self._ch21(X[0])
+        # Tensor roundtrip is float32; fb.build returns float64 — compare with tolerance
+        assert len(actual) == len(expected[21])
+        for a, e in zip(actual, expected[21]):
+            assert abs(a - e) < 1e-6, \
+                f"Per-window BTC slice mismatch: {a} vs {e}"
+
+    def test_extend_or_rebuild_plumbs_btc_closes_on_rebuild(self):
+        """The rebuild path of _extend_or_rebuild_product must also forward btc_closes."""
+        candles = _make_candles(80)
+        btc_closes = [50000.0 + 1000 * math.sin(i / 7.0) for i in range(len(candles))]
+        entry, status = _cnn_mod._extend_or_rebuild_product(
+            None, candles, self.fb, SEQ_LEN, 4, 0.003,
+            btc_closes=btc_closes,
+        )
+        assert status == "rebuild"
+        assert entry is not None and entry["X"]
+        assert any(abs(v) > 1e-6 for v in self._ch21(entry["X"][0])), \
+            "Rebuild path must forward btc_closes to _build_samples_range"
 
 
 # ── Sample-uniqueness weighting (P3c) ─────────────────────────────────────────

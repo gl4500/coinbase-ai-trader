@@ -5,6 +5,39 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 37] — 2026-04-24 — Wire BTC closes through training sample builder (Task #53)
+
+### Context
+Session 32 audit left 11 of 27 CNN channels constant-zero during training
+(inference-time mask keeps train/serve distributions aligned — invariant #11).
+The structural ceiling behind val_loss ~0.68 is feature starvation, not overfit
+capacity. Session 37 begins Group 2+3 remediation: unmask channels whose data
+is already available or cheaply fetchable.
+
+### Change
+`_build_samples_range` and `_extend_or_rebuild_product` now accept an optional
+`btc_closes: Optional[List[float]]` (aligned 1:1 with `candles`). When supplied,
+each sample at candle index `i` forwards the slice `btc_closes[i-seq_len+1 : i+1]`
+to `fb.build(..., btc_closes=...)`, populating Ch 21 (rolling BTC-return
+correlation). `FeatureBuilder.build` already supported this kwarg; only the
+training-time plumbing was missing.
+
+### Behavior (deliberately unchanged this session)
+The caller in `_build_dataset` still passes `None` — no training distribution
+change yet. Task #57 will flip the mask (removing Ch 21 from
+`_TRAINING_CONSTANT_CHANNELS`), wire BTC closes at the call site, and bump
+`_DATASET_CACHE_VERSION` in one coordinated change to avoid train/serve skew.
+
+### Tests
+`TestBuildSamplesRangeBtcCloses` (4 tests, `backend/tests/test_cnn_agent.py`):
+- `test_default_no_btc_closes_leaves_channel_21_zero` — regression
+- `test_aligned_btc_closes_populate_channel_21` — end-to-end plumbing
+- `test_btc_closes_sliced_per_window` — per-window slice alignment
+- `test_extend_or_rebuild_plumbs_btc_closes_on_rebuild` — cache-rebuild path
+`_FakeFB.build` in `TestPerProductDatasetCache` updated to accept the new kwarg.
+
+---
+
 ## [Session 36] — 2026-04-23 — Inference-time regime gate (Task #52, Option C)
 
 ### Root cause
