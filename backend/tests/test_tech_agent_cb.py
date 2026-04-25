@@ -436,3 +436,62 @@ class TestTrailingDollarExit:
             await ag.book.buy("BTC-USD", price=200.0, frac=0.10, trigger="TEST")
         pos = ag.book.positions["BTC-USD"]
         assert pos["peak_pnl_usd"] == 0.0, "Re-entry must start with fresh peak"
+
+
+# ── Per-trigger exit stats ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_book_records_per_trigger_exit_stats():
+    """_Book._stats must increment wins/losses/total_pnl by exit trigger."""
+    from agents.tech_agent_cb import _Book
+
+    book = _Book("TECH", balance=1000.0)
+
+    with (
+        patch("agents.tech_agent_cb.database.load_agent_state",  new=AsyncMock(return_value=None)),
+        patch("agents.tech_agent_cb.database.save_agent_state",  new=AsyncMock()),
+        patch("agents.tech_agent_cb.database.open_trade",        new=AsyncMock()),
+        patch("agents.tech_agent_cb.database.close_trade",       new=AsyncMock()),
+    ):
+        await book.buy("BTC-USD", price=100.0, frac=0.10, trigger="SCAN")
+        pnl_win = await book.sell("BTC-USD", price=110.0, trigger="TICK_PROFIT")
+        assert pnl_win > 0
+
+        await book.buy("ETH-USD", price=100.0, frac=0.10, trigger="SCAN")
+        pnl_loss = await book.sell("ETH-USD", price=92.0, trigger="TICK_STOP")
+        assert pnl_loss < 0
+
+        stats = book._stats
+        assert stats["TICK_PROFIT"]["wins"]   == 1
+        assert stats["TICK_PROFIT"]["losses"] == 0
+        assert stats["TICK_PROFIT"]["total_pnl"] == pytest.approx(pnl_win, abs=1e-6)
+
+        assert stats["TICK_STOP"]["wins"]   == 0
+        assert stats["TICK_STOP"]["losses"] == 1
+        assert stats["TICK_STOP"]["total_pnl"] == pytest.approx(pnl_loss, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_status_exposes_exit_stats():
+    """TechAgentCB.status must expose exit_stats with win_rate per trigger."""
+    ag = TechAgentCB(ws_subscriber=None)
+
+    with (
+        patch("agents.tech_agent_cb.database.load_agent_state", new=AsyncMock(return_value=None)),
+        patch("agents.tech_agent_cb.database.save_agent_state", new=AsyncMock()),
+        patch("agents.tech_agent_cb.database.open_trade",       new=AsyncMock()),
+        patch("agents.tech_agent_cb.database.close_trade",      new=AsyncMock()),
+    ):
+        await ag.book.buy("BTC-USD", price=100.0, frac=0.10, trigger="SCAN")
+        await ag.book.sell("BTC-USD", price=110.0, trigger="TICK_PROFIT")
+        await ag.book.buy("ETH-USD", price=100.0, frac=0.10, trigger="SCAN")
+        await ag.book.sell("ETH-USD", price=92.0, trigger="TICK_STOP")
+
+        st = ag.status
+        assert "exit_stats" in st
+        es = st["exit_stats"]
+        assert es["TICK_PROFIT"]["wins"]      == 1
+        assert es["TICK_PROFIT"]["win_rate"]  == 100.0
+        assert es["TICK_STOP"]["losses"]      == 1
+        assert es["TICK_STOP"]["win_rate"]    == 0.0
+        assert "TICK_TRAIL" not in es  # only triggers with closed trades appear
