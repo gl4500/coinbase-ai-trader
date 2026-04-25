@@ -1335,25 +1335,6 @@ class CoinbaseCNNAgent:
         except Exception as e:
             logger.warning(f"LGBMFilter retrain failed: {e}")
 
-    async def force_lgbm_retrain(self) -> Optional[Dict]:
-        """Forced LGBM retrain — bypasses the trades-seen short-circuit so the
-        gate can be re-aligned with a freshly hot-reloaded CNN (#70) without
-        waiting for the next closed trade."""
-        try:
-            rows = await database.get_lgbm_training_rows()
-            metrics = self._lgbm.train(rows)
-            if metrics:
-                self._lgbm.save(_LGBM_MODEL_PATH)
-                self._lgbm_trades_seen = len(rows)
-                logger.info(
-                    f"LGBMFilter force-retrained: n={metrics['n_samples']} "
-                    f"win={metrics['win_rate']}% auc={metrics['auc']}"
-                )
-            return metrics
-        except Exception as e:
-            logger.warning(f"LGBMFilter force retrain failed: {e}")
-            return None
-
     def _exists(self) -> bool:
         return os.path.exists(MODEL_PATH)
 
