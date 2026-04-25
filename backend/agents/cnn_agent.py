@@ -40,6 +40,7 @@ Install PyTorch (CUDA 12.x):
   pip install torch --index-url https://download.pytorch.org/whl/cu124
 """
 import asyncio
+import bisect
 import copy
 import datetime as _dt
 import json
@@ -634,11 +635,15 @@ def _dataset_schema(seq_len: int, forward_hours: int,
     }
 
 
+_TRAIN_5M_LIMIT = 72   # last 6h of 5m bars — mirrors inference fetch in scan_all
+
+
 def _build_samples_range(candles, i_start: int, i_end: int,
                          fb, seq_len: int, forward_hours: int,
                          label_thresh: float,
                          btc_closes: Optional[List[float]] = None,
-                         funding_rates: Optional[List[float]] = None):
+                         funding_rates: Optional[List[float]] = None,
+                         candles_5m: Optional[List[Dict]] = None):
     """Build (X, y, indices) for sliding-window indices i in [i_start, i_end).
 
     Labels use triple-barrier (P3a): upper barrier (+_TB_UP_MULT), lower
@@ -657,22 +662,40 @@ def _build_samples_range(candles, i_start: int, i_end: int,
     Ch 20 (funding rate) is populated with the rate active at that sample's
     timestamp (#54). Rates should be the raw per-period rate (e.g. 0.0001
     for +0.01%); normalisation/clipping happens inside fb.build.
+
+    When `candles_5m` is provided, each sample at hourly candle index i is
+    given the 5m bars whose `start` falls strictly before the close of hour
+    i (i.e. start < candles[i].start + 3600), capped at the last 72 bars to
+    mirror the inference fetch in `scan_all`. Replaces the previous synthetic
+    proxy `candles[max(0, i-11): i+1]` so Ch 17/18/19 see real fast-timeframe
+    data during training (#56). When None, falls back to that synthetic proxy.
     """
     X_list, y_list, idx_list = [], [], []
     if i_end <= i_start:
         return X_list, y_list, idx_list
+
+    # Pre-extract 5m start timestamps once for O(log n) per-sample lookup.
+    c5m_starts: Optional[List[int]] = None
+    if candles_5m:
+        c5m_starts = [int(c["start"]) for c in candles_5m]
+
     for i in range(i_start, i_end):
         label = _label_triple_barrier(
             candles, i, forward_hours, _TB_UP_MULT, _TB_DN_MULT, label_thresh
         )
         if label is None:
             continue
-        window   = candles[i - seq_len + 1: i + 1]
-        proxy_5m = candles[max(0, i - 11): i + 1]
-        btc_win  = (btc_closes[i - seq_len + 1: i + 1]
-                    if btc_closes is not None else None)
-        fr_val   = funding_rates[i] if funding_rates is not None else None
-        channels = fb.build(window, {}, candles_5m=proxy_5m,
+        window  = candles[i - seq_len + 1: i + 1]
+        if c5m_starts is not None:
+            t_close = int(candles[i]["start"]) + 3600  # exclusive end of hour i
+            cutoff  = bisect.bisect_left(c5m_starts, t_close)
+            five_m  = candles_5m[max(0, cutoff - _TRAIN_5M_LIMIT): cutoff]
+        else:
+            five_m = candles[max(0, i - 11): i + 1]
+        btc_win = (btc_closes[i - seq_len + 1: i + 1]
+                   if btc_closes is not None else None)
+        fr_val  = funding_rates[i] if funding_rates is not None else None
+        channels = fb.build(window, {}, candles_5m=five_m,
                             btc_closes=btc_win, funding_rate=fr_val)
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
@@ -683,7 +706,8 @@ def _build_samples_range(candles, i_start: int, i_end: int,
 def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
                                forward_hours: int, label_thresh: float,
                                btc_closes: Optional[List[float]] = None,
-                               funding_rates: Optional[List[float]] = None):
+                               funding_rates: Optional[List[float]] = None,
+                               candles_5m: Optional[List[Dict]] = None):
     """Return (new_entry, status) for one product's per-product cache slot.
 
     status ∈ {"skip", "hit", "append", "rebuild"}
@@ -699,6 +723,8 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
     `_build_samples_range` for both rebuild and append paths (#53).
     `funding_rates` is forwarded verbatim (aligned 1:1 with `candles`) to
     `_build_samples_range` for both rebuild and append paths (#54).
+    `candles_5m` (per-product 5m parquet, time-aligned by timestamp) is
+    forwarded verbatim to both paths (#56).
     """
     n = len(candles)
     if n < seq_len + forward_hours + 1:
@@ -713,6 +739,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
             fb, seq_len, forward_hours, label_thresh,
             btc_closes=btc_closes,
             funding_rates=funding_rates,
+            candles_5m=candles_5m,
         )
         return {
             "first_ts": first_ts, "last_ts": last_ts, "last_n": n,
@@ -737,6 +764,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         fb, seq_len, forward_hours, label_thresh,
         btc_closes=btc_closes,
         funding_rates=funding_rates,
+        candles_5m=candles_5m,
     )
     return {
         "first_ts": first_ts,

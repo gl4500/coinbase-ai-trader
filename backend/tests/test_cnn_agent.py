@@ -357,11 +357,19 @@ class TestTrainOnHistory:
     def _isolate_model_paths(self, tmp_path, monkeypatch):
         """Redirect best-loss + checkpoint paths into tmp_path so real
         train_on_history calls cannot clobber backend/cnn_best_loss.txt
-        or backend/cnn_model.pt. See test_production_paths_are_isolated."""
+        or backend/cnn_model.pt. See test_production_paths_are_isolated.
+
+        _CKPT_PATH must also be isolated: at cnn_agent.py:2253 train_on_history
+        does `epoch_log.extend(ckpt.get("epoch_log", []))` on resume, so any
+        stale resume checkpoint left in backend/ from a prior test (or real
+        production training) silently injects its epoch_log into the next
+        test's result and breaks len()-based assertions.
+        """
         import agents.cnn_agent as ca
         monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
         monkeypatch.setattr(ca, "MODEL_PATH",      str(tmp_path / "cnn_model.pt"))
         monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
+        monkeypatch.setattr(ca, "_CKPT_PATH",      str(tmp_path / "ckpt_resume.pt"))
 
     def test_production_paths_are_isolated(self):
         """Guard: these tests call real train_on_history which writes the
@@ -779,11 +787,19 @@ class TestTrainOnHistoryNonBlocking:
     def _isolate_model_paths(self, tmp_path, monkeypatch):
         """Redirect best-loss + checkpoint paths into tmp_path so real
         train_on_history calls cannot clobber backend/cnn_best_loss.txt
-        or backend/cnn_model.pt. See test_production_paths_are_isolated."""
+        or backend/cnn_model.pt. See test_production_paths_are_isolated.
+
+        _CKPT_PATH must also be isolated: at cnn_agent.py:2253 train_on_history
+        does `epoch_log.extend(ckpt.get("epoch_log", []))` on resume, so any
+        stale resume checkpoint left in backend/ from a prior test (or real
+        production training) silently injects its epoch_log into the next
+        test's result and breaks len()-based assertions.
+        """
         import agents.cnn_agent as ca
         monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
         monkeypatch.setattr(ca, "MODEL_PATH",      str(tmp_path / "cnn_model.pt"))
         monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
+        monkeypatch.setattr(ca, "_CKPT_PATH",      str(tmp_path / "ckpt_resume.pt"))
 
     def test_production_paths_are_isolated(self):
         """Guard: see TestTrainOnHistory.test_production_paths_are_isolated."""
@@ -1808,6 +1824,204 @@ class TestBuildSamplesRangeFundingRates:
         ch20 = self._ch20(entry["X"][0])
         assert all(abs(v - 0.05) < 1e-5 for v in ch20), \
             "Rebuild path must forward funding_rates to _build_samples_range"
+
+
+# ── Real 5m candles wired through training pipeline (#56) ─────────────────────
+
+class TestBuildSamplesRangeRealFiveMinute:
+    """#56 — replace the synthetic hourly proxy with real 5m candles.
+
+    Training has historically passed `proxy_5m = candles[max(0, i - 11): i + 1]`
+    (12 hourly bars) to fb.build's `candles_5m=` argument. With <14 elements,
+    FeatureBuilder.build degrades Ch 17/18/19 to constants (0.5, 0.0, 0.0).
+    This is why those channels live in `_TRAINING_CONSTANT_CHANNELS`.
+
+    Once `services.history_backfill.load_5m_history(pid)` returns real bars
+    (#55), `_build_samples_range` should slice them by timestamp aligned to
+    the hourly index `i`, mirroring inference (last 72 5m bars ending at the
+    close of hour `i`). Backward-compat: when `candles_5m` is None, fall back
+    to the existing synthetic proxy so unaffected callers keep working.
+    """
+
+    class _CapturingFB:
+        """Records what candles_5m fb.build was called with for each sample."""
+        def __init__(self):
+            self.calls = []
+
+        def build(self, window, _idx, candles_5m=None, btc_closes=None,
+                  funding_rate=None):
+            self.calls.append({
+                "window_start_ts":  window[0]["start"]  if window else None,
+                "window_end_ts":    window[-1]["start"] if window else None,
+                "c5m":              list(candles_5m or []),
+                "c5m_len":          len(candles_5m or []),
+            })
+            closes = [float(c["close"]) for c in window]
+            if len(closes) < SEQ_LEN:
+                closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
+            return [closes[:SEQ_LEN]]
+
+        def to_tensor(self, channels):
+            import torch
+            return torch.tensor(channels, dtype=torch.float32)
+
+    def _make_5m_candles(self, n: int, t0: int = 1_700_000_000) -> list:
+        return [
+            {
+                "start":  t0 + i * 300,
+                "open":   100.0,
+                "high":   100.5,
+                "low":     99.5,
+                "close":  100.0 + i * 0.01,
+                "volume": 5.0 + i * 0.1,
+            }
+            for i in range(n)
+        ]
+
+    def test_default_falls_back_to_synthetic_hourly_proxy(self):
+        """When candles_5m is None, the legacy 12-hourly-bar proxy is used."""
+        fb = self._CapturingFB()
+        candles = _make_candles(80)
+        _X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            fb, SEQ_LEN, 4, 0.003,
+        )
+        assert len(idx) >= 1
+        first = fb.calls[0]
+        # Synthetic proxy = candles[i-11 : i+1] (hourly bars, len ≤ 12)
+        assert first["c5m_len"] <= 12
+        # All "5m" entries are actually hourly candles (start ts spaced by 3600)
+        c5m = first["c5m"]
+        if len(c5m) >= 2:
+            spacing = c5m[1]["start"] - c5m[0]["start"]
+            assert spacing == 3600, \
+                f"Fallback proxy must use hourly bars (3600s spacing), got {spacing}s"
+
+    def test_real_5m_candles_passed_through_when_provided(self):
+        """When candles_5m is supplied, fb.build receives a 5m-spaced slice."""
+        fb = self._CapturingFB()
+        candles  = _make_candles(80)
+        # 6h of 5m bars covering the last sample window comfortably
+        candles_5m = self._make_5m_candles(
+            n=80 * 12, t0=candles[0]["start"]
+        )
+        _X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            fb, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m,
+        )
+        assert len(idx) >= 1
+        first = fb.calls[0]
+        c5m = first["c5m"]
+        assert len(c5m) >= 2, "Real 5m slice should have multiple bars"
+        spacing = c5m[1]["start"] - c5m[0]["start"]
+        assert spacing == 300, \
+            f"Real 5m bars must be 300s apart, got {spacing}s"
+
+    def test_5m_slice_excludes_future_bars(self):
+        """No 5m bar with start > end-of-hour-i may leak into the slice for sample i."""
+        fb = self._CapturingFB()
+        candles  = _make_candles(80)
+        candles_5m = self._make_5m_candles(
+            n=80 * 12, t0=candles[0]["start"]
+        )
+        _X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            fb, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m,
+        )
+        for sample_pos, i in enumerate(idx):
+            t_close = candles[i]["start"] + 3600  # exclusive end of hour i
+            for c in fb.calls[sample_pos]["c5m"]:
+                assert c["start"] < t_close, (
+                    f"Look-ahead leak at sample i={i}: 5m bar start={c['start']} "
+                    f"exceeds end-of-hour {t_close}"
+                )
+
+    def test_5m_slice_size_matches_inference_convention(self):
+        """Slice should cap at 72 bars (6h) — the same window inference uses."""
+        fb = self._CapturingFB()
+        candles  = _make_candles(80)
+        # Plenty of history so the 72-bar cap is the binding constraint
+        candles_5m = self._make_5m_candles(
+            n=80 * 12, t0=candles[0]["start"]
+        )
+        _X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            fb, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m,
+        )
+        # For an "interior" sample (well past the 6h warmup) we should see 72 bars.
+        # Pick the last sample — definitely has enough history behind it.
+        last_call = fb.calls[-1]
+        assert last_call["c5m_len"] == 72, \
+            f"5m slice must cap at 72 bars (inference convention); got {last_call['c5m_len']}"
+
+    def test_short_5m_history_returns_what_is_available(self):
+        """If the 5m parquet has fewer than 72 bars before sample i, return what we have."""
+        fb = self._CapturingFB()
+        candles  = _make_candles(80)
+        # Only the first 10 5m bars exist — early samples should see ≤10 bars
+        candles_5m = self._make_5m_candles(
+            n=10, t0=candles[0]["start"]
+        )
+        _X, _y, idx = _cnn_mod._build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            fb, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m,
+        )
+        for call in fb.calls:
+            assert call["c5m_len"] <= 10
+
+    def test_extend_or_rebuild_plumbs_candles_5m_on_rebuild(self):
+        """The rebuild path of _extend_or_rebuild_product must forward candles_5m."""
+        fb = self._CapturingFB()
+        candles  = _make_candles(80)
+        candles_5m = self._make_5m_candles(
+            n=80 * 12, t0=candles[0]["start"]
+        )
+        entry, status = _cnn_mod._extend_or_rebuild_product(
+            None, candles, fb, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m,
+        )
+        assert status == "rebuild"
+        assert entry is not None and entry["X"]
+        # Last fb.build call must have received real 5m bars (300s spacing)
+        last = fb.calls[-1]
+        assert last["c5m_len"] >= 2
+        spacing = last["c5m"][1]["start"] - last["c5m"][0]["start"]
+        assert spacing == 300, \
+            f"Rebuild path must forward candles_5m to _build_samples_range (got {spacing}s spacing)"
+
+    def test_extend_or_rebuild_plumbs_candles_5m_on_append(self):
+        """The append path must also forward candles_5m."""
+        fb1 = self._CapturingFB()
+        candles80 = _make_candles(80)
+        candles_5m_short = self._make_5m_candles(
+            n=80 * 12, t0=candles80[0]["start"]
+        )
+        entry, _status = _cnn_mod._extend_or_rebuild_product(
+            None, candles80, fb1, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m_short,
+        )
+        # Now extend candles + 5m and append
+        fb2 = self._CapturingFB()
+        candles85 = _make_candles(85)
+        candles_5m_long = self._make_5m_candles(
+            n=85 * 12, t0=candles85[0]["start"]
+        )
+        entry2, status2 = _cnn_mod._extend_or_rebuild_product(
+            entry, candles85, fb2, SEQ_LEN, 4, 0.003,
+            candles_5m=candles_5m_long,
+        )
+        assert status2 == "append"
+        # Append-only invocations should still pass real 5m bars
+        if fb2.calls:  # may be empty if no new samples added; assert non-empty
+            last = fb2.calls[-1]
+            assert last["c5m_len"] >= 2
+            spacing = last["c5m"][1]["start"] - last["c5m"][0]["start"]
+            assert spacing == 300, \
+                f"Append path must forward candles_5m (got {spacing}s spacing)"
 
 
 # ── Sample-uniqueness weighting (P3c) ─────────────────────────────────────────

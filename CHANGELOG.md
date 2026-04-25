@@ -5,6 +5,65 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 37b] — 2026-04-24 — Real 5m candles wired into training (Task #56)
+
+### Context
+Session 37 (#55) landed the per-product 5m parquet loader but no caller
+consumed it yet — `_build_samples_range` still passed the synthetic
+`candles[max(0, i-11): i+1]` (12 hourly bars) to `fb.build`'s `candles_5m=`
+kwarg. That < 14-element window forces FeatureBuilder.build's Ch 17/18/19
+branch into its degenerate fallback (constants `0.5 / 0.0 / 0.0`), which is
+why Session 32 added Ch 17/18/19 to `_TRAINING_CONSTANT_CHANNELS`. Until the
+training-time 5m path delivers ≥14 real bars per sample, the mask cannot
+shrink without retraining on garbage.
+
+### Change
+`backend/agents/cnn_agent.py`:
+- `_build_samples_range(...)` gains `candles_5m: Optional[List[Dict]] = None`
+- New module constant `_TRAIN_5M_LIMIT = 72` mirrors the inference fetch
+  (`scan_all` requests `limit=72` 5m bars = 6h)
+- Per-sample slice: `t_close = candles[i]["start"] + 3600`;
+  `cutoff = bisect.bisect_left(c5m_starts, t_close)`;
+  `five_m = candles_5m[max(0, cutoff - 72): cutoff]`
+  → strictly excludes any 5m bar starting at or after the close of hour `i`
+  (no look-ahead leak), capped at the last 72 bars to match inference
+- `c5m_starts` is built once per product call; per-sample lookup is O(log n)
+- When `candles_5m` is None, the legacy synthetic proxy is preserved
+  byte-for-byte → no behaviour change for callers that haven't migrated
+- `_extend_or_rebuild_product(...)` gains the same kwarg and forwards it to
+  both the rebuild and append code paths
+- `import bisect` added at module top
+
+Caller plumbing (`_build_dataset` → `_extend_or_rebuild_product` → loader)
+remains unchanged this commit. The atomic flip happens in Task #57 when
+`_TRAINING_CONSTANT_CHANNELS` shrinks: the caller will start passing
+`load_5m_history(pid)` and `_DATASET_CACHE_VERSION` will bump (#58) so all
+existing per-product cache entries rebuild against the new 5m channels.
+
+### Tests
+New class `TestBuildSamplesRangeRealFiveMinute` (7 tests) in
+`backend/tests/test_cnn_agent.py`:
+- `test_default_falls_back_to_synthetic_hourly_proxy` — 3600s spacing when None
+- `test_real_5m_candles_passed_through_when_provided` — 300s spacing in slice
+- `test_5m_slice_excludes_future_bars` — every passed bar has start < t_i+3600
+- `test_5m_slice_size_matches_inference_convention` — caps at 72 (last call)
+- `test_short_5m_history_returns_what_is_available` — partial 5m parquet OK
+- `test_extend_or_rebuild_plumbs_candles_5m_on_rebuild` — rebuild forwards kwarg
+- `test_extend_or_rebuild_plumbs_candles_5m_on_append` — append forwards kwarg
+
+`_CapturingFB` records every `fb.build` call's `candles_5m` slice so each
+assertion can introspect spacing, length, and timestamp bounds without
+needing the full FeatureBuilder pipeline.
+
+RED verified before implementation: 6/7 tests failed with
+`TypeError: _build_samples_range() got an unexpected keyword argument 'candles_5m'`.
+
+### Behavior (deliberately unchanged this commit)
+No production caller passes `candles_5m=` yet. CNN training output and
+inference paths are bitwise unchanged. The dataset cache version stays at 4.
+
+---
+
 ## [Session 37] — 2026-04-24 — 5-minute candle backfill (Task #55)
 
 ### Context
