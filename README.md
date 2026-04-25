@@ -67,8 +67,6 @@ Coinbase REST API ──► MarketScanner ──► SQLite DB
                       PortfolioTracker   ┌──┴──────────────────────────┐
                                          │  CoinbaseCNNAgent (27-ch)   │
                                          │  TechAgentCB                │
-                                         │  MomentumAgentCB            │
-                                         │  ScalpAgent                 │
                                          │  MacroSignalService         │
                                          └──────────────┬──────────────┘
                                                         │

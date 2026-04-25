@@ -17,7 +17,6 @@ polymarket_app/
 │   ├── agents/
 │   │   ├── cnn_agent.py         # CNN-LSTM + Ollama blend, 27-channel tensor
 │   │   ├── tech_agent_cb.py     # TechAgent — RSI/MACD/BB/Stoch/ADX/MFI
-│   │   ├── momentum_agent_cb.py # MomentumAgent — ROC momentum + trailing stop
 │   │   ├── signal_generator.py  # Shared indicator library (_rsi, _macd, _adx, _mfi, _vwap…)
 │   │   ├── order_executor.py    # Dry-run + live order execution
 │   │   └── market_scanner.py    # Discovers USD spot pairs from Coinbase
@@ -177,15 +176,6 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
 - **After signal**: calls `OutcomeTracker.record()` + `OutcomeTracker.validate_with_ollama()`
 - **Live prices**: reads from `ws_subscriber.get_price(pid)` first, falls back to DB
 
-### MomentumAgentCB (`agents/momentum_agent_cb.py`)
-- **Scan interval**: 1 min (trailing stops need fast response)
-- **Staggered start**: +60s after backend start
-- **Indicators**: 5d/10d/20d ROC, momentum acceleration, trend consistency, VW-momentum, volume ratio
-- **Threshold**: buy_score ≥ 0.45 AND vw_mom > 0
-- **Trailing stop**: 3% from high-water mark (high_water persisted in `agent_state`)
-- **Portfolio**: `_Book("MOMENTUM")` with `load(high_water_ref)` at startup
-- **After signal**: calls `OutcomeTracker.record()` + `OutcomeTracker.validate_with_ollama()`
-
 ### OutcomeTracker (`services/outcome_tracker.py`)
 - **Loop interval**: 30 min (resolves 4h-old outcomes)
 - **WIN**: price moved +0.5% in signal direction after 4h
@@ -207,17 +197,9 @@ TechAgent (2 min scan)
   → BUY/SELL/HOLD → save to agent_decisions
   → if BUY/SELL: OutcomeTracker.record() + validate_with_ollama()
          ↓
-MomentumAgent (1 min scan)
-  → score ROC momentum + trailing stop check
-  → BUY/SELL/HOLD → save to agent_decisions
-  → if BUY/SELL: OutcomeTracker.record() + validate_with_ollama()
-         ↓
 MacroSignalService (1 hr cache)
   → fetch funding rate, L/S ratio, OI, BTC dominance, CB premium
   → buy_gate_multiplier / sell_gate_multiplier applied to all agent scores
-         ↓
-ScalpAgent (5 sec tick loop)
-  → ultra-short 0.30% TP, ATR trailing stop, volume + RSI entry filters
          ↓
 CNN Agent (15 min scan)
   → build 27-ch tensor from hourly + 5-min candles + macro channels
@@ -288,7 +270,6 @@ def _no_window() -> dict:
 | StochK | stoch_k | <20 green / >80 red |
 | Time | scanned_at | Scan timestamp |
 | **Tech** | agent_decisions (TECH) | Side badge + conf% + score + PnL (purple) |
-| **Mom** | agent_decisions (MOMENTUM) | Side badge + conf% + score + PnL (blue) |
 | Regime/Signal | regime + side | T=Trending / R=Ranging badge |
 
 ---
@@ -378,8 +359,6 @@ backend/tests/
 ├── test_cnn_agent.py              # CNN scan, FeatureBuilder, model load/save
 ├── test_lgbm_filter.py            # LGBMFilter train/predict/unseen-label fix
 ├── test_tech_agent_cb.py          # TechAgent scoring, ATR stop, Kelly sizing
-├── test_momentum_agent_cb.py      # MomentumAgent ROC, trailing stop, high water
-├── test_scalp_agent.py            # ScalpAgent entry/exit triggers, stats
 ├── test_signal_generator_new.py   # All indicator functions (_rsi, _adx, _macd, _vwap…)
 ├── test_database.py               # All DB CRUD functions
 ├── test_startup_sequence.py       # Lifespan order, agent boot, DB init
@@ -419,7 +398,7 @@ Never skip step 1. Tests written after code are not TDD — they are documentati
 | Decision | Reason |
 |---|---|
 | WS subscriber created before agents in lifespan | Agents need live prices at init |
-| Tech +30s / Momentum +60s staggered start | Avoid DB stampede at startup |
+| Tech +30s staggered start | Avoid DB stampede at startup |
 | CNN always dry-run (`is_trading_fn=lambda: True`) | Never executes real orders in auto-loop |
 | CoinGecko removed entirely | Unreliable, added latency, not needed |
 | Browser opened only by launcher | main.py opening Brave caused 3 browser windows |
