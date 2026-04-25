@@ -45,6 +45,10 @@ _ATR_MULTIPLIER = 3.0    # stop distance = ATR × multiplier
 _ATR_STOP_MIN   = 0.015  # floor: never tighter than 1.5 % (prevent stop-hunting)
 _ATR_STOP_MAX   = 0.12   # ceiling: never wider than 12 % (limit max drawdown)
 
+# Trailing $-PnL take-profit (per-position)
+_TRAIL_ARM_USD      = 1.00   # peak unrealized PnL must reach >= $1.00 to arm
+_TRAIL_GIVEBACK_USD = 0.25   # sell when peak - current >= $0.25
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -138,7 +142,7 @@ class _Book:
             pos["avg_price"] = (pos["avg_price"] * pos["size"] + price * size) / tot
             pos["size"] = tot
         else:
-            self.positions[pid] = {"size": size, "avg_price": price}
+            self.positions[pid] = {"size": size, "avg_price": price, "peak_pnl_usd": 0.0}
         self.balance -= spend
         await self._save()
         await database.open_trade(
@@ -292,6 +296,11 @@ class TechAgentCB:
             avg_price = pos["avg_price"]
             pct       = (price - avg_price) / avg_price
 
+            current_pnl_usd = (price - avg_price) * pos["size"]
+            prev_peak       = pos.get("peak_pnl_usd", 0.0)
+            pos["peak_pnl_usd"] = max(prev_peak, current_pnl_usd)
+            peak_pnl_usd    = pos["peak_pnl_usd"]
+
             exit_reason = None
             exit_trigger = "TICK_SIGNAL"
 
@@ -314,7 +323,19 @@ class TechAgentCB:
                 confidence   = 0.95
                 exit_trigger = "TICK_STOP"
 
-            # 3. Take-profit (20% above entry)
+            # 3. Trailing $-PnL take-profit: armed at peak >= _TRAIL_ARM_USD,
+            #    fires when peak - current >= _TRAIL_GIVEBACK_USD.
+            elif (peak_pnl_usd >= _TRAIL_ARM_USD
+                  and (peak_pnl_usd - current_pnl_usd) >= _TRAIL_GIVEBACK_USD):
+                exit_reason  = (
+                    f"TECH TRAIL [TICK]: peak=+${peak_pnl_usd:.2f} "
+                    f"current=+${current_pnl_usd:.2f} "
+                    f"giveback=${peak_pnl_usd - current_pnl_usd:.2f}"
+                )
+                confidence   = 0.95
+                exit_trigger = "TICK_TRAIL"
+
+            # 4. Take-profit (legacy %-based backstop)
             elif pct > _TAKE_PROFIT:
                 exit_reason  = f"TECH TAKE PROFIT [TICK]: +{pct*100:.1f}% above entry ${avg_price:.4f}"
                 confidence   = 0.95
