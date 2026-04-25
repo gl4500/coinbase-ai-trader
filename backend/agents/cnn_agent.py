@@ -103,7 +103,7 @@ def _regime_gate_enabled() -> bool:
 
 class _CNNBook:
     """Lightweight dry-run portfolio book for the CNN agent.
-    Mirrors the _Book classes in tech_agent_cb / momentum_agent_cb so that
+    Mirrors the _Book class in tech_agent_cb so that
     CNN trades appear in the `trades` table and per-product positions are tracked
     (prevents buying the same asset repeatedly).
     """
@@ -1743,8 +1743,8 @@ class CoinbaseCNNAgent:
             trending = hmm_regime == "TRENDING"
         cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
 
-        # Fetch most-recent Tech & Momentum decisions for this product
-        # so the Ollama model can incorporate their votes into its reasoning.
+        # Fetch most-recent Tech decisions for this product so the Ollama
+        # model can incorporate their votes into its reasoning.
         agent_votes = await database.get_agent_decisions(pid, limit=2)
         agent_ctx = ""
         for av in agent_votes:

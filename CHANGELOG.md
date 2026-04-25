@@ -5,6 +5,100 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 42] — 2026-04-25 — Remove ScalpAgent + MomentumAgent, port exit-stats to TechAgent
+
+### Context
+TechAgent (with TICK_TRAIL exits added in Session 38) covers the same
+RSI/BB/MACD/Stoch/OBV signal space as MomentumAgent on a 2-min cadence;
+ScalpAgent's only durable contribution was its per-trigger exit-stats
+system. Two stale agents removed; the diagnostic value preserved.
+
+### Change
+**TechAgent gains per-trigger exit stats** (`agents/tech_agent_cb.py`):
+- `_Book._stats: Dict[str, Dict]` keyed by trigger
+  (`TICK_SIGNAL` / `TICK_STOP` / `TICK_TRAIL` / `TICK_PROFIT` / `SCAN`)
+  with `{wins, losses, total_pnl}` per trigger.
+- `_Book.sell()` updates the bucket on every close; `setdefault` handles
+  unseen triggers gracefully.
+- `TechAgentCB.status["exit_stats"]` exposes per-trigger counters with
+  `win_rate` computed inline; only triggers with at least one closed
+  trade are returned.
+- Diagnostic only — not persisted. The `trades` table is the durable
+  source of truth.
+- 2 new tests in `tests/test_tech_agent_cb.py`.
+
+**Backend deletions:**
+- `backend/agents/momentum_agent_cb.py`
+- `backend/agents/scalp_agent.py`
+- `backend/tests/test_momentum_agent_cb.py`
+- `backend/tests/test_momentum_entry_filter.py`
+- `backend/tests/test_scalp_agent.py`
+
+**`backend/main.py`** — dropped imports, AppState fields
+(`momentum_agent`, `scalp_agent`, `momentum_task`, `scalp_task`),
+startup-stagger constants (`_MOMENTUM_START_DELAY`, `_SCALP_START_DELAY`),
+lifespan instantiation + delayed-launch coroutines + task creation,
+shutdown task list entries + scalp.stop() call, `/api/agents/status`
+payload entries (`mom_status`, `scalp_status`), and `/api/trades` query
+description.
+
+**`backend/tests/test_startup_sequence.py`** — reduced to a single
+`_TECH_START_DELAY` sanity check; ScalpAgent warmup tests dropped.
+
+**`backend/tests/test_market_scanner.py`** — dropped one
+`test_scalp_skips_micro_price_in_scan` test that imported the deleted
+ScalpAgent class.
+
+**`backend/tests/test_signal_improvements.py`** — dropped
+`TestRSIOverbought` class which imported `_RSI_OVERBOUGHT` from the
+deleted `momentum_agent_cb` module.
+
+**Frontend cleanup** (6 files, all under `frontend/src/`):
+- `components/AgentsDashboard.tsx`: dropped Momentum + Scalp cards and
+  signal feeds; aggregate over TECH + CNN only; reflowed Tech feed to
+  a constrained single-column block (`max-w-3xl`) so the layout still
+  reads as intentional.
+- `components/CNNDashboard.tsx`: dropped Mom + Scalp `<th>` columns and
+  IIFE `<td>` blocks from confidence table; updated comment.
+- `components/FiringCounter.tsx`: dropped MOM + SCALP rows from Counts
+  type, default state, fetch handler, and JSX. (This file was
+  previously untracked — now committed for the first time.)
+- `components/PerformanceDashboard.tsx`: dropped MOMENTUM + SCALP from
+  `AgentFilter` union, both color maps, and chip array.
+- `utils/agentByProduct.ts`: `AgentVotes` is now `{ tech }` only.
+- `utils/agentByProduct.test.ts`: dropped MOMENTUM/SCALP fixtures and
+  assertions; kept tech / multi-product / newest-wins / unknown-agent.
+
+**Docs / cleanup:**
+- `_mom_sells.py` deleted (Momentum-only debug script).
+- `launcher.py`: subtitle changed from
+  "Advanced Trade · RSI · MACD · CNN · Momentum" to
+  "Advanced Trade · RSI · MACD · CNN".
+- `README.md`: MomentumAgentCB and ScalpAgent rows removed from the
+  architecture diagram.
+- `REBUILD_STANDARD.md`: scrubbed all class references — file-tree
+  entry, MomentumAgentCB section, signal-flow diagram blocks,
+  dashboard column row, test-file rows, and staggered-start design row.
+
+### Out of scope
+- ScalpAgent's 5-min stop-loss cooldown was NOT ported (user deferred).
+- ScalpAgent's confluence-reasons format with `(+score)` annotations
+  was NOT applied to TechAgent — TechAgent already has its own
+  `buy_reasons`/`sell_reasons` lists in `_score()`.
+
+### DB state
+Historical `MOMENTUM` / `SCALP` rows in `agent_state`,
+`agent_decisions`, `trades`, and `signal_outcomes` are left as-is
+(dry-run only; no migration). New writes will only land under `TECH` /
+`CNN`.
+
+### Test count
+439 backend tests passing post-removal (down from 525 pre-removal —
+~37 scalp tests + ~30 momentum tests + the small follow-on cleanups).
+5/5 frontend Vitest tests pass. Dev server compiles green.
+
+---
+
 ## [Session 41] — 2026-04-25 — Cloud retrain pipeline (#67–#70)
 
 ### Context

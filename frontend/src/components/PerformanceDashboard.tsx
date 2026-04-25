@@ -85,7 +85,7 @@ interface Decision {
   created_at: string
 }
 
-type AgentFilter = 'ALL' | 'TECH' | 'MOMENTUM' | 'CNN' | 'SCALP'
+type AgentFilter = 'ALL' | 'TECH' | 'CNN'
 type TradeView   = 'ALL' | 'OPEN' | 'CLOSED'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -103,17 +103,13 @@ function fmtTime(iso: string): string {
 }
 
 const AGENT_COLORS: Record<string, string> = {
-  CNN:      'text-blue-400',
-  MOMENTUM: 'text-purple-400',
-  SCALP:    'text-yellow-400',
-  TECH:     'text-green-400',
+  CNN:  'text-blue-400',
+  TECH: 'text-green-400',
 }
 
 const AGENT_BADGES: Record<string, string> = {
-  CNN:      'bg-blue-900/40 text-blue-300',
-  MOMENTUM: 'bg-purple-900/40 text-purple-300',
-  SCALP:    'bg-yellow-900/40 text-yellow-300',
-  TECH:     'bg-green-900/40 text-green-300',
+  CNN:  'bg-blue-900/40 text-blue-300',
+  TECH: 'bg-green-900/40 text-green-300',
 }
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
@@ -245,7 +241,7 @@ export default function PerformanceDashboard() {
     decisionAgent === 'ALL' || d.agent === decisionAgent
   )
 
-  const AGENTS: AgentFilter[] = ['ALL', 'CNN', 'MOMENTUM', 'SCALP', 'TECH']
+  const AGENTS: AgentFilter[] = ['ALL', 'CNN', 'TECH']
 
   return (
     <div className="space-y-6">

@@ -206,7 +206,7 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 - **Frontend:** React + Vite + Tailwind, port 3000
 - **DB:** SQLite via aiosqlite (`backend/coinbase.db`)
 - **Market data:** Coinbase Advanced Trade API (REST + WebSocket)
-- **AI agents:** CNN agent (PyTorch), Tech agent, Momentum agent, Scalp agent
+- **AI agents:** CNN agent (PyTorch), Tech agent
 - **Local inference:** Ollama at `http://localhost:11434`; model set via `OLLAMA_MODEL` in `.env`
 - **Current Ollama model:** `llama3.1:8b` (~4.7 GB Q4) — fits RTX 2060 with headroom
 - **GPU constraint:** RTX 2060 = 6 GB VRAM — only one Q4 model loaded at a time
@@ -236,7 +236,6 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 | `agents/cnn_agent.py` | `test_cnn_agent.py` | ✅ covered |
 | `agents/cnn_agent.py` (risk exits) | `test_cnn_risk_exits.py` | ✅ covered |
 | `agents/tech_agent_cb.py` | `test_tech_agent_cb.py` | ✅ covered |
-| `agents/momentum_agent_cb.py` | `test_momentum_entry_filter.py` | ✅ covered |
 | `agents/signal_generator.py` | `test_signal_improvements.py` | ✅ covered |
 | `data/cnn_model.py` | `test_cnn_model.py` | ✅ covered |
 | `data/history_backfill.py` | `test_history_backfill.py` | ✅ covered |

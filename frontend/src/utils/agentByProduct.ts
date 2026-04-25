@@ -6,7 +6,7 @@
 
 export interface AgentDecision {
   id:         number
-  agent:      string        // TECH | MOMENTUM | SCALP
+  agent:      string        // TECH (only — Momentum and Scalp removed)
   product_id: string
   side:       string        // BUY | SELL | HOLD
   confidence: number
@@ -19,18 +19,14 @@ export interface AgentDecision {
 }
 
 export interface AgentVotes {
-  tech:  AgentDecision | null
-  mom:   AgentDecision | null
-  scalp: AgentDecision | null
+  tech: AgentDecision | null
 }
 
 export function buildAgentByProduct(decisions: AgentDecision[]): Map<string, AgentVotes> {
   const map = new Map<string, AgentVotes>()
   for (const d of decisions) {
-    const cur = map.get(d.product_id) ?? { tech: null, mom: null, scalp: null }
-    if (d.agent === 'TECH'     && cur.tech  === null) cur.tech  = d
-    if (d.agent === 'MOMENTUM' && cur.mom   === null) cur.mom   = d
-    if (d.agent === 'SCALP'    && cur.scalp === null) cur.scalp = d
+    const cur = map.get(d.product_id) ?? { tech: null }
+    if (d.agent === 'TECH' && cur.tech === null) cur.tech = d
     map.set(d.product_id, cur)
   }
   return map

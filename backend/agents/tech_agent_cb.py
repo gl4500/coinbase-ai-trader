@@ -101,6 +101,11 @@ class _Book:
         self.balance     = balance
         self.positions: Dict[str, Dict] = {}  # pid → {size, avg_price}
         self.realized_pnl = 0.0
+        # Per-trigger exit stats — diagnostic only, not persisted (trades ledger is durable)
+        self._stats: Dict[str, Dict] = {
+            trigger: {"wins": 0, "losses": 0, "total_pnl": 0.0}
+            for trigger in ("TICK_SIGNAL", "TICK_STOP", "TICK_TRAIL", "TICK_PROFIT", "SCAN")
+        }
 
     async def load(self) -> None:
         """Restore balance, positions, and PnL from the database."""
@@ -161,6 +166,17 @@ class _Book:
         pnl = proceeds - pos["size"] * pos["avg_price"]
         self.balance += proceeds
         self.realized_pnl += pnl
+
+        # Per-trigger stats (diagnostic — trades table is durable)
+        bucket = self._stats.setdefault(
+            trigger, {"wins": 0, "losses": 0, "total_pnl": 0.0}
+        )
+        if pnl > 0:
+            bucket["wins"] += 1
+        else:
+            bucket["losses"] += 1
+        bucket["total_pnl"] += pnl
+
         await self._save()
         await database.close_trade(
             agent=self._agent, product_id=pid, exit_price=price,
@@ -625,4 +641,14 @@ class TechAgentCB:
             "signals_buy":   self.signals_buy,
             "signals_sell":  self.signals_sell,
             "last_scan_at":  self.last_scan_at,
+            "exit_stats":    {
+                trigger: {
+                    "wins":      s["wins"],
+                    "losses":    s["losses"],
+                    "win_rate":  round(s["wins"] / max(s["wins"] + s["losses"], 1) * 100, 1),
+                    "total_pnl": round(s["total_pnl"], 2),
+                }
+                for trigger, s in self.book._stats.items()
+                if s["wins"] + s["losses"] > 0
+            },
         }

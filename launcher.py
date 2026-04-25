@@ -316,7 +316,7 @@ class LauncherApp(tk.Tk):
         title_frame.pack(side="left")
         tk.Label(title_frame, text="Coinbase Trader",
                  font=("Segoe UI", 16, "bold"), bg=BG_PANEL, fg=TEXT).pack(anchor="w")
-        tk.Label(title_frame, text="Advanced Trade · RSI · MACD · CNN · Momentum",
+        tk.Label(title_frame, text="Advanced Trade · RSI · MACD · CNN",
                  font=("Segoe UI", 9), bg=BG_PANEL, fg=TEXT_DIM).pack(anchor="w")
 
         # Browser button in header

@@ -309,7 +309,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
     return () => clearInterval(id)
   }, [fetchAgentDecisions])
 
-  // Per-product lookup: latest Tech, Momentum & Scalp decision (agentDecisions is newest-first)
+  // Per-product lookup: latest Tech decision (agentDecisions is newest-first)
   const agentByProduct = useMemo(() => buildAgentByProduct(agentDecisions), [agentDecisions])
 
   // Filtered + sorted scans
@@ -915,14 +915,12 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                       </th>
                     ))}
                     <th className="px-3 py-2 text-left text-purple-400">Tech</th>
-                    <th className="px-3 py-2 text-left text-blue-400">Mom</th>
-                    <th className="px-3 py-2 text-left text-amber-400">Scalp</th>
                     <th className="px-3 py-2 text-left">Regime / Signal</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredScans.length === 0 ? (
-                    <tr><td colSpan={16} className="text-center py-8 text-gray-600">
+                    <tr><td colSpan={14} className="text-center py-8 text-gray-600">
                       No scans yet — run a scan first
                     </td></tr>
                   ) : filteredScans.map(s => {
@@ -1057,63 +1055,6 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                                 {ag.pnl != null && (
                                   <span className={`font-mono text-xs ${ag.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                                     {ag.pnl >= 0 ? '+' : ''}${ag.pnl.toFixed(2)}
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                          )
-                        })()}
-
-                        {/* Momentum agent vote */}
-                        {(() => {
-                          const ag = agentByProduct.get(s.product_id)?.mom ?? null
-                          if (!ag) return <td className="px-3 py-2 text-gray-700 font-mono text-xs">no data</td>
-                          const isBuy  = ag.side === 'BUY'
-                          const isSell = ag.side === 'SELL'
-                          const isHold = ag.side === 'HOLD'
-                          return (
-                            <td className="px-3 py-2">
-                              <div className="flex flex-col gap-0.5">
-                                <span className={`px-1.5 py-0.5 rounded text-xs font-bold w-fit ${
-                                  isBuy  ? 'bg-green-900/50 text-green-400 border border-green-800' :
-                                  isSell ? 'bg-red-900/50   text-red-400   border border-red-800'   :
-                                           'bg-gray-800     text-gray-500  border border-gray-700'
-                                }`}>{ag.side}</span>
-                                <span className={`font-mono text-xs ${isHold ? 'text-gray-600' : 'text-blue-400'}`}>
-                                  {Math.round(ag.confidence * 100)}%
-                                  {ag.score != null ? ` s=${ag.score.toFixed(2)}` : ''}
-                                </span>
-                                {ag.pnl != null && (
-                                  <span className={`font-mono text-xs ${ag.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                    {ag.pnl >= 0 ? '+' : ''}${ag.pnl.toFixed(2)}
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                          )
-                        })()}
-
-                        {/* Scalp agent vote */}
-                        {(() => {
-                          const ag = agentByProduct.get(s.product_id)?.scalp ?? null
-                          if (!ag) return <td className="px-3 py-2 text-gray-700 font-mono text-xs">—</td>
-                          const isBuyS  = ag.side === 'BUY'
-                          const isSellS = ag.side === 'SELL'
-                          return (
-                            <td className="px-3 py-2">
-                              <div className="flex flex-col gap-0.5">
-                                <span className={`px-1.5 py-0.5 rounded text-xs font-bold w-fit ${
-                                  isBuyS  ? 'bg-green-900/50 text-green-400 border border-green-800' :
-                                  isSellS ? 'bg-red-900/50   text-red-400   border border-red-800'   :
-                                            'bg-gray-800     text-gray-500  border border-gray-700'
-                                }`}>{ag.side}</span>
-                                <span className={`font-mono text-xs ${isBuyS || isSellS ? 'text-amber-400' : 'text-gray-600'}`}>
-                                  {Math.round(ag.confidence * 100)}%
-                                  {ag.score != null ? ` s=${ag.score.toFixed(2)}` : ''}
-                                </span>
-                                {ag.pnl != null && (
-                                  <span className={`font-mono text-xs ${ag.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                    {ag.pnl >= 0 ? '+' : ''}${ag.pnl.toFixed(4)}
                                   </span>
                                 )}
                               </div>

@@ -139,28 +139,3 @@ class TestAgentPriceGuard:
         }
         result = await agent.generate_signal(product)
         assert result is None, "CNN must not signal on micro-priced assets"
-
-    @pytest.mark.asyncio
-    async def test_scalp_skips_micro_price_in_scan(self):
-        """ScalpAgent._get_scalp_products must exclude products with price < MIN_PRICE."""
-        from agents.scalp_agent import ScalpAgent
-
-        ag = ScalpAgent()
-        tracked = [
-            {"product_id": "XRP-USD",  "price": 1.33},
-            {"product_id": "SHIB-USD", "price": 0.000012},
-        ]
-
-        async def fake_get_candles(pid, limit):
-            return [{}] * 120
-
-        with (
-            patch("agents.scalp_agent.database.get_products",
-                  new=AsyncMock(return_value=tracked)),
-            patch("agents.scalp_agent.database.get_candles",
-                  side_effect=fake_get_candles),
-        ):
-            result = await ag._get_scalp_products()
-
-        assert "XRP-USD"  in result
-        assert "SHIB-USD" not in result
