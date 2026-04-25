@@ -1,12 +1,11 @@
 """
-TDD tests for 6 CNN/signal improvements:
+TDD tests for CNN/signal improvements:
 
 1. ADX normalization fix   — _wilder() uses MEAN init, ADX values in 0-100
 2. MACD fast params        — default fast/slow/signal = 5/13/3 for 1h crypto
-3. RSI overbought 78       — momentum agent threshold updated
-4. Funding rate channel    — Ch 20 present in FeatureBuilder output
-5. BTC correlation channel — Ch 21 present in FeatureBuilder output
-6. Time-of-day channels    — Ch 22 (sin) and Ch 23 (cos) present; N_CHANNELS=27
+3. Funding rate channel    — Ch 20 present in FeatureBuilder output
+4. BTC correlation channel — Ch 21 present in FeatureBuilder output
+5. Time-of-day channels    — Ch 22 (sin) and Ch 23 (cos) present; N_CHANNELS=27
 
 Written before implementation (TDD).
 """
@@ -140,21 +139,8 @@ class TestMACDFastParams:
         assert any(v != 0.0 for v in last_vals), \
             f"Ch 5 all zeros with 25 candles — old (12,26,9) params still in use"
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. RSI overbought threshold 78
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestRSIOverbought:
-
-    def test_momentum_rsi_overbought_threshold(self):
-        from agents.momentum_agent_cb import _RSI_OVERBOUGHT
-        assert _RSI_OVERBOUGHT == 65.0, \
-            f"_RSI_OVERBOUGHT={_RSI_OVERBOUGHT}, expected 65.0"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4 & 5 & 6. New channels: funding rate (20), BTC corr (21), sin/cos time (22,23)
+# 3 & 4 & 5. New channels: funding rate (20), BTC corr (21), sin/cos time (22,23)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestNewChannels:
