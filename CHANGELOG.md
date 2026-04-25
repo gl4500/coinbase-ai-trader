@@ -5,6 +5,125 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 39] — 2026-04-25 — Wire real BTC + 5m into _build_dataset, shrink mask (#57 stage a)
+
+### Context
+Sessions 36–37b plumbed `btc_closes`, `funding_rates`, and `candles_5m`
+through `_build_samples_range` and `_extend_or_rebuild_product`, but the
+caller `_build_dataset` (closure inside `train_on_history`) never passed
+these kwargs. So even after #53/#54/#56, training tensors still saw
+`btc_closes=None`, no per-product 5m parquet, and only the synthetic
+hourly-proxy 5m window.
+
+That left Ch 15 (ADX), Ch 17/18/19 (5m fast), Ch 21 (BTC corr) inside
+`_TRAINING_CONSTANT_CHANNELS` even though their data sources were
+already in the codebase. Per CLAUDE.md invariant 11, inference masks
+those channels to zero — so the model literally couldn't see them.
+
+This session is **stage (a)** of #57. Stage (b) (funding-rate history
+fetcher) is parked behind a new module yet to be built.
+
+### Change
+`backend/agents/cnn_agent.py`:
+- Imported `load_5m_history` from `services.history_backfill`.
+- Added `_aligned_btc_closes(target_candles, btc_candles)` helper —
+  forward-fills BTC hourly closes onto a target product's bar timestamps,
+  with pre-target BTC bars seeding the initial value so the series
+  never starts at None.
+- `train_on_history` Phase 1 now loads BTC hourly history once
+  (parquet → DB fallback) and, per product, loads the 5m parquet via
+  `load_5m_history(pid)`. The per-product tuple grew from `(pid, candles)`
+  to `(pid, candles, btc_aligned, c5m)`.
+- `_build_dataset` (closure) unpacks the 4-tuple and passes
+  `btc_closes=btc_aligned, candles_5m=c5m` into `_extend_or_rebuild_product`
+  on both rebuild and append paths. BTC-USD itself receives `btc_closes=None`
+  (matches inference at `_extend_or_rebuild_product` callers).
+- Shrunk `_TRAINING_CONSTANT_CHANNELS` from
+  `{10, 11, 15, 17, 18, 19, 20, 21, 24, 25, 26}`
+  to `{10, 11, 20, 24, 25, 26}`.
+  Still masked: Ch 10/11 (orderbook — no historical L1), Ch 20 (funding —
+  pending stage b), Ch 24/25 (IV/RV — no historical IV source), Ch 26
+  (L/S sentiment — no Binance historical L/S).
+- Bumped `_DATASET_CACHE_VERSION` from 4 → 5 (required: pre-v5 caches
+  stored hourly-proxy 5m + zero BTC; without the bump, stale cached
+  tensors would still feed the unmasked positions to training, defeating
+  the wiring change).
+
+### Tests
+9 new tests in `backend/tests/test_cnn_agent.py`:
+- `TestAlignedBtcClosesHelper` (5) — length match, exact alignment,
+  forward-fill on gaps, pre-target seed, None on empty BTC.
+- `TestBuildDatasetWiresBtcAndFiveMinute` (2) — spy on
+  `_extend_or_rebuild_product` confirms `btc_closes` (non-BTC products)
+  and `candles_5m` are passed through `train_on_history`.
+- `TestMaskShrinkAndCacheBump` (2) — frozenset matches new shape;
+  cache version is 5.
+
+Updated existing `TestTrainingConstantChannelMask::test_mask_set_covers_expected_channels`
+to match the new mask.
+
+`backend/tests/test_cnn_agent.py` — 146/146 green.
+
+### Behavior
+Train/serve invariant 11 still holds: training now sees real values for
+Ch 15/17/18/19/21, and inference no longer masks them to zero. The next
+auto-train cycle will rebuild the per-product cache from scratch
+(invalidated by the version bump) and produce a model that can actually
+use those channels. Until that retrain completes, inference reads real
+values into a model that was trained with them masked — a brief
+distribution shift window that closes on the next training run.
+
+Stage (b) will add `services/binance_funding_history.py` and remove
+Ch 20 from the mask once historical funding lands.
+
+---
+
+## [Session 38] — 2026-04-25 — TechAgent trailing $-PnL take-profit (TICK_TRAIL)
+
+### Context
+TechAgent already exits on three triggers: cached SELL signal, ATR stop-loss,
+and a +6 % take-profit. Small profitable positions that peak above +$1 of
+unrealized PnL but reverse before reaching +6 % were leaking gains. This
+session adds a per-position trailing dollar exit that captures those wins.
+
+### Change
+`backend/agents/tech_agent_cb.py`:
+- New constants `_TRAIL_ARM_USD = 1.00` and `_TRAIL_GIVEBACK_USD = 0.25`.
+- `_Book.buy` initializes `peak_pnl_usd: 0.0` on new positions; averaging
+  up an existing position leaves the peak alone (intentional).
+- `on_price_tick` now updates `pos["peak_pnl_usd"] = max(prev, current_pnl_usd)`
+  every tick (before the exit if/elif chain).
+- New `TICK_TRAIL` branch inserted between `TICK_STOP` and the legacy
+  `TICK_PROFIT`. Fires when `peak_pnl_usd >= $1.00` AND
+  `peak - current >= $0.25`.
+- Stale inline comment on the +6 % take-profit ("20% above entry") corrected
+  to "legacy %-based backstop".
+
+Persistence rides on the existing `agent_state.positions_json` blob — no
+DB schema change. Legacy saved positions (pre-upgrade) lack the key and
+fall back to `0.0` via `dict.get`, picking up tracking on the next tick.
+
+### Tests
+12 new tests across two classes in `backend/tests/test_tech_agent_cb.py`:
+- `TestTrailingDollarExitState` (3) — constants present, fresh init, no
+  reset on average-up.
+- `TestTrailingDollarExit` (9) — peak rises/holds correctly, no fire below
+  arm or below giveback, fires at threshold with `TICK_TRAIL` trigger,
+  trail wins over `+6 %` take-profit, ATR stop wins on a loss, legacy
+  positions don't crash, re-entry resets the peak.
+
+`backend/tests/test_tech_agent_cb.py` — 30/30 green.
+
+### Behavior
+Existing exit triggers unchanged. The +6 % take-profit becomes a backstop
+that will rarely fire because the trail typically triggers first.
+
+### Spec / plan
+- Spec: `docs/superpowers/specs/2026-04-24-tech-agent-trailing-dollar-exit-design.md`
+- Plan: `docs/superpowers/plans/2026-04-24-tech-agent-trailing-dollar-exit.md`
+
+---
+
 ## [Session 37b] — 2026-04-24 — Real 5m candles wired into training (Task #56)
 
 ### Context

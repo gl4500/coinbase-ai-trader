@@ -1640,8 +1640,12 @@ class TestTrainingConstantChannelMask:
     """
 
     def test_mask_set_covers_expected_channels(self):
-        # These channels require inputs that training never provides.
-        expected = {10, 11, 15, 17, 18, 19, 20, 21, 24, 25, 26}
+        # As of #57 stage (a) the training loop wires real candles_5m and
+        # aligned btc_closes through _build_dataset, so Ch 15 (ADX),
+        # Ch 17/18/19 (5m fast), Ch 21 (BTC corr) are no longer constant.
+        # Still masked: Ch 10/11 (orderbook), Ch 20 (funding rate),
+        # Ch 24/25 (IV/RV), Ch 26 (L/S sentiment) — no historical sources.
+        expected = {10, 11, 20, 24, 25, 26}
         assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
 
     def test_mask_zeros_designated_channels(self):
@@ -2511,3 +2515,183 @@ class TestInferenceRegimeGate:
         assert sig["side"] == "BUY"
         buy_mock.assert_called_once()
         assert sig["execution"]["success"] is True
+
+
+# ── #57 stage (a): real BTC + real 5m into _build_dataset, mask shrink ────────
+
+
+class TestAlignedBtcClosesHelper:
+    """`_aligned_btc_closes(target_candles, btc_candles)` returns a list of
+    BTC closes aligned 1:1 with `target_candles` (forward-fill on gaps).
+    Used by `_build_dataset` so per-product training tensors get a real
+    BTC reference series (Ch 21 was constant-zero before #57)."""
+
+    def test_returns_list_with_target_length(self):
+        from agents.cnn_agent import _aligned_btc_closes
+        target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
+        btc    = [{"start": 1000 + i * 3600, "close": 50000.0 + i * 100} for i in range(5)]
+        assert len(_aligned_btc_closes(target, btc)) == len(target)
+
+    def test_aligns_by_matching_timestamps(self):
+        from agents.cnn_agent import _aligned_btc_closes
+        target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(3)]
+        btc    = [{"start": 1000 + i * 3600, "close": 50000.0 + i * 100} for i in range(3)]
+        assert _aligned_btc_closes(target, btc) == [50000.0, 50100.0, 50200.0]
+
+    def test_forward_fills_missing_btc_bars(self):
+        """If BTC has gaps inside target window, fill with prior known close."""
+        from agents.cnn_agent import _aligned_btc_closes
+        target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
+        btc = [
+            {"start": 1000 + 0 * 3600, "close": 50000.0},
+            {"start": 1000 + 2 * 3600, "close": 50200.0},
+            {"start": 1000 + 4 * 3600, "close": 50400.0},
+        ]
+        assert _aligned_btc_closes(target, btc) == \
+            [50000.0, 50000.0, 50200.0, 50200.0, 50400.0]
+
+    def test_pre_target_btc_seeds_initial_value(self):
+        """BTC bars before target start should provide the seed close so the
+        series is not None at index 0."""
+        from agents.cnn_agent import _aligned_btc_closes
+        target = [{"start": 5000 + i * 3600, "close": 1.0} for i in range(2)]
+        btc    = [
+            {"start": 1000, "close": 49000.0},
+            {"start": 5000 + 1 * 3600, "close": 50000.0},
+        ]
+        assert _aligned_btc_closes(target, btc) == [49000.0, 50000.0]
+
+    def test_returns_none_when_btc_empty_or_none(self):
+        from agents.cnn_agent import _aligned_btc_closes
+        target = [{"start": 1000, "close": 1.0}]
+        assert _aligned_btc_closes(target, []) is None
+        assert _aligned_btc_closes(target, None) is None
+
+
+class TestBuildDatasetWiresBtcAndFiveMinute:
+    """`_build_dataset` (closure in train_on_history) must pass real
+    `btc_closes` (aligned per product) and `candles_5m` (per-product 5m
+    parquet) into `_extend_or_rebuild_product` so Ch 17/18/19 (5m fast)
+    and Ch 21 (BTC corr) are populated during training."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_paths(self, tmp_path, monkeypatch):
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca, "_BEST_LOSS_PATH",      str(tmp_path / "best_loss.txt"))
+        monkeypatch.setattr(ca, "MODEL_PATH",           str(tmp_path / "cnn_model.pt"))
+        monkeypatch.setattr(ca, "_MODEL_BAK_PATH",      str(tmp_path / "cnn_model.pt.bak"))
+        monkeypatch.setattr(ca, "_CKPT_PATH",           str(tmp_path / "ckpt_resume.pt"))
+        monkeypatch.setattr(ca, "_DATASET_CACHE_PATH",  str(tmp_path / "dataset_cache.pt"))
+
+    def _hourly(self, n=200, base=50000.0):
+        return [{
+            "open": base - 50, "high": base + 100, "low": base - 100,
+            "close": base + 500 * math.sin(i / 5.0),
+            "volume": 10_000 + i * 100,
+            "start": 1_700_000_000 + i * 3600,
+        } for i in range(n)]
+
+    def _five_min(self, n=300, base=50000.0):
+        return [{
+            "open": base, "high": base + 5, "low": base - 5,
+            "close": base + 10 * math.sin(i / 5.0),
+            "volume": 100.0,
+            "start": 1_700_000_000 + i * 300,
+        } for i in range(n)]
+
+    @pytest.mark.asyncio
+    async def test_extend_or_rebuild_receives_btc_closes_for_non_btc_products(self):
+        """Non-BTC products must receive aligned btc_closes; BTC-USD itself
+        is expected to receive None (matches inference behavior at the
+        scan_all path — a series doesn't correlate with itself)."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("PyTorch not installed")
+
+        agent = CoinbaseCNNAgent()
+        products = [{"product_id": pid} for pid in ("BTC-USD", "ETH-USD", "SOL-USD")]
+        candles  = self._hourly(200)
+        seen = []
+        from agents.cnn_agent import _extend_or_rebuild_product as orig
+
+        def spy(*args, **kwargs):
+            # First positional arg after entry is `candles`; the test mock
+            # returns the same candles list for every product, so we tag
+            # which product this call was for via a side-channel.
+            seen.append(kwargs)
+            return orig(*args, **kwargs)
+
+        with (
+            patch("agents.cnn_agent.database.get_products",
+                  new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.load_history", return_value=[]),
+            patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
+        ):
+            await agent.train_on_history(epochs=1)
+
+        assert len(seen) == 3, f"expected 3 calls (BTC, ETH, SOL); got {len(seen)}"
+        # BTC-USD: btc_closes must be None (own-series, no self-correlation)
+        # Other products: btc_closes must be a non-empty list aligned to candles
+        n_with_btc   = sum(1 for k in seen if k.get("btc_closes") is not None)
+        n_without_btc = sum(1 for k in seen if k.get("btc_closes") is None)
+        assert n_with_btc == 2, f"non-BTC products must get btc_closes; only {n_with_btc} did"
+        assert n_without_btc == 1, "exactly one call (BTC-USD) should have btc_closes=None"
+        # The aligned series should match candle length
+        for k in seen:
+            bc = k.get("btc_closes")
+            if bc is not None:
+                assert len(bc) == len(candles), \
+                    f"btc_closes len {len(bc)} != candles len {len(candles)}"
+
+    @pytest.mark.asyncio
+    async def test_extend_or_rebuild_receives_candles_5m(self):
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("PyTorch not installed")
+
+        agent = CoinbaseCNNAgent()
+        products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
+        candles  = self._hourly(200)
+        c5m      = self._five_min(300)
+        seen = []
+        from agents.cnn_agent import _extend_or_rebuild_product as orig
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs)
+            return orig(*args, **kwargs)
+
+        with (
+            patch("agents.cnn_agent.database.get_products",
+                  new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.load_history", return_value=[]),
+            patch("agents.cnn_agent.load_5m_history", return_value=c5m),
+            patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
+        ):
+            await agent.train_on_history(epochs=1)
+
+        assert seen
+        for kwargs in seen:
+            assert kwargs.get("candles_5m") == c5m, \
+                "_extend_or_rebuild_product not called with candles_5m"
+
+
+class TestMaskShrinkAndCacheBump:
+    """Stage (a) flips _TRAINING_CONSTANT_CHANNELS down to
+    {10, 11, 20, 24, 25, 26} (unmasks Ch 15 ADX, Ch 17/18/19 5m fast,
+    Ch 21 BTC corr) and bumps _DATASET_CACHE_VERSION so cached tensors
+    built before the wiring change (with hourly-proxy 5m + zero BTC) are
+    invalidated and rebuilt with real values."""
+
+    def test_mask_shrunk(self):
+        from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
+        assert _TRAINING_CONSTANT_CHANNELS == frozenset({10, 11, 20, 24, 25, 26})
+
+    def test_dataset_cache_version_bumped(self):
+        from agents.cnn_agent import _DATASET_CACHE_VERSION
+        assert _DATASET_CACHE_VERSION == 5

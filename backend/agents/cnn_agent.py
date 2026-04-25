@@ -66,7 +66,7 @@ from agents.signal_generator import (
 from config import config
 from services.outcome_tracker import get_tracker
 from services.fear_greed import get_fear_greed
-from services.history_backfill import load_history
+from services.history_backfill import load_history, load_5m_history
 from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
 from services.hmm_regime import get_detector, regime_blend
@@ -269,14 +269,18 @@ except ImportError:
 N_CHANNELS      = 27
 SEQ_LEN         = 60
 
-# Channels whose values are constant-zero during training because the
-# training loop (train_on_history) calls fb.build(window, {}, candles_5m=...)
-# without the upstream inputs that populate them (empty order book, no
-# funding_rate, no iv_rv*, no ls_sentiment, no btc_closes, hourly proxy for
-# 5m). The model therefore learned nothing useful from these channels; at
-# inference we zero them too so the input distribution matches what the
+# Channels whose values are still constant-zero during training because the
+# training loop (train_on_history) doesn't yet pass the upstream inputs that
+# populate them. As of #57 stage (a) we wire candles_5m + btc_closes into
+# _build_dataset, so Ch 15 (ADX), Ch 17/18/19 (5m fast), Ch 21 (BTC corr)
+# are no longer constant — those are removed from the mask. Still masked:
+#   10, 11 → empty order book at training time (no historical L1 depth)
+#   20     → funding_rate (no historical fetcher; #57 stage b will add)
+#   24, 25 → iv_rv20/60 spread (no historical IV source)
+#   26     → ls_sentiment (no historical Binance L/S sentiment)
+# At inference we zero these too so the input distribution matches what the
 # model actually saw during training (P3b).
-_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 15, 17, 18, 19, 20, 21, 24, 25, 26})
+_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 20, 24, 25, 26})
 
 
 def _mask_training_constant_channels(channels):
@@ -354,7 +358,9 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 4
+_DATASET_CACHE_VERSION = 5  # bumped for #57: real candles_5m + btc_closes wired
+                            # into _build_dataset; pre-v5 caches stored hourly-
+                            # proxy 5m and zero BTC, so they must be discarded.
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
@@ -636,6 +642,41 @@ def _dataset_schema(seq_len: int, forward_hours: int,
 
 
 _TRAIN_5M_LIMIT = 72   # last 6h of 5m bars — mirrors inference fetch in scan_all
+
+
+def _aligned_btc_closes(target_candles: List[Dict],
+                        btc_candles: Optional[List[Dict]]) -> Optional[List[float]]:
+    """Return BTC closes aligned 1:1 with `target_candles` (forward-fill on gaps).
+
+    Both candle series are assumed to use a 'start' (or 'time') unix-timestamp
+    key. For each target bar we use the most recent BTC close whose start_ts
+    is <= target start_ts; pre-target BTC bars seed the initial value so the
+    series never starts None. Returns None when btc_candles is empty/None
+    (caller treats that as "no BTC reference, leave Ch 21 at zero").
+    """
+    if not btc_candles:
+        return None
+    btc_sorted = sorted(
+        btc_candles,
+        key=lambda c: c.get("start") or c.get("time") or 0,
+    )
+    btc_starts = [int(c.get("start") or c.get("time") or 0) for c in btc_sorted]
+    btc_closes = [float(c["close"]) for c in btc_sorted]
+
+    out: List[float] = []
+    last: Optional[float] = None
+    j = 0
+    n_btc = len(btc_starts)
+    for c in target_candles:
+        ts = int(c.get("start") or c.get("time") or 0)
+        while j < n_btc and btc_starts[j] <= ts:
+            last = btc_closes[j]
+            j += 1
+        if last is None:
+            # No pre/at-target BTC bar yet — use first available close as seed.
+            last = btc_closes[0]
+        out.append(last)
+    return out
 
 
 def _build_samples_range(candles, i_start: int, i_end: int,
@@ -2062,7 +2103,17 @@ class CoinbaseCNNAgent:
         # the event loop stays free to serve /api/cnn/train/status polls.
         _phase1_start = _t.time()
         logger.info(f"CNN training phase 1/3: loading candles for {len(products)} products")
-        all_candle_sets: list = []   # [(pid, candles)] — pid needed for per-product cache
+
+        # Load BTC hourly history once — used to build a per-product aligned
+        # series for Ch 21 (BTC return correlation). #57 stage (a).
+        btc_hist_for_align = await loop.run_in_executor(None, load_history, "BTC-USD")
+        if not btc_hist_for_align:
+            btc_hist_for_align = await database.get_candles("BTC-USD", limit=500)
+            for c in btc_hist_for_align or []:
+                if "start_time" in c and "start" not in c:
+                    c["start"] = c["start_time"]
+
+        all_candle_sets: list = []   # [(pid, candles, btc_aligned, candles_5m)]
         for p in products:
             pid  = p["product_id"]
             hist = await loop.run_in_executor(None, load_history, pid)
@@ -2085,7 +2136,15 @@ class CoinbaseCNNAgent:
                         c["start"] = c["start_time"]
 
             if len(candles) >= SEQ_LEN + _FORWARD_HOURS + 1:
-                all_candle_sets.append((pid, candles))
+                # Per-product 5m parquet (#55, #56) — empty list when product
+                # has no 5m backfill yet; _build_samples_range falls back to
+                # synthetic hourly proxy in that case.
+                c5m = await loop.run_in_executor(None, load_5m_history, pid) or []
+                btc_aligned = (
+                    _aligned_btc_closes(candles, btc_hist_for_align)
+                    if pid != "BTC-USD" else None
+                )
+                all_candle_sets.append((pid, candles, btc_aligned, c5m))
 
         _phase1_secs = _t.time() - _phase1_start
         logger.info(
@@ -2120,10 +2179,12 @@ class CoinbaseCNNAgent:
                 )
             X_list, y_list, w_list = [], [], []
             hits = appends = rebuilds = skips = 0
-            for prod_idx, (pid, candles) in enumerate(all_candle_sets, 1):
+            for prod_idx, (pid, candles, btc_aligned, c5m) in enumerate(all_candle_sets, 1):
                 entry, status = _extend_or_rebuild_product(
                     cache.get(pid), candles, fb,
                     SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH,
+                    btc_closes=btc_aligned,
+                    candles_5m=c5m,
                 )
                 if status == "skip":
                     skips += 1
