@@ -4,7 +4,7 @@ Tests for TechAgentCB — mean-reversion crypto scalper.
 Strategy: RSI(14) + Bollinger Bands + Stochastic RSI + VWAP
   BUY  threshold : 0.55
   SELL threshold : 0.55
-  ADX and MFI are NOT part of TechAgent (they were removed; see momentum_agent_cb).
+  ADX and MFI are NOT part of TechAgent score.
 
 All external I/O (database, WebSocket, Coinbase) is mocked.
 """
@@ -65,7 +65,7 @@ class TestTechAgentScore:
             assert key in sc, f"Missing key in score dict: {key}"
 
     def test_score_no_adx_or_mfi(self):
-        """ADX and MFI must NOT appear in TechAgent score (moved to MomentumAgent)."""
+        """ADX and MFI must NOT appear in TechAgent score."""
         ag = _agent()
         candles = _make_candles(100)
         sc = ag._score(candles)

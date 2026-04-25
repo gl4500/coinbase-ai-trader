@@ -102,7 +102,7 @@ def _regime_gate_enabled() -> bool:
 
 class _CNNBook:
     """Lightweight dry-run portfolio book for the CNN agent.
-    Mirrors the _Book classes in tech_agent_cb / momentum_agent_cb so that
+    Mirrors the _Book class in tech_agent_cb so that
     CNN trades appear in the `trades` table and per-product positions are tracked
     (prevents buying the same asset repeatedly).
     """
@@ -1335,6 +1335,25 @@ class CoinbaseCNNAgent:
         except Exception as e:
             logger.warning(f"LGBMFilter retrain failed: {e}")
 
+    async def force_lgbm_retrain(self) -> Optional[Dict]:
+        """Forced LGBM retrain — bypasses the trades-seen short-circuit so the
+        gate can be re-aligned with a freshly hot-reloaded CNN (#70) without
+        waiting for the next closed trade."""
+        try:
+            rows = await database.get_lgbm_training_rows()
+            metrics = self._lgbm.train(rows)
+            if metrics:
+                self._lgbm.save(_LGBM_MODEL_PATH)
+                self._lgbm_trades_seen = len(rows)
+                logger.info(
+                    f"LGBMFilter force-retrained: n={metrics['n_samples']} "
+                    f"win={metrics['win_rate']}% auc={metrics['auc']}"
+                )
+            return metrics
+        except Exception as e:
+            logger.warning(f"LGBMFilter force retrain failed: {e}")
+            return None
+
     def _exists(self) -> bool:
         return os.path.exists(MODEL_PATH)
 
@@ -1704,8 +1723,8 @@ class CoinbaseCNNAgent:
             trending = hmm_regime == "TRENDING"
         cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
 
-        # Fetch most-recent Tech & Momentum decisions for this product
-        # so the Ollama model can incorporate their votes into its reasoning.
+        # Fetch most-recent Tech decisions for this product so the Ollama
+        # model can incorporate their votes into its reasoning.
         agent_votes = await database.get_agent_decisions(pid, limit=2)
         agent_ctx = ""
         for av in agent_votes:
