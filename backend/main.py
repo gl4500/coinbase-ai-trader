@@ -49,7 +49,6 @@ from agents.signal_generator import SignalGenerator
 from agents.order_executor import OrderExecutor
 from agents.cnn_agent import CoinbaseCNNAgent
 from agents.tech_agent_cb import TechAgentCB
-from agents.scalp_agent import ScalpAgent
 from services.ws_subscriber import CoinbaseWSSubscriber
 from services.portfolio_tracker import PortfolioTracker
 from services.outcome_tracker import get_tracker
@@ -196,14 +195,12 @@ class AppState:
     order_executor:  OrderExecutor         = None
     cnn_agent:       CoinbaseCNNAgent      = None
     tech_agent:      TechAgentCB           = None
-    scalp_agent:     ScalpAgent            = None
     ws_subscriber:   CoinbaseWSSubscriber  = None
     portfolio:       PortfolioTracker      = None
     scanner_task:    asyncio.Task          = None
     portfolio_task:  asyncio.Task          = None
     cnn_task:        asyncio.Task          = None
     tech_task:       asyncio.Task          = None
-    scalp_task:      asyncio.Task          = None
     outcome_task:    asyncio.Task          = None
     backfill_task:   asyncio.Task          = None
     ws_connections:  List[WebSocket]       = []
@@ -391,7 +388,6 @@ async def _train_progress_watcher() -> None:
 
 # ── Agent startup stagger delays (seconds) ────────────────────────────────────
 _TECH_START_DELAY     =  5   # CNN starts at 0; Tech after 5s
-_SCALP_START_DELAY    = 15   # Scalp after 15s  (its _entry_loop has no extra warmup)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -412,7 +408,6 @@ async def lifespan(app: FastAPI):
     app_state.cnn_agent       = CoinbaseCNNAgent(ws_subscriber=app_state.ws_subscriber)
     _is_trading = lambda: app_state.is_trading
     app_state.tech_agent      = TechAgentCB(ws_subscriber=app_state.ws_subscriber)
-    app_state.scalp_agent     = ScalpAgent(ws_subscriber=app_state.ws_subscriber, is_trading_fn=_is_trading)
     app_state.portfolio       = PortfolioTracker(ws_subscriber=app_state.ws_subscriber)
 
     # Seed WS subscriber from DB-cached tracked products immediately —
@@ -476,12 +471,7 @@ async def lifespan(app: FastAPI):
         await asyncio.sleep(_TECH_START_DELAY)
         await app_state.tech_agent.run_loop(is_trading_fn=_is_trading)
 
-    async def _delayed_scalp():
-        await asyncio.sleep(_SCALP_START_DELAY)
-        await app_state.scalp_agent.start()
-
     app_state.tech_task     = asyncio.create_task(_delayed_tech())
-    app_state.scalp_task          = asyncio.create_task(_delayed_scalp())
     app_state.train_watcher_task  = asyncio.create_task(_train_progress_watcher())
 
     logger.info("Coinbase Trader ready — http://localhost:8001")
@@ -491,12 +481,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    if app_state.scalp_agent:
-        await app_state.scalp_agent.stop()
     for task in [
         app_state.scanner_task, app_state.portfolio_task,
         app_state.cnn_task, app_state.tech_task,
-        app_state.scalp_task, app_state.outcome_task, app_state.backfill_task,
+        app_state.outcome_task, app_state.backfill_task,
         app_state.train_watcher_task,
     ]:
         if task:
@@ -1137,17 +1125,12 @@ async def get_agent_status():
             },
         }
 
-    # SCALP book status
-    scalp_status: Dict = {}
-    if app_state.scalp_agent:
-        scalp_status = app_state.scalp_agent.status
-
     # Enrich positions with live price + unrealized PnL
     ws = app_state.ws_subscriber
 
     # Collect ALL held product IDs across all agents so we can ensure WS coverage
     all_held_pids: set = set()
-    for st in (tech_status, cnn_status, scalp_status):
+    for st in (tech_status, cnn_status):
         all_held_pids.update(st.get("positions", {}).keys())
 
     # Subscribe WS to any held product not already in its subscription list
@@ -1177,7 +1160,7 @@ async def get_agent_status():
                     logger.debug(f"REST price fallback failed for {pid}: {_e}")
             await asyncio.gather(*[_fetch_price(pid) for pid in no_price])
 
-    for st in (tech_status, cnn_status, scalp_status):
+    for st in (tech_status, cnn_status):
         positions = st.get("positions", {})
         for pid, pos in positions.items():
             live = ws.get_price(pid) if ws else None
@@ -1195,7 +1178,7 @@ async def get_agent_status():
                 pos["unrealized_pnl"] = None
                 pos["pct_pnl"]        = None
 
-    return {"tech": tech_status, "cnn": cnn_status, "scalp": scalp_status}
+    return {"tech": tech_status, "cnn": cnn_status}
 
 
 @app.get("/api/trades")
