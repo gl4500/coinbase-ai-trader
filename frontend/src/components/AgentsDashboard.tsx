@@ -8,7 +8,6 @@ interface AgentPosition {
   current_price:   number | null
   unrealized_pnl:  number | null
   pct_pnl:         number | null
-  high_water?:     number   // Momentum only
 }
 
 interface SubAgentStatus {
@@ -101,7 +100,7 @@ function ConfBar({ value, max = 1, color }: { value: number | null; max?: number
 // ── Main Component ─────────────────────────────────────────────────────────────
 
 export default function AgentsDashboard() {
-  const [agentStatus, setAgentStatus] = useState<{ tech: SubAgentStatus | null; momentum: SubAgentStatus | null; cnn: SubAgentStatus | null; scalp: SubAgentStatus | null }>({ tech: null, momentum: null, cnn: null, scalp: null })
+  const [agentStatus, setAgentStatus] = useState<{ tech: SubAgentStatus | null; cnn: SubAgentStatus | null }>({ tech: null, cnn: null })
   const [signals,     setSignals]     = useState<AgentDecision[]>([])
 
   const fetchStatus = useCallback(async () => {
@@ -109,7 +108,7 @@ export default function AgentsDashboard() {
       const r = await fetch('/api/agents/status')
       if (r.ok) {
         const d = await r.json()
-        setAgentStatus({ tech: d.tech ?? null, momentum: d.momentum ?? null, cnn: d.cnn ?? null, scalp: d.scalp ?? null })
+        setAgentStatus({ tech: d.tech ?? null, cnn: d.cnn ?? null })
       }
     } catch {}
   }, [])
@@ -132,18 +131,15 @@ export default function AgentsDashboard() {
     return () => clearInterval(id)
   }, [fetchStatus, fetchSignals])
 
-  const techSignals = useMemo(() => signals.filter(d => d.agent === 'TECH'),     [signals])
-  const momSignals  = useMemo(() => signals.filter(d => d.agent === 'MOMENTUM'), [signals])
+  const techSignals = useMemo(() => signals.filter(d => d.agent === 'TECH'), [signals])
 
   // ── Aggregate stats ─────────────────────────────────────────────────────────
   const techAg  = agentStatus.tech
-  const momAg   = agentStatus.momentum
   const cnnAg   = agentStatus.cnn
-  const scalpAg = agentStatus.scalp
 
-  const totalBuy  = (techAg?.signals_buy  ?? 0) + (momAg?.signals_buy  ?? 0)
-  const totalSell = (techAg?.signals_sell ?? 0) + (momAg?.signals_sell ?? 0)
-  const totalPnl  = (techAg?.realized_pnl ?? 0) + (momAg?.realized_pnl ?? 0) + (cnnAg?.realized_pnl ?? 0) + (scalpAg?.realized_pnl ?? 0)
+  const totalBuy  = (techAg?.signals_buy  ?? 0)
+  const totalSell = (techAg?.signals_sell ?? 0)
+  const totalPnl  = (techAg?.realized_pnl ?? 0) + (cnnAg?.realized_pnl ?? 0)
 
   return (
     <div className="space-y-6">
@@ -158,34 +154,30 @@ export default function AgentsDashboard() {
         <StatCard
           label="Combined PnL"
           value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`}
-          sub="Tech + Momentum + CNN + Scalp"
+          sub="Tech + CNN"
           color={totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}
         />
         <StatCard
           label="Open Positions"
-          value={(techAg?.open_positions ?? 0) + (momAg?.open_positions ?? 0) + (cnnAg?.open_positions ?? 0) + (scalpAg?.open_positions ?? 0)}
+          value={(techAg?.open_positions ?? 0) + (cnnAg?.open_positions ?? 0)}
           sub="across all agents"
         />
         <StatCard
           label="Total Signals"
           value={signals.length}
-          sub={`${techSignals.length} tech · ${momSignals.length} mom`}
+          sub={`${techSignals.length} tech`}
         />
       </div>
 
       {/* ── Per-agent stat cards ── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
-        {(['tech', 'momentum', 'cnn', 'scalp'] as const).map(key => {
+        {(['tech', 'cnn'] as const).map(key => {
           const ag    = agentStatus[key]
-          const label = key === 'tech' ? 'TechAgent' : key === 'momentum' ? 'MomentumAgent' : key === 'cnn' ? 'CNN Agent' : 'ScalpAgent'
-          const color = key === 'tech' ? 'text-purple-400' : key === 'momentum' ? 'text-blue-400' : key === 'cnn' ? 'text-yellow-400' : 'text-emerald-400'
+          const label = key === 'tech' ? 'TechAgent' : 'CNN Agent'
+          const color = key === 'tech' ? 'text-purple-400' : 'text-yellow-400'
           const borderClass = key === 'tech'
             ? 'border border-purple-900/50'
-            : key === 'momentum'
-            ? 'border border-blue-900/50'
-            : key === 'cnn'
-            ? 'border border-yellow-900/50'
-            : 'border border-emerald-900/50'
+            : 'border border-yellow-900/50'
           const pnlColor = !ag ? 'text-gray-500' : ag.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'
 
           return (
@@ -224,12 +216,6 @@ export default function AgentsDashboard() {
                     {ag?.open_positions ?? 0}
                   </div>
                 </div>
-                {key === 'momentum' && ag?.trailing_stops != null && (
-                  <div>
-                    <div className="text-gray-500 mb-0.5">Trailing stops</div>
-                    <div className="font-mono text-amber-400">{ag.trailing_stops}</div>
-                  </div>
-                )}
               </div>
 
               {/* Open positions table */}
@@ -244,7 +230,6 @@ export default function AgentsDashboard() {
                         <th className="text-right pb-1">Entry</th>
                         <th className="text-right pb-1">Current</th>
                         <th className="text-right pb-1">Unreal. PnL</th>
-                        {key === 'momentum' && <th className="text-right pb-1">Stop</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -281,15 +266,6 @@ export default function AgentsDashboard() {
                                 </span>
                               )}
                             </td>
-                            {key === 'momentum' && (
-                              <td className="py-1 text-right font-mono text-amber-500 text-xs">
-                                {pos.high_water
-                                  ? `$${pos.high_water >= 1000
-                                      ? pos.high_water.toLocaleString('en-US', { maximumFractionDigits: 2 })
-                                      : pos.high_water.toFixed(4)}`
-                                  : '—'}
-                              </td>
-                            )}
                           </tr>
                         )
                       })}
@@ -306,8 +282,8 @@ export default function AgentsDashboard() {
         })}
       </div>
 
-      {/* ── Signal feeds: Tech left / Momentum right ── */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+      {/* ── Tech signal feed ── */}
+      <div className="max-w-3xl">
 
         {/* Tech signals */}
         <div>
@@ -389,83 +365,6 @@ export default function AgentsDashboard() {
           )}
         </div>
 
-        {/* Momentum signals */}
-        <div>
-          <h2 className="text-base font-bold text-white mb-3">
-            <span className="text-blue-400">Momentum</span> Signals
-            <span className="text-sm text-gray-500 font-normal ml-2">({momSignals.length})</span>
-          </h2>
-          {momSignals.length === 0 ? (
-            <div className="card text-center py-10">
-              <p className="text-gray-500 text-sm">No Momentum signals yet — agents start ~60s after backend</p>
-            </div>
-          ) : (
-            <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
-              {momSignals.map(d => {
-                const isBuy  = d.side === 'BUY'
-                const ind    = parseIndicators(d.reasoning)
-                return (
-                  <div key={d.id} className="card p-3 border border-blue-900/30">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                          isBuy
-                            ? 'bg-green-900/50 text-green-400 border border-green-800'
-                            : 'bg-red-900/50 text-red-400 border border-red-800'
-                        }`}>{d.side}</span>
-                        <span className="font-bold text-white text-sm">{d.product_id.replace('-USD', '')}</span>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-mono text-white text-sm">
-                          ${d.price >= 1000
-                            ? d.price.toLocaleString('en-US', { maximumFractionDigits: 2 })
-                            : d.price.toFixed(4)}
-                        </div>
-                        <div className="text-xs text-gray-600">
-                          {new Date(d.created_at).toLocaleTimeString()}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mb-2">
-                      <div className="text-xs text-gray-500 mb-0.5">Confidence</div>
-                      <ConfBar value={d.confidence} color={isBuy ? 'bg-blue-500' : 'bg-orange-500'} />
-                    </div>
-
-                    <div className="flex flex-wrap gap-1.5 text-xs">
-                      {Object.entries(ind).map(([k, v]) => {
-                        const fv = parseFloat(v)
-                        let cls = 'text-gray-400 border-gray-700 bg-gray-800'
-                        if (k === 'ROC')   cls = fv > 0 ? 'text-green-300 border-green-800 bg-green-900/30' : 'text-red-300 border-red-800 bg-red-900/30'
-                        if (k === 'Mom')   cls = fv > 0 ? 'text-green-300 border-green-800 bg-green-900/30' : 'text-red-300 border-red-800 bg-red-900/30'
-                        if (k === 'VWMom') cls = fv > 0 ? 'text-green-300 border-green-800 bg-green-900/30' : 'text-red-300 border-red-800 bg-red-900/30'
-                        return (
-                          <span key={k} className={`px-2 py-0.5 rounded border ${cls}`}>
-                            {k} {v}
-                          </span>
-                        )
-                      })}
-                      {d.score != null && (
-                        <span className="px-2 py-0.5 rounded border text-blue-300 border-blue-800 bg-blue-900/20">
-                          score {d.score.toFixed(2)}
-                        </span>
-                      )}
-                      {d.pnl != null && (
-                        <span className={`px-2 py-0.5 rounded border ${d.pnl >= 0 ? 'text-green-300 border-green-800 bg-green-900/20' : 'text-red-300 border-red-800 bg-red-900/20'}`}>
-                          PnL {d.pnl >= 0 ? '+' : ''}${d.pnl.toFixed(2)}
-                        </span>
-                      )}
-                    </div>
-
-                    {d.reasoning && (
-                      <div className="mt-2 text-xs text-gray-600 truncate" title={d.reasoning}>{d.reasoning}</div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
       </div>
 
     </div>
