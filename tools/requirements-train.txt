@@ -1,0 +1,7 @@
+# Minimal deps for tools/train_cloud.py on Colab/Kaggle.
+# Excludes FastAPI/aiosqlite/ollama since train_cloud.py is self-contained.
+#
+# Colab/Kaggle base images already ship with torch + numpy on CUDA, so this
+# file should normally be a no-op there. Pin upper bounds defensively.
+torch>=2.0,<3.0
+numpy>=1.26,<3.0

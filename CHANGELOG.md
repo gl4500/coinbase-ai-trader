@@ -5,6 +5,182 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 41] — 2026-04-25 — Cloud retrain pipeline (#67–#70)
+
+### Context
+The local RTX 2060 (6 GB) was the bottleneck for the LSTM-tail CNN — long
+epochs, frequent OOM near batch=128, and Binance funding-history calls
+returning HTTP 451 from the US IP. To unblock retrain cycles we built a
+self-contained cloud-trainable trainer plus two backend endpoints so
+the user can drop fresh weights without restarting the API or waiting
+for the next closed trade to refit the LGBM gate.
+
+### Change
+**`tools/train_cloud.py`** (new, ~280 lines, #67):
+- Self-contained trainer (no `backend.cnn_agent` import) with prod-mirroring
+  constants (N_CHANNELS=27, SEQ_LEN=60, _FORWARD_HOURS=4, _LABEL_THRESH=0.003).
+- `DEFAULT_MASK = frozenset({10, 11, 24, 25, 26})` matches stage-b
+  `_TRAINING_CONSTANT_CHANNELS`.
+- `SignalCNN` (arch="glu2") + `GatedConv1d` copies, `apply_mask`, `_smooth`,
+  `save_prod_model` writing `{"arch", "n_channels", "state_dict"}`,
+  `write_best_loss`, atomic `write_progress_json` (`.tmp`+`os.replace`),
+  `_uniqueness_from_indices`, `load_dataset`.
+- `run_training` uses BCE `reduction="none"` + uniqueness-weighted mean
+  (CLAUDE.md invariant 12), AdamW + ReduceLROnPlateau, grad-clip 1.0,
+  label-pos-weight, batch by n_train (256/128/64), LR scaled by
+  `(BATCH/64)**0.5`, early-stop patience 8.
+
+**`tools/colab_train.ipynb`** (new, 15 cells, #68):
+- nvidia-smi → git clone polymarket_app → mount Drive OR upload tarball
+  of `backend/data/cnn_dataset_cache/` → pip install
+  `tools/requirements-train.txt` → run train_cloud.py → download
+  `cnn_model.pt` + `cnn_best_loss.txt`.
+- `metadata.accelerator = "GPU"`.
+
+**`tools/requirements-train.txt`** (new): `torch>=2.0,<3.0`, `numpy>=1.26,<3.0`
+— intentionally excludes FastAPI/aiosqlite/ollama (not needed for training).
+
+**`backend/agents/cnn_agent.py`** (#70):
+- New `force_lgbm_retrain()` async method — bypasses the
+  `n == self._lgbm_trades_seen` short-circuit in
+  `_lgbm_retrain_if_needed`. Calls `database.get_lgbm_training_rows`,
+  `self._lgbm.train(rows)`, persists on success, updates
+  `_lgbm_trades_seen = len(rows)`. Wraps in try/except returning
+  `None` on failure.
+
+**Pending implementation (tests landed ahead of code, TDD-style):**
+- `POST /api/cnn/model/reload` endpoint in `backend/main.py` (#69).
+- `POST /api/cnn/lgbm/retrain` endpoint in `backend/main.py` (#70).
+  `force_lgbm_retrain()` is the agent-side method these will call.
+
+### Tests
+**`backend/tests/test_train_cloud.py`** (10/10 pass): mask matches prod;
+SignalCNN forward shape (B,27,60)→(B,1) and arch="glu2"; apply_mask
+zero-out + empty-set passthrough; save_prod_model dict format;
+write_best_loss float→str; write_progress_json status + epoch_log
+(`completed` and `running` partial).
+
+**`backend/tests/test_cnn_model_reload.py`** (6 tests, awaiting #69
+endpoint): auth (no key 401, wrong key 401), 409 when training active,
+404 when model missing (detail string includes path), 503 when agent
+uninitialised, happy path calls `_load()` and returns metadata.
+
+**`backend/tests/test_lgbm_force_retrain.py`** (7 tests, awaiting #70
+endpoint): auth (2), 503 when agent missing, happy path calls
+`force_lgbm_retrain` (mocked return), 200 `skipped` when underlying
+returns None, `force_lgbm_retrain` runs even when
+`n == _lgbm_trades_seen`, `force_lgbm_retrain` returns None on empty
+rows.
+
+### Why
+The `_lgbm_retrain_if_needed` guard short-circuits on
+`n == self._lgbm_trades_seen` to avoid wasted refits when no new
+closed trades have arrived. After a CNN swap (cloud retrain → reload)
+that guard hurts — the gate stays fit against the old model's scan
+distribution until the next closed trade, even though the underlying
+prob distribution just shifted. `force_lgbm_retrain` is the manual
+escape hatch; the autonomous path is unchanged.
+
+### Follow-ups (open)
+- #69: Wire `POST /api/cnn/model/reload` endpoint in `backend/main.py`
+  (tests already in place at `backend/tests/test_cnn_model_reload.py`).
+- #70: Wire `POST /api/cnn/lgbm/retrain` endpoint in `backend/main.py`
+  (tests already in place at `backend/tests/test_lgbm_force_retrain.py`).
+- v2 of `tools/colab_train.ipynb`: refetch Binance funding in-Colab and
+  rebuild Ch 20 before training (US is the geoblock — Colab is not).
+- Decide on revert of mask `{10,11,24,25,26}` →
+  `{10,11,20,24,25,26}` until a non-US-blocked funding source is wired
+  (Bybit/OKX/CoinGlass).
+
+---
+
+## [Session 40] — 2026-04-25 — Wire Binance funding history into training, unmask Ch 20 (#57 stage b)
+
+### Context
+Stage (a) of #57 (Session 39) wired real BTC + 5m candles through
+`_build_dataset` and shrank `_TRAINING_CONSTANT_CHANNELS` to
+`{10, 11, 20, 24, 25, 26}`. Ch 20 (funding rate) stayed masked because no
+historical funding-rate source existed in the codebase — only
+`/fapi/v1/premiumIndex` (current `lastFundingRate`) was used at
+inference, so every training sample saw funding=0 and the inference mask
+zeroed Ch 20 to match.
+
+This session is **stage (b)** of #57: build a Binance historical funding
+fetcher, wire it through `train_on_history` Phase 1, and unmask Ch 20.
+
+### Change
+**New file** `backend/services/binance_funding_history.py`:
+- `_coinbase_to_binance(product_id)` mapping (26 perpetual products:
+  BTC, ETH, SOL, XRP, BNB, ADA, AVAX, LINK, DOT, MATIC, DOGE, LTC, ATOM,
+  FIL, NEAR, APT, INJ, ARB, OP, TIA, SEI, SUI, RNDR, FET, AAVE, UNI).
+- `async fetch_funding_history(product_id, start_ms, end_ms)` hits
+  `https://fapi.binance.com/fapi/v1/fundingRate` with
+  `symbol`/`startTime`/`endTime`/`limit=1000` and returns sorted
+  ascending `[(funding_time_ms, rate), ...]`. Returns `[]` for
+  unsupported symbol, HTTP error, non-200, or non-list payload.
+- One funding event every 8h; `limit=1000` covers ~333 days, sufficient
+  for the typical training window.
+
+**`backend/agents/cnn_agent.py`:**
+- Imported `fetch_funding_history` from the new service.
+- Added `_aligned_funding_rates(target_candles, funding_history)` helper
+  — forward-fills the most-recent funding rate ≤ each bar's timestamp,
+  with unit-aware comparison (target candles in seconds, funding events
+  in ms). Pre-target events seed the initial value; if every event is
+  after the first target bar, seed with the first available rate.
+- `train_on_history` Phase 1 now calls `fetch_funding_history(pid,
+  fr_start_ms, fr_end_ms)` per product (start/end derived from the
+  candle span) and aligns the result via `_aligned_funding_rates`. The
+  per-product tuple grew from
+  `(pid, candles, btc_aligned, c5m)` to
+  `(pid, candles, btc_aligned, c5m, funding_aligned)`.
+- `_build_dataset` (closure) unpacks the 5-tuple and passes
+  `funding_rates=funding_aligned` into `_extend_or_rebuild_product` on
+  both rebuild and append paths.
+- Shrunk `_TRAINING_CONSTANT_CHANNELS` from
+  `{10, 11, 20, 24, 25, 26}` → `{10, 11, 24, 25, 26}`.
+  Still masked: Ch 10/11 (orderbook — no historical L1), Ch 24/25
+  (IV/RV — no historical IV source), Ch 26 (L/S sentiment — no
+  historical Binance L/S).
+- Bumped `_DATASET_CACHE_VERSION` from 5 → 6 (required: pre-v6 caches
+  stored zero funding for Ch 20; without the bump, stale tensors would
+  still feed the now-unmasked Ch 20 to training, defeating the wiring
+  change).
+
+### Tests
+**New file** `backend/tests/test_binance_funding_history.py` (8 tests):
+- `TestProductSymbolMapping` (2) — known product mapping, unsupported
+  product returns None.
+- `TestFetchFundingHistory` (6) — sorted tuples, unsupported product
+  empty, symbol+window passed to Binance, empty on HTTP error, empty on
+  non-200, sorts unsorted payloads.
+- All `httpx.AsyncClient` calls mocked; no live API.
+
+**Updated** `backend/tests/test_cnn_agent.py`:
+- New `TestAlignedFundingRatesHelper` (6) — length match, single-event
+  forward fill, multi-event forward fill across 8h cycles, pre-target
+  seed, first-event seed when target precedes funding, None on empty.
+- New `TestBuildDatasetWiresBtcAndFiveMinute::
+  test_extend_or_rebuild_receives_funding_rates` — spy on
+  `_extend_or_rebuild_product` confirms `funding_rates=` is forwarded as
+  a list aligned to candles, with the patched payload's value at index 0.
+- Updated `TestTrainingConstantChannelMask::
+  test_mask_set_covers_expected_channels` and
+  `TestMaskShrinkAndCacheBump` to expect `{10, 11, 24, 25, 26}` and
+  cache version 6.
+
+### Verification
+- `pytest backend/tests/test_binance_funding_history.py -v` — 8/8 pass.
+- `pytest backend/tests/test_cnn_agent.py -q` — 153/153 pass.
+
+### Files
+- New: `backend/services/binance_funding_history.py`,
+  `backend/tests/test_binance_funding_history.py`
+- Modified: `backend/agents/cnn_agent.py`,
+  `backend/tests/test_cnn_agent.py`, `CHANGELOG.md`
+
+---
+
 ## [Session 39] — 2026-04-25 — Wire real BTC + 5m into _build_dataset, shrink mask (#57 stage a)
 
 ### Context

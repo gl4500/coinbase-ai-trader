@@ -26,6 +26,7 @@ import CNNDashboard     from './components/CNNDashboard'
 import AgentsDashboard      from './components/AgentsDashboard'
 import LogViewer             from './components/LogViewer'
 import PerformanceDashboard  from './components/PerformanceDashboard'
+import FiringCounter         from './components/FiringCounter'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -314,7 +315,10 @@ export default function App() {
           <PerformanceDashboard />
         )}
         {activeTab === 'Logs' && (
-          <LogViewer />
+          <>
+            <FiringCounter />
+            <LogViewer />
+          </>
         )}
       </main>
     </div>

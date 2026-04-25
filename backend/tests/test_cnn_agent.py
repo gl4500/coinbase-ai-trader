@@ -1640,12 +1640,11 @@ class TestTrainingConstantChannelMask:
     """
 
     def test_mask_set_covers_expected_channels(self):
-        # As of #57 stage (a) the training loop wires real candles_5m and
-        # aligned btc_closes through _build_dataset, so Ch 15 (ADX),
-        # Ch 17/18/19 (5m fast), Ch 21 (BTC corr) are no longer constant.
-        # Still masked: Ch 10/11 (orderbook), Ch 20 (funding rate),
+        # As of #57 stage (b) the training loop also wires real per-product
+        # Binance funding history through _build_dataset, so Ch 20 (funding
+        # rate) is no longer constant. Still masked: Ch 10/11 (orderbook),
         # Ch 24/25 (IV/RV), Ch 26 (L/S sentiment) — no historical sources.
-        expected = {10, 11, 20, 24, 25, 26}
+        expected = {10, 11, 24, 25, 26}
         assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
 
     def test_mask_zeros_designated_channels(self):
@@ -2568,6 +2567,72 @@ class TestAlignedBtcClosesHelper:
         assert _aligned_btc_closes(target, None) is None
 
 
+class TestAlignedFundingRatesHelper:
+    """`_aligned_funding_rates(target_candles, funding_history)` returns a
+    list of per-period funding rates aligned 1:1 with `target_candles`
+    (forward-fill: each bar gets the most-recent funding event whose
+    funding_time_ms <= bar_start_seconds * 1000). Used by `_build_dataset`
+    so per-product training tensors get a real funding-rate series for
+    Ch 20 (#57 stage b). Funding events occur every 8h on Binance futures;
+    a single rate stays active until the next event."""
+
+    def test_returns_list_with_target_length(self):
+        from agents.cnn_agent import _aligned_funding_rates
+        target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
+        # Funding event 1h before the first target bar.
+        funding = [(1000 * 1000, 0.0001)]
+        out = _aligned_funding_rates(target, funding)
+        assert len(out) == len(target)
+
+    def test_forward_fills_single_event_to_all_bars(self):
+        from agents.cnn_agent import _aligned_funding_rates
+        target = [{"start": 5000 + i * 3600, "close": 1.0} for i in range(3)]
+        funding = [(5000 * 1000, 0.00012)]
+        assert _aligned_funding_rates(target, funding) == [0.00012, 0.00012, 0.00012]
+
+    def test_forward_fills_across_funding_events_within_window(self):
+        """Two funding events 8h apart — bars before the second event keep
+        the first rate; bars at/after the second event switch to the new
+        rate. Mirrors Binance's 8h funding cycle."""
+        from agents.cnn_agent import _aligned_funding_rates
+        # 10 hourly bars starting at unix=0
+        target = [{"start": i * 3600, "close": 1.0} for i in range(10)]
+        # Event A at hour 0, Event B at hour 8
+        funding = [
+            (0,                  0.0001),
+            (8 * 3600 * 1000,   -0.0002),
+        ]
+        out = _aligned_funding_rates(target, funding)
+        assert out[:8] == [0.0001] * 8
+        assert out[8:] == [-0.0002, -0.0002]
+
+    def test_pre_target_funding_seeds_initial_value(self):
+        """A funding event before the first target bar should provide the
+        seed rate so the series is not None at index 0."""
+        from agents.cnn_agent import _aligned_funding_rates
+        target = [{"start": 100_000 + i * 3600, "close": 1.0} for i in range(2)]
+        funding = [
+            (50_000 * 1000,                 0.0003),  # well before target
+            ((100_000 + 3600) * 1000,       0.0004),  # at second bar
+        ]
+        assert _aligned_funding_rates(target, funding) == [0.0003, 0.0004]
+
+    def test_seeds_with_first_event_when_target_starts_before_any_funding(self):
+        """If every funding event is *after* the first target bar, seed the
+        early bars with the first available rate (mirrors _aligned_btc_closes
+        behaviour — never return None inside the list)."""
+        from agents.cnn_agent import _aligned_funding_rates
+        target = [{"start": i * 3600, "close": 1.0} for i in range(3)]
+        funding = [(2 * 3600 * 1000, 0.0001)]  # first event at hour 2
+        assert _aligned_funding_rates(target, funding) == [0.0001, 0.0001, 0.0001]
+
+    def test_returns_none_when_funding_empty_or_none(self):
+        from agents.cnn_agent import _aligned_funding_rates
+        target = [{"start": 1000, "close": 1.0}]
+        assert _aligned_funding_rates(target, []) is None
+        assert _aligned_funding_rates(target, None) is None
+
+
 class TestBuildDatasetWiresBtcAndFiveMinute:
     """`_build_dataset` (closure in train_on_history) must pass real
     `btc_closes` (aligned per product) and `candles_5m` (per-product 5m
@@ -2680,18 +2745,73 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
             assert kwargs.get("candles_5m") == c5m, \
                 "_extend_or_rebuild_product not called with candles_5m"
 
+    @pytest.mark.asyncio
+    async def test_extend_or_rebuild_receives_funding_rates(self):
+        """Phase 1 must fetch per-product Binance funding history, align it
+        to candles via `_aligned_funding_rates`, and forward `funding_rates=`
+        to `_extend_or_rebuild_product` so Ch 20 is populated during training
+        (#57 stage b). When the funding fetcher returns no data the kwarg may
+        be None — only assert that it's a list when data is present."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("PyTorch not installed")
+
+        agent = CoinbaseCNNAgent()
+        products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
+        candles  = self._hourly(200)
+        # Funding event at the first candle bar; same rate should forward-
+        # fill across all 200 hourly bars.
+        first_ts_ms = int(candles[0]["start"]) * 1000
+        funding_payload = [(first_ts_ms, 0.00012)]
+
+        seen = []
+        from agents.cnn_agent import _extend_or_rebuild_product as orig
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs)
+            return orig(*args, **kwargs)
+
+        with (
+            patch("agents.cnn_agent.database.get_products",
+                  new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.load_history", return_value=[]),
+            patch("agents.cnn_agent.load_5m_history", return_value=[]),
+            patch("agents.cnn_agent.fetch_funding_history",
+                  new=AsyncMock(return_value=funding_payload)),
+            patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
+        ):
+            await agent.train_on_history(epochs=1)
+
+        assert seen, "expected _extend_or_rebuild_product calls"
+        n_with_funding = sum(
+            1 for k in seen if isinstance(k.get("funding_rates"), list)
+        )
+        assert n_with_funding == len(seen), (
+            f"all calls should pass funding_rates list; "
+            f"{n_with_funding}/{len(seen)} did"
+        )
+        for k in seen:
+            fr = k["funding_rates"]
+            assert len(fr) == len(candles), (
+                f"funding_rates len {len(fr)} != candles len {len(candles)}"
+            )
+            assert fr[0] == 0.00012, "funding rate should match payload"
+
 
 class TestMaskShrinkAndCacheBump:
-    """Stage (a) flips _TRAINING_CONSTANT_CHANNELS down to
-    {10, 11, 20, 24, 25, 26} (unmasks Ch 15 ADX, Ch 17/18/19 5m fast,
-    Ch 21 BTC corr) and bumps _DATASET_CACHE_VERSION so cached tensors
-    built before the wiring change (with hourly-proxy 5m + zero BTC) are
-    invalidated and rebuilt with real values."""
+    """Stage (b) further shrinks _TRAINING_CONSTANT_CHANNELS down to
+    {10, 11, 24, 25, 26} (additionally unmasks Ch 20 funding rate via
+    Binance historical funding) and bumps _DATASET_CACHE_VERSION so
+    pre-stage-b caches (with zero funding) are invalidated and rebuilt
+    with real per-product funding rates."""
 
     def test_mask_shrunk(self):
         from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
-        assert _TRAINING_CONSTANT_CHANNELS == frozenset({10, 11, 20, 24, 25, 26})
+        assert _TRAINING_CONSTANT_CHANNELS == frozenset({10, 11, 24, 25, 26})
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
-        assert _DATASET_CACHE_VERSION == 5
+        assert _DATASET_CACHE_VERSION == 6

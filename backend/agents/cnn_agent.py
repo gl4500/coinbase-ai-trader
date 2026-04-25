@@ -69,6 +69,7 @@ from services.fear_greed import get_fear_greed
 from services.history_backfill import load_history, load_5m_history
 from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
+from services.binance_funding_history import fetch_funding_history
 from services.hmm_regime import get_detector, regime_blend
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
@@ -271,16 +272,16 @@ SEQ_LEN         = 60
 
 # Channels whose values are still constant-zero during training because the
 # training loop (train_on_history) doesn't yet pass the upstream inputs that
-# populate them. As of #57 stage (a) we wire candles_5m + btc_closes into
-# _build_dataset, so Ch 15 (ADX), Ch 17/18/19 (5m fast), Ch 21 (BTC corr)
-# are no longer constant — those are removed from the mask. Still masked:
+# populate them. As of #57 stage (b) we additionally wire per-product Binance
+# funding history into _build_dataset, so Ch 20 is no longer constant — it
+# joins Ch 15/17/18/19/21 (already unmasked in stage a) outside the mask.
+# Still masked:
 #   10, 11 → empty order book at training time (no historical L1 depth)
-#   20     → funding_rate (no historical fetcher; #57 stage b will add)
 #   24, 25 → iv_rv20/60 spread (no historical IV source)
 #   26     → ls_sentiment (no historical Binance L/S sentiment)
 # At inference we zero these too so the input distribution matches what the
 # model actually saw during training (P3b).
-_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 20, 24, 25, 26})
+_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 24, 25, 26})
 
 
 def _mask_training_constant_channels(channels):
@@ -358,9 +359,10 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 5  # bumped for #57: real candles_5m + btc_closes wired
-                            # into _build_dataset; pre-v5 caches stored hourly-
-                            # proxy 5m and zero BTC, so they must be discarded.
+_DATASET_CACHE_VERSION = 6  # bumped for #57 stage b: real per-product Binance
+                            # funding history wired into _build_dataset; pre-v6
+                            # caches stored zero funding (Ch 20), so they must
+                            # be discarded.
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
@@ -675,6 +677,43 @@ def _aligned_btc_closes(target_candles: List[Dict],
         if last is None:
             # No pre/at-target BTC bar yet — use first available close as seed.
             last = btc_closes[0]
+        out.append(last)
+    return out
+
+
+def _aligned_funding_rates(target_candles: List[Dict],
+                           funding_history: Optional[List[Tuple[int, float]]]) -> Optional[List[float]]:
+    """Return funding rates aligned 1:1 with `target_candles` (forward-fill).
+
+    `funding_history` is a list of `(funding_time_ms, rate)` tuples sorted
+    ascending — the format returned by
+    `services.binance_funding_history.fetch_funding_history`. Funding events
+    fire every 8h on Binance futures, so the same rate stays "active" for
+    every candle bar between events. For each target bar we use the most
+    recent funding event whose `funding_time_ms <= target_start_seconds *
+    1000`. Pre-target events seed the initial value so the series never
+    starts None; if every event is *after* the first target bar, we seed
+    the early bars with the first available rate (matches
+    `_aligned_btc_closes` behaviour). Returns None when `funding_history`
+    is empty/None (caller treats that as "no rate, leave Ch 20 at zero").
+    """
+    if not funding_history:
+        return None
+    fh_sorted = sorted(funding_history, key=lambda tr: tr[0])
+    fh_times  = [int(t) for t, _ in fh_sorted]
+    fh_rates  = [float(r) for _, r in fh_sorted]
+
+    out: List[float] = []
+    last: Optional[float] = None
+    j = 0
+    n_fh = len(fh_times)
+    for c in target_candles:
+        ts_ms = int(c.get("start") or c.get("time") or 0) * 1000
+        while j < n_fh and fh_times[j] <= ts_ms:
+            last = fh_rates[j]
+            j += 1
+        if last is None:
+            last = fh_rates[0]
         out.append(last)
     return out
 
@@ -2113,7 +2152,8 @@ class CoinbaseCNNAgent:
                 if "start_time" in c and "start" not in c:
                     c["start"] = c["start_time"]
 
-        all_candle_sets: list = []   # [(pid, candles, btc_aligned, candles_5m)]
+        # [(pid, candles, btc_aligned, candles_5m, funding_aligned)]
+        all_candle_sets: list = []
         for p in products:
             pid  = p["product_id"]
             hist = await loop.run_in_executor(None, load_history, pid)
@@ -2144,7 +2184,20 @@ class CoinbaseCNNAgent:
                     _aligned_btc_closes(candles, btc_hist_for_align)
                     if pid != "BTC-USD" else None
                 )
-                all_candle_sets.append((pid, candles, btc_aligned, c5m))
+                # Per-product Binance funding history (#57 stage b). The
+                # fetcher returns [] for unsupported symbols, fetch errors,
+                # or non-200 responses — `_aligned_funding_rates` then
+                # returns None and Ch 20 stays at zero (caller behaviour
+                # matches the prior constant-zero state).
+                fr_start_ms = int(candles[0]["start"]) * 1000
+                fr_end_ms   = int(candles[-1]["start"]) * 1000
+                funding_hist = await fetch_funding_history(
+                    pid, fr_start_ms, fr_end_ms
+                )
+                funding_aligned = _aligned_funding_rates(candles, funding_hist)
+                all_candle_sets.append(
+                    (pid, candles, btc_aligned, c5m, funding_aligned)
+                )
 
         _phase1_secs = _t.time() - _phase1_start
         logger.info(
@@ -2179,11 +2232,12 @@ class CoinbaseCNNAgent:
                 )
             X_list, y_list, w_list = [], [], []
             hits = appends = rebuilds = skips = 0
-            for prod_idx, (pid, candles, btc_aligned, c5m) in enumerate(all_candle_sets, 1):
+            for prod_idx, (pid, candles, btc_aligned, c5m, funding_aligned) in enumerate(all_candle_sets, 1):
                 entry, status = _extend_or_rebuild_product(
                     cache.get(pid), candles, fb,
                     SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH,
                     btc_closes=btc_aligned,
+                    funding_rates=funding_aligned,
                     candles_5m=c5m,
                 )
                 if status == "skip":
