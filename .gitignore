@@ -51,3 +51,26 @@ desktop.ini
 .pytest_cache/
 .coverage
 htmlcov/
+
+# PyInstaller output (launcher build)
+*.exe
+*.spec
+
+# Model backups & runtime training state
+backend/*.pt.bak*
+backend/cnn_best_loss.txt
+backend/cnn_train_progress.json
+
+# SQLite working files & extra DB locations
+*.db-shm
+*.db-wal
+coinbase.db
+backend/data/*.db
+backend/data/*.pkl
+backend/data/history/
+
+# Generated diagnostics & exploratory results
+cnn_*.html
+training_audit.txt
+tools/claude_train_results.jsonl
+tools/__pycache__/
