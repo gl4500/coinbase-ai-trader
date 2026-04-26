@@ -5,6 +5,50 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 43] — 2026-04-25 — Purge legacy SCALP/MOMENTUM rows from DB (#79)
+
+### Context
+Session 42 removed ScalpAgent and MomentumAgent from the runtime but left
+historical rows in `trades`, `signal_outcomes`, `agent_state`, and
+`agent_decisions` "as-is (no migration)". The frontend Performance
+Dashboard and `/api/performance` aggregations were therefore mixing
+legacy SCALP/MOMENTUM trades into PnL totals that are no longer
+attributable to any active agent. With CNN retrain (best_val=0.6002,
+val_auc=0.746) just landed, we want the dashboard to reflect only
+agents currently running.
+
+### Change
+**Backup first:** `backend/coinbase.db.bak_pre_purge_20260426`
+(428,118,016 bytes — full pre-purge snapshot, kept locally, gitignored
+via existing `*.db` rule).
+
+**Purged rows** (444,531 total):
+| Table | Column | Removed |
+|---|---|---|
+| `trades` | `agent` IN (MOMENTUM, SCALP) | 4,209 |
+| `signal_outcomes` | `source` IN (MOMENTUM, SCALP) | 2,420 |
+| `agent_state` | `agent` IN (MOMENTUM, SCALP) | 2 |
+| `agent_decisions` | `agent` IN (MOMENTUM, SCALP) | 437,900 |
+
+**VACUUM** reclaimed 294MB: `coinbase.db` 428MB → 134MB.
+
+**Remaining rows** (CNN/TECH only):
+- `trades`: CNN=338, TECH=156
+- `signal_outcomes`: CNN=20457, TECH=166
+- `agent_state`: CNN=1, TECH=1
+- `agent_decisions`: TECH=224331
+
+**Verification:**
+- `GET /api/performance` returns clean monthly totals (447 trades, 40.9% win rate, +$91.05 PnL) without orphan agent buckets.
+- `GET /api/agents/status` returns only `tech` and `cnn` keys.
+
+### Memory
+- `coinbase_trader_schema.md` "Active agents" section updated — the
+  "Historical rows left as-is" note replaced with the actual purge
+  record + remaining counts.
+
+---
+
 ## [Session 42] — 2026-04-25 — Remove ScalpAgent + MomentumAgent, port exit-stats to TechAgent
 
 ### Context

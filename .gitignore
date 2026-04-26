@@ -21,6 +21,7 @@ env/
 # Database (runtime data)
 backend/*.db
 backend/coinbase.db
+backend/*.db.bak*
 
 # Logs
 backend/logs/
