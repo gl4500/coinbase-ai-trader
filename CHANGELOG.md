@@ -5,6 +5,52 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 45] — 2026-04-26 — Capacity-reduced glu1 arch + per-arch checkpoints (#40)
+
+### Context
+Six consecutive glu2 retrains since Session 44 were rejected by save-if-better
+(best_val_loss 0.5908 / 0.6011 / 0.6001 / 0.6168 / 0.6118 / 0.6021 — all ≥ the
+0.5828 baseline). Every run shows the same OVERFIT signature: peak val_loss at
+epoch 1, train loss falls 0.577 → 0.388, val_loss climbs to ~0.75 by epoch 16
+(overfit_gap_pct ≈ 106%). val_auc holds at 0.71–0.76 — signal exists but the
+~280k-param glu2 memorizes the train set immediately. Hypothesis: capacity
+bottleneck. Fix: introduce a smaller sibling arch (`glu1`, ~5–8× fewer params)
+selectable via `CNN_ARCH` env var, with separate on-disk checkpoint files so
+the working glu2 baseline (val_loss=0.5828) is preserved as a safety net while
+glu1 trains.
+
+### Change
+**`backend/agents/cnn_agent.py`**
+- New `SignalCNNGlu1` class — 27→16→32 GatedConv1d (one MaxPool, 60→30), 1-layer LSTM(32→16), Dropout(0.3), FC(16→1). Carries `arch = "glu1"` for checkpoint compatibility checking. Includes `predict()` mirror of `SignalCNN`.
+- New `_active_arch()` reads `CNN_ARCH` env at call-time (default `glu2`); change takes effect on agent boot.
+- New `_build_cnn(arch)` factory routes via `_ARCH_REGISTRY = {"glu2": SignalCNN, "glu1": SignalCNNGlu1}`. Raises `ValueError` on unknown arch.
+- New `_model_path_for(arch)` / `_best_loss_path_for(arch)` — `glu2` keeps the legacy `cnn_model.pt` / `cnn_best_loss.txt` paths; non-glu2 archs get `_<arch>` suffix (e.g. `cnn_model_glu1.pt`, `cnn_best_loss_glu1.txt`).
+- `CoinbaseCNNAgent.__init__` now stores `self._arch = _active_arch()` and builds via the factory; startup log line includes `arch=`.
+- `_exists` / `_load` / `save_model` / `_read_best_loss` / `_write_best_loss` and the `_model_saved` check inside `train_on_history` route through the per-arch path helpers. `_read_best_loss` / `_write_best_loss` converted from `@staticmethod` to instance methods (callsites already used `self.`).
+- `save_model` derives its `.bak` path from the active checkpoint path, replacing the now-glu2-only `_MODEL_BAK_PATH`.
+
+**`backend/main.py`**
+- `POST /api/cnn/model/reload` now resolves the checkpoint via `_model_path_for(app_state.cnn_agent._arch)` instead of importing `MODEL_PATH` directly. Existence check, `os.stat`, and the response body all reflect the agent's active arch. Response gains an `arch` field. Agent-existence check moved before path resolution.
+
+### Why option (a)
+The save-if-better logic compares new val_loss against the previous best; without per-arch files, a winning glu1 retrain would overwrite the glu2 baseline in `cnn_model.pt`, and any later worse glu1 retrain would leave production with no fallback. Separate files preserve both baselines independently — flipping `CNN_ARCH` in `.env` is a safe, reversible choice.
+
+### Tests (TDD red→green)
+- `test_cnn_agent.py::TestSignalCNNGlu1` — class exists with `arch="glu1"`, forward shape `(B,1)`, `predict()` returns probability in `[0,1]`, param count ≤ glu2/3. **4/4 PASSED.**
+- `test_cnn_agent.py::TestArchFactoryAndPaths` — `_active_arch()` defaults to `glu2` and reads env, `_build_cnn` routes correctly and raises on unknown, `_model_path_for("glu2")` matches legacy `MODEL_PATH`, `glu1` paths carry `_glu1` suffix. **9/9 PASSED.**
+- `test_cnn_agent.py::TestCnnAgentArchWiring` — agent default arch is `glu2`, `CNN_ARCH=glu1` selects `SignalCNNGlu1`, `save_model()` under `glu1` writes only `cnn_model_glu1.pt`. **3/3 PASSED.**
+- All 13 RED-tests confirmed to fail before implementation (ImportError on `SignalCNNGlu1` / `_active_arch` / `_build_cnn` / `_model_path_for` / `_best_loss_path_for`; `AttributeError: '_arch'`; glu2-path-written assertion).
+
+### How to enable
+1. Add `CNN_ARCH=glu1` to `.env` (default remains `glu2`).
+2. Restart backend so `CoinbaseCNNAgent.__init__` picks up the new arch.
+3. Trigger a retrain — saves to `cnn_model_glu1.pt` against its own `cnn_best_loss_glu1.txt` baseline (initially `inf`, so the first glu1 run unconditionally saves). The glu2 `cnn_model.pt` baseline is untouched.
+
+### Memory
+- `coinbase_trader_schema.md` — landmarks updated for new classes/helpers.
+
+---
+
 ## [Session 44] — 2026-04-26 — Re-mask Ch 20 funding rate; geo-block kill switch (#80, #81)
 
 ### Context

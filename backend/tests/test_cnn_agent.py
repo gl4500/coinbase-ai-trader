@@ -776,7 +776,122 @@ class TestGatedConv1d:
             f"Weights should sum to 1.0, got {sum(weights):.6f}"
 
 
-# ── train_on_history executor tests ───────────────────────────────────────────
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+class TestSignalCNNGlu1:
+    """Smaller-capacity arch — half-depth/half-width vs glu2 — to combat overfit
+    seen in production retrains where glu2 memorizes by epoch 1."""
+
+    def _import(self):
+        from agents.cnn_agent import SignalCNNGlu1
+        return SignalCNNGlu1
+
+    def test_class_exists_with_arch_tag(self):
+        cls = self._import()
+        assert cls.arch == "glu1"
+
+    def test_forward_shape(self):
+        cls   = self._import()
+        model = cls(n_ch=N_CHANNELS)
+        x     = torch.randn(4, N_CHANNELS, SEQ_LEN)
+        assert model(x).shape == (4, 1)
+
+    def test_predict_returns_probability(self):
+        cls   = self._import()
+        model = cls(n_ch=N_CHANNELS)
+        prob  = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
+        assert 0.0 <= prob <= 1.0
+
+    def test_fewer_params_than_glu2(self):
+        """glu1 must be substantially smaller than glu2 — that is the whole point."""
+        cls   = self._import()
+        n_glu1 = sum(p.numel() for p in cls(n_ch=N_CHANNELS).parameters())
+        n_glu2 = sum(p.numel() for p in SignalCNN(n_ch=N_CHANNELS).parameters())
+        assert n_glu1 * 3 < n_glu2, (
+            f"glu1 has {n_glu1} params vs glu2 {n_glu2} — expected glu1 ≤ ~1/3."
+        )
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+class TestArchFactoryAndPaths:
+    """CNN_ARCH env var routes between glu2 (default) and glu1, with separate
+    on-disk checkpoint files so flipping the env var does not destroy the other
+    arch's saved baseline."""
+
+    def test_active_arch_default_is_glu2(self, monkeypatch):
+        monkeypatch.delenv("CNN_ARCH", raising=False)
+        from agents.cnn_agent import _active_arch
+        assert _active_arch() == "glu2"
+
+    def test_active_arch_reads_env(self, monkeypatch):
+        monkeypatch.setenv("CNN_ARCH", "glu1")
+        from agents.cnn_agent import _active_arch
+        assert _active_arch() == "glu1"
+
+    def test_build_cnn_glu2_returns_signal_cnn(self):
+        from agents.cnn_agent import _build_cnn, SignalCNN
+        assert isinstance(_build_cnn("glu2"), SignalCNN)
+
+    def test_build_cnn_glu1_returns_glu1_class(self):
+        from agents.cnn_agent import _build_cnn, SignalCNNGlu1
+        assert isinstance(_build_cnn("glu1"), SignalCNNGlu1)
+
+    def test_build_cnn_unknown_arch_raises(self):
+        from agents.cnn_agent import _build_cnn
+        with pytest.raises(ValueError):
+            _build_cnn("does_not_exist")
+
+    def test_model_path_glu2_is_legacy_path(self):
+        """glu2 must keep the existing cnn_model.pt path so the working
+        baseline (val_loss=0.5828) is not invalidated by this change."""
+        from agents.cnn_agent import _model_path_for, MODEL_PATH
+        assert os.path.abspath(_model_path_for("glu2")) == os.path.abspath(MODEL_PATH)
+
+    def test_model_path_glu1_has_arch_suffix(self):
+        from agents.cnn_agent import _model_path_for
+        path = _model_path_for("glu1")
+        assert path.endswith("cnn_model_glu1.pt"), path
+
+    def test_best_loss_path_glu2_is_legacy_path(self):
+        from agents.cnn_agent import _best_loss_path_for, _BEST_LOSS_PATH
+        assert os.path.abspath(_best_loss_path_for("glu2")) == os.path.abspath(_BEST_LOSS_PATH)
+
+    def test_best_loss_path_glu1_has_arch_suffix(self):
+        from agents.cnn_agent import _best_loss_path_for
+        path = _best_loss_path_for("glu1")
+        assert path.endswith("cnn_best_loss_glu1.txt"), path
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+class TestCnnAgentArchWiring:
+    """CoinbaseCNNAgent must honour CNN_ARCH and route checkpoint I/O through
+    per-arch path helpers — flipping CNN_ARCH from glu2→glu1 must not be able
+    to overwrite the glu2 baseline checkpoint."""
+
+    def test_default_arch_is_glu2(self, monkeypatch):
+        monkeypatch.delenv("CNN_ARCH", raising=False)
+        agent = CoinbaseCNNAgent(ws_subscriber=None)
+        from agents.cnn_agent import SignalCNN
+        assert agent._arch == "glu2"
+        assert isinstance(agent.model, SignalCNN)
+
+    def test_glu1_env_selects_glu1_model(self, monkeypatch):
+        monkeypatch.setenv("CNN_ARCH", "glu1")
+        agent = CoinbaseCNNAgent(ws_subscriber=None)
+        from agents.cnn_agent import SignalCNNGlu1
+        assert agent._arch == "glu1"
+        assert isinstance(agent.model, SignalCNNGlu1)
+
+    def test_save_uses_arch_specific_path(self, monkeypatch, tmp_path):
+        """save_model under CNN_ARCH=glu1 must NOT touch the glu2 cnn_model.pt path."""
+        monkeypatch.setenv("CNN_ARCH", "glu1")
+        glu2_path = str(tmp_path / "cnn_model.pt")
+        glu1_path = str(tmp_path / "cnn_model_glu1.pt")
+        monkeypatch.setattr(_cnn_mod, "MODEL_PATH",      glu2_path)
+        monkeypatch.setattr(_cnn_mod, "_MODEL_BAK_PATH", glu2_path + ".bak")
+        agent = CoinbaseCNNAgent(ws_subscriber=None)
+        agent.save_model(backup=False)
+        assert not os.path.exists(glu2_path), "glu1 save must not write glu2 checkpoint"
+        assert os.path.exists(glu1_path),     "glu1 save must write cnn_model_glu1.pt"
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
 class TestTrainOnHistoryNonBlocking:
@@ -1089,10 +1204,11 @@ class TestTrainingFramework:
         orig = ca._BEST_LOSS_PATH
         ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
         try:
-            assert CoinbaseCNNAgent._read_best_loss() == float("inf"), \
+            agent = CoinbaseCNNAgent()
+            assert agent._read_best_loss() == float("inf"), \
                 "Missing file should return inf"
-            CoinbaseCNNAgent._write_best_loss(0.4321)
-            assert abs(CoinbaseCNNAgent._read_best_loss() - 0.4321) < 1e-6
+            agent._write_best_loss(0.4321)
+            assert abs(agent._read_best_loss() - 0.4321) < 1e-6
         finally:
             ca._BEST_LOSS_PATH = orig
 
@@ -1108,13 +1224,14 @@ class TestTrainingFramework:
         orig = ca._BEST_LOSS_PATH
         ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
         try:
+            agent = CoinbaseCNNAgent()
             with open(ca._BEST_LOSS_PATH, "w") as f:
                 f.write("1e-06")
-            assert CoinbaseCNNAgent._read_best_loss() == float("inf"), \
+            assert agent._read_best_loss() == float("inf"), \
                 "Stale sub-0.1 value must be treated as unset so real models can save"
             with open(ca._BEST_LOSS_PATH, "w") as f:
                 f.write("0.5")
-            assert abs(CoinbaseCNNAgent._read_best_loss() - 0.5) < 1e-6, \
+            assert abs(agent._read_best_loss() - 0.5) < 1e-6, \
                 "Realistic values >= 0.1 must be preserved"
         finally:
             ca._BEST_LOSS_PATH = orig

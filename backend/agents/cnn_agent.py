@@ -888,6 +888,27 @@ def _save_pp_cache(path: str, schema: dict, products: dict) -> None:
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
 _CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
+
+
+def _model_path_for(arch: str) -> str:
+    """Resolve the on-disk checkpoint for a given arch.
+
+    glu2 keeps the legacy `cnn_model.pt` path so its working baseline
+    (val_loss=0.5828) stays addressable. Other archs get an `_<arch>` suffix
+    so a worse retrain on one arch can never overwrite the other's checkpoint.
+    """
+    if arch == "glu2":
+        return MODEL_PATH
+    root, ext = os.path.splitext(MODEL_PATH)
+    return f"{root}_{arch}{ext}"
+
+
+def _best_loss_path_for(arch: str) -> str:
+    """Per-arch save-if-better sentinel — paired with `_model_path_for`."""
+    if arch == "glu2":
+        return _BEST_LOSS_PATH
+    root, ext = os.path.splitext(_BEST_LOSS_PATH)
+    return f"{root}_{arch}{ext}"
 _CKPT_EVERY     = 10   # save resume checkpoint every N epochs
 OLLAMA_URL      = "http://localhost:11434"
 _CACHE_TTL      = 300
@@ -955,6 +976,57 @@ if _TORCH:
             with torch.no_grad():
                 device = next(self.parameters()).device
                 return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+
+    class SignalCNNGlu1(nn.Module):
+        """Capacity-reduced sibling of SignalCNN — half-depth, half-width.
+
+        Built to combat the epoch-1 memorization seen on glu2 in production
+        retrains: ~20× fewer params trades expressivity for generalization.
+        """
+        arch = "glu1"
+
+        def __init__(self, n_ch: int = N_CHANNELS):
+            super().__init__()
+            self.c1   = GatedConv1d(n_ch, 16)
+            self.c2   = GatedConv1d(16,   32)
+            self.p2   = nn.MaxPool1d(2)        # 60 → 30
+            self.lstm = nn.LSTM(32, 16, num_layers=1, batch_first=True)
+            self.drop = nn.Dropout(0.3)
+            self.fc   = nn.Linear(16, 1)
+
+        def forward(self, x):
+            x = self.c1(x)
+            x = self.c2(x); x = self.p2(x)
+            x = x.permute(0, 2, 1)             # (B, seq, 32)
+            self.lstm.flatten_parameters()
+            x, _ = self.lstm(x)
+            x = x[:, -1, :]
+            x = self.drop(x)
+            return self.fc(x)
+
+        def predict(self, tensor: "torch.Tensor") -> float:
+            self.eval()
+            with torch.no_grad():
+                device = next(self.parameters()).device
+                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+
+
+_ARCH_REGISTRY = {}
+if _TORCH:
+    _ARCH_REGISTRY = {"glu2": SignalCNN, "glu1": SignalCNNGlu1}
+
+
+def _active_arch() -> str:
+    """Read CNN_ARCH env at call-time so flips take effect without reimport."""
+    return os.environ.get("CNN_ARCH", "glu2").strip().lower() or "glu2"
+
+
+def _build_cnn(arch: str):
+    """Factory: arch tag → instance. Raises ValueError on unknown arch."""
+    cls = _ARCH_REGISTRY.get(arch)
+    if cls is None:
+        raise ValueError(f"Unknown CNN_ARCH '{arch}' — known: {sorted(_ARCH_REGISTRY)}")
+    return cls()
 
 
 # ── Feature Builder ───────────────────────────────────────────────────────────
@@ -1344,15 +1416,18 @@ class CoinbaseCNNAgent:
         # Set by main.py when a training subprocess is running — causes scans
         # to skip Ollama (GPU is saturated by training, LLM calls hang).
         self.training_active: bool = False
+        # Active arch is read at construction time so flipping CNN_ARCH only
+        # takes effect on the next agent boot, not mid-run.
+        self._arch = _active_arch()
         if _TORCH:
-            self.model = SignalCNN().to(_DEVICE)
+            self.model = _build_cnn(self._arch).to(_DEVICE)
             self._load()
         _status = "incompatible — signals suppressed until retrained" if self._needs_retrain else \
                   ("loaded" if self._exists() else "random (untrained)")
         _device_str = str(_DEVICE) if _TORCH else "n/a"
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
-            f"device={_device_str} | model={_status} | "
+            f"device={_device_str} | model={_status} | arch={self._arch} | "
             f"channels={N_CHANNELS} | lgbm={'ready' if self._lgbm.is_ready() else 'accumulating'}"
         )
 
@@ -1380,13 +1455,13 @@ class CoinbaseCNNAgent:
             logger.warning(f"LGBMFilter retrain failed: {e}")
 
     def _exists(self) -> bool:
-        return os.path.exists(MODEL_PATH)
+        return os.path.exists(_model_path_for(self._arch))
 
     def _load(self):
         if not _TORCH or not self.model or not self._exists():
             return
         try:
-            ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
+            ckpt = torch.load(_model_path_for(self._arch), map_location="cpu", weights_only=False)
             if isinstance(ckpt, dict) and "state_dict" in ckpt:
                 arch          = ckpt.get("arch", "legacy")
                 ckpt_channels = ckpt.get("n_channels", N_CHANNELS)
@@ -1425,31 +1500,30 @@ class CoinbaseCNNAgent:
     def save_model(self, backup: bool = False):
         if not (_TORCH and self.model):
             return
-        if backup and os.path.exists(MODEL_PATH):
-            shutil.copy2(MODEL_PATH, _MODEL_BAK_PATH)
+        path = _model_path_for(self._arch)
+        if backup and os.path.exists(path):
+            shutil.copy2(path, path + ".bak")
         torch.save(
             {
                 "arch":       getattr(self.model, "arch", "glu"),
                 "n_channels": N_CHANNELS,
                 "state_dict": self.model.state_dict(),
             },
-            MODEL_PATH,
+            path,
         )
 
-    @staticmethod
-    def _read_best_loss() -> float:
+    def _read_best_loss(self) -> float:
         try:
-            v = float(open(_BEST_LOSS_PATH).read().strip())
+            v = float(open(_best_loss_path_for(self._arch)).read().strip())
             # BCE at chance ≈ 0.693; anything below 0.1 is a stale/corrupted
             # sentinel (historic bug: content=1e-06 rejected every trained model).
             return v if v >= 0.1 else float("inf")
         except Exception:
             return float("inf")
 
-    @staticmethod
-    def _write_best_loss(loss: float) -> None:
+    def _write_best_loss(self, loss: float) -> None:
         try:
-            with open(_BEST_LOSS_PATH, "w") as f:
+            with open(_best_loss_path_for(self._arch), "w") as f:
                 f.write(str(loss))
         except Exception:
             pass
@@ -2576,7 +2650,8 @@ class CoinbaseCNNAgent:
             logger.warning(f"HMM fit during training failed: {_he}")
 
         # True if the model file was written during this training run
-        _model_saved = os.path.exists(MODEL_PATH) and os.path.getmtime(MODEL_PATH) > _train_start
+        _active_model_path = _model_path_for(self._arch)
+        _model_saved = os.path.exists(_active_model_path) and os.path.getmtime(_active_model_path) > _train_start
 
         result = {
             "epochs":           epochs,

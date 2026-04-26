@@ -815,20 +815,22 @@ async def reload_cnn_model(_: None = Depends(verify_api_key)):
             status_code=409,
             content={"detail": "Local training in progress; reload would race the on-disk save"},
         )
-    from agents.cnn_agent import MODEL_PATH, N_CHANNELS
-    if not os.path.exists(MODEL_PATH):
-        raise HTTPException(status_code=404, detail=f"Model file not found: {MODEL_PATH}")
     if not app_state.cnn_agent:
         raise HTTPException(status_code=503, detail="CNN agent not initialised")
+    from agents.cnn_agent import _model_path_for, N_CHANNELS
+    model_path = _model_path_for(app_state.cnn_agent._arch)
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail=f"Model file not found: {model_path}")
     app_state.cnn_agent._load()
-    st = os.stat(MODEL_PATH)
+    st = os.stat(model_path)
     logger.info(
         f"CNN model reloaded via /api/cnn/model/reload "
-        f"(size={st.st_size} bytes, mtime={int(st.st_mtime)})"
+        f"(arch={app_state.cnn_agent._arch}, size={st.st_size} bytes, mtime={int(st.st_mtime)})"
     )
     return {
         "status": "reloaded",
-        "model_path": MODEL_PATH,
+        "arch": app_state.cnn_agent._arch,
+        "model_path": model_path,
         "size_bytes": st.st_size,
         "mtime_unix": st.st_mtime,
         "n_channels_expected": N_CHANNELS,
