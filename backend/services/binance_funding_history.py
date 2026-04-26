@@ -11,8 +11,13 @@ Public API:
 
 Funding events occur every 8h. Binance returns up to 1000 records per call,
 which spans ~333 days — sufficient for the typical training window.
+
+Kill switch (#81): set env BINANCE_FUNDING_DISABLED=1 to short-circuit and
+return [] without an HTTP call. fapi.binance is geo-blocked from the US
+(HTTP 451), so the call always fails on the production host — skip it.
 """
 import logging
+import os
 from typing import List, Optional, Tuple
 
 import httpx
@@ -20,6 +25,13 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+
+
+def _is_disabled() -> bool:
+    """True when BINANCE_FUNDING_DISABLED env is set to a truthy value."""
+    return os.environ.get("BINANCE_FUNDING_DISABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 _PRODUCT_TO_BN = {
     "BTC-USD":   "BTCUSDT",
@@ -60,6 +72,8 @@ async def fetch_funding_history(
     start_ms: int,
     end_ms: int,
 ) -> List[Tuple[int, float]]:
+    if _is_disabled():
+        return []
     bn_sym = _coinbase_to_binance(product_id)
     if not bn_sym:
         return []

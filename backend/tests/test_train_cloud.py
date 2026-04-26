@@ -34,7 +34,7 @@ def _import_module():
 class TestDefaultMaskMatchesProd:
     def test_default_mask_is_frozenset_of_prod_constant_channels(self):
         tc = _import_module()
-        assert tc.DEFAULT_MASK == frozenset({10, 11, 24, 25, 26})
+        assert tc.DEFAULT_MASK == frozenset({10, 11, 20, 24, 25, 26})
 
     def test_default_mask_is_frozenset_type(self):
         tc = _import_module()

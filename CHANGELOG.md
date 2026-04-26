@@ -5,6 +5,38 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 44] — 2026-04-26 — Re-mask Ch 20 funding rate; geo-block kill switch (#80, #81)
+
+### Context
+Session 41 unmasked Ch 20 (funding rate) by wiring Binance Futures
+historical funding into `_build_dataset`. Production host (US-based) is
+geo-blocked from `fapi.binance.com` — every backfill returns HTTP 451,
+so the channel is uniformly zero at training time. The model was
+training on a feature it could never observe in the wild, contributing
+to the val→live gap. Until a non-blocked funding source is wired in,
+Ch 20 must be treated as a constant channel again.
+
+### Change
+**`backend/agents/cnn_agent.py`**
+- `_TRAINING_CONSTANT_CHANNELS` restored to `frozenset({10, 11, 20, 24, 25, 26})` — Ch 20 added back.
+- `_DATASET_CACHE_VERSION` bumped 6 → 7 to force full rebuild with new mask.
+
+**`tools/train_cloud.py`**
+- `DEFAULT_MASK` mirrored to `frozenset({10, 11, 20, 24, 25, 26})` so cloud retrain matches prod inference mask.
+
+**`backend/services/binance_funding_history.py`** (#81 kill switch)
+- New `BINANCE_FUNDING_DISABLED` env var short-circuits `fetch_funding_history` → `[]` without ever constructing `httpx.AsyncClient`. Set via `.env` so the geo-blocked HTTP 451 round-trip is skipped on prod.
+
+### Tests
+- `test_cnn_agent.py::TestMaskShrinkAndCacheBump` — assertions updated to mask `{10,11,20,24,25,26}` and version `7`. PASSED.
+- `test_binance_funding_history.py` — added `test_disabled_env_var_short_circuits_without_http` (verifies `MockClient.assert_not_called()`) and `test_disabled_env_var_off_makes_http_call` sanity. All 10 tests PASSED.
+- `test_train_cloud.py::TestDefaultMaskMatchesProd` — assertion already matched the new set.
+
+### Memory
+- `coinbase_trader_schema.md` — note Ch 20 re-masked + kill switch.
+
+---
+
 ## [Session 43] — 2026-04-25 — Purge legacy SCALP/MOMENTUM rows from DB (#79)
 
 ### Context

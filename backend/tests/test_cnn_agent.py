@@ -1640,11 +1640,14 @@ class TestTrainingConstantChannelMask:
     """
 
     def test_mask_set_covers_expected_channels(self):
-        # As of #57 stage (b) the training loop also wires real per-product
-        # Binance funding history through _build_dataset, so Ch 20 (funding
-        # rate) is no longer constant. Still masked: Ch 10/11 (orderbook),
-        # Ch 24/25 (IV/RV), Ch 26 (L/S sentiment) — no historical sources.
-        expected = {10, 11, 24, 25, 26}
+        # As of #80 Ch 20 (funding rate) is back in the mask: fapi.binance
+        # is geo-blocked from the US (HTTP 451), so fetch_funding_history
+        # returns [] for every product → Ch 20 was silently constant-zero
+        # in training despite #54 wiring it. Re-masking it at inference
+        # restores train/serve alignment until a non-blocked source is wired.
+        # Still masked alongside: Ch 10/11 (orderbook), Ch 24/25 (IV/RV),
+        # Ch 26 (L/S sentiment) — no historical sources for those either.
+        expected = {10, 11, 20, 24, 25, 26}
         assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
 
     def test_mask_zeros_designated_channels(self):
@@ -2802,16 +2805,16 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
 
 class TestMaskShrinkAndCacheBump:
-    """Stage (b) further shrinks _TRAINING_CONSTANT_CHANNELS down to
-    {10, 11, 24, 25, 26} (additionally unmasks Ch 20 funding rate via
-    Binance historical funding) and bumps _DATASET_CACHE_VERSION so
-    pre-stage-b caches (with zero funding) are invalidated and rebuilt
-    with real per-product funding rates."""
+    """#80: Ch 20 is geo-blocked (fapi.binance returns HTTP 451 from US),
+    so fetch_funding_history returns [] for every product → Ch 20 was
+    silently constant-zero despite #57(b)'s plumbing. Re-mask Ch 20 and
+    bump _DATASET_CACHE_VERSION 6→7 to invalidate caches built since the
+    geo-block (which contain zero funding for Ch 20)."""
 
     def test_mask_shrunk(self):
         from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
-        assert _TRAINING_CONSTANT_CHANNELS == frozenset({10, 11, 24, 25, 26})
+        assert _TRAINING_CONSTANT_CHANNELS == frozenset({10, 11, 20, 24, 25, 26})
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
-        assert _DATASET_CACHE_VERSION == 6
+        assert _DATASET_CACHE_VERSION == 7

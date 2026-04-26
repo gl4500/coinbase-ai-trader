@@ -118,6 +118,32 @@ class TestFetchFundingHistory:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_disabled_env_var_short_circuits_without_http(self, monkeypatch):
+        # #81: fapi.binance is geo-blocked from the US (HTTP 451); the env
+        # var BINANCE_FUNDING_DISABLED skips the network call entirely and
+        # returns []. Verifies AsyncClient is never constructed.
+        monkeypatch.setenv("BINANCE_FUNDING_DISABLED", "1")
+        with patch("services.binance_funding_history.httpx.AsyncClient") as MockClient:
+            result = await bfh.fetch_funding_history(
+                "BTC-USD", start_ms=0, end_ms=1_000
+            )
+        assert result == []
+        MockClient.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disabled_env_var_off_makes_http_call(self, monkeypatch):
+        # Sanity: when the kill-switch is unset (default) or "0", behaviour
+        # is unchanged — the HTTP path still runs.
+        monkeypatch.delenv("BINANCE_FUNDING_DISABLED", raising=False)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get = AsyncMock(return_value=_make_response([]))
+        with patch("services.binance_funding_history.httpx.AsyncClient", return_value=mock_client):
+            await bfh.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
+        mock_client.get.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_sorts_unsorted_payload(self):
         payload = [
             {"symbol": "BTCUSDT", "fundingTime": 200, "fundingRate": "0.0002"},

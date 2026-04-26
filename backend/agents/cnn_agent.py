@@ -272,16 +272,20 @@ SEQ_LEN         = 60
 
 # Channels whose values are still constant-zero during training because the
 # training loop (train_on_history) doesn't yet pass the upstream inputs that
-# populate them. As of #57 stage (b) we additionally wire per-product Binance
-# funding history into _build_dataset, so Ch 20 is no longer constant — it
-# joins Ch 15/17/18/19/21 (already unmasked in stage a) outside the mask.
+# populate them. #57(b) wired per-product Binance funding history through
+# _build_dataset (Ch 20), but #80 puts Ch 20 back in the mask: fapi.binance
+# is geo-blocked from the US (HTTP 451), so fetch_funding_history returns []
+# for every product → Ch 20 was silently constant-zero in production. Until
+# a non-blocked source is wired, masking Ch 20 at inference keeps train/serve
+# distributions aligned.
 # Still masked:
 #   10, 11 → empty order book at training time (no historical L1 depth)
+#   20     → funding rate (Binance geo-block, see #80)
 #   24, 25 → iv_rv20/60 spread (no historical IV source)
 #   26     → ls_sentiment (no historical Binance L/S sentiment)
 # At inference we zero these too so the input distribution matches what the
 # model actually saw during training (P3b).
-_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 24, 25, 26})
+_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 20, 24, 25, 26})
 
 
 def _mask_training_constant_channels(channels):
@@ -359,10 +363,11 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 6  # bumped for #57 stage b: real per-product Binance
-                            # funding history wired into _build_dataset; pre-v6
-                            # caches stored zero funding (Ch 20), so they must
-                            # be discarded.
+_DATASET_CACHE_VERSION = 7  # bumped for #80: Ch 20 (funding rate) re-masked
+                            # because Binance fapi is geo-blocked from US;
+                            # v6 caches were built while Ch 20 was unmasked
+                            # but already silently zero — invalidate so the
+                            # next rebuild reflects the new mask explicitly.
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
