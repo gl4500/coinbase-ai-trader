@@ -249,27 +249,11 @@ class TestFeatureBuilder27Channels:
         for i, c in enumerate(ch):
             assert len(c) == self.T, f"Ch {i} has {len(c)} timesteps, expected {self.T}"
 
-    def test_iv_rv_channels_default_to_zero_for_non_btc(self):
-        ch = self.fb.build(self._dummy_candles(), {})
-        # Ch 24 and 25 should be 0.0 when no IV/RV data provided
-        assert all(v == 0.0 for v in ch[24])
-        assert all(v == 0.0 for v in ch[25])
-
-    def test_iv_rv_channels_populated_when_provided(self):
-        ch = self.fb.build(
-            self._dummy_candles(), {},
-            iv_rv20_spread=0.25, iv_rv60_spread=0.15
-        )
-        assert all(v == pytest.approx(0.25) for v in ch[24])
-        assert all(v == pytest.approx(0.15) for v in ch[25])
-
-    def test_ls_sentiment_channel_default_zero(self):
-        ch = self.fb.build(self._dummy_candles(), {})
-        assert all(v == 0.0 for v in ch[26])
-
-    def test_ls_sentiment_channel_populated(self):
-        ch = self.fb.build(self._dummy_candles(), {}, ls_sentiment=-0.3)
-        assert all(v == pytest.approx(-0.3) for v in ch[26])
+    # Ch 24/25/26 injection tests removed in #46-A: the iv_rv20_spread,
+    # iv_rv60_spread, and ls_sentiment params are ignored — those channels
+    # are now derived from candles (realized-vol + volume sentiment). The
+    # new derivations are covered by TestRealizedVolHelper and
+    # TestVolumeSentimentHelper in test_cnn_agent.py.
 
     def test_empty_candles_returns_27_zero_channels(self):
         ch = self.fb.build([], {})

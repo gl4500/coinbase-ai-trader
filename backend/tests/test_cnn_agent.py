@@ -88,20 +88,25 @@ class TestFeatureBuilder:
         channels = self.fb.build(candles, {})
         assert all(0.0 <= v <= 1.0 for v in channels[0]), "Ch0 norm_close out of [0,1]"
 
-    def test_ob_channels_broadcast(self):
-        """OB bid/ask channels should be uniform scalars (broadcast)."""
+    def test_ch10_close_position_in_unit_range(self):
+        """Ch 10 (#46-A): close position (close-low)/(high-low) ∈ [0,1] per bar."""
         candles = _make_candles(60)
-        ob = {"bid_depth": 50_000, "ask_depth": 30_000}
-        channels = self.fb.build(candles, ob)
-        assert len(set(channels[10])) == 1, "bid_ch should be uniform"
-        assert len(set(channels[11])) == 1, "ask_ch should be uniform"
-
-    def test_ob_empty_gives_zero_channels(self):
-        """Empty orderbook should give 0 in bid/ask channels."""
-        candles  = _make_candles(60)
         channels = self.fb.build(candles, {})
-        assert channels[10][0] == 0.0
-        assert channels[11][0] == 0.0
+        assert all(0.0 <= v <= 1.0 for v in channels[10]), "Ch10 close_position out of [0,1]"
+
+    def test_ch11_bar_range_in_unit_range(self):
+        """Ch 11 (#46-A): relative bar range ∈ [0,1] per bar."""
+        candles = _make_candles(60)
+        channels = self.fb.build(candles, {})
+        assert all(0.0 <= v <= 1.0 for v in channels[11]), "Ch11 bar_range out of [0,1]"
+
+    def test_ch10_11_independent_of_orderbook(self):
+        """Ch 10/11 (#46-A): now candle-derived, ignore orderbook depth."""
+        candles = _make_candles(60)
+        with_ob = self.fb.build(candles, {"bid_depth": 50_000, "ask_depth": 30_000})
+        sans_ob = self.fb.build(candles, {})
+        assert with_ob[10] == sans_ob[10], "Ch10 must not depend on ob"
+        assert with_ob[11] == sans_ob[11], "Ch11 must not depend on ob"
 
     def test_rising_prices_positive_change(self):
         """Steadily rising closes → positive 1-bar change at the end (ch 9)."""
@@ -1139,11 +1144,15 @@ class TestTrainingFramework:
     """
 
     @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
-    def test_needs_retrain_flag_set_on_channel_mismatch(self, tmp_path):
+    def test_needs_retrain_flag_set_on_channel_mismatch(self, tmp_path, monkeypatch):
         """Loading a checkpoint with wrong n_channels sets _needs_retrain=True."""
         import torch
         from agents.cnn_agent import SignalCNN, N_CHANNELS, _EARLY_STOP_PATIENCE
 
+        # Force glu2 so _model_path_for(self._arch) resolves to the unsuffixed
+        # MODEL_PATH constant the test overrides below. Without this, env-driven
+        # CNN_ARCH=glu1 picks the glu1-suffixed path and bypasses the override.
+        monkeypatch.setenv("CNN_ARCH", "glu2")
         agent = CoinbaseCNNAgent()
         agent._needs_retrain = False
 
@@ -1180,11 +1189,12 @@ class TestTrainingFramework:
         assert result is None, "Signal must be suppressed when model is incompatible"
 
     @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
-    def test_save_model_stores_n_channels(self, tmp_path):
+    def test_save_model_stores_n_channels(self, tmp_path, monkeypatch):
         """save_model() writes n_channels into the checkpoint."""
         import torch
         import agents.cnn_agent as ca
 
+        monkeypatch.setenv("CNN_ARCH", "glu2")
         agent = CoinbaseCNNAgent()
         ckpt_path = str(tmp_path / "test_ckpt.pt")
         orig = ca.MODEL_PATH
@@ -1212,7 +1222,7 @@ class TestTrainingFramework:
         finally:
             ca._BEST_LOSS_PATH = orig
 
-    def test_best_loss_stale_tiny_value_treated_as_unset(self, tmp_path):
+    def test_best_loss_stale_tiny_value_treated_as_unset(self, tmp_path, monkeypatch):
         """A stale tiny value (< 0.1) in cnn_best_loss.txt must be treated as unset.
 
         Rationale: BCE loss at chance is ~0.693; a legitimate best_val_loss will
@@ -1221,6 +1231,7 @@ class TestTrainingFramework:
         time because best_val_loss >= 1e-06 always.
         """
         import agents.cnn_agent as ca
+        monkeypatch.setenv("CNN_ARCH", "glu2")
         orig = ca._BEST_LOSS_PATH
         ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
         try:
@@ -1757,14 +1768,10 @@ class TestTrainingConstantChannelMask:
     """
 
     def test_mask_set_covers_expected_channels(self):
-        # As of #80 Ch 20 (funding rate) is back in the mask: fapi.binance
-        # is geo-blocked from the US (HTTP 451), so fetch_funding_history
-        # returns [] for every product → Ch 20 was silently constant-zero
-        # in training despite #54 wiring it. Re-masking it at inference
-        # restores train/serve alignment until a non-blocked source is wired.
-        # Still masked alongside: Ch 10/11 (orderbook), Ch 24/25 (IV/RV),
-        # Ch 26 (L/S sentiment) — no historical sources for those either.
-        expected = {10, 11, 20, 24, 25, 26}
+        # #46-A: Ch 10/11/24/25/26 swapped to candle-derived proxies — only
+        # Ch 20 (funding rate) stays masked while fapi.binance.com remains
+        # geo-blocked from US (HTTP 451). See #80 for the geo-block context.
+        expected = {20}
         assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
 
     def test_mask_zeros_designated_channels(self):
@@ -2922,16 +2929,122 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
 
 class TestMaskShrinkAndCacheBump:
-    """#80: Ch 20 is geo-blocked (fapi.binance returns HTTP 451 from US),
-    so fetch_funding_history returns [] for every product → Ch 20 was
-    silently constant-zero despite #57(b)'s plumbing. Re-mask Ch 20 and
-    bump _DATASET_CACHE_VERSION 6→7 to invalidate caches built since the
-    geo-block (which contain zero funding for Ch 20)."""
+    """#46 (Path A): Replace constant-masked Ch 10/11/24/25/26 with
+    candle-derived proxies (no external data). Only Ch 20 stays masked
+    (still geo-blocked). Bump _DATASET_CACHE_VERSION 7→8 to invalidate
+    caches built with the previous constant values."""
 
     def test_mask_shrunk(self):
         from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
-        assert _TRAINING_CONSTANT_CHANNELS == frozenset({10, 11, 20, 24, 25, 26})
+        assert _TRAINING_CONSTANT_CHANNELS == frozenset({20})
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
-        assert _DATASET_CACHE_VERSION == 7
+        assert _DATASET_CACHE_VERSION == 8
+
+
+class TestClosePositionHelper:
+    """Ch 10 replacement: (close - low) / (high - low) — intra-bar buy pressure 0..1."""
+
+    def test_close_at_high_returns_one(self):
+        from agents.cnn_agent import _close_position
+        out = _close_position([10.0], [10.0], [9.0])
+        assert out == [1.0]
+
+    def test_close_at_low_returns_zero(self):
+        from agents.cnn_agent import _close_position
+        out = _close_position([9.0], [10.0], [9.0])
+        assert out == [0.0]
+
+    def test_close_at_midpoint_returns_half(self):
+        from agents.cnn_agent import _close_position
+        out = _close_position([9.5], [10.0], [9.0])
+        assert out == [0.5]
+
+    def test_zero_range_returns_zero_no_div_zero(self):
+        from agents.cnn_agent import _close_position
+        out = _close_position([10.0], [10.0], [10.0])
+        assert out == [0.0]
+
+
+class TestBarRangeHelper:
+    """Ch 11 replacement: (high - low) / close, scaled+clipped 0..1 (relative bar volatility)."""
+
+    def test_zero_range_returns_zero(self):
+        from agents.cnn_agent import _bar_range
+        out = _bar_range([10.0], [10.0], [10.0])
+        assert out == [0.0]
+
+    def test_one_pct_range_scales_to_zero_point_one(self):
+        from agents.cnn_agent import _bar_range
+        out = _bar_range([100.0], [100.5], [99.5])
+        assert abs(out[0] - 0.1) < 1e-6
+
+    def test_clipped_at_one(self):
+        from agents.cnn_agent import _bar_range
+        out = _bar_range([100.0], [200.0], [50.0])
+        assert out[0] == 1.0
+
+
+class TestRealizedVolHelper:
+    """Ch 24/25 replacement: rolling std of log returns, scaled+clipped 0..1."""
+
+    def test_constant_prices_yield_zero(self):
+        from agents.cnn_agent import _rv_series
+        out = _rv_series([100.0] * 30, window=20)
+        assert all(v == 0.0 for v in out)
+
+    def test_pre_window_bars_are_zero(self):
+        from agents.cnn_agent import _rv_series
+        out = _rv_series([100.0 + i for i in range(30)], window=20)
+        assert out[0] == 0.0
+        assert out[19] == 0.0
+
+    def test_post_window_increases_with_volatility(self):
+        from agents.cnn_agent import _rv_series
+        low_vol = [100.0 + 0.01 * i for i in range(30)]
+        high_vol = [100.0 + 5.0 * (-1)**i for i in range(30)]
+        ov_low = _rv_series(low_vol, window=20)
+        ov_high = _rv_series(high_vol, window=20)
+        assert ov_high[-1] > ov_low[-1]
+
+    def test_output_clipped_to_unit_range(self):
+        from agents.cnn_agent import _rv_series
+        crazy = [100.0 * (1.5 if i % 2 else 1.0) for i in range(30)]
+        out = _rv_series(crazy, window=20)
+        assert all(0.0 <= v <= 1.0 for v in out)
+
+
+class TestVolumeSentimentHelper:
+    """Ch 26 replacement: rolling up-vol / total-vol mapped to -1..1."""
+
+    def test_all_up_bars_yield_plus_one(self):
+        from agents.cnn_agent import _volume_sentiment
+        closes = [100.0 + i for i in range(10)]
+        vols = [1.0] * 10
+        out = _volume_sentiment(closes, vols, window=5)
+        assert out[-1] == 1.0
+
+    def test_all_down_bars_yield_minus_one(self):
+        from agents.cnn_agent import _volume_sentiment
+        closes = [100.0 - i for i in range(10)]
+        vols = [1.0] * 10
+        out = _volume_sentiment(closes, vols, window=5)
+        assert out[-1] == -1.0
+
+    def test_balanced_alternating_yields_near_zero(self):
+        from agents.cnn_agent import _volume_sentiment
+        closes = [100.0 + (1 if i % 2 else -1) for i in range(20)]
+        vols = [1.0] * 20
+        out = _volume_sentiment(closes, vols, window=10)
+        assert abs(out[-1]) < 0.3
+
+    def test_zero_volume_window_yields_zero(self):
+        from agents.cnn_agent import _volume_sentiment
+        out = _volume_sentiment([100.0] * 10, [0.0] * 10, window=5)
+        assert all(v == 0.0 for v in out)
+
+    def test_first_bar_is_zero(self):
+        from agents.cnn_agent import _volume_sentiment
+        out = _volume_sentiment([100.0, 101.0, 102.0], [1.0, 1.0, 1.0], window=5)
+        assert out[0] == 0.0

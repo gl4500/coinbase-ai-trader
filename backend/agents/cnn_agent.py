@@ -278,14 +278,74 @@ SEQ_LEN         = 60
 # for every product → Ch 20 was silently constant-zero in production. Until
 # a non-blocked source is wired, masking Ch 20 at inference keeps train/serve
 # distributions aligned.
+# Path A (#46): Ch 10/11/24/25/26 swapped to candle-derived proxies — no
+# external data needed, real per-bar variance instead of constants.
 # Still masked:
-#   10, 11 → empty order book at training time (no historical L1 depth)
-#   20     → funding rate (Binance geo-block, see #80)
-#   24, 25 → iv_rv20/60 spread (no historical IV source)
-#   26     → ls_sentiment (no historical Binance L/S sentiment)
+#   20 → funding rate (Binance geo-block, see #80)
 # At inference we zero these too so the input distribution matches what the
 # model actually saw during training (P3b).
-_TRAINING_CONSTANT_CHANNELS = frozenset({10, 11, 20, 24, 25, 26})
+_TRAINING_CONSTANT_CHANNELS = frozenset({20})
+
+
+def _close_position(closes, highs, lows):
+    """Ch 10: where close sits in the bar's high-low range, [0,1].
+    1.0 = closed at high (buy pressure), 0.0 = closed at low.
+    Returns 0.0 for zero-range bars (no div-by-zero)."""
+    out = []
+    for c, h, l in zip(closes, highs, lows):
+        rng = h - l
+        out.append((c - l) / rng if rng > 0 else 0.0)
+    return out
+
+
+def _bar_range(closes, highs, lows):
+    """Ch 11: relative bar size (high-low)/close, scaled ×10 and clipped [0,1].
+    A 1% bar maps to 0.1; a 10%+ bar saturates at 1.0."""
+    out = []
+    for c, h, l in zip(closes, highs, lows):
+        if c <= 0:
+            out.append(0.0)
+            continue
+        v = (h - l) / c * 10.0
+        out.append(min(1.0, max(0.0, v)))
+    return out
+
+
+def _rv_series(closes, window):
+    """Ch 24/25: rolling realized volatility (std of log returns) per bar.
+    Returns a per-bar list, length == len(closes). Pre-window bars are 0.0.
+    Output scaled ×50 and clipped [0,1] (a 2% std/bar saturates at 1.0)."""
+    out = [0.0] * len(closes)
+    for i in range(window, len(closes)):
+        rets = []
+        for j in range(i - window + 1, i + 1):
+            if closes[j - 1] > 0 and closes[j] > 0:
+                rets.append(math.log(closes[j] / closes[j - 1]))
+        if not rets:
+            continue
+        mu = sum(rets) / len(rets)
+        var = sum((r - mu) ** 2 for r in rets) / len(rets)
+        out[i] = min(1.0, math.sqrt(var) * 50.0)
+    return out
+
+
+def _volume_sentiment(closes, volumes, window):
+    """Ch 26: rolling up-volume / total-volume, mapped to [-1,1].
+    +1.0 = all bars in window were up (close > prev close), -1.0 = all down.
+    First bar is 0.0 (no prior close)."""
+    out = [0.0] * len(closes)
+    for i in range(1, len(closes)):
+        start = max(1, i - window + 1)
+        up = 0.0
+        tot = 0.0
+        for j in range(start, i + 1):
+            v = volumes[j]
+            tot += v
+            if closes[j] > closes[j - 1]:
+                up += v
+        if tot > 0:
+            out[i] = 2.0 * (up / tot) - 1.0
+    return out
 
 
 def _mask_training_constant_channels(channels):
@@ -363,7 +423,7 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 7  # bumped for #80: Ch 20 (funding rate) re-masked
+_DATASET_CACHE_VERSION = 8  # bumped for #46-A: Ch 10/11/24/25/26 → candle-derived proxies
                             # because Binance fapi is geo-blocked from US;
                             # v6 caches were built while Ch 20 was unmasked
                             # but already silently zero — invalidate so the
@@ -1116,11 +1176,10 @@ class FeatureBuilder:
             chg = (closes[i] - closes[i - 1]) / max(closes[i - 1], 1e-9)
             chg_ch.append(max(-0.1, min(0.1, chg)) / 0.1)
 
-        # ── Ch 10 & 11: Order book depth ─────────────────────────────────────
-        bv   = float(ob.get("bid_depth", 0) or 0)
-        av   = float(ob.get("ask_depth", 0) or 0)
-        bid_ch = [self._slog(bv) / 8.0] * len(closes)
-        ask_ch = [self._slog(av) / 8.0] * len(closes)
+        # ── Ch 10 & 11: Candle-derived intra-bar pressure (#46-A) ────────────
+        # Replaced order-book depth (no historical L1 source) with candle proxies.
+        bid_ch = _close_position(closes, highs, lows)   # buy pressure 0..1
+        ask_ch = _bar_range(closes, highs, lows)        # bar volatility 0..1
 
         # ── Ch 12: MFI(14) per bar ────────────────────────────────────────────
         mfi_ch = [_mfi(highs[max(0, i - 20): i + 1],
@@ -1239,12 +1298,15 @@ class FeatureBuilder:
         sin_ch  = [math.sin(_hours[i] * _2pi_24) for i in range(len(closes))]
         cos_ch  = [math.cos(_hours[i] * _2pi_24) for i in range(len(closes))]
 
-        # ── Ch 24 & 25: IV/RV spread (Deribit — BTC/ETH only, 0.0 for others) ──
-        ivrv20_ch = [float(iv_rv20_spread) if iv_rv20_spread is not None else 0.0] * len(closes)
-        ivrv60_ch = [float(iv_rv60_spread) if iv_rv60_spread is not None else 0.0] * len(closes)
+        # ── Ch 24 & 25: Realized-vol windows (#46-A) ─────────────────────────
+        # Replaced IV/RV spread (Deribit only had BTC/ETH) with pure RV — no
+        # external dep, real per-bar variance for all products.
+        ivrv20_ch = _rv_series(closes, window=20)
+        ivrv60_ch = _rv_series(closes, window=60)
 
-        # ── Ch 26: Top-trader L/S sentiment (Binance futures, 0.0 if unavailable) ─
-        ls_ch = [float(ls_sentiment) if ls_sentiment is not None else 0.0] * len(closes)
+        # ── Ch 26: Volume sentiment (#46-A) ──────────────────────────────────
+        # Replaced Binance L/S (geo-blocked) with rolling up-vol / total-vol.
+        ls_ch = _volume_sentiment(closes, volumes, window=20)
 
         P = self._pad
         channels = [

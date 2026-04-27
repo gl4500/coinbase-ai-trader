@@ -5,6 +5,57 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 46] — 2026-04-26 — Path A: candle-derived proxies for masked channels (#60-62)
+
+### Context
+Tasks #60/#61/#62 (parked) covered Ch 10/11 (L1 order book), Ch 24/25 (IV/RV
+spread), and Ch 26 (Binance top-trader sentiment) — all masked because their
+external data sources were unavailable: Coinbase has no historical L1 depth,
+Deribit options only cover BTC/ETH, and fapi.binance.com is geo-blocked from
+US (HTTP 451). Five of the 27 channels were silently constant-zero per window,
+contributing nothing to training.
+
+### Change
+Replaced the five external-data channels with candle-derived proxies (Path A —
+no external dependencies, real per-bar variance for every product):
+- **Ch 10** ← `_close_position(closes, highs, lows)` — `(close − low) / (high − low)` ∈ [0,1] (intra-bar buy pressure)
+- **Ch 11** ← `_bar_range(closes, highs, lows)` — `(high − low) / close × 10`, clipped [0,1] (relative bar volatility)
+- **Ch 24** ← `_rv_series(closes, window=20)` — rolling 20-bar std of log returns × 50, clipped [0,1]
+- **Ch 25** ← `_rv_series(closes, window=60)` — rolling 60-bar std of log returns × 50, clipped [0,1]
+- **Ch 26** ← `_volume_sentiment(closes, volumes, window=20)` — rolling up-vol/total-vol mapped to [-1,1]
+
+Five new module-level helpers in `backend/agents/cnn_agent.py`. No external
+imports needed. `_TRAINING_CONSTANT_CHANNELS` shrunk from `{10, 11, 20, 24, 25, 26}`
+→ `{20}` (only Ch 20 funding rate stays masked while geo-blocked).
+`_DATASET_CACHE_VERSION` 7 → 8 invalidates caches that contain the old constant
+values; next training triggers full rebuild.
+
+### Why Path A (not B/C)
+- Path A: derived proxies — zero external deps, ships immediately, all 5 channels become live.
+- Path B: real sources where available — narrow benefit (BTC/ETH-only for #61, geo-block risk for #62).
+- Path C: drop channels (27 → 22) — clean but requires arch change + full retrain + breaks current production glu2 baseline.
+
+### Tests
+- `TestClosePositionHelper` (4): close at high/low/mid, zero-range no-div-zero
+- `TestBarRangeHelper` (3): zero range, 1% scaling, clip at 1.0
+- `TestRealizedVolHelper` (4): constant prices → 0, pre-window bars → 0, vol comparison, [0,1] clip
+- `TestVolumeSentimentHelper` (5): all-up → +1, all-down → −1, balanced → ~0, zero-vol → 0, first bar → 0
+- `TestMaskShrinkAndCacheBump` (2): mask now `{20}` only, cache version == 8
+
+187 tests pass.
+
+### How to roll forward
+Backend currently running glu1 retrain (PID 31724) on the OLD code (cache v7,
+mask `{10, 11, 20, 24, 25, 26}`). Once that completes, restart backend to load
+new code and trigger a fresh retrain — first run with cache v8 forces full
+dataset rebuild with the new channel values.
+
+### Memory updates
+- `feedback_*` — no rule changes
+- `coinbase_trader_schema.md` — landmark line numbers (helper definitions, mask, cache version)
+
+---
+
 ## [Session 45] — 2026-04-26 — Capacity-reduced glu1 arch + per-arch checkpoints (#40)
 
 ### Context
