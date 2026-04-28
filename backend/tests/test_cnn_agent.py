@@ -1561,7 +1561,7 @@ class TestPerProductDatasetCache:
     class _FakeFB:
         """Minimal FeatureBuilder shim: 1-channel window of closes."""
         def build(self, window, _idx, candles_5m=None, btc_closes=None,
-                  funding_rate=None):
+                  funding_rate=None, closes_ext=None):
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
                 closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
@@ -2040,12 +2040,13 @@ class TestBuildSamplesRangeRealFiveMinute:
             self.calls = []
 
         def build(self, window, _idx, candles_5m=None, btc_closes=None,
-                  funding_rate=None):
+                  funding_rate=None, closes_ext=None):
             self.calls.append({
                 "window_start_ts":  window[0]["start"]  if window else None,
                 "window_end_ts":    window[-1]["start"] if window else None,
                 "c5m":              list(candles_5m or []),
                 "c5m_len":          len(candles_5m or []),
+                "closes_ext_len":   len(closes_ext or []),
             })
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
@@ -3001,7 +3002,8 @@ class TestMaskShrinkAndCacheBump:
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
-        assert _DATASET_CACHE_VERSION == 9
+        # #98 superseded the #86 bump from 8→9; cache is now at 10.
+        assert _DATASET_CACHE_VERSION >= 9
 
 
 class TestClosePositionHelper:
@@ -3109,3 +3111,114 @@ class TestVolumeSentimentHelper:
         from agents.cnn_agent import _volume_sentiment
         out = _volume_sentiment([100.0, 101.0, 102.0], [1.0, 1.0, 1.0], window=5)
         assert out[0] == 0.0
+
+
+class TestRvPrefixLookback:
+    """#98: Ch 24/25 (rv20/rv60) were always-zero across the SEQ_LEN=60 window
+    because _rv_series returns 0.0 for the first `window` bars. Permutation
+    importance confirmed Ch 25 (rv60) had delta=0.0 across all seeds.
+
+    Fix: FeatureBuilder.build accepts an optional `closes_ext` kwarg holding
+    extra prior closes; RV is computed over the extended series and the last
+    len(closes) values are taken for the channel. With ≥60 prior closes both
+    rv20_ch and rv60_ch are non-zero across the entire 60-bar window.
+    """
+
+    def _make_candles(self, closes):
+        """Build minimal hourly candles from a closes list (open=close-0.1, h/l flat)."""
+        return [
+            {"start": 1700000000 + i * 3600,
+             "open": c - 0.1, "high": c + 0.5, "low": c - 0.5,
+             "close": c, "volume": 100.0}
+            for i, c in enumerate(closes)
+        ]
+
+    def test_no_closes_ext_keeps_current_zero_behavior(self):
+        """Regression guard: without closes_ext, rv60 stays all-zero (today's
+        bug) so the cache version bump is the canary, not silent change."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN, N_CHANNELS
+        fb = FeatureBuilder()
+        # 60 random-walk closes, no prefix
+        closes = [100.0 + 0.5 * ((i * 37) % 7 - 3) for i in range(SEQ_LEN)]
+        channels = fb.build(self._make_candles(closes), {})
+        rv60 = channels[25]
+        assert all(v == 0.0 for v in rv60), (
+            "Without closes_ext rv60 must remain zero across the window — "
+            "if this test fails, the fallback semantics regressed"
+        )
+
+    def test_closes_ext_makes_rv60_nonzero_across_window(self):
+        """With 60 prior closes prepended via closes_ext, rv60_ch must be
+        non-zero across all 60 in-window bars."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        fb = FeatureBuilder()
+        # 120 closes total: 60 prefix + 60 in-window. Use a slightly oscillating
+        # series so realized vol is genuinely non-zero everywhere.
+        all_closes = [100.0 + 2.0 * (((i * 13) % 11) - 5) / 5.0 for i in range(SEQ_LEN * 2)]
+        in_window = all_closes[-SEQ_LEN:]
+        prefix    = all_closes[:-SEQ_LEN]  # 60 prior closes (oldest → newest-1)
+        channels  = fb.build(
+            self._make_candles(in_window), {}, closes_ext=prefix + in_window,
+        )
+        rv60 = channels[25]
+        nonzero = sum(1 for v in rv60 if v > 0.0)
+        assert nonzero == SEQ_LEN, (
+            f"Expected rv60_ch non-zero across all {SEQ_LEN} bars; got {nonzero}"
+        )
+
+    def test_closes_ext_makes_rv20_nonzero_across_window(self):
+        """rv20_ch should also be non-zero across all in-window bars when
+        closes_ext provides ≥20 bars of prefix."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        fb = FeatureBuilder()
+        all_closes = [100.0 + 0.3 * (((i * 17) % 9) - 4) for i in range(SEQ_LEN * 2)]
+        in_window  = all_closes[-SEQ_LEN:]
+        channels = fb.build(
+            self._make_candles(in_window), {}, closes_ext=all_closes,
+        )
+        rv20 = channels[24]
+        nonzero = sum(1 for v in rv20 if v > 0.0)
+        assert nonzero == SEQ_LEN, (
+            f"Expected rv20_ch non-zero across all {SEQ_LEN} bars; got {nonzero}"
+        )
+
+    def test_closes_ext_alignment_last_value_matches_in_window_only(self):
+        """The last value of rv60_ch when closes_ext is provided must equal
+        the value computed over the last 60 closes of closes_ext (sanity:
+        the channel is aligned to the in-window candles, not shifted)."""
+        from agents.cnn_agent import FeatureBuilder, _rv_series, SEQ_LEN
+        fb = FeatureBuilder()
+        all_closes = [100.0 + 0.5 * (((i * 7) % 5) - 2) for i in range(SEQ_LEN * 2)]
+        in_window  = all_closes[-SEQ_LEN:]
+        channels = fb.build(
+            self._make_candles(in_window), {}, closes_ext=all_closes,
+        )
+        rv60_ch = channels[25]
+        # Recompute expected last value: rv at index N-1 of closes_ext
+        full = _rv_series(all_closes, window=60)
+        assert abs(rv60_ch[-1] - full[-1]) < 1e-9, (
+            f"Last rv60_ch value {rv60_ch[-1]} != reference {full[-1]}"
+        )
+
+    def test_short_closes_ext_falls_back_gracefully(self):
+        """If closes_ext is shorter than closes (degenerate input), build must
+        not crash — it falls back to using closes alone (current behavior)."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        fb = FeatureBuilder()
+        in_window = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
+        channels  = fb.build(
+            self._make_candles(in_window), {}, closes_ext=[100.0, 100.5],
+        )
+        rv60 = channels[25]
+        assert len(rv60) == SEQ_LEN
+        # Falls back to closes-only path → all zeros (unchanged from default)
+        assert all(v == 0.0 for v in rv60)
+
+
+class TestDatasetCacheVersionBumpForRv:
+    """#98: Cache must invalidate because Ch 24/25 semantics change from
+    constant-zero to real RV. Bump version 9 → 10."""
+
+    def test_dataset_cache_version_bumped_to_10(self):
+        from agents.cnn_agent import _DATASET_CACHE_VERSION
+        assert _DATASET_CACHE_VERSION == 10

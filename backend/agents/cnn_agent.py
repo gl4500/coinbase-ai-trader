@@ -419,7 +419,7 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 9  # bumped for #86: Ch 20 funding rate now sourced
+_DATASET_CACHE_VERSION = 10  # bumped for #98: Ch 24/25 (rv20/rv60) now
                             # from OKX (replacing geo-blocked Binance fapi);
                             # v8 caches were built while Ch 20 was masked and
                             # constant-zero — invalidate so the next rebuild
@@ -705,6 +705,7 @@ def _dataset_schema(seq_len: int, forward_hours: int,
 
 
 _TRAIN_5M_LIMIT = 72   # last 6h of 5m bars — mirrors inference fetch in scan_all
+_RV_PREFIX_BARS = 60   # #98: prior closes prepended for RV60/RV20 lookback
 
 
 def _aligned_btc_closes(target_candles: List[Dict],
@@ -836,8 +837,14 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         btc_win = (btc_closes[i - seq_len + 1: i + 1]
                    if btc_closes is not None else None)
         fr_val  = funding_rates[i] if funding_rates is not None else None
+        # #98: 60-bar prefix lookback for RV20/RV60 — without it _rv_series
+        # returns 0.0 for the first `window` bars, leaving Ch 25 (rv60)
+        # constant-zero across the entire SEQ_LEN=60 window.
+        ext_start = max(0, i - seq_len + 1 - _RV_PREFIX_BARS)
+        closes_ext = [c["close"] for c in candles[ext_start: i + 1]]
         channels = fb.build(window, {}, candles_5m=five_m,
-                            btc_closes=btc_win, funding_rate=fr_val)
+                            btc_closes=btc_win, funding_rate=fr_val,
+                            closes_ext=closes_ext)
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
         idx_list.append(i)
@@ -1137,6 +1144,7 @@ class FeatureBuilder:
               iv_rv20_spread: Optional[float] = None,
               iv_rv60_spread: Optional[float] = None,
               ls_sentiment: Optional[float] = None,
+              closes_ext: Optional[List[float]] = None,
               T: int = SEQ_LEN) -> List[List[float]]:
         if not candles:
             return [[0.0] * T] * N_CHANNELS
@@ -1328,11 +1336,19 @@ class FeatureBuilder:
         sin_ch  = [math.sin(_hours[i] * _2pi_24) for i in range(len(closes))]
         cos_ch  = [math.cos(_hours[i] * _2pi_24) for i in range(len(closes))]
 
-        # ── Ch 24 & 25: Realized-vol windows (#46-A) ─────────────────────────
+        # ── Ch 24 & 25: Realized-vol windows (#46-A, #98) ────────────────────
         # Replaced IV/RV spread (Deribit only had BTC/ETH) with pure RV — no
-        # external dep, real per-bar variance for all products.
-        ivrv20_ch = _rv_series(closes, window=20)
-        ivrv60_ch = _rv_series(closes, window=60)
+        # external dep, real per-bar variance for all products. #98 adds
+        # closes_ext: when caller provides ≥len(closes) prior closes, RV is
+        # computed over the extended series so the first 20/60 bars of the
+        # in-window region are non-zero (without prefix, _rv_series returns
+        # 0.0 for the first `window` bars and rv60 was zero across SEQ_LEN=60).
+        if closes_ext is not None and len(closes_ext) >= len(closes):
+            _rv_src = closes_ext
+        else:
+            _rv_src = closes
+        ivrv20_ch = _rv_series(_rv_src, window=20)[-len(closes):]
+        ivrv60_ch = _rv_series(_rv_src, window=60)[-len(closes):]
 
         # ── Ch 26: Volume sentiment (#46-A) ──────────────────────────────────
         # Replaced Binance L/S (geo-blocked) with rolling up-vol / total-vol.
@@ -1790,7 +1806,10 @@ class CoinbaseCNNAgent:
             vel_norm     = _cached_ind.get("vel_norm",     vel_norm)
             vol_z_norm   = _cached_ind.get("vol_z_norm",   vol_z_norm)
         else:
-            candles = await database.get_candles(pid, limit=80)
+            # #98: fetch SEQ_LEN(60) + RV_PREFIX_BARS(60) + 20 buffer = 140
+            # so closes_ext can satisfy the rv60 lookback at the first
+            # in-window bar; build() pads/truncates each channel to SEQ_LEN.
+            candles = await database.get_candles(pid, limit=140)
             if len(candles) < 30:
                 return None
 
@@ -1848,7 +1867,7 @@ class CoinbaseCNNAgent:
             btc_closes: Optional[List[float]] = None
             if pid != "BTC-USD":
                 try:
-                    btc_candles = await database.get_candles("BTC-USD", limit=80)
+                    btc_candles = await database.get_candles("BTC-USD", limit=140)
                     if btc_candles:
                         btc_closes = [c["close"] for c in btc_candles]
                 except Exception as _be:
@@ -1876,11 +1895,17 @@ class CoinbaseCNNAgent:
             except Exception as _lse:
                 logger.debug(f"L/S sentiment unavailable for {pid}: {_lse}")
 
+            # #98: pass closes_ext so rv20/rv60 channels see prior history
+            # — without it _rv_series returns 0.0 for the first `window` bars.
+            # `candles` (limit=80) gives 80-len closes; the in-window slice is
+            # the last SEQ_LEN of that, and closes_ext is the full series so
+            # the rv60 lookback at the first in-window bar is satisfied.
             channels = self.fb.build(
                 candles, ob, candles_5m=candles_5m,
                 btc_closes=btc_closes, funding_rate=funding_rate,
                 iv_rv20_spread=iv_rv20_spread, iv_rv60_spread=iv_rv60_spread,
                 ls_sentiment=ls_sentiment,
+                closes_ext=closes,
             )
             cnn_prob = self._cnn_prob(channels)
 

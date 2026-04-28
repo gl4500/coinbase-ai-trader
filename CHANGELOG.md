@@ -5,6 +5,56 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 49] — 2026-04-27 — RV20/RV60 prefix-lookback fix (#98)
+
+### Context
+Permutation importance (#92-94) revealed Ch 25 (`ivrv_60`) had **delta = 0.0
+across all 5 seeds and both shuffle axes** — i.e. the channel carried zero
+signal because it was constant-zero across the entire 60-bar training window.
+
+Root cause: `_rv_series(closes, window=60)` returns 0.0 for the first
+`window` indices (`out = [0.0] * len(closes); for i in range(window, len(closes))`).
+With `len(closes) == SEQ_LEN == 60` and `window == 60`, the loop body never
+executes — every output is zero. Same shape issue for RV20 over the first
+20 bars of the window (1/3 of the series zero).
+
+### Change
+- `_DataPipeline.build` accepts new optional kwarg `closes_ext: Optional[List[float]]`.
+  When provided and `len(closes_ext) >= len(closes)`, RV20/RV60 are computed
+  over `closes_ext` and the **last `len(closes)` values** are taken for the
+  channel (alignment preserves in-window correspondence).
+- `_build_samples_range` (training path) now passes
+  `closes_ext = [c["close"] for c in candles[i - SEQ_LEN + 1 - 60 : i + 1]]`
+  — 60 prior closes prepended for full RV60 lookback. New constant
+  `_RV_PREFIX_BARS = 60`.
+- Inference path: `database.get_candles(pid, limit=...)` bumped 80 → 140
+  so the in-build truncation `P(...)[-SEQ_LEN:]` now returns the
+  rv-non-zero tail of the series. `btc_candles` fetch matched (80 → 140)
+  to keep correlation alignment. `closes_ext=closes` forwarded for parity.
+- `_DATASET_CACHE_VERSION` bumped 9 → 10 to invalidate caches built with
+  the old constant-zero RV channels — first scan post-restart triggers
+  full per-product rebuild.
+- Tests: 5 new in `TestRvPrefixLookback` (no-ext fallback regression,
+  rv60 non-zero across window, rv20 non-zero across window, alignment
+  matches reference, short-ext graceful fallback) + 1 in
+  `TestDatasetCacheVersionBumpForRv` (version == 10). Updated 2 test fakes
+  (`_FakeFB.build`, `_CapturingFB.build`) to accept the new kwarg.
+  Loosened the prior `TestMaskShrinkAndCacheBump` cache assertion to `>= 9`.
+
+### Activation
+**Not auto-activated.** PID 37496 (glu1 retrain on cache v9) is still
+running and per `feedback_no_restart_during_retrain` no restart happens
+until that completes. After completion: backend restart picks up new code
++ cache v10; first scan rebuilds the per-product cache; next retrain
+trains on real RV20/RV60 channels (no longer constant zero).
+
+### Verification
+- `tests/test_cnn_agent.py` — 199/199 PASS.
+- Full suite — **537/537 PASS** in 89s on `.venv/Scripts/python.exe`
+  (Python 3.11.13, torch 2.6.0+cu124).
+
+---
+
 ## [Session 48] — 2026-04-27 — Mid-size CNN arch `SignalCNNGluM` (#89)
 
 ### Context
