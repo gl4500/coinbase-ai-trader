@@ -817,6 +817,53 @@ class TestSignalCNNGlu1:
 
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
+class TestSignalCNNGluM:
+    """Mid-size arch sitting between glu1 (~9k, UNDERFITs at val 0.69-0.70) and
+    glu2 (~249k, OVERFITs train→0.40 / val 0.58-0.69). Target ~50k params for
+    enough capacity to fit signal without memorizing noise."""
+
+    def _import(self):
+        from agents.cnn_agent import SignalCNNGluM
+        return SignalCNNGluM
+
+    def test_class_exists_with_arch_tag(self):
+        cls = self._import()
+        assert cls.arch == "glum"
+
+    def test_forward_shape(self):
+        cls   = self._import()
+        model = cls(n_ch=N_CHANNELS)
+        x     = torch.randn(4, N_CHANNELS, SEQ_LEN)
+        assert model(x).shape == (4, 1)
+
+    def test_predict_returns_probability(self):
+        cls   = self._import()
+        model = cls(n_ch=N_CHANNELS)
+        prob  = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
+        assert 0.0 <= prob <= 1.0
+
+    def test_param_count_between_glu1_and_glu2(self):
+        """glum must have strictly more params than glu1 and strictly fewer
+        than glu2 — the whole point of a mid-size arch."""
+        from agents.cnn_agent import SignalCNNGlu1
+        cls    = self._import()
+        n_glum = sum(p.numel() for p in cls(n_ch=N_CHANNELS).parameters())
+        n_glu1 = sum(p.numel() for p in SignalCNNGlu1(n_ch=N_CHANNELS).parameters())
+        n_glu2 = sum(p.numel() for p in SignalCNN(n_ch=N_CHANNELS).parameters())
+        assert n_glu1 < n_glum < n_glu2, (
+            f"glum {n_glum} must lie between glu1 {n_glu1} and glu2 {n_glu2}."
+        )
+        # Sanity: glum should be at least 3× glu1 (capacity bump matters) and
+        # at most glu2/3 (otherwise indistinguishable from glu2).
+        assert n_glum >= 3 * n_glu1, (
+            f"glum {n_glum} too close to glu1 {n_glu1} — expected ≥3× capacity bump."
+        )
+        assert n_glum * 3 <= n_glu2, (
+            f"glum {n_glum} too close to glu2 {n_glu2} — expected ≤glu2/3."
+        )
+
+
+@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
 class TestArchFactoryAndPaths:
     """CNN_ARCH env var routes between glu2 (default) and glu1, with separate
     on-disk checkpoint files so flipping the env var does not destroy the other
@@ -840,6 +887,10 @@ class TestArchFactoryAndPaths:
         from agents.cnn_agent import _build_cnn, SignalCNNGlu1
         assert isinstance(_build_cnn("glu1"), SignalCNNGlu1)
 
+    def test_build_cnn_glum_returns_glum_class(self):
+        from agents.cnn_agent import _build_cnn, SignalCNNGluM
+        assert isinstance(_build_cnn("glum"), SignalCNNGluM)
+
     def test_build_cnn_unknown_arch_raises(self):
         from agents.cnn_agent import _build_cnn
         with pytest.raises(ValueError):
@@ -856,6 +907,11 @@ class TestArchFactoryAndPaths:
         path = _model_path_for("glu1")
         assert path.endswith("cnn_model_glu1.pt"), path
 
+    def test_model_path_glum_has_arch_suffix(self):
+        from agents.cnn_agent import _model_path_for
+        path = _model_path_for("glum")
+        assert path.endswith("cnn_model_glum.pt"), path
+
     def test_best_loss_path_glu2_is_legacy_path(self):
         from agents.cnn_agent import _best_loss_path_for, _BEST_LOSS_PATH
         assert os.path.abspath(_best_loss_path_for("glu2")) == os.path.abspath(_BEST_LOSS_PATH)
@@ -864,6 +920,11 @@ class TestArchFactoryAndPaths:
         from agents.cnn_agent import _best_loss_path_for
         path = _best_loss_path_for("glu1")
         assert path.endswith("cnn_best_loss_glu1.txt"), path
+
+    def test_best_loss_path_glum_has_arch_suffix(self):
+        from agents.cnn_agent import _best_loss_path_for
+        path = _best_loss_path_for("glum")
+        assert path.endswith("cnn_best_loss_glum.txt"), path
 
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")

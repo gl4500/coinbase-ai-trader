@@ -5,6 +5,42 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 48] — 2026-04-27 — Mid-size CNN arch `SignalCNNGluM` (#89)
+
+### Context
+Two-era retrain analysis showed the existing arch lineup straddles the
+underfit/overfit boundary with no middle ground:
+- `glu2` (249,345 params) memorizes — train BCE → 0.40, val 0.58–0.69
+- `glu1` (9,073 params) underfits — val plateaus at 0.69–0.70, never beats 0.6931
+27.5× param gap; geometric mean ≈ 47k. A mid-size variant gives the next
+retrain a third option without requiring an arch flip on the live process.
+
+### Change
+- New class `SignalCNNGluM` in `backend/agents/cnn_agent.py` (arch tag
+  `"glum"`, **55,793 params**). 3-block GLU conv stack 24→48→96, single
+  MaxPool (60→30), 1-layer LSTM(96→32), Dropout 0.4, FC(32→1).
+- `_ARCH_REGISTRY` extended with `"glum": SignalCNNGluM`. Per-arch checkpoint
+  paths already work via the generic `_model_path_for(arch)` /
+  `_best_loss_path_for(arch)` suffix logic — no path code changes needed
+  (`cnn_model_glum.pt`, `cnn_best_loss_glum.txt`).
+- Tests: 4 new tests in `TestSignalCNNGluM` (class+arch tag, forward shape,
+  predict probability, param count strictly between glu1 and glu2 with
+  ≥3× glu1 and ≤glu2/3 bands) + 3 in `TestArchFactoryAndPaths` (factory
+  build, model-path suffix, best-loss-path suffix).
+
+### Activation
+**Not auto-activated.** PID 37496 (glu1 retrain) is still running and per
+`feedback_no_restart_during_retrain` no flip happens until that completes.
+After completion, switch via `CNN_ARCH=glum` in `.env` and restart backend.
+Cache version unchanged — the v9 dataset cache built for #86 is reusable.
+
+### Verification
+- `tests/test_cnn_agent.py` — 193/193 PASS in 71s on
+  `.venv/Scripts/python.exe` (Python 3.11.13, torch 2.6.0+cu124).
+- Param sanity (live import): `glu1 9,073 / glum 55,793 / glu2 249,345`.
+
+---
+
 ## [Session 47] — 2026-04-27 — OKX funding history replaces geo-blocked Binance source (#86)
 
 ### Context

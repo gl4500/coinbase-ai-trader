@@ -1066,10 +1066,44 @@ if _TORCH:
                 device = next(self.parameters()).device
                 return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
 
+    class SignalCNNGluM(nn.Module):
+        """Mid-size arch between glu1 (UNDERFITs at val 0.69-0.70) and
+        glu2 (OVERFITs train→0.40 / val 0.58-0.69). ~50k params: enough capacity
+        to fit signal without memorizing noise.
+        """
+        arch = "glum"
+
+        def __init__(self, n_ch: int = N_CHANNELS):
+            super().__init__()
+            self.c1   = GatedConv1d(n_ch, 24)
+            self.c2   = GatedConv1d(24,   48)
+            self.p2   = nn.MaxPool1d(2)        # 60 → 30
+            self.c3   = GatedConv1d(48,   96)
+            self.lstm = nn.LSTM(96, 32, num_layers=1, batch_first=True)
+            self.drop = nn.Dropout(0.4)
+            self.fc   = nn.Linear(32, 1)
+
+        def forward(self, x):
+            x = self.c1(x)
+            x = self.c2(x); x = self.p2(x)
+            x = self.c3(x)
+            x = x.permute(0, 2, 1)
+            self.lstm.flatten_parameters()
+            x, _ = self.lstm(x)
+            x = x[:, -1, :]
+            x = self.drop(x)
+            return self.fc(x)
+
+        def predict(self, tensor: "torch.Tensor") -> float:
+            self.eval()
+            with torch.no_grad():
+                device = next(self.parameters()).device
+                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+
 
 _ARCH_REGISTRY = {}
 if _TORCH:
-    _ARCH_REGISTRY = {"glu2": SignalCNN, "glu1": SignalCNNGlu1}
+    _ARCH_REGISTRY = {"glu2": SignalCNN, "glu1": SignalCNNGlu1, "glum": SignalCNNGluM}
 
 
 def _active_arch() -> str:
