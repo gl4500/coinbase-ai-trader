@@ -61,6 +61,7 @@ htmlcov/
 backend/*.pt.bak*
 backend/cnn_best_loss.txt
 backend/cnn_train_progress.json
+backend/cnn_perm_importance_*.csv
 
 # SQLite working files & extra DB locations
 *.db-shm
