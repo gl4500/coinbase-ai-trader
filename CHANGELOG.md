@@ -5,6 +5,75 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 47] — 2026-04-27 — OKX funding history replaces geo-blocked Binance source (#86)
+
+### Context
+After #80/#81 disabled Ch 20 (funding rate) because `fapi.binance.com` returns
+HTTP 451 from the US, Ch 20 was the only remaining masked channel — every
+sample fed to training had Ch 20 = 0. OKX's public funding-rate endpoint is
+reachable from this region, mirrors Binance's data layout, and covers the
+USDT-margined SWAP equivalents of every product on our top-list.
+
+### Change
+- New module: `backend/services/okx_funding_history.py` — drop-in replacement
+  for `services.binance_funding_history`. Same signature
+  (`fetch_funding_history(product_id, start_ms, end_ms)`), same return type
+  (sorted `[(ts_ms, rate), …]`).
+- 30-product `_PRODUCT_TO_OKX` mapping (BTC, ETH, SOL, XRP, BNB, ADA, AVAX,
+  LINK, DOT, DOGE, LTC, ATOM, FIL, NEAR, APT, INJ, ARB, OP, TIA, SEI, SUI,
+  AAVE, UNI, HYPE, ICP, TAO, BCH, ZEC, SHIB, TRX). Products without a SWAP
+  short-circuit to `[]` without an HTTP call (mirrors Binance fetcher
+  behaviour for VVV-USD etc.).
+- Pagination via `after=<ts_ms>` cursor (OKX caps `limit` at 100 per call vs
+  Binance 1000); walks backward from `end_ms` until oldest row crosses
+  `start_ms`. `_MAX_PAGES = 60` guards against runaway loops.
+- Kill switch: `OKX_FUNDING_DISABLED=1` env short-circuits without HTTP.
+- `agents/cnn_agent.py:72` swaps `from services.binance_funding_history` →
+  `from services.okx_funding_history`. The Binance module stays in-tree as
+  reference / fallback.
+- `_TRAINING_CONSTANT_CHANNELS` shrunk from `frozenset({20})` → `frozenset()`.
+  All 27 channels are now populated end-to-end.
+- `_DATASET_CACHE_VERSION` 8 → 9 invalidates caches built while Ch 20 was
+  zero; next training triggers a full rebuild that pulls real OKX funding
+  values into the per-product samples.
+
+### Coverage / retention
+- 30 products mapped (88 % spot-checked coverage). Missing on OKX: MATIC
+  (rebranded POL), RNDR (rebranded RENDER), FET, VVV — these gracefully
+  return `[]` via the existing `inst_id is None` short-circuit.
+- OKX funding history retention is **~90 days**. Live BTC fetch confirmed
+  180 rows over a 60-day window (3× daily funding events). Older training
+  samples beyond the 90-day window will still see Ch 20 = 0 for now;
+  inference and recent windows carry real values.
+
+### Tests
+- New: `backend/tests/test_okx_funding_history.py` — 13 tests covering
+  symbol mapping (known/unsupported), single-page success path, all
+  failure modes (non-200, non-zero `code`, network exceptions, malformed
+  rows), kill switch on/off, pagination via `after=` cursor, and early
+  termination when `oldest_ts <= start_ms`.
+- Updated: `test_cnn_agent.py::TestTrainingConstantChannelMask` and
+  `TestMaskShrinkAndCacheBump` — assert the empty mask and cache version 9.
+- 199 tests pass (cnn_agent 186 + okx_funding_history 13).
+
+### Smoke test
+```
+fetch_funding_history('BTC-USD', now-60d, now) → 180 rows
+fetch_funding_history('SOL-USD', now-60d, now) → 180 rows
+fetch_funding_history('VVV-USD', now-60d, now) → []  (no OKX listing)
+```
+
+### How to roll forward
+1. Restart backend — loads new code, picks up `_DATASET_CACHE_VERSION = 9`.
+2. First scan of any product triggers full dataset rebuild (cache v8 dropped).
+3. Train worker re-trains with real Ch 20; compare val_loss vs the 0.6931
+   baseline that 3 prior glu1 runs all hit while Ch 20 was masked.
+
+### Bugs fixed
+None — pure additive feature.
+
+---
+
 ## [Session 46] — 2026-04-26 — Path A: candle-derived proxies for masked channels (#60-62)
 
 ### Context

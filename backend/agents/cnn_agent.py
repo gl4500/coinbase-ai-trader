@@ -69,7 +69,7 @@ from services.fear_greed import get_fear_greed
 from services.history_backfill import load_history, load_5m_history
 from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
-from services.binance_funding_history import fetch_funding_history
+from services.okx_funding_history import fetch_funding_history
 from services.hmm_regime import get_detector, regime_blend
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
@@ -272,19 +272,15 @@ SEQ_LEN         = 60
 
 # Channels whose values are still constant-zero during training because the
 # training loop (train_on_history) doesn't yet pass the upstream inputs that
-# populate them. #57(b) wired per-product Binance funding history through
-# _build_dataset (Ch 20), but #80 puts Ch 20 back in the mask: fapi.binance
-# is geo-blocked from the US (HTTP 451), so fetch_funding_history returns []
-# for every product → Ch 20 was silently constant-zero in production. Until
-# a non-blocked source is wired, masking Ch 20 at inference keeps train/serve
-# distributions aligned.
+# populate them. After #86 wired OKX funding history (replacing the geo-
+# blocked Binance source from #80/#81), Ch 20 is now populated end-to-end and
+# no longer masked. OKX retention is ~90 days; older training samples will
+# still see zeros, but inference and recent windows carry real values.
 # Path A (#46): Ch 10/11/24/25/26 swapped to candle-derived proxies — no
 # external data needed, real per-bar variance instead of constants.
-# Still masked:
-#   20 → funding rate (Binance geo-block, see #80)
-# At inference we zero these too so the input distribution matches what the
-# model actually saw during training (P3b).
-_TRAINING_CONSTANT_CHANNELS = frozenset({20})
+# At inference we zero any masked channels so the input distribution matches
+# what the model actually saw during training (P3b).
+_TRAINING_CONSTANT_CHANNELS: frozenset = frozenset()
 
 
 def _close_position(closes, highs, lows):
@@ -423,11 +419,11 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 8  # bumped for #46-A: Ch 10/11/24/25/26 → candle-derived proxies
-                            # because Binance fapi is geo-blocked from US;
-                            # v6 caches were built while Ch 20 was unmasked
-                            # but already silently zero — invalidate so the
-                            # next rebuild reflects the new mask explicitly.
+_DATASET_CACHE_VERSION = 9  # bumped for #86: Ch 20 funding rate now sourced
+                            # from OKX (replacing geo-blocked Binance fapi);
+                            # v8 caches were built while Ch 20 was masked and
+                            # constant-zero — invalidate so the next rebuild
+                            # picks up real OKX funding values.
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires

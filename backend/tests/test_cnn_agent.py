@@ -1768,10 +1768,10 @@ class TestTrainingConstantChannelMask:
     """
 
     def test_mask_set_covers_expected_channels(self):
-        # #46-A: Ch 10/11/24/25/26 swapped to candle-derived proxies — only
-        # Ch 20 (funding rate) stays masked while fapi.binance.com remains
-        # geo-blocked from US (HTTP 451). See #80 for the geo-block context.
-        expected = {20}
+        # #46-A: Ch 10/11/24/25/26 swapped to candle-derived proxies. #86: Ch
+        # 20 (funding rate) now sourced from OKX, replacing geo-blocked
+        # Binance fapi (#80/#81). All channels populated → mask is empty.
+        expected: set = set()
         assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
 
     def test_mask_zeros_designated_channels(self):
@@ -2929,18 +2929,18 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
 
 class TestMaskShrinkAndCacheBump:
-    """#46 (Path A): Replace constant-masked Ch 10/11/24/25/26 with
-    candle-derived proxies (no external data). Only Ch 20 stays masked
-    (still geo-blocked). Bump _DATASET_CACHE_VERSION 7→8 to invalidate
-    caches built with the previous constant values."""
+    """#86: Ch 20 funding rate now sourced from OKX (replacing geo-blocked
+    Binance fapi from #80/#81). With Ch 20 populated end-to-end the mask is
+    empty. Bump _DATASET_CACHE_VERSION 8→9 to invalidate caches built while
+    Ch 20 was constant-zero."""
 
     def test_mask_shrunk(self):
         from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
-        assert _TRAINING_CONSTANT_CHANNELS == frozenset({20})
+        assert _TRAINING_CONSTANT_CHANNELS == frozenset()
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
-        assert _DATASET_CACHE_VERSION == 8
+        assert _DATASET_CACHE_VERSION == 9
 
 
 class TestClosePositionHelper:
