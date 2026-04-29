@@ -1829,10 +1829,12 @@ class TestTrainingConstantChannelMask:
     """
 
     def test_mask_set_covers_expected_channels(self):
-        # #46-A: Ch 10/11/24/25/26 swapped to candle-derived proxies. #86: Ch
-        # 20 (funding rate) now sourced from OKX, replacing geo-blocked
-        # Binance fapi (#80/#81). All channels populated → mask is empty.
-        expected: set = set()
+        # #99: Ch 17/18/19 (fast_rsi_1h, velocity_1h, vol_zscore) emit
+        # constants from FeatureBuilder (0.5, 0.0, 0.0) because the 1h-
+        # derived sources never feed real values. Permutation importance
+        # confirms delta=0 in both glu1 and glu2 — mask them so train and
+        # inference both see zeros (no train/serve skew, no wasted capacity).
+        expected: set = {17, 18, 19}
         assert set(_cnn_mod._TRAINING_CONSTANT_CHANNELS) == expected
 
     def test_mask_zeros_designated_channels(self):
@@ -2997,13 +2999,54 @@ class TestMaskShrinkAndCacheBump:
     Ch 20 was constant-zero."""
 
     def test_mask_shrunk(self):
+        # #99: re-grew the mask to cover Ch 17/18/19 (1h-derived channels
+        # that emit constants from FeatureBuilder fallback). #86's empty
+        # mask was correct for 10/11/20/24/25/26 (now real), but 17/18/19
+        # were never wired up.
         from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
-        assert _TRAINING_CONSTANT_CHANNELS == frozenset()
+        assert _TRAINING_CONSTANT_CHANNELS == frozenset({17, 18, 19})
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
         # #98 superseded the #86 bump from 8→9; cache is now at 10.
         assert _DATASET_CACHE_VERSION >= 9
+
+
+class TestZeroMaskChannelsHelper:
+    """#99: training-time helper that zeros _TRAINING_CONSTANT_CHANNELS on
+    an [N, C, T] tensor. Without this, ch 17 (=0.5 in cache) gets zeroed at
+    inference but trained on 0.5 — a real train/serve distribution skew
+    even though perm importance shows the model has learned to ignore it.
+    """
+
+    def test_zero_mask_channels_zeros_only_listed_set(self):
+        import torch
+        from agents.cnn_agent import _zero_mask_channels
+        x = torch.ones(2, 27, 60) * 0.5
+        out = _zero_mask_channels(x)
+        # 17/18/19 zeroed, others preserved
+        assert torch.all(out[:, 17, :] == 0.0)
+        assert torch.all(out[:, 18, :] == 0.0)
+        assert torch.all(out[:, 19, :] == 0.0)
+        assert torch.all(out[:, 16, :] == 0.5)
+        assert torch.all(out[:, 20, :] == 0.5)
+        assert torch.all(out[:, 0,  :] == 0.5)
+
+    def test_zero_mask_channels_does_not_mutate_input(self):
+        import torch
+        from agents.cnn_agent import _zero_mask_channels
+        x = torch.ones(1, 27, 60) * 0.5
+        x_before = x.clone()
+        _ = _zero_mask_channels(x)
+        assert torch.equal(x, x_before)
+
+    def test_zero_mask_channels_preserves_shape_and_dtype(self):
+        import torch
+        from agents.cnn_agent import _zero_mask_channels
+        x = torch.randn(3, 27, 60, dtype=torch.float32)
+        out = _zero_mask_channels(x)
+        assert out.shape == x.shape
+        assert out.dtype == x.dtype
 
 
 class TestClosePositionHelper:

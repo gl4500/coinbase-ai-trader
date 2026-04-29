@@ -44,12 +44,12 @@ SEQ_LEN = 60
 _LABEL_SMOOTH = 0.05
 _FORWARD_HOURS = 4
 
-# Mirrors backend.cnn_agent._TRAINING_CONSTANT_CHANNELS (cnn_agent.py:284).
-# Channels that are constant-zero during training (cache build skips them);
-# inference must zero the same channels to avoid train/serve skew. Ch 20
-# (funding rate) is masked here too — fapi.binance is geo-blocked from the
-# US (HTTP 451), so the cache's funding column is silently zero (see #80).
-DEFAULT_MASK = frozenset({10, 11, 20, 24, 25, 26})
+# Mirrors backend.cnn_agent._TRAINING_CONSTANT_CHANNELS. #99: prod set is
+# now {17, 18, 19} (fast_rsi_1h, velocity_1h, vol_zscore — 1h-derived
+# channels that emit constants from FeatureBuilder fallback). Ch 10/11/20/
+# 24/25/26 are now real: 10/11 = candle-derived proxies (#46-A), 20 = OKX
+# funding history (#86), 24/25 = RV prefix-lookback (#98), 26 = vol_sentiment.
+DEFAULT_MASK = frozenset({17, 18, 19})
 
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -33,8 +33,10 @@ def _import_module():
 
 class TestDefaultMaskMatchesProd:
     def test_default_mask_is_frozenset_of_prod_constant_channels(self):
+        # #99: prod _TRAINING_CONSTANT_CHANNELS now {17, 18, 19} — DEFAULT_MASK
+        # must mirror so cloud-trained checkpoints match prod inference masking.
         tc = _import_module()
-        assert tc.DEFAULT_MASK == frozenset({10, 11, 20, 24, 25, 26})
+        assert tc.DEFAULT_MASK == frozenset({17, 18, 19})
 
     def test_default_mask_is_frozenset_type(self):
         tc = _import_module()

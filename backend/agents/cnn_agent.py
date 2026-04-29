@@ -278,9 +278,15 @@ SEQ_LEN         = 60
 # still see zeros, but inference and recent windows carry real values.
 # Path A (#46): Ch 10/11/24/25/26 swapped to candle-derived proxies — no
 # external data needed, real per-bar variance instead of constants.
+# #99: Ch 17/18/19 (fast_rsi_1h, velocity_1h, vol_zscore) emit constants
+# (0.5, 0.0, 0.0) from FeatureBuilder fallback — the 1h-derived sources
+# never feed real values. Permutation importance confirms delta=0 in both
+# glu1 and glu2. Mask zeros them at both training and inference so they
+# don't waste conv capacity on a constant input.
 # At inference we zero any masked channels so the input distribution matches
-# what the model actually saw during training (P3b).
-_TRAINING_CONSTANT_CHANNELS: frozenset = frozenset()
+# what the model actually saw during training (P3b). _train_arch applies
+# the same mask to training tensors via _zero_mask_channels.
+_TRAINING_CONSTANT_CHANNELS: frozenset = frozenset({17, 18, 19})
 
 
 def _close_position(closes, highs, lows):
@@ -356,6 +362,24 @@ def _mask_training_constant_channels(channels):
         list(zero) if idx in _TRAINING_CONSTANT_CHANNELS else ch
         for idx, ch in enumerate(channels)
     ]
+
+
+def _zero_mask_channels(x):
+    """#99: zero `_TRAINING_CONSTANT_CHANNELS` on an [N, C, T] tensor.
+
+    Tensor analogue of `_mask_training_constant_channels` for the training
+    pipeline. _train_arch calls this on `X_all` before the train/val split
+    so the model sees zeros for masked channels at training, matching what
+    `_cnn_prob` produces at inference. Without this, ch 17 (constant 0.5
+    in cache) would train as 0.5 but be zeroed at inference — real
+    train/serve skew. Input is not mutated.
+    """
+    if not _TRAINING_CONSTANT_CHANNELS:
+        return x
+    out = x.clone()
+    for ch in _TRAINING_CONSTANT_CHANNELS:
+        out[:, ch, :] = 0.0
+    return out
 
 _PHASE2_LOG_EVERY = 5  # log dataset-build progress every N products (watchdog)
 MODEL_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
@@ -2503,6 +2527,10 @@ class CoinbaseCNNAgent:
         # ── 80/20 time-ordered split (no shuffle — preserves temporal order) ──
         split      = max(1, int(len(X_list) * 0.8))
         X_all      = torch.stack(X_list).to(_DEVICE)
+        # #99: zero training-constant channels before fit so train and
+        # inference both see zeros for the same channels. Without this,
+        # ch 17 (=0.5 in cache) trains as 0.5 but inference zeros it.
+        X_all      = _zero_mask_channels(X_all)
         y_all      = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
         # Per-sample uniqueness weight (P3c). Fallback to 1.0 if upstream
         # couldn't produce a weight list (e.g. legacy code path).

@@ -5,6 +5,66 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 50] — 2026-04-28 — Mask Ch 17/18/19 + train-time zeroing (#99)
+
+### Context
+Cache inspection on the v10 dataset revealed three channels still emitting
+constants from `FeatureBuilder` fallback even though the OKX funding fetch
+(observed via httpx 200 OK on `/api/v5/public/funding-rate-history`) was
+running cleanly:
+
+| ch | name         | min/max     | std    | notes                              |
+|----|--------------|-------------|--------|------------------------------------|
+| 17 | fast_rsi_1h  | 0.5 / 0.5   | 0.0    | neutral fallback — 1h source unfed |
+| 18 | velocity_1h  | 0   / 0     | 0.0    | never populated                    |
+| 19 | vol_zscore   | 0   / 0     | 0.0    | never populated                    |
+
+Permutation importance (Session 49 perm run) confirmed delta = 0.0 across
+both glu1 and glu2 — model already ignores them, but they consume 11% of
+input bandwidth and present a hidden train/serve skew: ch 17 trains as 0.5
+yet `_cnn_prob` zeros it at inference (because it was *intended* to be in
+`_TRAINING_CONSTANT_CHANNELS` but the post-#86 reset to `frozenset()` left
+it unmasked).
+
+### Change
+- `_TRAINING_CONSTANT_CHANNELS` reset from `frozenset()` to
+  `frozenset({17, 18, 19})` (cnn_agent.py:283). Comments updated to record
+  why these three remain dead while 10/11/20/24/25/26 are real.
+- New helper `_zero_mask_channels(x: torch.Tensor)` — tensor analogue of
+  `_mask_training_constant_channels`. Clones input, zeros every channel in
+  the mask along the time axis, returns. No-op when mask is empty.
+- `_train_arch` now calls `_zero_mask_channels(X_all)` immediately after
+  `torch.stack(X_list)` so training tensors carry zeros for masked
+  channels. This pairs with the existing inference-time mask in `_cnn_prob`
+  to eliminate the train/serve distribution skew on ch 17 (constant 0.5
+  in cache → 0.0 at training and inference).
+- `tools/train_cloud.py:DEFAULT_MASK` updated `{10, 11, 20, 24, 25, 26}`
+  → `{17, 18, 19}` to mirror prod (stale since #86 made those channels
+  real). Comment refreshed with the per-channel timeline.
+
+### Tests
+- New `TestZeroMaskChannelsHelper` (3 tests): zeros only listed set,
+  doesn't mutate input, preserves shape/dtype.
+- Updated `TestTrainingConstantChannelMask::test_mask_set_covers_expected_channels`
+  to expect `{17, 18, 19}`.
+- Updated `TestMaskShrinkAndCacheBump::test_mask_shrunk` to expect
+  `frozenset({17, 18, 19})`.
+- Updated `tests/test_train_cloud.py::test_default_mask_is_frozenset_of_prod_constant_channels`
+  to expect `frozenset({17, 18, 19})`.
+
+### Activation
+**Requires retrain.** Existing `cnn_model.pt` (glu2) and `cnn_model_glu1.pt`
+were trained with ch 17 = 0.5 in input; the new inference mask zeros it.
+Per CLAUDE.md invariant #11, mask changes require retraining. Cache version
+NOT bumped — cached X tensors are unchanged; only how training/inference
+consume them changed. Retrain on v10 cache picks up the new mask.
+
+### Verification
+- Targeted tests — 11/11 PASS in 2.43s on `.venv/Scripts/python.exe`.
+- Full suite — **540/540 PASS** in 623s (added 3 new tests vs. 537).
+
+---
+
 ## [Session 49] — 2026-04-27 — RV20/RV60 prefix-lookback fix (#98)
 
 ### Context
