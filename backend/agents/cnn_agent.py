@@ -997,6 +997,8 @@ def _best_loss_path_for(arch: str) -> str:
     root, ext = os.path.splitext(_BEST_LOSS_PATH)
     return f"{root}_{arch}{ext}"
 _CKPT_EVERY     = 10   # save resume checkpoint every N epochs
+_HEARTBEAT_EVERY = 5   # emit INFO log every N epochs so train_watchdog log-mtime
+                       # check (1800s) doesn't kill healthy training on slow archs
 OLLAMA_URL      = "http://localhost:11434"
 _CACHE_TTL      = 300
 _EARLY_STOP_PATIENCE = 15   # stop if val_loss doesn't improve for this many epochs
@@ -2650,6 +2652,12 @@ class CoinbaseCNNAgent:
                     f"CNN train epoch {ep}/{epochs} | "
                     f"train={tl:.4f} val={vl:.4f} lr={current_lr:.2e}"
                 )
+                if ep == start_ep or ep % _HEARTBEAT_EVERY == 0:
+                    logger.info(
+                        f"CNN train heartbeat epoch {ep}/{epochs} | "
+                        f"train={tl:.4f} val={vl:.4f} lr={current_lr:.2e} "
+                        f"best_val={best_val:.4f}"
+                    )
 
                 # ── Best-model tracking ───────────────────────────────────────
                 if vl < best_val:

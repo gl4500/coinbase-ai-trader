@@ -5,6 +5,45 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 51] — 2026-05-01 — Fit-loop INFO heartbeat (#101)
+
+### Context
+Glum retrain (Session 50 follow-up) was killed by `train_watchdog` at exactly
+30 minutes — `cnn_train_progress.json` written with
+`{"error": "watchdog: log stale, subprocess killed"}`. Investigation showed:
+
+- The CNN fit loop (`cnn_agent.py::_sync_fit`) only logs at `DEBUG` per-epoch
+  (line 2649). With `LOG_LEVEL=INFO` in production, `logs/cnn_training.log`
+  receives **one** INFO line during training: "CNN fit started: ...".
+- Watchdog (`main.py::_is_training_stale`) reaps the subprocess when
+  `cnn_training.log` mtime is unchanged for ≥`_TRAIN_STALE_LOG_SECS=1800` (30 min).
+- glu1 (~7 min) and glu2 (~12 min) finished before the threshold so they
+  slipped through. Glum needed >30 min — watchdog killed a healthy process.
+- CPU dry-run (`tools/dryrun_glum.py`) confirmed `SignalCNNGluM` forward+backward
+  works at all batch sizes (1, 8, 64, 256). No architectural hang.
+
+### Change
+- Add `_HEARTBEAT_EVERY = 5` constant near `_CKPT_EVERY` (cnn_agent.py:1000).
+- Inside the per-epoch loop, after the existing DEBUG log, emit a
+  `logger.info("CNN train heartbeat epoch X/Y | train=... val=... lr=... best_val=...")`
+  on epoch 1 and every 5 epochs thereafter. Keeps `cnn_training.log` mtime
+  fresh (gap ≤ ~3 min on the slowest archs) so the watchdog only fires on
+  real hangs.
+
+### Verification
+- New tests in `TestFitLoopHeartbeat` (test_cnn_agent.py): assert
+  `_HEARTBEAT_EVERY` exists & is reasonable, and source-inspect the per-epoch
+  loop body for both `_HEARTBEAT_EVERY` and `logger.info(...)`.
+- Full `test_cnn_agent.py` + `test_train_watchdog.py`: 213 passed.
+- Re-spawn glum after this change to populate the 3-way comparison.
+
+### Files
+- `backend/agents/cnn_agent.py`
+- `backend/tests/test_cnn_agent.py`
+- `backend/tools/dryrun_glum.py` (diagnostic helper, kept for future arch verification)
+
+---
+
 ## [Session 50] — 2026-04-28 — Mask Ch 17/18/19 + train-time zeroing (#99)
 
 ### Context

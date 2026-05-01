@@ -1486,6 +1486,48 @@ class TestPhase2LogCadence:
         assert _cnn_mod._PHASE2_LOG_EVERY == 5
 
 
+class TestFitLoopHeartbeat:
+    """Per-epoch fit loop must emit an INFO heartbeat so the train_watchdog
+    log-mtime check doesn't kill healthy training on slow archs.
+
+    Background: glum retrain (PID 19332) was reaped by the watchdog at exactly
+    30 min. The fit loop logged at DEBUG only, so logs/cnn_training.log mtime
+    stayed at 'fit started' for the entire run. Glu1 (7 min) and glu2 (12 min)
+    finished before the threshold so they slipped through, but any arch that
+    needs >30 min hits the watchdog despite training fine.
+    """
+
+    def test_heartbeat_every_is_set_and_reasonable(self):
+        # Heartbeat cadence must exist and be small enough that the gap
+        # between INFO lines stays well under 1800s (the staleness threshold).
+        assert hasattr(_cnn_mod, "_HEARTBEAT_EVERY"), \
+            "cnn_agent must define _HEARTBEAT_EVERY for fit-loop heartbeat"
+        v = _cnn_mod._HEARTBEAT_EVERY
+        assert isinstance(v, int) and 1 <= v <= 10, \
+            f"_HEARTBEAT_EVERY must be int in [1,10], got {v!r}"
+
+    def test_fit_loop_emits_info_log_per_heartbeat(self):
+        """Source-level: the per-epoch loop body must contain a logger.info(...)
+        call gated by `_HEARTBEAT_EVERY`. Without this, a slow arch's log file
+        is silent between 'fit started' and 'fit done' → watchdog false-kill.
+        """
+        import inspect
+        import re
+
+        src = inspect.getsource(_cnn_mod.CoinbaseCNNAgent.train_on_history)
+        m = re.search(
+            r"for ep in range\(start_ep,\s*epochs\s*\+\s*1\):(.+?)# Restore best weights",
+            src, re.DOTALL,
+        )
+        assert m, "Per-epoch loop not found in train_on_history"
+        body = m.group(1)
+        assert "_HEARTBEAT_EVERY" in body, \
+            "Per-epoch loop must reference _HEARTBEAT_EVERY for heartbeat cadence"
+        assert re.search(r"logger\.info\(", body), \
+            "Per-epoch loop has no logger.info heartbeat — train_watchdog will " \
+            "kill healthy training at 30 min on slow archs (glum)."
+
+
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestDatasetCache:
     """Phase-2 tensor build takes 30-40 min. Rerunning every hour re-does
