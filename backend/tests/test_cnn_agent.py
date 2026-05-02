@@ -1528,6 +1528,36 @@ class TestFitLoopHeartbeat:
             "kill healthy training at 30 min on slow archs (glum)."
 
 
+class TestRunLoopExitPriority:
+    """CNN's own SCAN-SELL must be the primary exit. TRAIL_STOP / STOP_LOSS
+    are fallbacks for positions CNN did not choose to close itself.
+
+    Live data (2026-04-12 → 2026-05-02): SCAN exits +$59.44, TRAIL_STOP
+    -$49.89, STOP_LOSS -$42.69. The risk-stop machinery was pre-empting the
+    model's own SELL signal each loop because _check_risk_exits ran BEFORE
+    scan_all. Reversing the call order makes risk stops a true fallback.
+    """
+
+    def test_scan_all_runs_before_check_risk_exits_in_run_loop(self):
+        """Source-level: in CoinbaseCNNAgent.run_loop, the call to self.scan_all(
+        must appear earlier than the call to self._check_risk_exits( inside the
+        main while-loop body, so SCAN-SELL is primary and risk exits are fallback.
+        """
+        import inspect
+        import re
+
+        src = inspect.getsource(_cnn_mod.CoinbaseCNNAgent.run_loop)
+        m_scan = re.search(r"self\.scan_all\(", src)
+        m_risk = re.search(r"self\._check_risk_exits\(", src)
+        assert m_scan is not None, "scan_all call not found in run_loop"
+        assert m_risk is not None, "_check_risk_exits call not found in run_loop"
+        assert m_scan.start() < m_risk.start(), (
+            "scan_all() must run BEFORE _check_risk_exits() each loop so CNN's "
+            "own SCAN-SELL is the primary exit and TRAIL_STOP/STOP_LOSS are "
+            "secondary/tertiary fallbacks."
+        )
+
+
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestDatasetCache:
     """Phase-2 tensor build takes 30-40 min. Rerunning every hour re-does

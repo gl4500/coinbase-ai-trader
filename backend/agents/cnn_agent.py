@@ -2279,15 +2279,23 @@ class CoinbaseCNNAgent:
                 self.last_scan_at = time.time()
                 self.next_scan_at = time.time() + interval
 
-                # Risk exits run every loop regardless of is_trading gate —
-                # stop-loss and max-hold must fire even when scanning is paused.
-                await self._check_risk_exits()
-
                 should_execute = is_trading_fn() if is_trading_fn else False
+
+                # Primary exit: CNN's own SCAN-SELL fires first via scan_all
+                # so the model can close positions before risk fallbacks
+                # pre-empt it. Live data showed risk-first ordering caused
+                # TRAIL_STOP/STOP_LOSS to lose -$92 net while SCAN exits
+                # earned +$59 on the same window.
                 await self.scan_all(
                     execute        = should_execute,
                     order_executor = order_executor if should_execute else None,
                 )
+
+                # Secondary/tertiary fallbacks (TRAIL_STOP → STOP_LOSS →
+                # MAX_HOLD) run every loop regardless of is_trading gate —
+                # stops must fire even when scanning is paused — but only
+                # close positions CNN did not already exit via SCAN above.
+                await self._check_risk_exits()
                 self.scan_count  += 1
                 self.next_scan_at = time.time() + interval
 

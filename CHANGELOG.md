@@ -5,6 +5,48 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 52] — 2026-05-02 — CNN: SCAN-SELL is primary, risk exits demoted to fallback (#104)
+
+### Context
+Live-trade audit (2026-04-12 → 2026-05-02) of `coinbase.db` showed CNN net PnL
+**-$19.24** on 597 closed trades (36% win rate), while TECH was net **+$23.46**
+on 245 closed trades (60% win rate). Decomposing CNN exits by trigger:
+
+| trigger               | n   | PnL     |
+|-----------------------|-----|---------|
+| SCAN (CNN's own SELL) | 318 | **+$59.44** ✅ |
+| TRAIL_STOP            | 197 | -$49.89 ❌ |
+| STOP_LOSS             | 13  | -$42.69 ❌ |
+| RECONCILE             | 68  |   $0.00 |
+
+CNN's own SELL judgment was profitable. The risk-stop machinery on top of
+weak entries was bleeding -$92 net. Root cause: `run_loop` (cnn_agent.py:2284)
+called `_check_risk_exits()` **before** `scan_all()` each iteration, so
+TRAIL_STOP / STOP_LOSS pre-empted CNN's own SCAN-SELL.
+
+### Change
+- `agents/cnn_agent.py::CoinbaseCNNAgent.run_loop`: swap call order. `scan_all()`
+  now runs first (CNN's own SCAN-SELL fires as primary exit), then
+  `_check_risk_exits()` runs second (TRAIL_STOP → STOP_LOSS → MAX_HOLD as
+  secondary/tertiary fallbacks for positions CNN did not close itself).
+- Comment updated to document the new priority and to preserve the existing
+  semantic that risk fallbacks still run every loop regardless of `is_trading`
+  gate (so stops fire even when scanning is paused).
+
+### Why this is safe
+- Risk exits still run unconditionally each loop — the safety net is preserved.
+- When trading is paused, `scan_all` runs in non-execute mode (no closes), so
+  risk-exits remain the only real exit path during pause.
+- When trading is live, risk-exits only see positions CNN chose **not** to
+  close. If CNN's SELL fires, the position is gone before risk machinery looks.
+
+### Tests
+- `tests/test_cnn_agent.py::TestRunLoopExitPriority::test_scan_all_runs_before_check_risk_exits_in_run_loop`
+  RED→GREEN. Source-inspection asserts `self.scan_all(` appears earlier in
+  `run_loop` body than `self._check_risk_exits(`.
+
+---
+
 ## [Session 51] — 2026-05-01 — Fit-loop INFO heartbeat (#101)
 
 ### Context
