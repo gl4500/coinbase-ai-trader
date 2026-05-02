@@ -5,6 +5,37 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 56] — 2026-05-02 — Auto-start launcher on Windows login (#113)
+
+### Context
+
+User repeatedly forgets to click the "Start All" button after a reboot.
+The launcher already auto-starts services 1 s after its window opens, and
+already exposes a "Start on login" toggle that writes to
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Default state was
+"unset", so on a fresh install nothing launches at boot.
+
+### Changes
+
+- **One-shot registry write**: enabled the `CoinbaseAITrader` HKCU Run
+  entry pointing at `Coinbase AI Trader.exe`. Next Windows login auto-
+  launches the launcher → which auto-starts backend+frontend within ~1 s.
+
+- **#113 — `launcher.py:_maybe_default_startup_to_on`**: new helper plus
+  one call from `LauncherApp.__init__`. On the very first launcher run, it
+  defaults Start-on-login to ON and drops a sentinel file at
+  `backend/logs/.startup_default_applied`. Subsequent runs see the
+  sentinel and never overwrite the user's choice — so a deliberate opt-out
+  via the toggle stays opt-out. Tests:
+  `backend/tests/test_launcher.py` (3 tests covering first-run write,
+  no-op when sentinel exists, and parent-dir creation).
+
+### Test status
+
+- `tests/test_launcher.py`: 3 passed.
+
+---
+
 ## [Session 55] — 2026-05-02 — Trades-table as source of truth + dashboard cache alignment (#109–#111)
 
 ### Context
