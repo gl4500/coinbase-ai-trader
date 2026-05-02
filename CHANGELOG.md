@@ -5,6 +5,77 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 53] — 2026-05-02 — GPU/Ollama coordination across trading_app and polymarket_app
+
+### Context
+
+Mirror of trading_app's `gpu_coord.py` — both apps share one Ollama instance
+on a single RTX 2060. Without coordination, concurrent Ollama calls cause
+15–50s latencies and 50s timeouts (observed in `trading_app/error.log` on
+2026-04-27). The trading_app side shipped 2026-05-02 (PRs #6, #7) but was
+ineffective for cross-app priority until polymarket also writes to the
+shared coord file. This session completes that loop.
+
+### Changes
+
+- **`backend/data/gpu_coord.py` (new)** — mirror of trading_app's module.
+  - `OllamaCoordinator` class + module singleton `ollama_coord(app_name="polymarket_app")`.
+  - Layer 1: per-process `asyncio.Lock` serializes Ollama calls within polymarket.
+  - Layer 2: shared `~/.ollama-coord/state.json` (env override `OLLAMA_COORD_FILE`)
+    with `{exposure_usd, updated_at}` per app. `acquire()` yields up to 10s to
+    higher-exposure apps, fires anyway on timeout.
+  - `acquire_training_mutex` / `release_training_mutex` sync API for the
+    cross-app training mutex via `~/.ollama-coord/training.lock`. Stale-PID
+    reclaim handles crashed peers.
+
+- **`agents/cnn_agent.py:_ollama_prob`** — wrapped in `ollama_coord.acquire(expected_ms=25_000)`.
+- **`agents/signal_generator.py:_llm_confirm`** — wrapped in `ollama_coord.acquire(expected_ms=20_000)`.
+- **`services/outcome_tracker.py:validate_with_ollama`** — wrapped in `ollama_coord.acquire(expected_ms=20_000)`.
+
+- **`train_worker.py`** — acquires `acquire_training_mutex(app_name="polymarket_app")`
+  at startup, releases in `finally`. If a peer is training, waits up to 1h then
+  defers (writes `status="skipped"` to the progress file and exits 0). The next
+  scheduled retrain picks it back up — no infinite queueing.
+
+- **`main.py`** — new `_publish_exposure_loop` async task writes
+  `app_state.portfolio.summary["total_value"]` to the coord file every 30s so
+  trading_app sees polymarket's current exposure for cross-app priority.
+
+### Tests
+
+`backend/tests/test_gpu_coord.py` (new) — 15 pytest tests covering:
+- Per-app asyncio.Lock serialization
+- Exposure round-trip + multi-app preservation
+- Stale-entry handling (>60s)
+- Acquire bypass when we have higher exposure
+- Bounded wait when we don't, fires after timeout
+- Missing coord file falls back to lock-only
+- Training mutex: acquire / release / safe-release / stale-reclaim / timeout / re-entrant
+
+15/15 passing in 1.11s.
+
+### Migration / interaction
+
+- Coord file location: `~/.ollama-coord/state.json` (default). Both apps must
+  use the same path. If `OLLAMA_COORD_FILE` is set in only one app's `.env`,
+  cross-app priority silently breaks.
+- Training mutex file: `~/.ollama-coord/training.lock`. Same protocol.
+- Coord-file IO is best-effort: missing/unreadable file falls back to lock-only
+  behavior — never raises into the call path.
+
+### Files
+
+- `backend/data/gpu_coord.py` (new, 285 lines)
+- `backend/agents/cnn_agent.py` (1 site wrapped)
+- `backend/agents/signal_generator.py` (1 site wrapped)
+- `backend/services/outcome_tracker.py` (1 site wrapped)
+- `backend/main.py` (+ exposure publisher task)
+- `backend/train_worker.py` (+ mutex acquire/release)
+- `backend/tests/test_gpu_coord.py` (new)
+- `CHANGELOG.md` (this entry)
+
+---
+
 ## [Session 52] — 2026-05-02 — CNN: SCAN-SELL is primary, risk exits demoted to fallback (#104)
 
 ### Context

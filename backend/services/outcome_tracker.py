@@ -107,15 +107,18 @@ class OutcomeTracker:
         )
 
         try:
+            # GPU coord: serialize Ollama calls per-app + cross-app priority.
+            from data.gpu_coord import ollama_coord
             _t0 = time.perf_counter()
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(
-                    f"{OLLAMA_URL}/api/generate",
-                    json={"model": model, "prompt": prompt,
-                          "stream": False, "format": "json"},
-                )
-                resp.raise_for_status()
-                text = resp.json().get("response", "")
+            async with ollama_coord.acquire(expected_ms=20_000):
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(
+                        f"{OLLAMA_URL}/api/generate",
+                        json={"model": model, "prompt": prompt,
+                              "stream": False, "format": "json"},
+                    )
+                    resp.raise_for_status()
+                    text = resp.json().get("response", "")
             _elapsed = time.perf_counter() - _t0
             if _elapsed > 15:
                 logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s (SLOW)")

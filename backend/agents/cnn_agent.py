@@ -1485,18 +1485,21 @@ async def _ollama_prob(product_id: str, context: str,
         f'Respond with ONLY valid JSON: {{"probability": <0.00-1.00>}}'
     )
     try:
+        # GPU coord: serialize Ollama calls per-app + cross-app priority.
+        from data.gpu_coord import ollama_coord
         _t0 = time.perf_counter()
-        async with httpx.AsyncClient(timeout=25) as client:
-            resp = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": model, "prompt": prompt,
-                      "stream": False, "format": "json"},
-            )
-            resp.raise_for_status()
-            raw      = resp.json()
-            text     = raw.get("response", "")
-            prompt_t = raw.get("prompt_eval_count", 0)
-            resp_t   = raw.get("eval_count", 0)
+        async with ollama_coord.acquire(expected_ms=25_000):
+            async with httpx.AsyncClient(timeout=25) as client:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={"model": model, "prompt": prompt,
+                          "stream": False, "format": "json"},
+                )
+                resp.raise_for_status()
+                raw      = resp.json()
+                text     = raw.get("response", "")
+                prompt_t = raw.get("prompt_eval_count", 0)
+                resp_t   = raw.get("eval_count", 0)
         _elapsed = time.perf_counter() - _t0
         if _elapsed > 15:
             logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s (SLOW)")

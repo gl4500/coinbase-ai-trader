@@ -81,6 +81,25 @@ if __name__ == "__main__":
     })
 
     logger.info(f"CNN training worker started — PID={os.getpid()} epochs={args.epochs}")
+
+    # Acquire the cross-app training mutex so two apps can't both retrain
+    # simultaneously (would either OOM the RTX 2060 or thrash). If a peer
+    # is currently training, wait up to 1h, then defer (skip this run —
+    # the next scheduled retrain picks it back up).
+    from data.gpu_coord import acquire_training_mutex, release_training_mutex
+    if not acquire_training_mutex(app_name="polymarket_app"):
+        logger.warning(
+            "polymarket train_worker: could not acquire training mutex "
+            "within timeout — another app is training. Skipping this retrain."
+        )
+        _write({
+            "status":       "skipped",
+            "elapsed_secs": int(time.time() - started_at),
+            "result":       {"error": "training mutex contended; deferred"},
+            "finished_at":  time.time(),
+        })
+        sys.exit(0)
+
     try:
         asyncio.run(_run(args.epochs, started_at))
     except Exception as exc:
@@ -92,5 +111,7 @@ if __name__ == "__main__":
             "finished_at":  time.time(),
         })
         sys.exit(1)
+    finally:
+        release_training_mutex(app_name="polymarket_app")
 
     logger.info("CNN training worker finished successfully")
