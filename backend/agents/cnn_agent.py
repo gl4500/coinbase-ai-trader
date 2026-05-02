@@ -224,14 +224,28 @@ class _CNNBook:
     async def sell(self, pid: str, price: float, trigger: str = "SCAN") -> float:
         if pid not in self.positions:
             return 0.0
-        pos = self.positions.pop(pid)
+        pos = self.positions[pid]
         proceeds = pos["size"] * price
         pnl      = proceeds - pos["size"] * pos["avg_price"]
         pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
+
+        # #109: persist trade close to DB FIRST — trades table is the source of
+        # truth for realized PnL. If this raises, leave in-memory state intact
+        # so the caller (or a retry) can try again. Updating agent_state before
+        # close_trade caused the divergence seen in Session 54: agent_state
+        # captured the gain but no closed-trade row existed; on restart the
+        # reconcile path force-closed the orphan with pnl=0, locking in skew.
+        await database.close_trade(
+            agent=self._agent, product_id=pid, exit_price=price,
+            size=pos["size"], pnl=pnl, trigger_close=trigger,
+            balance_after=self.balance + proceeds,
+        )
+
+        # close_trade succeeded — now mutate in-memory state and persist it
+        self.positions.pop(pid)
         self.balance      += proceeds
         self.realized_pnl += pnl
 
-        # Update win/loss counters
         if pnl > 0:
             self.wins         += 1
             self._sum_win_pct += pct_pnl
@@ -240,11 +254,6 @@ class _CNNBook:
             self._sum_loss_pct  += abs(pct_pnl)
 
         await self._save()
-        await database.close_trade(
-            agent=self._agent, product_id=pid, exit_price=price,
-            size=pos["size"], pnl=pnl, trigger_close=trigger,
-            balance_after=self.balance,
-        )
         return pnl
 
 logger = logging.getLogger(__name__)

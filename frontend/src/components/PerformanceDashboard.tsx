@@ -1,7 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react'
 
-// Module-level cache — survives tab switches, cleared on manual refresh
-const _CACHE_TTL_MS = 2 * 60 * 1000  // 2 minutes
+// Module-level cache — survives tab switches, cleared on manual refresh.
+// #111: 30s TTL aligns with AgentsDashboard's 15s polling so closed CNN
+// trades show up in Performance within roughly the same window the agent
+// view reflects them. Larger TTLs caused the perceived "no trades" gap
+// even after a sell completed.
+const _CACHE_TTL_MS = 30 * 1000  // 30 seconds
 let _cache: { data: PerfData; trades: any[]; decisions: any[]; ts: number } | null = null
 
 // ── Types ──────────────────────────────────────────────────────────────────────

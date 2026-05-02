@@ -3374,3 +3374,75 @@ class TestDatasetCacheVersionBumpForRv:
     def test_dataset_cache_version_bumped_to_10(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
         assert _DATASET_CACHE_VERSION == 10
+
+
+# ── _CNNBook.sell() ordering: trades table is source of truth ──────────────────
+
+class TestCNNBookSellOrdering:
+    """#109: _CNNBook.sell() must persist the trade close to the DB BEFORE
+    saving agent_state. Otherwise a close_trade failure leaves agent_state
+    with realized_pnl updated but no matching closed trade row → divergence
+    between agent_state.realized_pnl and SUM(trades.pnl)."""
+
+    @pytest.mark.asyncio
+    async def test_close_trade_called_before_save_agent_state(self):
+        from agents.cnn_agent import _CNNBook
+
+        book = _CNNBook()
+        book.positions["XRP-USD"] = {
+            "size": 100.0, "avg_price": 1.30,
+            "entry_time": 0.0, "peak_price": 1.30,
+        }
+
+        call_order: list[str] = []
+
+        async def fake_close_trade(*a, **kw):
+            call_order.append("close_trade")
+
+        async def fake_save_agent_state(*a, **kw):
+            call_order.append("save_agent_state")
+
+        with (
+            patch("agents.cnn_agent.database.close_trade",
+                  new=AsyncMock(side_effect=fake_close_trade)),
+            patch("agents.cnn_agent.database.save_agent_state",
+                  new=AsyncMock(side_effect=fake_save_agent_state)),
+        ):
+            await book.sell("XRP-USD", 1.40, trigger="SCAN")
+
+        assert call_order == ["close_trade", "save_agent_state"], (
+            f"Expected close_trade BEFORE save_agent_state — got {call_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_close_trade_failure_rolls_back_in_memory_state(self):
+        """If close_trade raises, the position must remain in book and
+        realized_pnl/balance must NOT be mutated. Otherwise next restart
+        force-closes orphan with pnl=0 while agent_state has the gain."""
+        from agents.cnn_agent import _CNNBook
+
+        book = _CNNBook()
+        book.positions["XRP-USD"] = {
+            "size": 100.0, "avg_price": 1.30,
+            "entry_time": 0.0, "peak_price": 1.30,
+        }
+        balance_before = book.balance
+        pnl_before = book.realized_pnl
+
+        async def boom(*a, **kw):
+            raise RuntimeError("DB write failed")
+
+        with (
+            patch("agents.cnn_agent.database.close_trade",
+                  new=AsyncMock(side_effect=boom)),
+            patch("agents.cnn_agent.database.save_agent_state",
+                  new=AsyncMock()) as save_mock,
+        ):
+            with pytest.raises(RuntimeError):
+                await book.sell("XRP-USD", 1.40, trigger="SCAN")
+
+            save_mock.assert_not_called()
+
+        assert "XRP-USD" in book.positions, "position should remain on rollback"
+        assert book.balance == balance_before, "balance must not change"
+        assert book.realized_pnl == pnl_before, "realized_pnl must not change"

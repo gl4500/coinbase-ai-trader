@@ -5,6 +5,77 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 55] — 2026-05-02 — Trades-table as source of truth + dashboard cache alignment (#109–#111)
+
+### Context
+
+Investigating "CNN gained ~$1.50 in Realized PnL but no trades show up on the
+Performance tab" surfaced a divergence between two values that should always
+match: `agent_state.realized_pnl` (in-memory accumulator persisted on each
+sell) vs `SUM(trades.pnl)` (the trade-ledger source of truth). Live snapshot:
+
+| Agent | agent_state | SUM(trades.pnl) | Δ          |
+|-------|-------------|-----------------|------------|
+| CNN   | -$5.55      | -$11.53         | +$5.98    |
+| TECH  | +$39.07     | +$23.64         | +$15.43   |
+
+Plus 14 TECH trade rows that were open in the DB but absent from
+`agent_state.positions` ("orphans"), which on next restart would force-close
+with `pnl=0` — locking the divergence in permanently.
+
+Root cause: `_CNNBook.sell()` updated `agent_state.realized_pnl` (via `_save`)
+**before** calling `database.close_trade()`. If `close_trade` raised (Windows
+file lock, transient DB error), the gain was captured in agent_state but no
+matching closed-trade row existed. Compounding: PerformanceDashboard cached
+trade lists for 2 minutes while AgentsDashboard polled every 15 s, so the
+user-visible gap was even wider than reality.
+
+### Changes
+
+- **#109 — `backend/agents/cnn_agent.py:_CNNBook.sell()`**: swap call order so
+  `database.close_trade(...)` runs **before** any in-memory mutation or
+  `_save()`. The trades table is now the source of truth: if the DB write
+  fails the position stays in the book, balance + realized_pnl are unchanged,
+  and the next sell attempt can retry cleanly. Tests:
+  `tests/test_cnn_agent.py::TestCNNBookSellOrdering` covers both ordering and
+  rollback-on-failure.
+
+- **#110 — `backend/tools/reconcile_agent_state.py`**: one-shot CLI that (1)
+  closes orphan open-trade rows for each agent (open in DB but absent from
+  saved positions) with `trigger_close="RECONCILE"`, and (2) overwrites
+  `agent_state.realized_pnl = SUM(trades.pnl)` so the in-memory accumulator
+  re-syncs to the ledger on next backend restart. `--dry-run` previews. Run
+  with the backend stopped (avoids race where a concurrent sell overwrites
+  the reconciled value with the stale in-memory accumulator). Tests:
+  `tests/test_reconcile_agent_state.py` (4 tests).
+
+- **#111 — `frontend/src/components/PerformanceDashboard.tsx:_CACHE_TTL_MS`**
+  `2 min → 30 s`. Aligns the Performance tab with AgentsDashboard's 15 s poll
+  so closed trades appear within roughly the same window the agent view
+  reflects them. The "trade vanished for 2 minutes" symptom that prompted
+  this investigation is gone.
+
+### Test status
+
+- `tests/test_cnn_agent.py + test_reconcile_agent_state.py + test_database.py`:
+  239 passed (495 s) on `.venv` Python 3.11.
+
+### Operator action required
+
+After deploying, run on the host with backend stopped:
+
+```
+cd backend
+.venv/Scripts/python.exe -m tools.reconcile_agent_state --dry-run   # preview
+.venv/Scripts/python.exe -m tools.reconcile_agent_state             # apply
+```
+
+Restart the backend; `_CNNBook.load()` will read the corrected
+`agent_state.realized_pnl`, and the Performance tab will match
+AgentsDashboard within 30 s.
+
+---
+
 ## [Session 54] — 2026-05-02 — CNN training health: majors-pin + watchdog/heartbeat/cache hardening (#105–#108)
 
 ### Context
