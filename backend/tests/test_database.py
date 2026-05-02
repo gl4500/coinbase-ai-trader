@@ -146,6 +146,38 @@ class TestProducts:
         assert p["price_pct_change_24h"] == 5.5
 
 
+class TestMajorsAlwaysIncluded:
+    """#105 — get_products must include core majors (BTC/ETH/SOL/...) even when
+    their volume_24h is lower than memecoins. Without this pinning the CNN
+    trains on a memecoin-dominated dataset and the OKX funding fetch silently
+    skips BTC/ETH because they never enter the products iteration."""
+
+    def _prod(self, pid, volume):
+        return {
+            "product_id":    pid,
+            "base_currency": pid.split("-")[0],
+            "quote_currency": "USD",
+            "price":         1.0,
+            "volume_24h":    volume,
+            "is_tracked":    True,
+        }
+
+    def test_btc_eth_sol_returned_even_with_low_native_volume(self, db, run):
+        # Memecoins with huge native-unit volume (typical real-world state)
+        for i in range(100):
+            run(db.upsert_product(self._prod(f"MEME{i}-USD", volume=1_000_000_000)))
+        # Majors with lower native-unit volume (BTC trades in tiny coin counts)
+        run(db.upsert_product(self._prod("BTC-USD", volume=50_000)))
+        run(db.upsert_product(self._prod("ETH-USD", volume=200_000)))
+        run(db.upsert_product(self._prod("SOL-USD", volume=500_000)))
+
+        products = run(db.get_products(limit=100))
+        pids = [p["product_id"] for p in products]
+        assert "BTC-USD" in pids, "BTC-USD must be pinned regardless of volume rank"
+        assert "ETH-USD" in pids, "ETH-USD must be pinned regardless of volume rank"
+        assert "SOL-USD" in pids, "SOL-USD must be pinned regardless of volume rank"
+
+
 # ── Candles CRUD ──────────────────────────────────────────────────────────────
 
 class TestCandles:

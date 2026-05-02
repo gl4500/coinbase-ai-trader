@@ -965,12 +965,27 @@ def _load_pp_cache(path: str, schema: dict):
 
 
 def _save_pp_cache(path: str, schema: dict, products: dict) -> None:
-    """Atomically save {schema, products} to disk."""
-    import torch
+    """Atomically save {schema, products} to disk.
+
+    On Windows, os.replace raises PermissionError (WinError 5) when the
+    destination is held open by another process — most commonly the live
+    backend keeping cnn_dataset_cache.pt mapped during inference. The lock
+    window is brief, so retry a few times before giving up (#108).
+    """
+    import torch, time as _t
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
     torch.save({"schema": schema, "products": products}, tmp)
-    os.replace(tmp, path)
+    last_exc = None
+    for delay in (0.0, 0.5, 1.5, 3.0):
+        if delay:
+            _t.sleep(delay)
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as e:
+            last_exc = e
+    raise last_exc
 
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
@@ -997,7 +1012,7 @@ def _best_loss_path_for(arch: str) -> str:
     root, ext = os.path.splitext(_BEST_LOSS_PATH)
     return f"{root}_{arch}{ext}"
 _CKPT_EVERY     = 10   # save resume checkpoint every N epochs
-_HEARTBEAT_EVERY = 5   # emit INFO log every N epochs so train_watchdog log-mtime
+_HEARTBEAT_EVERY = 1   # #106: every epoch — under GPU contention 5+ min epochs caused
                        # check (1800s) doesn't kill healthy training on slow archs
 OLLAMA_URL      = "http://localhost:11434"
 _CACHE_TTL      = 300

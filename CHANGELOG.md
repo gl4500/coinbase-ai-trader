@@ -5,6 +5,92 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 54] — 2026-05-02 — CNN training health: majors-pin + watchdog/heartbeat/cache hardening (#105–#108)
+
+### Context
+
+Glum retrain (PID 57568) was watchdog-killed at 17:54 with
+`{"status":"failed","error":"watchdog: log stale, subprocess killed"}` while
+the live backend held the same RTX 2060 for inference. Root-cause sweep
+turned up four separate problems that compounded to false-kill a healthy run
+and mis-target the dataset itself. All four are fixed here as one bundle so
+the next retrain has a clean slate.
+
+### Changes
+
+- **#105 — `backend/database.py:get_products()`** pins a 15-symbol majors
+  list (`BTC, ETH, SOL, BNB, XRP, ADA, AVAX, LINK, DOT, DOGE, LTC, ATOM,
+  BCH, TRX, MATIC`) at the top of the result regardless of `volume_24h`
+  rank. Coinbase stores `volume_24h` in **native token units**, so a pure
+  `ORDER BY volume_24h DESC LIMIT 100` was dominated by memecoins (PEPE,
+  BONK, SHIB, FLOKI, …) and silently excluded BTC/ETH/SOL. Of 30
+  OKX-mapped majors only 3 made the cut; the CNN was training on memecoin
+  chaos. Discovered while investigating "why doesn't OKX funding pull
+  BTC/ETH?" — the answer was upstream: those products never entered the
+  product list. SQL change uses a `CASE WHEN product_id IN (...) THEN 0
+  ELSE 1 END, volume_24h DESC` pre-sort so the pin works without breaking
+  the existing volume tiebreak among non-major rows.
+
+- **#106 — `backend/agents/cnn_agent.py:_HEARTBEAT_EVERY`** `5 → 1`. Under
+  GPU contention with the live backend's inference path, glum epochs
+  stretched to 5+ min each. Heartbeat-every-5 meant 25-min gaps between
+  INFO log writes — over the existing 30-min watchdog threshold — and
+  killed a fundamentally healthy training run. Heartbeat every epoch keeps
+  the log mtime fresh even on the slowest arch.
+
+- **#107 — `backend/main.py:_TRAIN_STALE_LOG_SECS`** `1800 → 3600`. Belt-
+  and-braces companion to #106: even with per-epoch heartbeats, a single
+  contended phase-2 dataset-build chunk could go quiet >30 min. 1 hr gives
+  the worst observed 50-min epoch headroom without making the watchdog
+  useless against real hangs.
+
+- **#108 — `backend/agents/cnn_agent.py:_save_pp_cache()`** wraps
+  `os.replace(tmp, path)` in a 4-attempt retry loop with backoff
+  `(0, 0.5, 1.5, 3.0) s`. The live backend keeps `cnn_dataset_cache.pt`
+  open during inference; on Windows that raises `PermissionError`
+  (WinError 5) when the trainer tries to atomically swap in a new copy.
+  The lock window is brief so a short retry recovers cleanly without
+  needing to coordinate with the backend.
+
+### Tests
+
+- `backend/tests/test_database.py::TestMajorsAlwaysIncluded::test_btc_eth_sol_returned_even_with_low_native_volume`
+  inserts 100 fake memecoins (volume=1e9 each) plus BTC/ETH/SOL with low
+  native volume, then asserts the majors are in the top-100 result.
+- `backend/tests/test_cnn_agent.py::test_heartbeat_every_is_one` —
+  asserts `_HEARTBEAT_EVERY == 1` exactly (constant pin).
+- `backend/tests/test_cnn_agent.py::TestPerProductDatasetCache::test_pp_cache_save_retries_on_windows_file_lock`
+  uses `monkeypatch` to inject a flaky `os.replace` that raises
+  `PermissionError` on the first 2 calls and succeeds on the 3rd, then
+  asserts `_save_pp_cache` returned without raising.
+- `backend/tests/test_train_watchdog.py` — updated existing thresholds
+  test to assert `3600` and added `test_running_log_idle_45m_is_not_stale`
+  / `test_running_log_idle_70m_is_stale` covering the new boundary.
+
+Full per-module suite (database + cnn_agent + train_watchdog) green:
+**244 passed in 502.53s** (with venv python 3.11).
+
+### Files
+
+- `backend/database.py` (#105 pinned-majors SQL)
+- `backend/agents/cnn_agent.py` (#106 heartbeat=1, #108 cache save retry)
+- `backend/main.py` (#107 watchdog 1 hr)
+- `backend/tests/test_database.py` (new test class)
+- `backend/tests/test_cnn_agent.py` (heartbeat-pin + cache-retry tests)
+- `backend/tests/test_train_watchdog.py` (1-hour boundary coverage)
+- `CHANGELOG.md` (this entry)
+
+### Why bundled
+
+All four issues surface from the same incident (glum killed at 17:54 under
+backend GPU contention). #106 and #107 are belt-and-braces for the
+watchdog. #105 is unrelated mechanism but was discovered in the same
+investigation thread and gates whether the *next* retrain trains on the
+right data at all. #108 is the cache-save flake that caused the original
+"non-fatal" warning that started the trail.
+
+---
+
 ## [Session 53] — 2026-05-02 — GPU/Ollama coordination across trading_app and polymarket_app
 
 ### Context

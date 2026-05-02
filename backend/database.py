@@ -310,12 +310,30 @@ async def upsert_product(p: Dict) -> None:
         await db.commit()
 
 
+# Major-cap products always included in get_products() regardless of
+# volume_24h rank (#105). volume_24h on Coinbase is in NATIVE TOKEN UNITS,
+# so memecoins with billions of tokens dominate a pure DESC sort and push
+# real majors out of the top-N. Without this pin the CNN trains on a
+# memecoin-dominated dataset and OKX funding fetch silently skips BTC/ETH.
+_PINNED_MAJORS = (
+    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD",
+    "AVAX-USD", "LINK-USD", "DOT-USD", "DOGE-USD", "LTC-USD", "ATOM-USD",
+    "BCH-USD", "TRX-USD", "MATIC-USD",
+)
+
+
 async def get_products(tracked_only: bool = False, limit: int = 100) -> List[Dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         where = "WHERE is_tracked = 1" if tracked_only else ""
+        majors_csv = ",".join(f"'{m}'" for m in _PINNED_MAJORS)
         cursor = await db.execute(
-            f"SELECT * FROM products {where} ORDER BY volume_24h DESC LIMIT ?", (limit,)
+            f"""SELECT * FROM products {where}
+                ORDER BY
+                  CASE WHEN product_id IN ({majors_csv}) THEN 0 ELSE 1 END,
+                  volume_24h DESC
+                LIMIT ?""",
+            (limit,)
         )
         return [dict(r) for r in await cursor.fetchall()]
 

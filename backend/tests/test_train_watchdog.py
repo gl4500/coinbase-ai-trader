@@ -50,10 +50,10 @@ class TestTrainingStaleness:
         assert _fn()(data, log_mtime=now - 60, now=now) is False
 
     def test_running_with_stale_log_after_grace_is_stale(self):
-        # Ran for 2 hours, last log 45 minutes ago → past the 30-min window.
+        # Ran for 3 hours, last log 70 minutes ago → past the 1-hour window.
         now = 1_000_000.0
-        data = {"status": "running", "started_at": now - 2 * 3600}
-        assert _fn()(data, log_mtime=now - 45 * 60, now=now) is True
+        data = {"status": "running", "started_at": now - 3 * 3600}
+        assert _fn()(data, log_mtime=now - 70 * 60, now=now) is True
 
     def test_missing_log_mtime_is_not_stale(self):
         # Can't determine → don't kill.
@@ -61,13 +61,30 @@ class TestTrainingStaleness:
         data = {"status": "running", "started_at": now - 2 * 3600}
         assert _fn()(data, log_mtime=None, now=now) is False
 
-    def test_log_stale_threshold_is_30_min(self):
+    def test_log_stale_threshold_is_1_hour(self):
+        # #107: Under GPU contention with the live backend, glum epochs ran
+        # 5+ min each — gaps between phase-3 heartbeats grew well past 30 min
+        # and the watchdog false-killed healthy training. Bump to 3600s (1hr)
+        # so even a 50-min-per-epoch worst case has headroom.
         import main
-        assert main._TRAIN_STALE_LOG_SECS == 1800
+        assert main._TRAIN_STALE_LOG_SECS == 3600
 
     def test_running_log_idle_20m_is_not_stale(self):
         # Phase-2 dataset build logs every ~10-13 min; 20 min idle must NOT trip
-        # the watchdog under the new 30-min threshold.
+        # the watchdog under the 1-hour threshold.
         now = 1_000_000.0
         data = {"status": "running", "started_at": now - 2 * 3600}
         assert _fn()(data, log_mtime=now - 20 * 60, now=now) is False
+
+    def test_running_log_idle_45m_is_not_stale(self):
+        # #107: 45-min idle (slow glum epoch under GPU contention) must NOT
+        # trip the watchdog under the new 1-hour threshold.
+        now = 1_000_000.0
+        data = {"status": "running", "started_at": now - 2 * 3600}
+        assert _fn()(data, log_mtime=now - 45 * 60, now=now) is False
+
+    def test_running_log_idle_70m_is_stale(self):
+        # 70-min idle is past the 1-hour threshold — must trip.
+        now = 1_000_000.0
+        data = {"status": "running", "started_at": now - 3 * 3600}
+        assert _fn()(data, log_mtime=now - 70 * 60, now=now) is True

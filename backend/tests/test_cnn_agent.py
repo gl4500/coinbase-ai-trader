@@ -1497,14 +1497,17 @@ class TestFitLoopHeartbeat:
     needs >30 min hits the watchdog despite training fine.
     """
 
-    def test_heartbeat_every_is_set_and_reasonable(self):
-        # Heartbeat cadence must exist and be small enough that the gap
-        # between INFO lines stays well under 1800s (the staleness threshold).
+    def test_heartbeat_every_is_one(self):
+        # #106: Under GPU contention with the live backend, glum epochs ran
+        # 5+ min each. With _HEARTBEAT_EVERY=5 the gap between heartbeats
+        # exceeded the 30-min watchdog and a healthy run was false-killed.
+        # Pin to 1 — every epoch logs, so log mtime advances at most one
+        # epoch behind real time.
         assert hasattr(_cnn_mod, "_HEARTBEAT_EVERY"), \
             "cnn_agent must define _HEARTBEAT_EVERY for fit-loop heartbeat"
-        v = _cnn_mod._HEARTBEAT_EVERY
-        assert isinstance(v, int) and 1 <= v <= 10, \
-            f"_HEARTBEAT_EVERY must be int in [1,10], got {v!r}"
+        assert _cnn_mod._HEARTBEAT_EVERY == 1, \
+            f"_HEARTBEAT_EVERY must be 1 to survive slow epochs under GPU " \
+            f"contention; got {_cnn_mod._HEARTBEAT_EVERY!r}"
 
     def test_fit_loop_emits_info_log_per_heartbeat(self):
         """Source-level: the per-epoch loop body must contain a logger.info(...)
@@ -1765,6 +1768,40 @@ class TestPerProductDatasetCache:
         assert _cnn_mod._load_pp_cache(
             str(tmp_path / "no_such.pt"), schema
         ) is None
+
+    def test_pp_cache_save_retries_on_windows_file_lock(self, tmp_path, monkeypatch):
+        """#108 — On Windows os.replace raises PermissionError (WinError 5) when
+        the destination file is held open by another process (the running
+        backend keeps cnn_dataset_cache.pt mapped). A single transient lock
+        previously discarded the entire cache build (4.9 min of work). Retry
+        a few times with backoff so a brief lock window doesn't lose progress.
+        """
+        import torch
+        path = str(tmp_path / "pp_cache.pt")
+        schema = _cnn_mod._dataset_schema(SEQ_LEN, self._FWD, self._THR, N_CHANNELS)
+        products = {
+            "BTC-USD": {
+                "first_ts": 0, "last_ts": 1, "last_n": 1,
+                "X": [torch.zeros(1, SEQ_LEN)], "y": [0.0],
+            }
+        }
+
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky_replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(5, "Access is denied")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(_cnn_mod.os, "replace", flaky_replace)
+        # Must NOT raise — retry should swallow the first failure.
+        _cnn_mod._save_pp_cache(path, schema, products)
+        assert calls["n"] >= 2, \
+            f"expected at least one retry after PermissionError, got {calls['n']} call(s)"
+        # File actually written.
+        assert _cnn_mod._load_pp_cache(path, schema) is not None
 
 
 # ── Triple-barrier labeling (P3a) ─────────────────────────────────────────────
