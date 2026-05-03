@@ -25,11 +25,19 @@ if BACKEND not in sys.path:
 class TestConfigField:
 
     def test_model_backend_defaults_to_cnn(self, monkeypatch):
-        """MODEL_BACKEND unset → config.model_backend == 'cnn'."""
+        """MODEL_BACKEND unset → config.model_backend == 'cnn'.
+
+        importlib.reload(config) re-runs load_dotenv() which re-injects any
+        MODEL_BACKEND value present in .env. Clear it again post-reload and
+        instantiate Config() directly so we test the dataclass default rather
+        than the singleton, which load_dotenv has already polluted.
+        """
         monkeypatch.delenv("MODEL_BACKEND", raising=False)
         import config as cfg_mod
         importlib.reload(cfg_mod)
-        assert cfg_mod.config.model_backend == "cnn"
+        monkeypatch.delenv("MODEL_BACKEND", raising=False)
+        fresh = cfg_mod.Config()
+        assert fresh.model_backend == "cnn"
 
     def test_model_backend_reads_env(self, monkeypatch):
         """MODEL_BACKEND=xgb propagates into config.model_backend."""
