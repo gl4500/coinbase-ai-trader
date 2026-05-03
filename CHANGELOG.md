@@ -5,6 +5,51 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.5] — 2026-05-03 — Phase 6 flip — train XGB + MODEL_BACKEND=xgb live (#136)
+
+### Context
+
+Closes the loop on the CNN→XGBoost transition. After #135 wired the
+`MODEL_BACKEND` selector with default `"cnn"`, this session trained an
+XGBoost booster on the existing 27-channel cache and flipped the live
+backend to `MODEL_BACKEND=xgb` for the 7-day shadow-mode comparison
+(#136 Phase 6). Live capital is safe: `DRY_RUN=true` and
+`CNN_BUY_THRESHOLD=0.99` combined with `xgb_prob` clipping to
+`[0.01, 0.99]` mean the buy gate `model_prob > 0.99` cannot fire under
+either backend — this is observation-only.
+
+### Changes
+
+- **`backend/xgb_model.json` + `backend/xgb_features.json` (NEW)**:
+  trained via `train_xgb` with 5-fold purged walk-forward, 4h embargo,
+  on top-20 pooled products from `cnn_dataset_cache.pt`
+  (X.shape=(162982, 27, 60), pos_pct=48.6).
+  - best_params: `max_depth=4, min_child_weight=1, subsample=0.7`
+  - fold AUCs: 0.5157 / 0.5093 / 0.5259 / 0.5185 / 0.5427
+  - **mean_auc: 0.5224** — below the 0.55 Phase-4 hard gate, consistent
+    with prior `xgb_feature_optimization_findings` peak of 0.5284 on
+    the same 22-effective-channel stack (5 channels zeroed: MASKED
+    {17,18,19} + XGB_DROP {21,24}).
+  - 270 features (v1 set: per-channel mean/std/p25/p50/p75/last/
+    momentum/range/... × 22 live channels + cross-channel terms).
+- **`.env`**: appended `MODEL_BACKEND=xgb` block with rollback note
+  ("set MODEL_BACKEND=cnn to revert"). Annotated rationale: AUC <
+  gate but DRY_RUN + 0.99 buy gate make this a safe shadow flip.
+- **Backend restart**: killed prior instance (PID 60284), relaunched
+  via `.venv/Scripts/python.exe backend/main.py` (canonical port 8001
+  per `start_backend.ps1`). `xgb_signal: loaded booster (270
+  features, set=v1)` confirmed in logs at 19:15:15. CNN agent
+  continues to scan; probabilities now sourced from XGB.
+
+### Phase 6 next
+
+7-day window: collect side-by-side XGB-vs-CNN probability traces and
+real outcomes, then decide whether to relax `CNN_BUY_THRESHOLD` (and
+which backend to keep) once feature work (#143-145 OKX OI, #156 BTC
+dominance) lifts AUC above 0.55.
+
+---
+
 ## [Session 58.4] — 2026-05-03 — Phase 5 — agents/xgb_signal.py + MODEL_BACKEND env var (#135)
 
 ### Context
