@@ -76,7 +76,7 @@ _CNN_DRY_RUN_BALANCE = 1_000.0
 _CNN_MAX_FRAC        = 0.15    # max 15% of portfolio per position
 _CNN_STOP_LOSS_PCT    = 0.08    # 8% hard stop-loss below avg entry price
 _CNN_ATR_TRAIL_MULT   = 2.0     # trailing stop = ATR(14) × multiplier below peak
-_CNN_ATR_TRAIL_MIN    = 0.03    # floor: never tighter than 3% (prevents stop-hunting)
+_CNN_ATR_TRAIL_MIN    = 0.06    # floor: never tighter than 6% (Session 57 cash-flow lever 3 — was 3%, exited too early in low-ATR regimes)
 _CNN_ATR_TRAIL_MAX    = 0.15    # ceiling: never wider than 15% (limits max give-back)
 _CNN_MAX_HOLD_SECS    = 7 * 24 * 3600  # 7-day max-hold — last resort for flat/forgotten positions
 # Positions missing entry_time (opened before that field existed) are treated

@@ -5,6 +5,38 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 57] — 2026-05-02 — Cash-flow phase 1: bump ATR trail floor 3% → 6% (#115)
+
+### Context
+
+CNN agent has been bleeding money: per-trade expectancy ≈ +0.083% gross is
+swamped by 1.2% round-trip taker fees → net ≈ −1.12% per trade. Monte Carlo
+simulation across 7-day cohorts identified four cumulative levers (ranked
+by marginal PnL impact). **Lever 3 — wider trail floor — is the cheapest
+fix and was first.**
+
+The 3% floor was triggering `TRAIL_STOP` on routine intra-day chop in
+low-ATR regimes, locking in losses before mean-reversion could play out.
+Bumping to 6% gives positions room to breathe; downside is still capped
+by hard `STOP_LOSS = 8%`.
+
+### Changes
+
+- **#115 — `agents/cnn_agent.py:79`**: `_CNN_ATR_TRAIL_MIN` 0.03 → 0.06.
+  Comment updated to reference Session 57 cash-flow lever 3. Tests:
+  `tests/test_cnn_risk_exits.py` — new `TestTrailFloor` class with
+  3 tests (constant assertion, 4% drawdown does NOT exit, 6.5% DOES exit).
+- **#115d — test cleanup**: `tests/test_cnn_agent.py` and
+  `tests/test_cnn_risk_exits.py` had stale
+  `OLLAMA_MODEL=qwen2.5:7b`. Bumped to `llama3.1:8b` to match production
+  `.env`. Per CLAUDE.md invariant 7 (env-driven model name).
+
+### Test status
+
+- `tests/test_cnn_risk_exits.py`: 17 passed (3 new + 14 existing).
+
+---
+
 ## [Session 56] — 2026-05-02 — Auto-start launcher on Windows login (#113)
 
 ### Context

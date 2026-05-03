@@ -22,9 +22,15 @@ os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/te
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
 os.environ.setdefault("DRY_RUN",                  "true")
 os.environ.setdefault("LOG_LEVEL",                "WARNING")
-os.environ.setdefault("OLLAMA_MODEL",             "qwen2.5:7b")
+os.environ.setdefault("OLLAMA_MODEL",             "llama3.1:8b")
 
-from agents.cnn_agent import CoinbaseCNNAgent, _CNNBook, _CNN_STOP_LOSS_PCT, _CNN_MAX_HOLD_SECS
+from agents.cnn_agent import (
+    CoinbaseCNNAgent,
+    _CNNBook,
+    _CNN_STOP_LOSS_PCT,
+    _CNN_MAX_HOLD_SECS,
+    _CNN_ATR_TRAIL_MIN,
+)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -282,3 +288,74 @@ class TestCNNMaxHoldTime:
             await agent._check_risk_exits()
 
         sell_mock.assert_not_called()
+
+
+# ── ATR trail-stop floor (Session 57 cash-flow phase) ─────────────────────────
+
+class TestTrailFloor:
+    """Floor on ATR trailing stop must be 6%, not 3%.
+
+    Why: 3% floor was triggering TRAIL_STOP on routine intra-day chop,
+    locking in losses before mean-reversion could play out. Bumping the
+    floor to 6% gives positions room to breathe in low-volatility regimes
+    while still capping downside at hard STOP_LOSS=8%.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trail_floor_constant_is_6pct(self):
+        """_CNN_ATR_TRAIL_MIN must equal 0.06 (cash-flow lever 3)."""
+        assert _CNN_ATR_TRAIL_MIN == 0.06, (
+            f"Trail floor is {_CNN_ATR_TRAIL_MIN:.2%} — should be 6% "
+            "to stop premature trail-stop exits in low-ATR regimes."
+        )
+
+    @pytest.mark.asyncio
+    async def test_4pct_drawdown_does_not_trigger_trail_stop(self):
+        """Position 4% off peak must NOT exit when ATR floor is 6%."""
+        agent = CoinbaseCNNAgent()
+        entry  = 1000.0
+        peak   = 1000.0
+        current = peak * (1 - 0.04)   # -4% from peak → above 6% floor
+        agent.book = _book_with_position("OP-USD", avg_price=entry,
+                                          peak_price=peak)
+
+        sell_mock = AsyncMock(return_value=0.0)
+        ws_mock   = MagicMock()
+        ws_mock.get_price.return_value = current
+        agent.ws = ws_mock
+
+        with (
+            patch.object(agent.book, "sell", sell_mock),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=[])),  # forces floor fallback
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_65pct_drawdown_triggers_trail_stop(self):
+        """Position 6.5% off peak must exit (below 6% floor)."""
+        agent = CoinbaseCNNAgent()
+        entry  = 1000.0
+        peak   = 1000.0
+        current = peak * (1 - 0.065)   # -6.5% from peak → below 6% floor
+        agent.book = _book_with_position("ARB-USD", avg_price=entry,
+                                          peak_price=peak)
+
+        sell_mock = AsyncMock(return_value=0.0)
+        ws_mock   = MagicMock()
+        ws_mock.get_price.return_value = current
+        agent.ws = ws_mock
+
+        with (
+            patch.object(agent.book, "sell", sell_mock),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=[])),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_called_once()
+        trigger = sell_mock.call_args[1].get("trigger") or sell_mock.call_args[0][2]
+        assert "TRAIL" in trigger.upper(), \
+            f"Expected TRAIL_STOP trigger, got: {trigger}"
