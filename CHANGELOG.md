@@ -5,6 +5,66 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.4] — 2026-05-03 — Phase 5 — agents/xgb_signal.py + MODEL_BACKEND env var (#135)
+
+### Context
+
+Phase 5 of the CNN→XGBoost transition (see
+`docs/superpowers/plans/2026-05-02-cnn-to-xgboost-transition.md`). Phases
+0-4 built the XGB feature extractor (`tools/xgb_features.py`),
+walk-forward harness, training script, and calibration probe. This phase
+ships the inference glue so that flipping a single env var
+(`MODEL_BACKEND=xgb`) routes `_cnn_prob` through XGBoost instead of the
+CNN — without retraining or recompiling. Default stays `cnn` so live
+behaviour is unchanged; Phase 6 (#136) is the 7-day shadow-mode
+follow-up that will actually flip it.
+
+### Changes
+
+- **#135 RED — `tests/test_xgb_signal.py` (NEW)**: 8 tests covering the
+  `xgb_prob(channels)` contract — graceful fallback to 0.5 when
+  `xgb_model.json`/`xgb_features.json` artifacts are missing, returns
+  float in `[0.01, 0.99]` when artifacts present, deterministic across
+  calls (lazy-loaded singleton booster), accepts both `np.ndarray` and
+  nested-list inputs, and channel-mask invariant (ch 17/18/19 values
+  must not change predictions because `tools.xgb_features.extract_features`
+  zeros them).
+- **#135 RED — `tests/test_model_backend.py` (NEW)**: 5 tests covering
+  the `Config.model_backend` field (default `"cnn"`, reads
+  `MODEL_BACKEND` env, lowercases for stable comparisons) and the
+  `CoinbaseCNNAgent._cnn_prob` branch (default backend never invokes
+  `xgb_prob`; `MODEL_BACKEND=xgb` returns `xgb_prob`'s value).
+- **#135 GREEN — `agents/xgb_signal.py` (NEW)**: lazy-load singleton
+  with `_MODEL_PATH`, `_FEATURES_PATH`, threading.Lock-guarded loader.
+  `xgb_prob(channels)` extracts features via `extract_features`, runs
+  `Booster.predict`, and clips to `[0.01, 0.99]`. All exception paths
+  return `0.5` so the production code path can never crash on a missing
+  or corrupt model file.
+- **#135 GREEN — `config.py:71-74`**: new `model_backend` field
+  reading `MODEL_BACKEND` env var, default `"cnn"`, lowercased.
+- **#135 GREEN — `agents/cnn_agent.py:_cnn_prob`**: branch on
+  `config.model_backend`. When `"xgb"`, import `agents.xgb_signal` and
+  return `xgb_signal.xgb_prob(channels)`. Otherwise the existing
+  PyTorch / linear-fallback path runs unchanged.
+
+### Tests (all GREEN)
+
+- `tests/test_xgb_signal.py` — 8/8 (4.3 s)
+- `tests/test_model_backend.py` — 5/5
+- `tests/test_cnn_agent.py` + `tests/test_cnn_risk_exits.py` — 218
+  passed, 7 xfailed, 0 failed (regression smoke; 2:25 wall-clock)
+
+### Pending
+
+- **#136 Phase 6**: 7-day shadow-mode A/B — duplicate the scan loop's
+  `_cnn_prob` call to also log `xgb_prob` predictions to a new
+  `model_predictions` table for offline comparison without trading on
+  them. Decision gate: if Sharpe(xgb) ≥ 1.5× Sharpe(cnn) over the
+  shadow window, flip `MODEL_BACKEND=xgb` for live; otherwise stay on
+  CNN and revisit feature inputs.
+
+---
+
 ## [Session 58] — 2026-05-03 — Ch 15 ADX causality fix: per-bar expanding window (#157)
 
 ### Context

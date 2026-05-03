@@ -1701,6 +1701,9 @@ class CoinbaseCNNAgent:
         # Align inference input with the training distribution — zero out the
         # channels that were constant-zero at training (P3b).
         channels = _mask_training_constant_channels(channels)
+        if config.model_backend == "xgb":
+            from agents import xgb_signal
+            return xgb_signal.xgb_prob(channels)
         if _TORCH and self.model:
             return self.model.predict(self.fb.to_tensor(channels))
         return self._linear(channels)

@@ -68,6 +68,12 @@ class Config:
     # Central default so every module reads the same model (CLAUDE.md invariant 7).
     ollama_model:         str  = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
 
+    # ── Model backend selector (#135 Phase 5) ──────────────────────────────────
+    # "cnn" (default) keeps current behavior; "xgb" routes _cnn_prob through
+    # agents.xgb_signal.xgb_prob. Phase 6 (#136) will flip this for the 7-day
+    # shadow-mode comparison without retraining or recompiling.
+    model_backend:       str  = field(default_factory=lambda: os.getenv("MODEL_BACKEND", "cnn").lower())
+
     # ── History backfill schedule ──────────────────────────────────────────────
     # How many hours between automatic incremental backfill runs (0 = disabled)
     backfill_interval_hours: int  = field(default_factory=lambda: int(os.getenv("BACKFILL_INTERVAL_HOURS", "24")))
