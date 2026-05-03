@@ -452,11 +452,13 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 10  # bumped for #98: Ch 24/25 (rv20/rv60) now
-                            # from OKX (replacing geo-blocked Binance fapi);
-                            # v8 caches were built while Ch 20 was masked and
-                            # constant-zero — invalidate so the next rebuild
-                            # picks up real OKX funding values.
+_DATASET_CACHE_VERSION = 11  # bumped for #157: Ch 15 (ADX) was broadcasting
+                            # a single value computed on the full candle
+                            # window across all 60 timesteps — every cached
+                            # sample's Ch 15 series leaked future info.
+                            # Now per-bar causal expanding window. v10 caches
+                            # must rebuild to pick up the corrected channel.
+                            # (Prior: v10 = #98 OKX rv20/rv60.)
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
@@ -1303,8 +1305,14 @@ class FeatureBuilder:
             stoch_ch[i] = k / 100.0
 
         # ── Ch 15: ADX(14) regime ─────────────────────────────────────────────
-        adx_val, _, _ = _adx(highs, lows, closes)
-        adx_ch = [adx_val / 100.0] * len(closes)
+        # Per-bar causal: ADX at bar i uses only highs/lows/closes[:i+1].
+        # Earlier impl computed adx_val once on the full window and broadcast
+        # it across all timesteps, which leaked future info into every bar
+        # of every cached sample.
+        adx_ch = [
+            _adx(highs[: i + 1], lows[: i + 1], closes[: i + 1])[0] / 100.0
+            for i in range(len(closes))
+        ]
 
         # ── Ch 16: VWAP distance per bar ──────────────────────────────────────
         # Rolling 20-bar VWAP; distance = (close - vwap) / vwap, norm to [-1,1]

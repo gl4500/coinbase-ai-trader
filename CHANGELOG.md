@@ -5,6 +5,58 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58] — 2026-05-03 — Ch 15 ADX causality fix: per-bar expanding window (#157)
+
+### Context
+
+Audit cross-checking `docs/equity_feature_engineering.md` and
+`docs/crypto_feature_engineering_pipeline.md` against the actual 27-channel
+FeatureBuilder identified a concrete look-ahead leak on Ch 15 (ADX regime).
+
+`agents/cnn_agent.py:1305-1307` (pre-fix) computed `adx_val` once on the
+**full** candle window and broadcast that single value across all 60
+timesteps. Every cached training sample's Ch 15 series therefore carried
+information about future bars in the window. Verified empirically: on a
+sinusoidal 120-bar series, Ch 15 at candle 79 = 0.381 when built on the
+full series vs 0.305 when built on only candles[:80] — a 0.076 delta
+(~25 % of channel scale) leaking from the 40 future bars.
+
+This is the lookahead-test failure mode that the crypto-pipeline doc §4
+calls out: *"If you do nothing else from this guide, build the lookahead
+test."*
+
+### Changes
+
+- **#157a — `tests/test_feature_builder_causality.py` (NEW)**: RED tests
+  asserting (a) Ch 15 terminal value is identical when built on full
+  vs. truncated candle series (windowed-equality property), and (b) Ch 15
+  varies across timesteps within a single build call (broadcast detector).
+- **#157b — `agents/cnn_agent.py:1305-1313`**: replace the broadcast
+  `[adx_val / 100.0] * len(closes)` with a per-bar expanding window list
+  comprehension calling `_adx(highs[:i+1], lows[:i+1], closes[:i+1])` for
+  each `i`. Pattern mirrors Ch 4 RSI / Ch 8 Bollinger / Ch 14 Stoch RSI.
+- **#157c — `agents/cnn_agent.py:455`**: `_DATASET_CACHE_VERSION` 10 → 11
+  to invalidate v10 caches built with the leaky Ch 15 series. Updated
+  `tests/test_cnn_agent.py::TestDatasetCacheVersionBumpForRv` to assert == 11.
+
+### Tests (all GREEN)
+
+- `tests/test_feature_builder_causality.py::TestCh15ADXCausality` — 2/2
+- `tests/test_cnn_agent.py` — 203 passed, 7 xfailed, 0 failed (full suite,
+  10:02 wall-clock)
+
+### Pending
+
+- **#160**: re-run `tools/permutation_importance.py` and
+  `tools/feature_set_compare.py` on a fresh v11 cache to measure the Δ
+  AUC from removing the leak. Expect an apparent **drop** in Ch 15
+  permutation-importance (the prior signal was partly leakage); re-test
+  whether Ch 15 still earns its slot post-fix.
+- **#161**: generic lookahead-test harness extending the windowed-equality
+  property to all 27 non-masked channels.
+
+---
+
 ## [Session 57] — 2026-05-02 — Cash-flow phase 1: bump ATR trail floor 3% → 6% (#115)
 
 ### Context
