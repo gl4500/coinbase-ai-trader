@@ -110,7 +110,47 @@ production cache.
 
 - **#176**: tests also pollute production `coinbase.db` with junk
   `cnn_training_sessions` rows (515-525 from the 2026-05-03 venv run).
-  Same fix pattern needed for `DATABASE_URL` redirect.
+  Same fix pattern needed for `DATABASE_URL` redirect — addressed in
+  Session 58.2 below.
+
+---
+
+## [Session 58.2] — 2026-05-03 — Autouse DB redirect fixture (#176)
+
+### Context
+
+While verifying #173, observed that the venv pytest run added 11 junk
+rows (ids 515-525) to `cnn_training_sessions` in production
+`coinbase.db`. Tests calling `agent.train_on_history(...)` end at
+`agents/cnn_agent.py:2881 await database.save_training_session(result)`,
+which writes via `database.DB_PATH` set at module import from
+`config.database_url`. The existing `tmp_db` fixture only mutates
+DATABASE_URL — it does NOT monkeypatch the already-imported
+`database.DB_PATH`, so non-`init_db` tests continued to write to the
+real file.
+
+22 junk training-history rows accumulated in coinbase.db across multiple
+sessions before the autouse fixtures landed (504-525 visible in the
+post-#172 audit). Historical pollution preserved as-is — fix targets
+future runs only.
+
+### Changes
+
+- **#176a RED — `tests/test_database_isolation.py` (NEW)**: two asserts
+  that `database.DB_PATH` does NOT resolve to the real `backend/coinbase.db`
+  file and is not under `backend/`.
+- **#176b GREEN — `tests/conftest.py`**: added `_redirect_database_path`
+  autouse fixture that monkeypatches `database.DB_PATH` to a per-test
+  tmp directory. Sibling of the #173 cache redirect — same defense-by-
+  default pattern.
+
+### Tests (all GREEN)
+
+- `tests/test_database_isolation.py` — 2/2 PASSED
+- Full pytest suite still GREEN with both autouse fixtures in place.
+  Tests that explicitly use `tmp_db` + `init_db` reload the database
+  module which re-reads DATABASE_URL — overriding this autouse default
+  with the test's own tmp DB path. Compatible by design.
 
 ---
 

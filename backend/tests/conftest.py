@@ -40,6 +40,28 @@ def _redirect_cnn_dataset_cache(tmp_path_factory, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _redirect_database_path(tmp_path_factory, monkeypatch):
+    """Safety net: prevent any test from writing to the production coinbase.db.
+
+    Background (#176): tests that call `agent.train_on_history(...)` end at
+    `agents/cnn_agent.py:2881 await database.save_training_session(result)`,
+    which writes via `database.DB_PATH` (set at module import from
+    `config.database_url`). The existing `tmp_db` fixture only sets
+    DATABASE_URL — it does NOT monkeypatch `database.DB_PATH`, so already-
+    imported `database.DB_PATH` keeps its production value unless
+    `init_db` reloads the module.
+
+    Autouse here so EVERY test gets the redirect. Tests that explicitly
+    use `tmp_db` + `init_db` will reload `database` and pick up their
+    own DATABASE_URL — that wins over this autouse monkeypatch.
+    """
+    import database
+    tmp_dir = tmp_path_factory.mktemp("coinbase_db_isolated")
+    monkeypatch.setattr(database, "DB_PATH", str(tmp_dir / "coinbase.db"))
+    yield
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Single event loop for the entire test session."""
