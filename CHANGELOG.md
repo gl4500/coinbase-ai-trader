@@ -57,6 +57,63 @@ test."*
 
 ---
 
+## [Session 58.1] — 2026-05-03 — Quarantine corrupted dataset cache + autouse test isolation (#172, #173)
+
+### Context
+
+While preparing to measure Δ AUC from the #157 Ch 15 fix on a fresh v11
+cache, `tools/feature_set_compare.py` failed with `KeyError: 'BTC-USD'`.
+Investigation found the production cache file
+`backend/cnn_dataset_cache.pt` (3.2 MB) contained synthetic test fixture
+data — 10 fake products `COIN0-USD..COIN9-USD`, 486 samples on
+sinusoidal candles with `start=1_700_000_000+i*3600`. Eleven consecutive
+production trains (ids 504-514) had run on this junk, producing tiny
+sample counts (78-1020) and near-random val_auc.
+
+Root cause traced to `tests/test_cnn_agent.py:1027` and `:1051`: the
+`_make_products_and_candles` helper generates synthetic 6-product
+fixtures and the test methods call `agent.train_on_history(...)`
+directly. The correct pattern (e.g. `tests/test_cnn_agent.py:2956`)
+monkeypatches `_DATASET_CACHE_PATH` to a tmp path, but the offending
+tests omitted the redirect — every test run silently overwrote the
+production cache.
+
+### Changes
+
+- **#172 — quarantine**: renamed corrupted `cnn_dataset_cache.pt` →
+  `cnn_dataset_cache.corrupted_20260503_135915.pt` (preserved for forensic
+  analysis, not deleted).
+- **#173a RED — `tests/test_dataset_cache_isolation.py` (NEW)**: two
+  asserts that during any pytest session, `_DATASET_CACHE_PATH` does NOT
+  resolve to the real production file and is not under `backend/`.
+- **#173b GREEN — `tests/conftest.py`**: added `_redirect_cnn_dataset_cache`
+  autouse fixture that monkeypatches `agents.cnn_agent._DATASET_CACHE_PATH`
+  to a per-test tmp directory. Defends against the entire class of bug —
+  any future test that touches the cache via deep import side-effects is
+  now safe by default rather than per-method opt-in.
+
+### Tests (all GREEN)
+
+- `tests/test_dataset_cache_isolation.py` — 2/2 PASSED
+- Full venv suite: 241 passed, 8 xfailed, 0 failed in 154s
+
+### Verified
+
+- `cnn_model_glu1.pt` mtime = 2026-05-02 21:06:20 UTC, predates all 22
+  junk training rows (504-525, 16:30-18:06 UTC on 2026-05-03). Disk model
+  weights are intact from the last legitimate train (id 503,
+  val_auc=0.6092, 359689 samples, fit_status=REJECTED).
+- After v11 cache rebuild on next big train, #157 Δ AUC measurement (#160)
+  can proceed.
+
+### Follow-up
+
+- **#176**: tests also pollute production `coinbase.db` with junk
+  `cnn_training_sessions` rows (515-525 from the 2026-05-03 venv run).
+  Same fix pattern needed for `DATABASE_URL` redirect.
+
+---
+
 ## [Session 57] — 2026-05-02 — Cash-flow phase 1: bump ATR trail floor 3% → 6% (#115)
 
 ### Context

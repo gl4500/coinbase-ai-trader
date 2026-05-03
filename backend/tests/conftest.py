@@ -19,6 +19,27 @@ os.environ.setdefault("DRY_RUN",                  "true")
 os.environ.setdefault("LOG_LEVEL",                "WARNING")
 
 
+@pytest.fixture(autouse=True)
+def _redirect_cnn_dataset_cache(tmp_path_factory, monkeypatch):
+    """Safety net: prevent any test from writing to the real CNN dataset cache.
+
+    Background (#173): tests that call `agent.train_on_history(...)` without
+    monkeypatching `_DATASET_CACHE_PATH` silently overwrite the production
+    cache file at `backend/cnn_dataset_cache.pt`. This corrupted real
+    candle data with synthetic 6-product fixture data on 2026-05-03,
+    causing 11 consecutive trains to run on junk samples.
+
+    Autouse here so EVERY test gets the redirect, even ones that don't
+    realise they touch the cache (e.g. via deep import side-effects).
+    """
+    import agents.cnn_agent as ca
+    tmp_dir = tmp_path_factory.mktemp("cnn_cache_isolated")
+    monkeypatch.setattr(
+        ca, "_DATASET_CACHE_PATH", str(tmp_dir / "dataset_cache.pt")
+    )
+    yield
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Single event loop for the entire test session."""
