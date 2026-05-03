@@ -154,6 +154,44 @@ future runs only.
 
 ---
 
+## [Session 58.3] — 2026-05-03 — Tiered blacklist evaluator: services/product_status.py (#120, #122, #123)
+
+### Context
+
+Task #120 — auto-blacklist losing pairs by per-product Sharpe — needs a
+graduated tier system rather than a binary in/out gate. The user's stated
+concern was: *"what if you blacklist losers then they become winners?"*
+A three-tier ladder with one-step transitions answers that: a Suspended
+product earns its way back via Probation (paper trades), where a small
+positive Sharpe is enough to re-enter Active.
+
+### Changes
+
+- **#122 — `tests/test_product_status.py` (already-RED)**: 13 tests
+  covering constants, min-sample gate, demote/promote paths (each only
+  one tier per evaluation), and the boundary-stdev hold case. xfail mark
+  removed in this commit so they run as ordinary tests.
+- **#123 — `services/product_status.py` (NEW, GREEN)**: implements
+  `compute_status(trades, current) → (new_status, reason)`. Sharpe is
+  computed as mean(pnl_pct) / stdev(pnl_pct) over the most recent N
+  closed trades; below MIN_TRADES_FOR_REVIEW=10 the status holds. Demote
+  threshold SHARPE_DEMOTE=-0.5; promote threshold SHARPE_PROMOTE=+0.2;
+  zero-variance / very-tight clusters (`stdev < 0.005`) hold to avoid
+  amplifying tiny-mean noise into a Sharpe signal.
+
+### Tests (all GREEN)
+
+- `tests/test_product_status.py` — 13/13 PASSED in 2.76s.
+
+### Pending
+
+- **#124**: persistence — `product_status` DB table + helpers.
+- **#125**: wire status into `_CNNBook.buy()` (block/half-size) and into
+  the scan-loop evaluator (recompute on trade close).
+- **#126**: CHANGELOG + memory updates after #124-#125.
+
+---
+
 ## [Session 57] — 2026-05-02 — Cash-flow phase 1: bump ATR trail floor 3% → 6% (#115)
 
 ### Context
