@@ -12,14 +12,20 @@ silently inert until a model file is dropped on disk.
 
 Default artifact paths sit beside the CNN checkpoint at backend/, so the
 sibling files are discoverable by the same Operator runbook.
+
+XGB-Step2 (#180): A pickled IsotonicRegression at xgb_calibration.pkl is
+loaded alongside the booster (when present) and applied to raw output
+before clipping. Fixes the live U-shape calibration discovered in the
+shadow window without retraining the booster.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import pickle
 import threading
-from typing import List, Sequence, Union
+from typing import List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -28,6 +34,7 @@ logger = logging.getLogger(__name__)
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODEL_PATH = os.path.join(_BACKEND_DIR, "xgb_model.json")
 _FEATURES_PATH = os.path.join(_BACKEND_DIR, "xgb_features.json")
+_CALIBRATION_PATH = os.path.join(_BACKEND_DIR, "xgb_calibration.pkl")
 
 _NEUTRAL = 0.5
 _FEATURE_SET_DEFAULT = "v1"
@@ -36,6 +43,7 @@ _lock = threading.Lock()
 _booster = None
 _feature_names: List[str] = []
 _feature_set: str = _FEATURE_SET_DEFAULT
+_calibration: Optional[object] = None
 _load_attempted: bool = False
 _load_succeeded: bool = False
 
@@ -44,8 +52,8 @@ ChannelsLike = Union[np.ndarray, Sequence[Sequence[float]]]
 
 
 def _try_load() -> bool:
-    """Load Booster + feature_names from disk once. Idempotent."""
-    global _booster, _feature_names, _feature_set, _load_attempted, _load_succeeded
+    """Load Booster + feature_names + optional calibrator from disk once. Idempotent."""
+    global _booster, _feature_names, _feature_set, _calibration, _load_attempted, _load_succeeded
     with _lock:
         if _load_attempted:
             return _load_succeeded
@@ -74,6 +82,25 @@ def _try_load() -> bool:
                 "xgb_signal: loaded booster (%d features, set=%s)",
                 len(names), _feature_set,
             )
+            if os.path.exists(_CALIBRATION_PATH):
+                try:
+                    with open(_CALIBRATION_PATH, "rb") as f:
+                        _calibration = pickle.load(f)
+                    logger.info(
+                        "xgb_signal: loaded isotonic calibrator from %s",
+                        _CALIBRATION_PATH,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "xgb_signal: failed to load calibrator (raw passthrough): %s",
+                        exc,
+                    )
+                    _calibration = None
+            else:
+                logger.info(
+                    "xgb_signal: no calibrator at %s — raw passthrough",
+                    _CALIBRATION_PATH,
+                )
             return True
         except Exception as exc:
             logger.exception("xgb_signal: failed to load artifacts: %s", exc)
@@ -99,6 +126,8 @@ def xgb_prob(channels: ChannelsLike) -> float:
         features, _ = extract_features(arr, feature_set=_feature_set)
         dmat = xgb.DMatrix(features, feature_names=_feature_names)
         raw = float(_booster.predict(dmat)[0])
+        if _calibration is not None:
+            raw = float(_calibration.transform(np.asarray([raw]))[0])
         return float(np.clip(raw, 0.01, 0.99))
     except Exception as exc:
         logger.exception("xgb_signal.xgb_prob failed, returning neutral: %s", exc)

@@ -5,6 +5,107 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.8] — 2026-05-04 — XGB-Step2: post-hoc isotonic calibration (#180)
+
+### Context
+
+The Phase 4 calibration_probe walk-forward CV passed monotonicity, but
+4 days of live shadow data show a U-shaped win-rate-by-bucket curve on
+resolved BUYs (n=371):
+
+```
+raw 0.20-0.30: 51.2%   (overconfident-low — actually wins)
+raw 0.30-0.40: 46.8%
+raw 0.40-0.50: 36.1%
+raw 0.50-0.60: 33.8%   trough
+raw 0.60-0.70: 50.0%
+raw 0.70-0.80: 86.8%
+raw 0.80-0.90: 90.0%   peak
+```
+
+The booster's *ranking* is fine — high-prob predictions really do win
+more. Its *absolute calibration* was off in the 0.30-0.70 zone (likely
+ranging-market borderline buys the walk-forward CV averaged across
+regimes). Fixing this without retraining: post-hoc isotonic regression
+on live (raw_prob, win_label) pairs, applied between the booster and
+the [0.01, 0.99] clip in `xgb_signal.xgb_prob`.
+
+### Changes
+
+- **`backend/agents/xgb_signal.py` (#183)**:
+  - New `_CALIBRATION_PATH` module constant pointing at
+    `backend/xgb_calibration.pkl` (sibling of model + features).
+  - `_try_load()` now also tries to unpickle an `IsotonicRegression`;
+    missing pkl is logged and falls back to raw passthrough so Phase 5
+    behavior is preserved when no calibrator has been fit.
+  - `xgb_prob()` applies `iso.transform([raw])` between booster predict
+    and the [0.01, 0.99] clip — the safety clip stays last so
+    pathological 0.0/1.0 isotonic outputs can't reach the gate.
+- **`backend/tools/fit_xgb_calibration.py` (NEW, #184)**: pulls
+  `(confidence, outcome)` pairs from `signal_outcomes` for source='CNN',
+  side='BUY', `checked_at IS NOT NULL`, since 2026-05-03 19:15:15 UTC.
+  Refuses to fit on < 200 samples. Logs PRE/POST bucket WR + a 0..1
+  grid mapping so the calibration shape is visible at fit-time. Saves
+  pickled `IsotonicRegression(out_of_bounds='clip', y_min=0, y_max=1)`
+  to `backend/xgb_calibration.pkl`.
+- **`.gitignore`**: explicit ignore for `backend/xgb_model.json`,
+  `backend/xgb_features.json`, `backend/xgb_calibration.pkl` — matches
+  the existing `.pt` model-artifact convention. All three are built
+  locally and never committed.
+- **Backend restarted** at 2026-05-04 06:52 LOCAL after fitting; the
+  startup log confirms `xgb_signal: loaded isotonic calibrator from
+  backend/xgb_calibration.pkl`.
+
+### Tests
+
+- `backend/tests/test_xgb_signal.py` — 4 new cases (TestModuleAttributes
+  + TestCalibration class):
+  - `test_has_calibration_path` — module exposes monkeypatchable
+    `_CALIBRATION_PATH`.
+  - `test_calibration_pkl_remaps_raw_to_calibrated` — fits an isotonic
+    that maps the booster's raw output to 0.42, asserts xgb_prob
+    returns 0.42 (within 1e-6).
+  - `test_no_calibration_pkl_falls_back_to_raw` — preserves Phase 5
+    backwards-compat when pkl is missing.
+  - `test_calibration_clipped_to_safe_range` — even a degenerate
+    calibrator outputting 0.0 still gets clipped to 0.01 before return,
+    so downstream `model_prob > threshold` math is safe.
+- All 12 `test_xgb_signal.py` cases green.
+
+### Calibration grid (raw → calibrated)
+
+```
+0.20 → 0.286
+0.30 → 0.435
+0.50 → 0.435   (U-shape squashed flat in the bad zone)
+0.70 → 0.607
+0.80 → 0.867
+0.90 → 1.000   (clipped to 0.99 in xgb_prob)
+```
+
+Effective gate semantics under `CNN_BUY_THRESHOLD=0.80`: only raw
+booster outputs > 0.80 produce calibrated probs > 0.80, so fires now
+correspond to the well-calibrated peak of the curve only.
+
+### Follow-up tasks
+
+- **#181 XGB-Step3**: add `xgb_prob` REAL column to `cnn_scans` so
+  CNN and XGB probs can be logged in parallel during the remaining
+  3 days of the shadow window.
+- **Re-fit cadence**: `fit_xgb_calibration` should be re-run
+  weekly or when shadow N grows by ~50%. (Manual for now; cron
+  hookup tracked separately.)
+
+### Files touched
+
+- `backend/agents/xgb_signal.py`
+- `backend/tests/test_xgb_signal.py`
+- `backend/tools/fit_xgb_calibration.py` (new)
+- `.gitignore`
+- `CHANGELOG.md` (this entry)
+
+---
+
 ## [Session 58.7] — 2026-05-04 — XGB-Step1: lower CNN_BUY_THRESHOLD 0.99 → 0.80
 
 ### Context

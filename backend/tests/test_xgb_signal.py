@@ -12,9 +12,14 @@ Contract:
           process (Booster is loaded once and cached).
         - Mask honored implicitly via tools.xgb_features.extract_features —
           channels 17/18/19 are zeroed before the Booster sees them.
+        - **XGB-Step2** (#180): If xgb_calibration.pkl exists, an
+          IsotonicRegression remaps the raw booster output to fix the live
+          U-shape calibration. Calibration is optional — pkl missing means
+          raw passthrough (Phase 5 backwards-compat).
 """
 import json
 import os
+import pickle
 import sys
 
 import numpy as np
@@ -159,3 +164,103 @@ class TestModuleAttributes:
 
     def test_xgb_prob_is_callable(self, fresh_xgb_module):
         assert callable(fresh_xgb_module.xgb_prob)
+
+    def test_has_calibration_path(self, fresh_xgb_module):
+        """XGB-Step2 (#180): module exposes _CALIBRATION_PATH for monkeypatch.
+
+        Default points beside the booster artifacts at backend/xgb_calibration.pkl
+        so a single Operator runbook can copy all three files together.
+        """
+        assert hasattr(fresh_xgb_module, "_CALIBRATION_PATH")
+        assert fresh_xgb_module._CALIBRATION_PATH.endswith("xgb_calibration.pkl")
+
+
+# ── XGB-Step2: post-hoc isotonic calibration (#180) ───────────────────────────
+
+class TestCalibration:
+
+    def test_calibration_pkl_remaps_raw_to_calibrated(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        """When xgb_calibration.pkl exists, xgb_prob applies it to raw output.
+
+        Strategy: train a tiny booster that gives some raw output R, fit an
+        IsotonicRegression that maps R → 0.42 (intentionally far from any
+        natural booster output so the test cannot pass by coincidence), and
+        assert xgb_prob returns 0.42 (within float tolerance). Calibrator must
+        be applied BEFORE the [0.01, 0.99] clip.
+        """
+        from sklearn.isotonic import IsotonicRegression
+
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
+
+        x = _synthetic_channels(seed=7)
+        # Get the raw (uncalibrated) output by calling xgb_prob with no calibration
+        cal_path = str(tmp_path / "xgb_calibration.pkl")
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", cal_path)
+        raw = fresh_xgb_module.xgb_prob(x)  # no .pkl yet → raw passthrough
+
+        # Fit a calibrator that maps the observed raw value to exactly 0.42.
+        # IsotonicRegression needs at least 2 distinct x values; provide a
+        # spread so the fit is well-defined and 0.42 wins at x=raw.
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        xs = np.array([0.0, raw, 1.0], dtype=np.float64)
+        ys = np.array([0.0, 0.42, 1.0], dtype=np.float64)
+        iso.fit(xs, ys)
+        with open(cal_path, "wb") as f:
+            pickle.dump(iso, f)
+
+        # Reset lazy-load state so the next call picks up the new .pkl
+        fresh_xgb_module._load_attempted = False
+        fresh_xgb_module._load_succeeded = False
+        fresh_xgb_module._booster = None
+        fresh_xgb_module._calibration = None
+
+        cal = fresh_xgb_module.xgb_prob(x)
+        assert cal == pytest.approx(0.42, abs=1e-6), (
+            f"calibration not applied: raw={raw}, expected 0.42, got {cal}"
+        )
+
+    def test_no_calibration_pkl_falls_back_to_raw(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        """Missing xgb_calibration.pkl → raw booster output (no exception)."""
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
+        monkeypatch.setattr(
+            fresh_xgb_module, "_CALIBRATION_PATH",
+            str(tmp_path / "does_not_exist.pkl"),
+        )
+        x = _synthetic_channels(seed=8)
+        prob = fresh_xgb_module.xgb_prob(x)
+        assert isinstance(prob, float)
+        assert 0.01 <= prob <= 0.99
+
+    def test_calibration_clipped_to_safe_range(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        """Even if isotonic outputs 0.0 or 1.0, xgb_prob still clips to [0.01, 0.99].
+
+        Without this, downstream signal-blend math could divide by zero or
+        treat 1.0 as a hard certainty.
+        """
+        from sklearn.isotonic import IsotonicRegression
+
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
+
+        cal_path = str(tmp_path / "xgb_calibration.pkl")
+        # Calibrator that maps every raw input to exactly 0.0
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso.fit(np.array([0.0, 0.5, 1.0]), np.array([0.0, 0.0, 0.0]))
+        with open(cal_path, "wb") as f:
+            pickle.dump(iso, f)
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", cal_path)
+
+        x = _synthetic_channels(seed=9)
+        prob = fresh_xgb_module.xgb_prob(x)
+        assert prob == 0.01, f"expected post-calibration clip to 0.01, got {prob}"

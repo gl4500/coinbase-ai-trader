@@ -37,6 +37,11 @@ backend/*.pth
 backend/*.pt
 backend/*.bin
 
+# XGBoost artifacts (built locally via tools/train_xgb.py + tools/fit_xgb_calibration.py)
+backend/xgb_model.json
+backend/xgb_features.json
+backend/xgb_calibration.pkl
+
 # macOS / Windows
 .DS_Store
 Thumbs.db
