@@ -5,6 +5,90 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.6] — 2026-05-03 — Tiered blacklist landed end-to-end (#120)
+
+### Context
+
+Closes cash-flow lever 4 (#118/#120) — auto-blacklist losing pairs by
+per-product Sharpe so the live system shrinks size on weak products and
+paper-trades suspended ones, instead of sizing every product the same.
+Three-tier ladder driven by per-trade Sharpe over the most recent
+N=10 closed trades:
+
+- **Active**     → full-size trades
+- **Probation**  → ½-size trades (real money, reduced risk)
+- **Suspended**  → paper-trade only (signal logged, no execution)
+
+Iron rule: a product cannot skip tiers. Suspended must recover to
+Probation before it can return to Active — protects against a flip where
+a previously-blacklisted product becomes a winner mid-window.
+
+### Changes
+
+- **`backend/services/product_status.py` (NEW, #120a/#120b)**: pure
+  evaluator `compute_status(trades, current) -> (new_status, reason)`.
+  Constants: `MIN_TRADES_FOR_REVIEW=10`, `SHARPE_DEMOTE=-0.5`,
+  `SHARPE_PROMOTE=+0.2`, `_MIN_STDEV=0.005` (decimal). Held silent
+  unless N ≥ 10 to avoid noise from a 2-trade unlucky streak.
+- **`backend/database.py` (#120c)**: added `product_status` table
+  `(product_id PK, status, reason, last_evaluated_at, demoted_at)` +
+  index on `status`. Helpers: `get_product_status(pid)`,
+  `set_product_status(pid, status, reason)` (UPSERT;
+  `demoted_at` stamped iff `status=='suspended'`, cleared on any
+  other transition), `list_products_by_status(status)`.
+- **`backend/agents/cnn_agent.py` `_CNNBook.buy()` (#125a)**: reads
+  `product_status` at the top of `buy()`; missing row or `"active"` →
+  full `frac`; `"probation"` → `frac *= 0.5`; `"suspended"` →
+  paper-trade (logs CNN PAPER and returns `(0.0, 0.0)` without
+  spending or persisting a position).
+- **`backend/services/product_status.py` `evaluate_and_persist`
+  helper (#125b)**: pulls last N closed trades via
+  `database.get_trades(agent=..., product_id=..., closed_only=True,
+  limit=N)`, converts `pct_pnl` (stored ×100) to decimal, runs
+  `compute_status`, persists only on transition. Returns
+  `(old_status, new_status, changed)`.
+- **`backend/agents/cnn_agent.py` `_CNNBook.sell()` (#125b)**: after
+  the in-memory state has been persisted via `_save()`, calls
+  `product_status.evaluate_and_persist(pid, agent=self._agent)` so a
+  fresh trade close can immediately tip the product into the next
+  tier (or recover it). Wrapped in `try/except` — evaluator failures
+  log via `logger.exception` but never block the sell return.
+
+### Tests
+
+- `tests/test_product_status.py` — 21 cases:
+  - 13 for the pure `compute_status` evaluator (constants, min-sample
+    gate, demotion paths, promotion paths, neutral-Sharpe hold,
+    boundary at -0.5).
+  - 8 for `evaluate_and_persist` (insufficient trades, no-status row,
+    demote/promote/no-change paths, percent→decimal conversion gate,
+    null `pct_pnl` skip, `get_trades` arg passthrough).
+- `tests/test_database.py::TestProductStatusPersistence` — 11 cases
+  for the new table + helpers (idempotent init, get/set round-trip,
+  upsert, `demoted_at` stamp on suspended + clear on promotion,
+  `list_products_by_status`).
+- `tests/test_cnn_agent.py::TestCNNBookBuyProductStatus` — 4 cases
+  for buy() gating (no status row, active, probation halves frac,
+  suspended records no trade).
+- `tests/test_cnn_agent.py::TestCNNBookSellEvaluatesProductStatus` —
+  3 cases for sell() wiring (calls evaluator on success, skips
+  evaluator when close_trade fails, swallows evaluator exceptions
+  while completing the sell).
+- Full pre-commit suite: 742 passed, 8 xfailed (no regressions).
+
+### Live impact
+
+- `product_status` table is read-empty at runtime; until enough closed
+  trades accumulate for any product, `compute_status` returns
+  `(current, "hold: only N trades…")` — buy() reads no row → defaults
+  to `"active"` → full frac. So the change is a no-op until the
+  evaluator has signal.
+- `CNN_BUY_THRESHOLD=0.99` from #127 still blocks all CNN BUYs, so
+  the live capital exposure of #125a is double-gated: the auto-shut-off
+  is a passive observer until a future session relaxes the threshold.
+
+---
+
 ## [Session 58.5] — 2026-05-03 — Phase 6 flip — train XGB + MODEL_BACKEND=xgb live (#136)
 
 ### Context
