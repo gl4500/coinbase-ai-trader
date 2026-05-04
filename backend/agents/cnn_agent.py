@@ -196,6 +196,20 @@ class _CNNBook:
 
     async def buy(self, pid: str, price: float, frac: float,
                   trigger: str = "SCAN") -> Tuple[float, float]:
+        # #125a: tiered blacklist gating. Active (or no row) → full frac.
+        # Probation → half size (real money, reduced risk). Suspended →
+        # paper-trade only: log the signal but do not spend or open a trade.
+        status_row = await database.get_product_status(pid)
+        status = status_row["status"] if status_row else "active"
+        if status == "suspended":
+            logger.info(
+                "CNN PAPER %s @ %.6f frac=%.4f — suspended tier (no execution)",
+                pid, price, frac,
+            )
+            return 0.0, 0.0
+        if status == "probation":
+            frac *= 0.5
+
         spend = min(self.balance * frac, self.balance * 0.95)
         if spend < 1.0 or price <= 0:
             return 0.0, 0.0

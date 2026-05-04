@@ -680,6 +680,97 @@ class TestCNNBookReconciliation:
         assert book.positions == {}
 
 
+# ── _CNNBook.buy() product_status branching (#125a) ────────────────────────────
+
+class TestCNNBookBuyProductStatus:
+    """`_CNNBook.buy` must read `database.get_product_status(pid)` and adjust
+    sizing per tier:
+
+        active (or no row) → full frac (current behavior, unchanged)
+        probation          → frac × 0.5 (half-size, real money, real risk)
+        suspended          → paper-trade only (no spend, no DB write)
+
+    Until #124 lands runtime data into product_status, the table is empty
+    and every product reads None → 'active' default. Live shadow XGB
+    is unaffected.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_status_row_uses_full_frac(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        book.balance = 1000.0
+        with (
+            patch("agents.cnn_agent.database.get_product_status",
+                  new=AsyncMock(return_value=None)),
+            patch("agents.cnn_agent.database.open_trade", new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
+        ):
+            spend, size = await book.buy("BTC-USD", price=100.0, frac=0.1)
+        assert spend == 100.0, (
+            "no product_status row → default to 'active' tier (full frac)"
+        )
+        assert size == 1.0
+        assert "BTC-USD" in book.positions
+
+    @pytest.mark.asyncio
+    async def test_active_status_uses_full_frac(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        book.balance = 1000.0
+        with (
+            patch("agents.cnn_agent.database.get_product_status",
+                  new=AsyncMock(return_value={"status": "active"})),
+            patch("agents.cnn_agent.database.open_trade", new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
+        ):
+            spend, size = await book.buy("ETH-USD", price=100.0, frac=0.1)
+        assert spend == 100.0
+        assert size == 1.0
+
+    @pytest.mark.asyncio
+    async def test_probation_halves_frac(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        book.balance = 1000.0
+        open_mock = AsyncMock()
+        with (
+            patch("agents.cnn_agent.database.get_product_status",
+                  new=AsyncMock(return_value={"status": "probation"})),
+            patch("agents.cnn_agent.database.open_trade", open_mock),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
+        ):
+            spend, size = await book.buy("DOGE-USD", price=100.0, frac=0.1)
+        assert spend == 50.0, (
+            f"probation must halve frac (1000*0.05=50.0), got {spend}"
+        )
+        assert size == 0.5
+        # Still a real trade — must hit DB
+        open_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_suspended_records_no_trade(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        book.balance = 1000.0
+        open_mock = AsyncMock()
+        save_mock = AsyncMock()
+        with (
+            patch("agents.cnn_agent.database.get_product_status",
+                  new=AsyncMock(return_value={"status": "suspended"})),
+            patch("agents.cnn_agent.database.open_trade", open_mock),
+            patch("agents.cnn_agent.database.save_agent_state", save_mock),
+        ):
+            spend, size = await book.buy("XRP-USD", price=100.0, frac=0.1)
+        assert spend == 0.0, "suspended must paper-trade only (no spend)"
+        assert size == 0.0
+        assert "XRP-USD" not in book.positions, (
+            "suspended must NOT add a position to the book"
+        )
+        assert book.balance == 1000.0, "suspended must not debit balance"
+        open_mock.assert_not_called()
+
+
 # ── GatedConv1d / GLU architecture tests ──────────────────────────────────────
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
