@@ -5,6 +5,77 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.10] — 2026-05-04 — CNN vs XGB delta probe + isotonic-calibrator pathology surfaced
+
+### Context
+
+Phase 6 shadow has been live ~24h with `MODEL_BACKEND=xgb`. Visual delta on
+`cnn_scans` rows since deploy was zero (cnn_prob == xgb_prob, expected since
+both reads come from the same xgb head when MODEL_BACKEND=xgb). To get a
+real CNN-vs-XGB comparison we need a retrospective on the labeled cache —
+no live changes, no model edits.
+
+### Changes
+
+- **`backend/tools/cnn_xgb_delta_probe.py` (NEW, exploratory — no test, lives
+  under `tools/` per existing oneoff convention)**:
+  - Reuses `tools.permutation_importance._load_model` and a new
+    `_load_val_split_with_products` (mirror of `_load_val_split` but tracks
+    pid per sample) to run CNN forward pass + XGB booster + isotonic
+    calibration on the same chronological 20% val tensor.
+  - Reports probability distributions, Pearson r, decision-agreement matrix
+    at the live thresholds (BUY > 0.8, SELL < 0.2), AUC per model, and
+    per-product / per-regime / per-time-slice cuts. Crucially, splits XGB
+    output into `XGBraw` (booster-only) and `XGBcal` (post-isotonic) so
+    calibrator-induced collapse can be isolated from booster signal.
+  - Read-only — touches no DB rows, no checkpoints, no live process.
+
+### Findings (val split: 83,614 samples, 24 distinct products)
+
+| Output | AUC | mean | std | p5 | p50 | p95 |
+|---|---|---|---|---|---|---|
+| CNN (glu1) | **0.6523** | 0.5007 | 0.1186 | 0.2949 | 0.5021 | 0.6987 |
+| XGB raw booster | **0.6036** | 0.4869 | 0.0627 | 0.4038 | 0.4822 | 0.5883 |
+| XGB after isotonic | **0.0506** | 0.4381 | 0.0360 | 0.4346 | 0.4346 | 0.4346 |
+
+- `Pearson r(CNN, XGBraw) = +0.33` — modest, models complement.
+- `Pearson r(CNN, XGBcal) = +0.10` — calibrator destroys correlation.
+- XGBcal is near-constant 0.4346 (p5=p50=p95 plateau). Live system has been
+  routing every trade decision through a model emitting essentially constant
+  output for ~24h. Under CNN_BUY_THRESHOLD=0.80 that's HOLD-only with a few
+  random BUYs at the plateau boundary.
+
+Per-product (XGBraw): 7 products with raw AUC > 0.60. STRK (0.745) and VARA
+(0.781) — XGB raw beats CNN. Per-regime: flat (CNN ~0.65 / XGBraw ~0.60 in
+both ranging and trending). Per-quintile: XGBraw stable 0.56–0.64 across
+val time, XGBcal degrades 0.15 → 0.005 (calibrator was fit on the start of
+val and is stale).
+
+### Verification
+
+```
+../.venv/Scripts/python.exe -m tools.cnn_xgb_delta_probe
+[delta] arch=glu1  n_val=83,614  channels=27  distinct_products=24
+=== overall AUC ===
+  CNN     AUC = 0.6523
+  XGBraw  AUC = 0.6036
+  XGBcal  AUC = 0.0506
+```
+
+### Memory
+
+`xgb_feature_optimization_findings.md` updated with a 2026-05-04
+retrospective section and three remediation options (drop calibrator /
+refit on cache val / switch to Platt scaling).
+
+### Next (awaiting decision)
+
+- Cheapest fix: stop loading `xgb_calibration.pkl` in `xgb_signal._try_load`
+  → live XGB AUC 0.05 → 0.60 with no retrain. Threshold needs retuning
+  since raw output centers at 0.487 not 0.5.
+
+---
+
 ## [Session 58.9] — 2026-05-04 — XGB-Step3: parallel xgb_prob shadow logging (#181)
 
 ### Context
