@@ -5,6 +5,84 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.11] — 2026-05-04 — Calibrator refit on cache val split (#187) — XGBcal AUC 0.05 → 0.61
+
+### Context
+
+Session 58.10 surfaced that the production isotonic calibrator (fit on
+~300 resolved CNN BUYs from `signal_outcomes` per #180) collapsed to a
+near-constant 0.4346 across ~95% of the booster's [0.4, 0.6] output range.
+Live XGB has been emitting effectively-constant probabilities for ~24h.
+
+User asked to **fix the calibrator** rather than drop it. Fix follows
+sklearn's CalibratedClassifierCV pattern: refit on a held-out slice of the
+same distribution as the booster's training data (the dataset cache's
+chronological 20% val split, 83k samples, balanced labels).
+
+### Changes
+
+- **`backend/tools/fit_xgb_calibration.py`**: added `--source cache` mode
+  alongside the legacy `--source shadow` (default kept for backward
+  compat). New `_load_cache_pairs()` mirrors
+  `tools.permutation_importance._load_val_split` (sorted-by-pid concat,
+  `_TRAINING_CONSTANT_CHANNELS` masking, 80/20 chronological cut), then
+  runs `xgb.Booster.predict` over the val tensor via
+  `tools.xgb_features.extract_features` (auto-detects v1 vs v2 from
+  feature-names length). Returns (raw_probs, labels) for `IsotonicRegression.fit`.
+  `fit_calibration(source="cache", ...)` dispatches accordingly with a
+  `_MIN_CACHE_SAMPLES = 5_000` floor.
+- **`backend/tests/test_fit_xgb_calibration.py` (NEW)**: 5 tests covering
+  the new path — `source` kwarg exists, calibrator doesn't collapse to
+  one plateau (≥5 unique grid values), monotone non-decreasing,
+  AUC preserved within 0.02 of raw booster, default kwarg routes to legacy
+  shadow path.
+- **`backend/xgb_calibration.pkl`** (binary, gitignored): refit. Old
+  artifact backed up to `xgb_calibration.pkl.bak.20260504`.
+
+### Verification (cache fit, 83,614 samples)
+
+```
+loaded 83614 (raw_prob, label) pairs from cache val split
+PRE-calibration win rate by raw bucket:
+  [0.40, 0.50)  n=50145  win= 44.0%
+  [0.50, 0.60)  n=26584  win= 56.5%
+  [0.60, 0.70)  n=2572   win= 67.6%
+  [0.70, 0.80)  n=568    win= 84.2%
+  [0.80, 0.90)  n=96     win= 99.0%
+Calibration grid (raw -> calibrated):
+  0.40 -> 0.3378   0.50 -> 0.5174   0.60 -> 0.6535
+  0.70 -> 0.7301   0.80 -> 0.9815   0.90 -> 1.0000
+```
+
+Re-ran `tools.cnn_xgb_delta_probe`:
+
+| Output | AUC (Session 58.10) | AUC (now) |
+|---|---|---|
+| CNN (glu1) | 0.6523 | 0.6523 |
+| XGBraw | 0.6036 | 0.6036 |
+| **XGBcal** | **0.0506** | **0.6065** |
+
+XGBcal now tracks XGBraw within +0.003 AUC and the calibrator no longer
+collapses ranking. Decision-agreement matrix shows XGBcal can fire SELL
+(472) and BUY (503) signals at live thresholds — previously it was
+HOLD-only with 0 SELLs (calibrator output never crossed 0.2).
+
+### Tests
+```
+tests/test_fit_xgb_calibration.py::TestCacheSourceCalibratorFit  5 passed
+```
+
+### Memory
+`xgb_feature_optimization_findings.md` already documents the pathology;
+no further memory edits needed.
+
+### Next
+- Restart backend so the lazy-loaded `_calibration` in
+  `agents.xgb_signal._try_load` re-reads the new pickle.
+- Continue XGB shadow watch with restored calibration.
+
+---
+
 ## [Session 58.10] — 2026-05-04 — CNN vs XGB delta probe + isotonic-calibrator pathology surfaced
 
 ### Context
