@@ -230,6 +230,17 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_trades_closed_at
                 ON trades(closed_at DESC);
 
+            CREATE TABLE IF NOT EXISTS product_status (
+                product_id        TEXT PRIMARY KEY,
+                status            TEXT NOT NULL,
+                reason            TEXT,
+                last_evaluated_at TEXT NOT NULL,
+                demoted_at        TEXT,
+                FOREIGN KEY (product_id) REFERENCES products(product_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_product_status_status
+                ON product_status(status);
+
             CREATE TABLE IF NOT EXISTS cnn_training_sessions (
                 id                       INTEGER PRIMARY KEY AUTOINCREMENT,
                 trained_at               TEXT NOT NULL,
@@ -951,3 +962,54 @@ async def get_training_sessions(limit: int = 50) -> List[Dict]:
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Product status (#120c — auto-blacklist tier persistence) ──────────────────
+
+async def get_product_status(product_id: str) -> Optional[Dict]:
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM product_status WHERE product_id = ?", (product_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def set_product_status(
+    product_id: str,
+    status: str,
+    reason: Optional[str] = None,
+) -> None:
+    """Upsert a product's blacklist tier.
+
+    `demoted_at` is stamped only when transitioning into 'suspended' and
+    cleared on any other status (including promotion back to 'probation'),
+    so the next demotion records a fresh timestamp instead of reusing a
+    stale one.
+    """
+    now = _now()
+    demoted_at = now if status == "suspended" else None
+    async with _db() as db:
+        await db.execute(
+            """INSERT INTO product_status
+                 (product_id, status, reason, last_evaluated_at, demoted_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(product_id) DO UPDATE SET
+                 status            = excluded.status,
+                 reason            = excluded.reason,
+                 last_evaluated_at = excluded.last_evaluated_at,
+                 demoted_at        = excluded.demoted_at""",
+            (product_id, status, reason, now, demoted_at),
+        )
+        await db.commit()
+
+
+async def list_products_by_status(status: str) -> List[str]:
+    async with _db() as db:
+        cursor = await db.execute(
+            "SELECT product_id FROM product_status WHERE status = ? "
+            "ORDER BY product_id", (status,)
+        )
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]

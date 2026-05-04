@@ -399,3 +399,100 @@ class TestCNNTrainingSessions:
         )
         row = cur.fetchone()
         assert row == (None, None, None, None)
+
+
+# ── Product status persistence (#120c — task #124) ───────────────────────────
+
+class TestProductStatusPersistence:
+    """Per-product blacklist tier (#120c). The evaluator in
+    `services.product_status` is pure and trade-driven; persistence lives in
+    `database` so the scan loop and `_CNNBook.buy()` can read the live status
+    without running the evaluator on every signal.
+
+    Schema: product_status(product_id PK, status TEXT NOT NULL,
+        reason TEXT, last_evaluated_at TEXT NOT NULL, demoted_at TEXT).
+    """
+
+    def test_table_created_by_init_db(self, db):
+        import sqlite3
+        cur = sqlite3.connect(db.DB_PATH).execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='product_status'"
+        )
+        assert cur.fetchone() is not None, (
+            "init_db() must create product_status table — required for #120c persistence"
+        )
+
+    def test_init_db_is_idempotent(self, db, run):
+        # Running init_db twice on the same path must not raise (production
+        # path: backend reboots against an existing DB file).
+        run(db.init_db())
+        run(db.init_db())
+
+    def test_get_returns_none_for_unknown_product(self, db, run):
+        assert run(db.get_product_status("DOGE-USD")) is None
+
+    def test_set_then_get_round_trips_status(self, db, run):
+        run(db.set_product_status("BTC-USD", "active"))
+        row = run(db.get_product_status("BTC-USD"))
+        assert row is not None
+        assert row["product_id"] == "BTC-USD"
+        assert row["status"] == "active"
+        assert row["last_evaluated_at"].endswith("+00:00"), (
+            "last_evaluated_at must be a UTC ISO timestamp"
+        )
+
+    def test_set_persists_reason(self, db, run):
+        run(db.set_product_status("ETH-USD", "probation",
+                                  reason="demote: per-trade sharpe=-0.612"))
+        row = run(db.get_product_status("ETH-USD"))
+        assert row["status"] == "probation"
+        assert row["reason"] == "demote: per-trade sharpe=-0.612"
+
+    def test_set_is_upsert(self, db, run):
+        run(db.set_product_status("SOL-USD", "active"))
+        run(db.set_product_status("SOL-USD", "probation",
+                                  reason="demote: sharpe=-0.7"))
+        row = run(db.get_product_status("SOL-USD"))
+        assert row["status"] == "probation"
+        assert row["reason"] == "demote: sharpe=-0.7"
+
+    def test_set_to_suspended_records_demoted_at(self, db, run):
+        """First entry into 'suspended' must stamp demoted_at — used by the
+        UI to show how long a pair has been blacklisted."""
+        run(db.set_product_status("XRP-USD", "suspended",
+                                  reason="demote: sharpe=-1.2"))
+        row = run(db.get_product_status("XRP-USD"))
+        assert row["status"] == "suspended"
+        assert row["demoted_at"] is not None
+        assert row["demoted_at"].endswith("+00:00")
+
+    def test_promotion_clears_demoted_at(self, db, run):
+        """Recovery (suspended -> probation) clears demoted_at so the next
+        demotion stamps a fresh timestamp rather than reusing the stale one."""
+        run(db.set_product_status("ADA-USD", "suspended",
+                                  reason="demote: sharpe=-1.0"))
+        run(db.set_product_status("ADA-USD", "probation",
+                                  reason="promote: sharpe=+0.3"))
+        row = run(db.get_product_status("ADA-USD"))
+        assert row["status"] == "probation"
+        assert row["demoted_at"] is None
+
+    def test_active_does_not_set_demoted_at(self, db, run):
+        run(db.set_product_status("LINK-USD", "active"))
+        row = run(db.get_product_status("LINK-USD"))
+        assert row["demoted_at"] is None
+
+    def test_list_products_by_status(self, db, run):
+        run(db.set_product_status("BTC-USD",  "active"))
+        run(db.set_product_status("ETH-USD",  "probation"))
+        run(db.set_product_status("DOGE-USD", "suspended"))
+        run(db.set_product_status("XRP-USD",  "suspended"))
+
+        suspended = run(db.list_products_by_status("suspended"))
+        assert sorted(suspended) == ["DOGE-USD", "XRP-USD"]
+
+        active = run(db.list_products_by_status("active"))
+        assert active == ["BTC-USD"]
+
+    def test_list_products_by_status_returns_empty_when_none(self, db, run):
+        assert run(db.list_products_by_status("suspended")) == []
