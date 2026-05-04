@@ -71,6 +71,7 @@ from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
 from services.okx_funding_history import fetch_funding_history
 from services.hmm_regime import get_detector, regime_blend
+from services import product_status
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
 _CNN_MAX_FRAC        = 0.15    # max 15% of portfolio per position
@@ -268,6 +269,15 @@ class _CNNBook:
             self._sum_loss_pct  += abs(pct_pnl)
 
         await self._save()
+
+        # #125b: re-evaluate product status on every successful close so a
+        # fresh trade can immediately tip a product into Probation/Suspended
+        # (or recover it). Evaluator failures must not block the trade.
+        try:
+            await product_status.evaluate_and_persist(pid, agent=self._agent)
+        except Exception:
+            logger.exception("product_status evaluator failed for %s", pid)
+
         return pnl
 
 logger = logging.getLogger(__name__)

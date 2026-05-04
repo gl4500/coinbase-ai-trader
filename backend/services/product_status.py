@@ -12,8 +12,13 @@ must recover to Probation before returning to Active. This guards the
 "what if a blacklisted loser becomes a winner?" case — recovery happens
 gradually under observation rather than as a coin-flip.
 """
+import logging
 import statistics
 from collections.abc import Sequence
+
+import database
+
+logger = logging.getLogger(__name__)
 
 STATUS_ACTIVE = "active"
 STATUS_PROBATION = "probation"
@@ -65,3 +70,41 @@ def compute_status(trades: Sequence[dict], current: str) -> tuple[str, str]:
         return current, "hold: already active"
 
     return current, f"hold: per-trade sharpe={sharpe:.3f}"
+
+
+async def evaluate_and_persist(
+    product_id: str,
+    *,
+    agent: str = "CNN",
+    n_trades: int = MIN_TRADES_FOR_REVIEW,
+) -> tuple[str, str, bool]:
+    """Pull recent closed trades, evaluate, and persist a status change.
+
+    `trades.pct_pnl` is stored in PERCENT units (×100); convert to decimal
+    before passing to `compute_status` so the `_MIN_STDEV` gate reflects
+    the same scale as `SHARPE_DEMOTE`/`SHARPE_PROMOTE`.
+    """
+    rows = await database.get_trades(
+        agent=agent,
+        product_id=product_id,
+        closed_only=True,
+        limit=n_trades,
+    )
+    trades_decimal = [
+        {"pnl_pct": float(r["pct_pnl"]) / 100.0}
+        for r in rows
+        if r.get("pct_pnl") is not None
+    ]
+
+    status_row = await database.get_product_status(product_id)
+    current = status_row["status"] if status_row else STATUS_ACTIVE
+
+    new_status, reason = compute_status(trades_decimal, current)
+    changed = new_status != current
+    if changed:
+        await database.set_product_status(product_id, new_status, reason)
+        logger.info(
+            "product_status %s: %s -> %s (%s)",
+            product_id, current, new_status, reason,
+        )
+    return current, new_status, changed

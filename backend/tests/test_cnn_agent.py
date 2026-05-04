@@ -3611,3 +3611,81 @@ class TestCNNBookSellOrdering:
         assert "XRP-USD" in book.positions, "position should remain on rollback"
         assert book.balance == balance_before, "balance must not change"
         assert book.realized_pnl == pnl_before, "realized_pnl must not change"
+
+
+class TestCNNBookSellEvaluatesProductStatus:
+    """#125b: every successful sell() must trigger product_status re-evaluation
+    so a fresh closed trade can immediately tip a product into Probation /
+    Suspended (or recover it). Wiring is event-driven on close — the N>=10
+    sample gate inside compute_status keeps things quiet until enough trades
+    have accumulated."""
+
+    @pytest.mark.asyncio
+    async def test_sell_calls_evaluate_and_persist_on_success(self):
+        from agents.cnn_agent import _CNNBook
+
+        book = _CNNBook()
+        book.positions["XRP-USD"] = {
+            "size": 100.0, "avg_price": 1.30,
+            "entry_time": 0.0, "peak_price": 1.30,
+        }
+        with (
+            patch("agents.cnn_agent.database.close_trade", new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
+            patch("agents.cnn_agent.product_status.evaluate_and_persist",
+                  new=AsyncMock(return_value=("active", "active", False)))
+                  as eval_mock,
+        ):
+            await book.sell("XRP-USD", 1.40, trigger="SCAN")
+
+        eval_mock.assert_awaited_once()
+        args, kwargs = eval_mock.call_args
+        assert ("XRP-USD" in args) or (kwargs.get("product_id") == "XRP-USD")
+
+    @pytest.mark.asyncio
+    async def test_sell_does_not_evaluate_when_close_trade_fails(self):
+        """If close_trade raises, no evaluation should be triggered — the
+        sell never actually persisted, so re-evaluating would feed stale
+        data."""
+        from agents.cnn_agent import _CNNBook
+
+        book = _CNNBook()
+        book.positions["XRP-USD"] = {
+            "size": 100.0, "avg_price": 1.30,
+            "entry_time": 0.0, "peak_price": 1.30,
+        }
+        with (
+            patch("agents.cnn_agent.database.close_trade",
+                  new=AsyncMock(side_effect=RuntimeError("DB down"))),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
+            patch("agents.cnn_agent.product_status.evaluate_and_persist",
+                  new=AsyncMock()) as eval_mock,
+        ):
+            with pytest.raises(RuntimeError):
+                await book.sell("XRP-USD", 1.40, trigger="SCAN")
+        eval_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sell_still_succeeds_when_evaluator_raises(self):
+        """A bug in evaluator must NEVER block a successful sell from
+        returning. Evaluator failures are observability concerns, not
+        trade-flow blockers."""
+        from agents.cnn_agent import _CNNBook
+
+        book = _CNNBook()
+        book.positions["XRP-USD"] = {
+            "size": 100.0, "avg_price": 1.30,
+            "entry_time": 0.0, "peak_price": 1.30,
+        }
+        with (
+            patch("agents.cnn_agent.database.close_trade", new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
+            patch("agents.cnn_agent.product_status.evaluate_and_persist",
+                  new=AsyncMock(side_effect=RuntimeError("evaluator boom"))),
+        ):
+            pnl = await book.sell("XRP-USD", 1.40, trigger="SCAN")
+
+        assert pnl == pytest.approx(10.0)  # (1.40 - 1.30) * 100
+        assert "XRP-USD" not in book.positions, (
+            "Position must close even if downstream evaluator fails"
+        )

@@ -18,6 +18,7 @@ winners?" — recovery is gradual and observation-based.
 """
 import os
 import sys
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -183,3 +184,179 @@ class TestHold:
         assert new == STATUS_ACTIVE, (
             "Demote rule is strict (≤) — boundary case should not demote"
         )
+
+
+# ── Orchestration helper: evaluate_and_persist (#125b) ───────────────────────
+
+def _row(pct_pnl: float) -> dict:
+    """Trade row as returned by database.get_trades — pct_pnl in percent units."""
+    return {"pct_pnl": pct_pnl}
+
+
+class TestEvaluateAndPersist:
+    """`evaluate_and_persist(pid, agent="CNN", n_trades=10)` — pulls recent
+    closed trades from `database.get_trades`, reads current status from
+    `database.get_product_status`, runs `compute_status`, and persists the
+    new status via `database.set_product_status` only if it changed.
+
+    Returns (old_status, new_status, changed).
+
+    Critical: `trades.pct_pnl` is stored in PERCENT units (×100) but
+    `compute_status` expects decimal form because of the `_MIN_STDEV=0.005`
+    gate. The helper must divide pct_pnl by 100 before passing to
+    `compute_status`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_insufficient_trades_returns_unchanged(self):
+        from services.product_status import evaluate_and_persist
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=[_row(-2.0)] * 5)), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value={"status": "active"})), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()) as set_mock:
+            old, new, changed = await evaluate_and_persist("BTC-USD")
+        assert (old, new, changed) == ("active", "active", False)
+        set_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_status_row_defaults_to_active(self):
+        from services.product_status import evaluate_and_persist
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=[])), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value=None)), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()) as set_mock:
+            old, new, changed = await evaluate_and_persist("BTC-USD")
+        assert old == "active"
+        assert new == "active"
+        assert changed is False
+        set_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_demote_path_persists_and_returns_changed(self):
+        """Active → Probation when sharpe ≤ -0.5; must persist."""
+        from services.product_status import evaluate_and_persist
+        # 10 losing trades in PERCENT units (pct_pnl as stored in DB)
+        rows = [_row(-3.0), _row(-1.0), _row(-4.0), _row(-2.0),
+                _row(-3.0), _row(-1.0), _row(-2.0), _row(-3.0),
+                _row(-2.0), _row(-4.0)]
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=rows)), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value={"status": "active"})), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()) as set_mock:
+            old, new, changed = await evaluate_and_persist("BTC-USD")
+        assert old == "active"
+        assert new == "probation"
+        assert changed is True
+        set_mock.assert_awaited_once()
+        args, kwargs = set_mock.call_args
+        # accept either positional or kwarg form
+        assert ("BTC-USD" in args) or (kwargs.get("product_id") == "BTC-USD")
+        assert ("probation" in args) or (kwargs.get("status") == "probation")
+
+    @pytest.mark.asyncio
+    async def test_promote_path_persists_and_returns_changed(self):
+        """Suspended → Probation when sharpe ≥ +0.2; must persist."""
+        from services.product_status import evaluate_and_persist
+        rows = [_row(+3.0), _row(+2.0), _row(+1.0), _row(+4.0),
+                _row(+2.0), _row(+3.0), _row(+5.0), _row(+1.0),
+                _row(+2.0), _row(+3.0)]
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=rows)), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value={"status": "suspended"})), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()) as set_mock:
+            old, new, changed = await evaluate_and_persist("ETH-USD")
+        assert old == "suspended"
+        assert new == "probation"
+        assert changed is True
+        set_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_change_returns_changed_false(self):
+        """Neutral sharpe between thresholds — no persist call."""
+        from services.product_status import evaluate_and_persist
+        # 10 trades with mean ~0 — neutral sharpe
+        rows = [_row(+1.0), _row(-1.0)] * 5
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=rows)), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value={"status": "active"})), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()) as set_mock:
+            old, new, changed = await evaluate_and_persist("BTC-USD")
+        assert old == "active"
+        assert new == "active"
+        assert changed is False
+        set_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pct_pnl_converted_from_percent_to_decimal(self):
+        """`trades.pct_pnl` is stored ×100; helper must divide by 100 before
+        feeding to compute_status — otherwise tiny variance trades (stdev ≈
+        0.001 in percent units = 0.1% in decimal) would never clear the
+        `_MIN_STDEV=0.005` decimal gate.
+
+        Construct a row set whose PERCENT-form stdev easily clears 0.005 but
+        whose DECIMAL-form stdev (÷100) falls below it. The helper should
+        return a 'hold' on the decimal form, NOT a transition.
+        """
+        from services.product_status import evaluate_and_persist
+        # In percent: stdev ≈ 0.10 (clearly > 0.005)
+        # In decimal: stdev ≈ 0.001 (< 0.005, gate fires → no Sharpe → hold)
+        rows = [_row(-0.5)] * 5 + [_row(-0.3)] * 5  # all losing, low variance
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=rows)), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value={"status": "active"})), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()) as set_mock:
+            old, new, changed = await evaluate_and_persist("BTC-USD")
+        assert (old, new, changed) == ("active", "active", False), (
+            "If pct_pnl wasn't converted to decimal, the percent-form stdev "
+            "would clear the gate and a demote could fire. Conversion is required."
+        )
+        set_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_rows_with_null_pct_pnl(self):
+        """Defensive: rows where pct_pnl IS NULL must be skipped, not crash."""
+        from services.product_status import evaluate_and_persist
+        # mix valid + None — only the valid ones should reach compute_status
+        rows = [_row(-3.0), {"pct_pnl": None}, _row(-1.0), _row(-4.0),
+                _row(-2.0), _row(-3.0), _row(-1.0), _row(-2.0),
+                _row(-3.0), _row(-2.0), _row(-4.0)]
+        with patch("services.product_status.database.get_trades",
+                   AsyncMock(return_value=rows)), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value={"status": "active"})), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()):
+            old, new, changed = await evaluate_and_persist("BTC-USD")
+        assert old == "active"
+        # 10 valid losses → demote
+        assert new == "probation"
+        assert changed is True
+
+    @pytest.mark.asyncio
+    async def test_passes_agent_and_limit_to_get_trades(self):
+        from services.product_status import evaluate_and_persist
+        get_trades_mock = AsyncMock(return_value=[])
+        with patch("services.product_status.database.get_trades", get_trades_mock), \
+             patch("services.product_status.database.get_product_status",
+                   AsyncMock(return_value=None)), \
+             patch("services.product_status.database.set_product_status",
+                   AsyncMock()):
+            await evaluate_and_persist("SOL-USD", agent="CNN", n_trades=10)
+        get_trades_mock.assert_awaited_once()
+        kwargs = get_trades_mock.call_args.kwargs
+        assert kwargs.get("agent") == "CNN"
+        assert kwargs.get("product_id") == "SOL-USD"
+        assert kwargs.get("closed_only") is True
+        assert kwargs.get("limit") == 10
