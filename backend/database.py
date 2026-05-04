@@ -146,6 +146,7 @@ async def init_db() -> None:
                 fast_rsi    REAL,
                 velocity    REAL,
                 vol_z       REAL,
+                xgb_prob    REAL,
                 scanned_at  TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_cnn_scans_time
@@ -273,6 +274,7 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN fast_rsi REAL",
             "ALTER TABLE cnn_scans ADD COLUMN velocity REAL",
             "ALTER TABLE cnn_scans ADD COLUMN vol_z REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
@@ -550,8 +552,8 @@ async def save_cnn_scan(scan: Dict) -> None:
                (product_id, price, cnn_prob, llm_prob, model_prob,
                 cnn_weight, llm_weight, side, strength, signal_gen,
                 regime, adx, rsi, macd, mfi, stoch_k, atr, vwap_dist,
-                fast_rsi, velocity, vol_z, scanned_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                fast_rsi, velocity, vol_z, xgb_prob, scanned_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan["product_id"], scan["price"],
                 scan.get("cnn_prob"), scan.get("llm_prob"), scan["model_prob"],
@@ -561,6 +563,7 @@ async def save_cnn_scan(scan: Dict) -> None:
                 scan.get("macd"), scan.get("mfi"), scan.get("stoch_k"),
                 scan.get("atr"), scan.get("vwap_dist"),
                 scan.get("fast_rsi"), scan.get("velocity"), scan.get("vol_z"),
+                scan.get("xgb_prob"),
                 _now(),
             )
         )

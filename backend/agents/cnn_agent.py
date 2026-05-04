@@ -1915,6 +1915,7 @@ class CoinbaseCNNAgent:
         closes: List[float] = []
         ob = {}
 
+        xgb_shadow: Optional[float] = None
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob, _, _cached_ind = cached
@@ -1928,6 +1929,7 @@ class CoinbaseCNNAgent:
             fast_rsi_val = _cached_ind.get("fast_rsi_val", fast_rsi_val)
             vel_norm     = _cached_ind.get("vel_norm",     vel_norm)
             vol_z_norm   = _cached_ind.get("vol_z_norm",   vol_z_norm)
+            xgb_shadow   = _cached_ind.get("xgb_shadow",   None)
         else:
             # #98: fetch SEQ_LEN(60) + RV_PREFIX_BARS(60) + 20 buffer = 140
             # so closes_ext can satisfy the rv60 lookback at the first
@@ -2032,6 +2034,19 @@ class CoinbaseCNNAgent:
             )
             cnn_prob = self._cnn_prob(channels)
 
+            # Shadow XGB probability — log every scan regardless of MODEL_BACKEND
+            # so we can compare CNN vs XGB calibration on identical inputs (#181).
+            if config.model_backend == "xgb":
+                xgb_shadow = cnn_prob
+            else:
+                try:
+                    from agents import xgb_signal as _xgb
+                    xgb_shadow = _xgb.xgb_prob(
+                        _mask_training_constant_channels(channels)
+                    )
+                except Exception:
+                    xgb_shadow = None
+
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)
             _, _, _, bb_pos    = _bollinger(closes)
@@ -2049,6 +2064,7 @@ class CoinbaseCNNAgent:
                 "mfi_val": mfi_val, "stoch_k": stoch_k, "atr_val": atr_val,
                 "vwap_d": vwap_d, "fast_rsi_val": fast_rsi_val,
                 "vel_norm": vel_norm, "vol_z_norm": vol_z_norm,
+                "xgb_shadow": xgb_shadow,
             })
 
         # ── HMM regime detection → dynamic CNN/LLM blend ─────────────────────
@@ -2179,6 +2195,7 @@ class CoinbaseCNNAgent:
             "fast_rsi":    round(fast_rsi_val, 4),
             "velocity":    round(vel_norm, 4),
             "vol_z":       round(vol_z_norm, 4),
+            "xgb_prob":    round(xgb_shadow, 4) if xgb_shadow is not None else None,
         })
 
         if not passes:

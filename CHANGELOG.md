@@ -5,6 +5,58 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.9] — 2026-05-04 — XGB-Step3: parallel xgb_prob shadow logging (#181)
+
+### Context
+
+Steps 1+2 unblocked XGB live firing and corrected its U-shape calibration,
+but `cnn_scans` still only persists `cnn_prob` and the blended `model_prob`.
+For the Phase 7 cutover decision we need a per-row apples-to-apples
+comparison: every scan must store both the active-backend output (already in
+`cnn_prob`) **and** the XGB shadow output (new column), computed on the
+same masked feature tensor.
+
+### Changes
+
+- **`backend/database.py` (#186)**:
+  - Added `xgb_prob REAL` to `cnn_scans` CREATE TABLE.
+  - Added `ALTER TABLE cnn_scans ADD COLUMN xgb_prob REAL` to the in-place
+    migration list (safe on existing prod DB).
+  - Extended `save_cnn_scan` INSERT (now 23 columns, ?-list grew by one);
+    binding pulls `scan.get("xgb_prob")` so callers that omit it get NULL.
+- **`backend/agents/cnn_agent.py` (#186)**:
+  - In `generate_signal`, after `cnn_prob = self._cnn_prob(channels)`,
+    compute `xgb_shadow`. When `MODEL_BACKEND=xgb` it equals `cnn_prob`
+    (already xgb output, no double inference). When `MODEL_BACKEND=cnn`
+    it's `xgb_signal.xgb_prob(_mask_training_constant_channels(channels))`,
+    matching the masking `_cnn_prob` itself applies, so the shadow runs on
+    identical features. Exceptions in the shadow path silently fall back
+    to `None` — never break the CNN scan.
+  - Stored the shadow value alongside `cnn_prob` in `self._cache[pid][2]`
+    under key `"xgb_shadow"` so cache hits don't lose it on the
+    cnn-prob-cached fast path. Initialized to `None` upfront to keep both
+    branches type-safe.
+  - Pass `"xgb_prob": round(xgb_shadow, 4) if xgb_shadow is not None else None`
+    to `database.save_cnn_scan`.
+- **`backend/tests/test_database.py` (#185)**:
+  - New `TestCnnScansXgbProb` class with 3 RED→GREEN tests:
+    - `test_save_and_read_xgb_prob` — round-trips `xgb_prob=0.4242`.
+    - `test_xgb_prob_defaults_to_null_when_omitted` — backwards-compat.
+    - `test_xgb_prob_distinct_from_cnn_prob` — independent persistence.
+
+### Verification
+
+```
+tests\test_database.py::TestCnnScansXgbProb  3/3 PASSED
+tests\test_xgb_signal.py                    12/12 PASSED
+tests\test_cnn_agent.py::TestCoinbaseCNNAgent::test_cache_skips_fetch  PASSED
+```
+
+After backend restart, fresh `cnn_scans` rows have `xgb_prob` populated for
+every scan (or `NULL` if xgb_signal artifacts are missing — Phase 5 fallback).
+
+---
+
 ## [Session 58.8] — 2026-05-04 — XGB-Step2: post-hoc isotonic calibration (#180)
 
 ### Context

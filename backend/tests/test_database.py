@@ -496,3 +496,65 @@ class TestProductStatusPersistence:
 
     def test_list_products_by_status_returns_empty_when_none(self, db, run):
         assert run(db.list_products_by_status("suspended")) == []
+
+
+# ── XGB-Step3 (#181): xgb_prob column on cnn_scans ────────────────────────────
+
+class TestCnnScansXgbProb:
+    """Parallel xgb_prob logging in cnn_scans — XGB-Step3 (#181).
+
+    Lets the shadow window collect side-by-side (cnn_prob, xgb_prob) per
+    scan tick so we can compare ranking + win rate without flipping the
+    live MODEL_BACKEND.
+    """
+
+    def _scan_payload(self, **overrides) -> dict:
+        base = {
+            "product_id": "BTC-USD",
+            "price":      50_000.0,
+            "cnn_prob":   0.55,
+            "llm_prob":   0.40,
+            "model_prob": 0.50,
+            "cnn_weight": 0.6,
+            "llm_weight": 0.4,
+            "side":       "HOLD",
+            "strength":   0.0,
+            "signal_gen": False,
+            "regime":     "RANGING",
+            "adx":        18.0,
+            "rsi":        55.0,
+            "macd":       0.001,
+            "mfi":        50.0,
+            "stoch_k":    60.0,
+            "atr":        100.0,
+            "vwap_dist":  0.001,
+            "fast_rsi":   0.50,
+            "velocity":   0.0,
+            "vol_z":      0.0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_save_and_read_xgb_prob(self, db, run):
+        """save_cnn_scan persists xgb_prob; get_cnn_scans returns it."""
+        run(db.save_cnn_scan(self._scan_payload(xgb_prob=0.4242)))
+        rows = run(db.get_cnn_scans(product_id="BTC-USD", limit=1))
+        assert len(rows) == 1
+        assert "xgb_prob" in rows[0]
+        assert rows[0]["xgb_prob"] == pytest.approx(0.4242)
+
+    def test_xgb_prob_defaults_to_null_when_omitted(self, db, run):
+        """Backwards compat: callers that don't pass xgb_prob get NULL stored."""
+        run(db.save_cnn_scan(self._scan_payload()))
+        rows = run(db.get_cnn_scans(product_id="BTC-USD", limit=1))
+        assert len(rows) == 1
+        assert rows[0]["xgb_prob"] is None
+
+    def test_xgb_prob_distinct_from_cnn_prob(self, db, run):
+        """Stores cnn_prob and xgb_prob independently in a single row."""
+        run(db.save_cnn_scan(
+            self._scan_payload(cnn_prob=0.71, xgb_prob=0.33)
+        ))
+        rows = run(db.get_cnn_scans(product_id="BTC-USD", limit=1))
+        assert rows[0]["cnn_prob"] == pytest.approx(0.71)
+        assert rows[0]["xgb_prob"] == pytest.approx(0.33)
