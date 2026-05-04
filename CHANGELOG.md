@@ -5,6 +5,70 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.7] — 2026-05-04 — XGB-Step1: lower CNN_BUY_THRESHOLD 0.99 → 0.80
+
+### Context
+
+XGB shadow window opened 2026-05-03 19:15 (#136 Phase 6) with
+`MODEL_BACKEND=xgb` + `CNN_BUY_THRESHOLD=0.99`. Four days later the
+threshold has produced **zero hypothetical BUYs** — the booster output
+is clipped to [0.01, 0.99] inside `agents.xgb_signal.xgb_prob`, so
+nothing can ever exceed 0.99. The shadow window has been collecting
+predictions but no live fires, which means we have no execution data
+to inform the Phase 7 cutover decision.
+
+Worse, the resolved-BUY win-rate-by-bucket is **U-shaped**, not
+monotonic:
+
+```
+0.2-0.3: 30.4% (n=138)
+0.3-0.4: 27.8% (n=108)
+0.4-0.5: 13.7% (n=95)
+0.5-0.6: 11.5% (n=191)  ← trough
+0.6-0.7: 13.7% (n=168)
+0.7-0.8: 18.2% (n=181)
+0.8-0.9: 30.0% (n=120)  ← peak
+```
+
+Phase 7 cutover gate 3 ("monotonic calibration") fails on this shape.
+That drives Step 2 (calibrated retrain) — but Step 2 needs live fire
+data to validate against, which is what Step 1 unblocks.
+
+### Changes
+
+- **`.env` (line 41)**: `CNN_BUY_THRESHOLD=0.99` → `CNN_BUY_THRESHOLD=0.80`.
+  Inline comment block records the rationale: 0.8-0.9 bucket = 30% WR
+  over 4-day shadow window is the only monotonically-up region of the
+  calibration curve, so it's the safest non-zero firing threshold for
+  paper-money shadow-mode data collection. `DRY_RUN=true` keeps
+  everything paper-money. `CNN_SELL_THRESHOLD=0.40` unchanged.
+- **Backend restarted** at 2026-05-04 06:21:01 LOCAL (10:21:01 UTC).
+  Verified `xgb_signal: loaded booster (270 features, set=v1)` in
+  `backend/logs/backend.err` at 06:21:07. CNN-blend signals firing post-
+  restart (e.g. `[SELL] XRP-USD cnn=43.08% llm=32.00% blend=37.90%`),
+  confirming `cnn_prob` is being driven by the XGB booster as expected
+  under `MODEL_BACKEND=xgb`.
+
+### Tests
+
+No code change — `.env` is gitignored config. No new test required;
+existing `test_xgb_signal.py` still covers the booster path.
+
+### Follow-up tasks
+
+- **#180 XGB-Step2**: retrain XGB with isotonic / Platt calibration to
+  fix the U-shape. Hard gate before Phase 7 cutover.
+- **#181 XGB-Step3**: add `xgb_prob` REAL column to `cnn_scans` so we
+  can log CNN and XGB probabilities side-by-side in a true parallel
+  shadow mode (the spec for #136 Phase 6).
+
+### Files touched
+
+- `.env` (gitignored — change documented here only)
+- `CHANGELOG.md` (this entry)
+
+---
+
 ## [Session 58.6] — 2026-05-03 — Tiered blacklist landed end-to-end (#120)
 
 ### Context
