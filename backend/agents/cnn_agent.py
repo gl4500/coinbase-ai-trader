@@ -815,6 +815,41 @@ def _aligned_funding_rates(target_candles: List[Dict],
     return out
 
 
+def _aligned_oi_history(target_candles: List[Dict],
+                        oi_history: Optional[List[Tuple[int, float]]]) -> Optional[List[float]]:
+    """Return open-interest values aligned 1:1 with `target_candles` (forward-fill).
+
+    `oi_history` is a list of `(oi_time_ms, value)` tuples sorted ascending —
+    the format returned by `services.okx_oi_history.fetch_oi_history`. Each
+    target bar gets the most-recent OI snapshot whose `oi_time_ms <=
+    target_start_seconds * 1000`. Pre-target snapshots seed the initial
+    value so the series never starts None; if every snapshot is *after* the
+    first target bar, early bars are seeded with the first available value
+    (mirrors `_aligned_funding_rates` / `_aligned_btc_closes`). Returns None
+    when `oi_history` is empty/None (caller treats that as "no OI signal,
+    leave Ch 27 at zero").
+    """
+    if not oi_history:
+        return None
+    oi_sorted = sorted(oi_history, key=lambda tr: tr[0])
+    oi_times  = [int(t) for t, _ in oi_sorted]
+    oi_vals   = [float(v) for _, v in oi_sorted]
+
+    out: List[float] = []
+    last: Optional[float] = None
+    j = 0
+    n_oi = len(oi_times)
+    for c in target_candles:
+        ts_ms = int(c.get("start") or c.get("time") or 0) * 1000
+        while j < n_oi and oi_times[j] <= ts_ms:
+            last = oi_vals[j]
+            j += 1
+        if last is None:
+            last = oi_vals[0]
+        out.append(last)
+    return out
+
+
 def _build_samples_range(candles, i_start: int, i_end: int,
                          fb, seq_len: int, forward_hours: int,
                          label_thresh: float,

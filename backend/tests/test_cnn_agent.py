@@ -2940,6 +2940,70 @@ class TestAlignedFundingRatesHelper:
         assert _aligned_funding_rates(target, None) is None
 
 
+class TestAlignedOIHistoryHelper:
+    """`_aligned_oi_history(target_candles, oi_history)` mirrors
+    `_aligned_funding_rates`: returns a list of per-bar open-interest values
+    aligned 1:1 with `target_candles` via forward-fill (each bar gets the
+    most-recent OI snapshot whose `oi_time_ms <= bar_start_seconds * 1000`).
+    Used by `_build_dataset` so per-product training tensors get a real OI
+    series for Ch 27 (#143 OKX-Loop1). Input shape matches
+    `services.okx_oi_history.fetch_oi_history` — `List[Tuple[int, float]]`."""
+
+    def test_returns_list_with_target_length(self):
+        from agents.cnn_agent import _aligned_oi_history
+        target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
+        oi = [(1000 * 1000, 1_000_000.0)]
+        out = _aligned_oi_history(target, oi)
+        assert len(out) == len(target)
+
+    def test_forward_fills_single_event_to_all_bars(self):
+        from agents.cnn_agent import _aligned_oi_history
+        target = [{"start": 5000 + i * 3600, "close": 1.0} for i in range(3)]
+        oi = [(5000 * 1000, 2_500_000.0)]
+        assert _aligned_oi_history(target, oi) == [2_500_000.0] * 3
+
+    def test_forward_fills_across_oi_events_within_window(self):
+        """Two OI snapshots 4h apart — bars before the second snapshot keep
+        the first value; bars at/after the second snapshot switch to the new
+        value. OKX returns hourly OI in our pull, but the helper must not
+        assume any specific cadence."""
+        from agents.cnn_agent import _aligned_oi_history
+        target = [{"start": i * 3600, "close": 1.0} for i in range(10)]
+        oi = [
+            (0,                  1_000_000.0),
+            (4 * 3600 * 1000,    1_500_000.0),
+        ]
+        out = _aligned_oi_history(target, oi)
+        assert out[:4] == [1_000_000.0] * 4
+        assert out[4:] == [1_500_000.0] * 6
+
+    def test_pre_target_oi_seeds_initial_value(self):
+        """An OI event before the first target bar should provide the seed
+        value so the series is not None at index 0."""
+        from agents.cnn_agent import _aligned_oi_history
+        target = [{"start": 100_000 + i * 3600, "close": 1.0} for i in range(2)]
+        oi = [
+            (50_000 * 1000,                 900_000.0),
+            ((100_000 + 3600) * 1000,       950_000.0),
+        ]
+        assert _aligned_oi_history(target, oi) == [900_000.0, 950_000.0]
+
+    def test_seeds_with_first_event_when_target_starts_before_any_oi(self):
+        """If every OI event is *after* the first target bar, seed the early
+        bars with the first available value (mirrors _aligned_btc_closes /
+        _aligned_funding_rates behaviour — never return None inside list)."""
+        from agents.cnn_agent import _aligned_oi_history
+        target = [{"start": i * 3600, "close": 1.0} for i in range(3)]
+        oi = [(2 * 3600 * 1000, 1_234_567.0)]
+        assert _aligned_oi_history(target, oi) == [1_234_567.0] * 3
+
+    def test_returns_none_when_oi_empty_or_none(self):
+        from agents.cnn_agent import _aligned_oi_history
+        target = [{"start": 1000, "close": 1.0}]
+        assert _aligned_oi_history(target, []) is None
+        assert _aligned_oi_history(target, None) is None
+
+
 class TestBuildDatasetWiresBtcAndFiveMinute:
     """`_build_dataset` (closure in train_on_history) must pass real
     `btc_closes` (aligned per product) and `candles_5m` (per-product 5m
