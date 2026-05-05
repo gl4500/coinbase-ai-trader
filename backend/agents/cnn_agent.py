@@ -70,6 +70,7 @@ from services.history_backfill import load_history, load_5m_history
 from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
 from services.okx_funding_history import fetch_funding_history
+from services.okx_oi_history import fetch_oi_history
 from services.hmm_regime import get_detector, regime_blend
 from services import product_status
 
@@ -949,6 +950,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
                                forward_hours: int, label_thresh: float,
                                btc_closes: Optional[List[float]] = None,
                                funding_rates: Optional[List[float]] = None,
+                               oi_rates: Optional[List[float]] = None,
                                candles_5m: Optional[List[Dict]] = None):
     """Return (new_entry, status) for one product's per-product cache slot.
 
@@ -2496,7 +2498,7 @@ class CoinbaseCNNAgent:
                 if "start_time" in c and "start" not in c:
                     c["start"] = c["start_time"]
 
-        # [(pid, candles, btc_aligned, candles_5m, funding_aligned)]
+        # [(pid, candles, btc_aligned, candles_5m, funding_aligned, oi_aligned)]
         all_candle_sets: list = []
         for p in products:
             pid  = p["product_id"]
@@ -2539,8 +2541,15 @@ class CoinbaseCNNAgent:
                     pid, fr_start_ms, fr_end_ms
                 )
                 funding_aligned = _aligned_funding_rates(candles, funding_hist)
+                # Per-product OKX OI history (#143-A). Same forward-fill
+                # alignment as funding; `_aligned_oi_history` returns None
+                # when the fetcher yields no data, leaving Ch 27 at zero.
+                oi_hist = await fetch_oi_history(
+                    pid, fr_start_ms, fr_end_ms
+                )
+                oi_aligned = _aligned_oi_history(candles, oi_hist)
                 all_candle_sets.append(
-                    (pid, candles, btc_aligned, c5m, funding_aligned)
+                    (pid, candles, btc_aligned, c5m, funding_aligned, oi_aligned)
                 )
 
         _phase1_secs = _t.time() - _phase1_start
@@ -2576,12 +2585,13 @@ class CoinbaseCNNAgent:
                 )
             X_list, y_list, w_list = [], [], []
             hits = appends = rebuilds = skips = 0
-            for prod_idx, (pid, candles, btc_aligned, c5m, funding_aligned) in enumerate(all_candle_sets, 1):
+            for prod_idx, (pid, candles, btc_aligned, c5m, funding_aligned, oi_aligned) in enumerate(all_candle_sets, 1):
                 entry, status = _extend_or_rebuild_product(
                     cache.get(pid), candles, fb,
                     SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH,
                     btc_closes=btc_aligned,
                     funding_rates=funding_aligned,
+                    oi_rates=oi_aligned,
                     candles_5m=c5m,
                 )
                 if status == "skip":

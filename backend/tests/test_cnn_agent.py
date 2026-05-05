@@ -3262,6 +3262,62 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
             )
             assert fr[0] == 0.00012, "funding rate should match payload"
 
+    @pytest.mark.asyncio
+    async def test_extend_or_rebuild_receives_oi_rates(self):
+        """#143-A: Phase 1 must fetch per-product OKX OI history, align it to
+        candles via `_aligned_oi_history`, and forward `oi_rates=` to
+        `_extend_or_rebuild_product` so Ch 27 can be populated during training.
+        Mirrors the funding-rates wiring (#54). When the OI fetcher returns no
+        data the kwarg may be None — only assert that it's a list when data
+        is present."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("PyTorch not installed")
+
+        agent = CoinbaseCNNAgent()
+        products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
+        candles  = self._hourly(200)
+        first_ts_ms = int(candles[0]["start"]) * 1000
+        oi_payload = [(first_ts_ms, 2_500_000.0)]
+
+        seen = []
+        from agents.cnn_agent import _extend_or_rebuild_product as orig
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs)
+            return orig(*args, **kwargs)
+
+        with (
+            patch("agents.cnn_agent.database.get_products",
+                  new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.load_history", return_value=[]),
+            patch("agents.cnn_agent.load_5m_history", return_value=[]),
+            patch("agents.cnn_agent.fetch_funding_history",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.fetch_oi_history",
+                  new=AsyncMock(return_value=oi_payload)),
+            patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
+        ):
+            await agent.train_on_history(epochs=1)
+
+        assert seen, "expected _extend_or_rebuild_product calls"
+        n_with_oi = sum(
+            1 for k in seen if isinstance(k.get("oi_rates"), list)
+        )
+        assert n_with_oi == len(seen), (
+            f"all calls should pass oi_rates list; "
+            f"{n_with_oi}/{len(seen)} did"
+        )
+        for k in seen:
+            oi = k["oi_rates"]
+            assert len(oi) == len(candles), (
+                f"oi_rates len {len(oi)} != candles len {len(candles)}"
+            )
+            assert oi[0] == 2_500_000.0, "oi value should match payload"
+
 
 class TestMaskShrinkAndCacheBump:
     """#86: Ch 20 funding rate now sourced from OKX (replacing geo-blocked

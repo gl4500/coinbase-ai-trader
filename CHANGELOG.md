@@ -5,6 +5,51 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.13] — 2026-05-05 — Wire OKX OI fetch into Phase 1 (#143-A)
+
+### Context
+
+`services.okx_oi_history.fetch_oi_history` (#141/#142) and
+`_aligned_oi_history` (cnn_agent.py:842) have existed since the OKX-Loop1
+RED/GREEN tasks but the dataset builder Phase 1 never called them. To
+populate Ch 27 during training (#143-B) the per-product loop must first
+fetch OI alongside funding and forward an aligned series to
+`_extend_or_rebuild_product`.
+
+### Changes (TDD)
+
+- **`backend/tests/test_cnn_agent.py`**: added
+  `test_extend_or_rebuild_receives_oi_rates` mirroring the funding-rates
+  wiring test — patches `fetch_oi_history` to return a single-event payload
+  at the first candle's timestamp, runs `train_on_history(epochs=1)`,
+  asserts every spy capture of `_extend_or_rebuild_product` received
+  `oi_rates=` as a list with `len(candles)` and the payload value
+  forward-filled to bar 0.
+- **`backend/agents/cnn_agent.py`**:
+  - import `fetch_oi_history` from `services.okx_oi_history`
+  - in `_train_full_async` Phase 1 per-product loop, call
+    `fetch_oi_history(pid, fr_start_ms, fr_end_ms)` after the existing
+    funding fetch and align via `_aligned_oi_history(candles, oi_hist)`
+  - extend `all_candle_sets` tuple to 6 elements: `(pid, candles,
+    btc_aligned, c5m, funding_aligned, oi_aligned)`
+  - update tuple unpacking in nested `_build_dataset` and forward
+    `oi_rates=oi_aligned` to `_extend_or_rebuild_product`
+  - add `oi_rates: Optional[List[float]] = None` kwarg to
+    `_extend_or_rebuild_product` signature (no-op forward; #143-B will
+    plumb through to `_build_samples_range` + FeatureBuilder Ch 27)
+
+### Verification
+
+```
+tests/test_cnn_agent.py  16 passed
+  (TestBuildDatasetWiresBtcAndFiveMinute, TestAlignedFundingRates,
+   TestAlignedOiHistory)
+```
+
+No regressions in BTC/funding/5m wiring tests after tuple shape change.
+
+---
+
 ## [Session 58.12] — 2026-05-04 — Hot-reload endpoint for XGB calibrator (#192)
 
 ### Context
