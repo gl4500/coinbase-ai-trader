@@ -5,6 +5,47 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.12] — 2026-05-04 — Hot-reload endpoint for XGB calibrator (#192)
+
+### Context
+
+Session 58.11 refit `xgb_calibration.pkl` on disk but the running backend
+still holds the stale calibrator in `agents.xgb_signal._calibration`
+(lazy-loaded once via `_try_load`'s `_load_attempted` guard). A full process
+restart was the obvious fix, but two factors made it risky:
+
+1. CNN auto-train subprocess was running (per `feedback_no_restart_during_retrain`).
+2. Three confusing `python.exe` processes were live (trading_app, polymarket
+   .venv, Spyder) — kill-by-port was not safely deterministic.
+
+Cleaner option: mirror the existing `/api/cnn/model/reload` pattern with a
+`force_reload()` on `xgb_signal` and an admin endpoint that calls it.
+
+### Changes (TDD)
+
+- **`backend/agents/xgb_signal.py`**: added `force_reload() -> bool` that
+  drops cached `_booster`, `_feature_names`, `_feature_set`, `_calibration`,
+  resets the load-once guard, then re-runs `_try_load()`. Lock-protected.
+- **`backend/tests/test_xgb_signal.py`**: added `TestForceReload` class
+  with 3 tests — function exists, picks up swapped calibrator pickle on
+  disk (writes calibrator A, reads value, swaps to B, calls `force_reload`,
+  confirms B's value), returns False when artifacts missing.
+- **`backend/main.py`**: added `POST /api/xgb/calibration/reload` (auth
+  via `verify_api_key`) returning `{status, load_succeeded, calibration_loaded,
+  feature_set, n_features}`. Logs hot-reload outcome.
+
+### Verification
+
+```
+tests/test_xgb_signal.py  15 passed (3 new + 12 existing)
+```
+
+Live activation: pending — will call endpoint after CNN train subprocess
+(PID 4292) completes. The `cnn_train_progress.json` status flip from
+`running` → `completed` is the gate.
+
+---
+
 ## [Session 58.11] — 2026-05-04 — Calibrator refit on cache val split (#187) — XGBcal AUC 0.05 → 0.61
 
 ### Context

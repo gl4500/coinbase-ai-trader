@@ -107,6 +107,26 @@ def _try_load() -> bool:
             return False
 
 
+def force_reload() -> bool:
+    """Drop cached booster + calibrator + feature names and re-read from disk.
+
+    Use after refitting `xgb_calibration.pkl` (#187) or swapping the booster
+    artifacts so the running backend picks up the new files without a process
+    restart. Returns the new load_succeeded so callers can branch on whether
+    artifacts are present.
+    """
+    global _booster, _feature_names, _feature_set, _calibration
+    global _load_attempted, _load_succeeded
+    with _lock:
+        _booster = None
+        _feature_names = []
+        _feature_set = _FEATURE_SET_DEFAULT
+        _calibration = None
+        _load_attempted = False
+        _load_succeeded = False
+    return _try_load()
+
+
 def xgb_prob(channels: ChannelsLike) -> float:
     """XGBoost probability of upward target, in [0.01, 0.99].
 

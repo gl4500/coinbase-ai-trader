@@ -854,6 +854,34 @@ async def reload_cnn_model(_: None = Depends(verify_api_key)):
     }
 
 
+@app.post("/api/xgb/calibration/reload")
+async def reload_xgb_calibration(_: None = Depends(verify_api_key)):
+    """Hot-reload the XGB booster + isotonic calibrator from disk (#192).
+
+    Use after refitting `backend/xgb_calibration.pkl` via
+    `tools.fit_xgb_calibration --source cache` (#187) so the running
+    process picks up the new artifacts without a backend restart.
+
+    Returns:
+      - 200 {"status": "reloaded", "load_succeeded": True/False, ...}
+      - 200 {"status": "missing", ...} if booster artifacts are absent
+    """
+    from agents import xgb_signal
+    ok = xgb_signal.force_reload()
+    cal_present = xgb_signal._calibration is not None
+    logger.info(
+        "xgb_signal hot-reload via /api/xgb/calibration/reload "
+        f"(load_succeeded={ok}, calibration_loaded={cal_present})"
+    )
+    return {
+        "status": "reloaded" if ok else "missing",
+        "load_succeeded": ok,
+        "calibration_loaded": cal_present,
+        "feature_set": xgb_signal._feature_set if ok else None,
+        "n_features": len(xgb_signal._feature_names) if ok else 0,
+    }
+
+
 @app.post("/api/cnn/lgbm/retrain")
 async def force_lgbm_retrain(_: None = Depends(verify_api_key)):
     """

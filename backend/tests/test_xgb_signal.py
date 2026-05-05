@@ -264,3 +264,84 @@ class TestCalibration:
         x = _synthetic_channels(seed=9)
         prob = fresh_xgb_module.xgb_prob(x)
         assert prob == 0.01, f"expected post-calibration clip to 0.01, got {prob}"
+
+
+# ── #192: hot-reload after on-disk artifacts change ───────────────────────────
+
+class TestForceReload:
+    """Targets the new force_reload() that #192 adds.
+
+    Without it, agents.xgb_signal caches _booster + _calibration on first
+    call and never re-reads the pickle. After fitting a fresh calibrator
+    on disk (#187) the running backend keeps the old in-memory plateau
+    until process restart. force_reload() lets us flip the cached state
+    and re-read both artifacts without bouncing the FastAPI process.
+    """
+
+    def test_force_reload_function_exists(self, fresh_xgb_module):
+        """The reload entrypoint must exist and be callable."""
+        assert hasattr(fresh_xgb_module, "force_reload"), (
+            "agents.xgb_signal.force_reload missing — required for hot-swap "
+            "after on-disk calibrator refit (#187)"
+        )
+        assert callable(fresh_xgb_module.force_reload)
+
+    def test_force_reload_picks_up_swapped_calibrator(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        """Swap the on-disk pickle, call force_reload(), assert the next
+        xgb_prob() uses the *new* calibrator without restarting the module."""
+        from sklearn.isotonic import IsotonicRegression
+
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
+
+        cal_path = str(tmp_path / "xgb_calibration.pkl")
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", cal_path)
+
+        x = _synthetic_channels(seed=42)
+
+        # First calibrator: every raw input -> 0.30
+        iso_a = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso_a.fit(np.array([0.0, 0.5, 1.0]), np.array([0.30, 0.30, 0.30]))
+        with open(cal_path, "wb") as f:
+            pickle.dump(iso_a, f)
+
+        first = fresh_xgb_module.xgb_prob(x)
+        assert first == pytest.approx(0.30, abs=1e-6)
+
+        # Swap to a different calibrator on disk. Without force_reload the
+        # module still serves 0.30 from cache.
+        iso_b = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        iso_b.fit(np.array([0.0, 0.5, 1.0]), np.array([0.70, 0.70, 0.70]))
+        with open(cal_path, "wb") as f:
+            pickle.dump(iso_b, f)
+
+        # Sanity: cache still serves the old value.
+        cached = fresh_xgb_module.xgb_prob(x)
+        assert cached == pytest.approx(0.30, abs=1e-6), (
+            "module not actually caching — test setup invalid"
+        )
+
+        ok = fresh_xgb_module.force_reload()
+        assert ok is True, "force_reload should return True when artifacts present"
+
+        after = fresh_xgb_module.xgb_prob(x)
+        assert after == pytest.approx(0.70, abs=1e-6), (
+            f"force_reload did not pick up new calibrator: got {after}, "
+            f"expected 0.70"
+        )
+
+    def test_force_reload_returns_false_when_artifacts_missing(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        """If model files vanish between loads, force_reload returns False
+        and subsequent xgb_prob falls back to the neutral 0.5."""
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "nope.json"))
+        monkeypatch.setattr(
+            fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "also_nope.json")
+        )
+        ok = fresh_xgb_module.force_reload()
+        assert ok is False
+        assert fresh_xgb_module.xgb_prob(_synthetic_channels()) == 0.5
