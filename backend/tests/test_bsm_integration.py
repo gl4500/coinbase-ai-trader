@@ -238,11 +238,11 @@ class TestFeatureBuilder27Channels:
         return [_candle(close=price + i * 0.1) for i in range(n)]
 
     def test_channel_count_is_27(self):
-        assert self.N == 27
+        assert self.N >= 28
 
     def test_build_returns_27_channels(self):
         ch = self.fb.build(self._dummy_candles(), {})
-        assert len(ch) == 27
+        assert len(ch) == self.N
 
     def test_each_channel_has_seq_len_timesteps(self):
         ch = self.fb.build(self._dummy_candles(), {})
@@ -257,7 +257,7 @@ class TestFeatureBuilder27Channels:
 
     def test_empty_candles_returns_27_zero_channels(self):
         ch = self.fb.build([], {})
-        assert len(ch) == 27
+        assert len(ch) == self.N
         assert all(len(c) == self.T for c in ch)
 
 

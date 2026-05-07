@@ -5,6 +5,57 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.14] — 2026-05-06 — Populate Ch 27 OI in FeatureBuilder.build (#143-B)
+
+### Context
+
+#143-A landed the per-product OI fetch and forwarded an `oi_aligned` series
+through `_extend_or_rebuild_product`, but the array stopped one layer above
+`FeatureBuilder.build`. Ch 27 in the cache was still zeros, so XGB and CNN
+had no OI signal at training or inference. #143-B closes that gap and bumps
+the cache schema to v12 so the next rebuild populates Ch 27 from real OKX
+events.
+
+### Changes (TDD)
+
+- **`backend/agents/cnn_agent.py`**:
+  - `FeatureBuilder.build`: append `Ch 27 = oi_norm` (scalar `oi_rate / 3.0`
+    clipped to ±1, broadcast across `T=SEQ_LEN`), mirroring the Ch 20
+    funding pattern.
+  - `_build_samples_range`: accept new `oi_rates` kwarg, z-score over the
+    full per-product series (`(x − μ) / σ`), and forward per-sample
+    `oi_val_z` into `fb.build(oi_rate=…)`.
+  - `_extend_or_rebuild_product`: forward `oi_rates=oi_rates` into both
+    `_full_rebuild` and the append-path `_build_samples_range` call.
+  - `N_CHANNELS = 28`; `_DATASET_CACHE_VERSION = 12` (forces full rebuild
+    on next backend start — rebuild is #144).
+- **`backend/tests/test_cnn_agent.py`**:
+  - new spy tests assert Ch 27 carries OI in `FeatureBuilder.build`.
+  - `_zero_mask_channels` fixtures import `N_CHANNELS` instead of
+    hardcoding 27.
+  - `test_dataset_cache_version_bumped_to_11` asserts `>= 12`.
+  - `_FakeFB.build` and `_CapturingFB.build` mocks absorb the new
+    `oi_rate=None` kwarg so existing call sites keep passing.
+- **CHANGELOG + memory**: this entry; memory `xgb_feature_optimization_findings.md`
+  to be updated post-rebuild with measured AUC delta (#145).
+
+### Verification
+
+```
+cd backend
+.venv/Scripts/python -m pytest tests/test_cnn_agent.py \
+    tests/test_cnn_risk_exits.py tests/test_train_cloud.py
+# 249 passed, 2 xfailed, 5 xpassed in 678.90s
+```
+
+Live activation requires #144 (cache rebuild on next backend start) and a
+fresh XGB train on the new 28-channel cache before Ch 27 contributes.
+The `xgb_model.json` currently on disk is 270-feature (27 channels × 10
+stats); first inference call after restart will fall back to neutral 0.5
+because feature-count mismatch — addressed by the rebuild + retrain flow.
+
+---
+
 ## [Session 58.13] — 2026-05-05 — Wire OKX OI fetch into Phase 1 (#143-A)
 
 ### Context

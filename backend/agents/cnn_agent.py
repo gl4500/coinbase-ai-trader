@@ -301,7 +301,7 @@ except ImportError:
     _DEVICE = None
     logger.warning("PyTorch not found — CNN agent uses linear fallback")
 
-N_CHANNELS      = 27
+N_CHANNELS      = 28
 SEQ_LEN         = 60
 
 # Channels whose values are still constant-zero during training because the
@@ -477,7 +477,7 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 11  # bumped for #157: Ch 15 (ADX) was broadcasting
+_DATASET_CACHE_VERSION = 12  # bumped for #143-B: Ch 27 (OKX OI) added; channel count 27→28
                             # a single value computed on the full candle
                             # window across all 60 timesteps — every cached
                             # sample's Ch 15 series leaked future info.
@@ -880,6 +880,7 @@ def _build_samples_range(candles, i_start: int, i_end: int,
                          label_thresh: float,
                          btc_closes: Optional[List[float]] = None,
                          funding_rates: Optional[List[float]] = None,
+                         oi_rates: Optional[List[float]] = None,
                          candles_5m: Optional[List[Dict]] = None):
     """Build (X, y, indices) for sliding-window indices i in [i_start, i_end).
 
@@ -916,6 +917,16 @@ def _build_samples_range(candles, i_start: int, i_end: int,
     if candles_5m:
         c5m_starts = [int(c["start"]) for c in candles_5m]
 
+    # #143-B: z-score OI over the full per-product series so each sample's
+    # scalar OI is in standard-deviation units before fb.build clips at 3σ.
+    oi_mean: float = 0.0
+    oi_std: float = 1.0
+    if oi_rates is not None and len(oi_rates) > 0:
+        _oi_n = len(oi_rates)
+        oi_mean = sum(oi_rates) / _oi_n
+        _var = sum((v - oi_mean) ** 2 for v in oi_rates) / _oi_n
+        oi_std = math.sqrt(_var) if _var > 0 else 1.0
+
     for i in range(i_start, i_end):
         label = _label_triple_barrier(
             candles, i, forward_hours, _TB_UP_MULT, _TB_DN_MULT, label_thresh
@@ -932,6 +943,10 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         btc_win = (btc_closes[i - seq_len + 1: i + 1]
                    if btc_closes is not None else None)
         fr_val  = funding_rates[i] if funding_rates is not None else None
+        if oi_rates is not None:
+            oi_val_z = (oi_rates[i] - oi_mean) / oi_std
+        else:
+            oi_val_z = None
         # #98: 60-bar prefix lookback for RV20/RV60 — without it _rv_series
         # returns 0.0 for the first `window` bars, leaving Ch 25 (rv60)
         # constant-zero across the entire SEQ_LEN=60 window.
@@ -939,7 +954,7 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         closes_ext = [c["close"] for c in candles[ext_start: i + 1]]
         channels = fb.build(window, {}, candles_5m=five_m,
                             btc_closes=btc_win, funding_rate=fr_val,
-                            closes_ext=closes_ext)
+                            closes_ext=closes_ext, oi_rate=oi_val_z)
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
         idx_list.append(i)
@@ -983,6 +998,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
             fb, seq_len, forward_hours, label_thresh,
             btc_closes=btc_closes,
             funding_rates=funding_rates,
+            oi_rates=oi_rates,
             candles_5m=candles_5m,
         )
         return {
@@ -1008,6 +1024,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         fb, seq_len, forward_hours, label_thresh,
         btc_closes=btc_closes,
         funding_rates=funding_rates,
+        oi_rates=oi_rates,
         candles_5m=candles_5m,
     )
     return {
@@ -1258,6 +1275,7 @@ class FeatureBuilder:
               iv_rv60_spread: Optional[float] = None,
               ls_sentiment: Optional[float] = None,
               closes_ext: Optional[List[float]] = None,
+              oi_rate: Optional[float] = None,
               T: int = SEQ_LEN) -> List[List[float]]:
         if not candles:
             return [[0.0] * T] * N_CHANNELS
@@ -1473,6 +1491,14 @@ class FeatureBuilder:
         # Replaced Binance L/S (geo-blocked) with rolling up-vol / total-vol.
         ls_ch = _volume_sentiment(closes, volumes, window=20)
 
+        # ── Ch 27: Open Interest (#143-B) ─────────────────────────────────────
+        # Z-scored upstream by `_build_samples_range` over full per-product series.
+        # Clip to [-1, 1] via /3.0 (3σ → 1.0). Broadcast scalar across window
+        # like Ch 20 funding pattern.
+        oi_val  = float(oi_rate) if oi_rate is not None else 0.0
+        oi_norm = max(-1.0, min(1.0, oi_val / 3.0))
+        oi_ch   = [oi_norm] * len(closes)
+
         P = self._pad
         channels = [
             P(norm_c,                                  T),   # 0
@@ -1502,6 +1528,7 @@ class FeatureBuilder:
             P(ivrv20_ch,                               T),   # 24
             P(ivrv60_ch,                               T),   # 25
             P(ls_ch,                                   T),   # 26
+            P(oi_ch,                                   T),   # 27
         ]
         assert len(channels) == N_CHANNELS
         return channels

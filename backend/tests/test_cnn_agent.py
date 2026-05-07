@@ -1731,7 +1731,7 @@ class TestPerProductDatasetCache:
     class _FakeFB:
         """Minimal FeatureBuilder shim: 1-channel window of closes."""
         def build(self, window, _idx, candles_5m=None, btc_closes=None,
-                  funding_rate=None, closes_ext=None):
+                  funding_rate=None, closes_ext=None, oi_rate=None):
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
                 closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
@@ -2246,7 +2246,7 @@ class TestBuildSamplesRangeRealFiveMinute:
             self.calls = []
 
         def build(self, window, _idx, candles_5m=None, btc_closes=None,
-                  funding_rate=None, closes_ext=None):
+                  funding_rate=None, closes_ext=None, oi_rate=None):
             self.calls.append({
                 "window_start_ts":  window[0]["start"]  if window else None,
                 "window_end_ts":    window[-1]["start"] if window else None,
@@ -3095,6 +3095,171 @@ class TestAlignedOIHistoryHelper:
         assert _aligned_oi_history(target, None) is None
 
 
+class TestFeatureBuilderCh27OpenInterest:
+    """#143-B: `FeatureBuilder.build` must accept `oi_rate` (scalar, already
+    z-scored upstream by `_build_samples_range`) and emit Ch 27 broadcast
+    across the window — same pattern as Ch 20 (funding). N_CHANNELS bumps
+    27 → 28; channel-count assert at end of build matches the new value."""
+
+    def _make_candles(self, closes):
+        return [
+            {"start": 1700000000 + i * 3600,
+             "open": c - 0.1, "high": c + 0.5, "low": c - 0.5,
+             "close": c, "volume": 100.0}
+            for i, c in enumerate(closes)
+        ]
+
+    def test_n_channels_bumped_to_28(self):
+        from agents.cnn_agent import N_CHANNELS
+        assert N_CHANNELS == 28
+
+    def test_build_emits_28_channels(self):
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN, N_CHANNELS
+        fb = FeatureBuilder()
+        closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
+        channels = fb.build(self._make_candles(closes), {})
+        assert len(channels) == N_CHANNELS == 28
+
+    def test_build_oi_rate_default_is_zero_channel(self):
+        """No oi_rate kwarg → Ch 27 is all zeros (matches inference fallback
+        when OI fetch fails / is unavailable for a product)."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        fb = FeatureBuilder()
+        closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
+        channels = fb.build(self._make_candles(closes), {})
+        assert all(v == 0.0 for v in channels[27]), (
+            "Ch 27 should be all-zero when oi_rate is not provided"
+        )
+
+    def test_build_oi_rate_populates_ch27_broadcast(self):
+        """With `oi_rate=0.5` (already z-scored), Ch 27 should be a constant
+        non-zero series (broadcast across the SEQ_LEN window). Mirrors how
+        Ch 20 (funding) is broadcast across the window."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        fb = FeatureBuilder()
+        closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
+        channels = fb.build(
+            self._make_candles(closes), {}, oi_rate=0.5,
+        )
+        ch27 = channels[27]
+        assert len(ch27) == SEQ_LEN
+        assert all(abs(v - ch27[0]) < 1e-9 for v in ch27), (
+            "Ch 27 should be a constant series (broadcast)"
+        )
+        assert ch27[0] != 0.0, "non-zero oi_rate should populate Ch 27"
+
+    def test_build_oi_rate_clipped_to_unit_range(self):
+        """oi_rate is z-scored upstream; fb.build divides by 3 (3σ) and
+        clips to [-1, 1] so the channel is bounded like the rest."""
+        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        fb = FeatureBuilder()
+        closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
+        # extreme positive z-score → clip ceiling
+        channels = fb.build(self._make_candles(closes), {}, oi_rate=10.0)
+        assert channels[27][0] == 1.0
+        # extreme negative z-score → clip floor
+        channels = fb.build(self._make_candles(closes), {}, oi_rate=-10.0)
+        assert channels[27][0] == -1.0
+        # 0 → 0
+        channels = fb.build(self._make_candles(closes), {}, oi_rate=0.0)
+        assert channels[27][0] == 0.0
+
+
+class TestBuildSamplesRangeOIPlumbing:
+    """#143-B: `_build_samples_range` must accept `oi_rates` (list aligned
+    1:1 with candles, raw OI values from `_aligned_oi_history`), z-score
+    them across the per-product series, and forward the per-sample scaled
+    value to `fb.build(oi_rate=...)`. Mirrors the funding-rate plumbing
+    (#54) but with z-score normalization since OI raw values vary widely
+    across products."""
+
+    def _hourly(self, n=200, base=50_000.0):
+        import math as _math
+        return [{
+            "open": base - 50, "high": base + 100, "low": base - 100,
+            "close": base + 500 * _math.sin(i / 5.0),
+            "volume": 10_000 + i * 100,
+            "start": 1_700_000_000 + i * 3600,
+        } for i in range(n)]
+
+    def test_oi_rates_propagated_to_fb_build(self):
+        """Each call to fb.build during _build_samples_range should receive
+        the per-sample oi_rate kwarg (z-scored from the full series)."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("PyTorch not installed")
+        from agents.cnn_agent import (
+            FeatureBuilder, _build_samples_range, SEQ_LEN,
+        )
+
+        candles = self._hourly(120)
+        # Strictly increasing OI gives non-degenerate std → non-zero z-scores
+        oi_rates = [1_000_000.0 + i * 1000.0 for i in range(len(candles))]
+
+        seen_oi: List = []
+        real_fb = FeatureBuilder()
+
+        class SpyFB:
+            def build(self, *args, **kwargs):
+                seen_oi.append(kwargs.get("oi_rate"))
+                return real_fb.build(*args, **kwargs)
+
+            def to_tensor(self, channels):
+                return real_fb.to_tensor(channels)
+
+        i_start = SEQ_LEN - 1
+        i_end = len(candles) - 4  # forward_hours=4
+        X, y, idx = _build_samples_range(
+            candles, i_start, i_end,
+            SpyFB(), SEQ_LEN, 4, 0.003,
+            oi_rates=oi_rates,
+        )
+
+        assert len(seen_oi) > 0, "expected fb.build to be called at least once"
+        # All values should be floats (z-scored), none should be the raw OI
+        # values like 1_000_000.0
+        assert all(isinstance(v, float) for v in seen_oi), \
+            f"expected float oi_rate per call; saw {[type(v) for v in seen_oi]}"
+        assert all(abs(v) < 100.0 for v in seen_oi), (
+            "z-scored values should be O(1); large values mean raw OI was "
+            f"forwarded without normalization. Sample: {seen_oi[:3]}"
+        )
+
+    def test_oi_rates_none_keeps_ch27_zero(self):
+        """When oi_rates=None, fb.build should receive oi_rate=None and Ch 27
+        defaults to all zeros (matches the fallback path)."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("PyTorch not installed")
+        from agents.cnn_agent import (
+            FeatureBuilder, _build_samples_range, SEQ_LEN,
+        )
+
+        candles = self._hourly(120)
+        seen_oi: List = []
+        real_fb = FeatureBuilder()
+
+        class SpyFB:
+            def build(self, *args, **kwargs):
+                seen_oi.append(kwargs.get("oi_rate"))
+                return real_fb.build(*args, **kwargs)
+
+            def to_tensor(self, channels):
+                return real_fb.to_tensor(channels)
+
+        _build_samples_range(
+            candles, SEQ_LEN - 1, len(candles) - 4,
+            SpyFB(), SEQ_LEN, 4, 0.003,
+            oi_rates=None,
+        )
+        assert len(seen_oi) > 0
+        assert all(v is None for v in seen_oi), (
+            "oi_rate must be None when oi_rates=None (no OI signal available)"
+        )
+
+
 class TestBuildDatasetWiresBtcAndFiveMinute:
     """`_build_dataset` (closure in train_on_history) must pass real
     `btc_closes` (aligned per product) and `candles_5m` (per-product 5m
@@ -3348,8 +3513,8 @@ class TestZeroMaskChannelsHelper:
 
     def test_zero_mask_channels_zeros_only_listed_set(self):
         import torch
-        from agents.cnn_agent import _zero_mask_channels
-        x = torch.ones(2, 27, 60) * 0.5
+        from agents.cnn_agent import _zero_mask_channels, N_CHANNELS
+        x = torch.ones(2, N_CHANNELS, 60) * 0.5
         out = _zero_mask_channels(x)
         # 17/18/19 zeroed, others preserved
         assert torch.all(out[:, 17, :] == 0.0)
@@ -3361,16 +3526,16 @@ class TestZeroMaskChannelsHelper:
 
     def test_zero_mask_channels_does_not_mutate_input(self):
         import torch
-        from agents.cnn_agent import _zero_mask_channels
-        x = torch.ones(1, 27, 60) * 0.5
+        from agents.cnn_agent import _zero_mask_channels, N_CHANNELS
+        x = torch.ones(1, N_CHANNELS, 60) * 0.5
         x_before = x.clone()
         _ = _zero_mask_channels(x)
         assert torch.equal(x, x_before)
 
     def test_zero_mask_channels_preserves_shape_and_dtype(self):
         import torch
-        from agents.cnn_agent import _zero_mask_channels
-        x = torch.randn(3, 27, 60, dtype=torch.float32)
+        from agents.cnn_agent import _zero_mask_channels, N_CHANNELS
+        x = torch.randn(3, N_CHANNELS, 60, dtype=torch.float32)
         out = _zero_mask_channels(x)
         assert out.shape == x.shape
         assert out.dtype == x.dtype
@@ -3590,11 +3755,12 @@ class TestDatasetCacheVersionBumpForRv:
     constant-zero to real RV. Bump version 9 → 10.
     #157: Bumped 10 → 11 because Ch 15 (ADX) semantics change from
     broadcast-of-full-window value to per-bar causal expanding window —
-    every cached sample's Ch 15 series was leaky."""
+    every cached sample's Ch 15 series was leaky.
+    #143-B: Bumped 11 → 12 for Ch 27 (OKX OI) — channel count 27→28."""
 
     def test_dataset_cache_version_bumped_to_11(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
-        assert _DATASET_CACHE_VERSION == 11
+        assert _DATASET_CACHE_VERSION >= 12
 
 
 # ── _CNNBook.sell() ordering: trades table is source of truth ──────────────────
