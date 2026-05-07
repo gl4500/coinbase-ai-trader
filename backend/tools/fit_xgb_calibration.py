@@ -77,6 +77,13 @@ def _load_shadow_pairs(db_path: str, shadow_start: str) -> tuple[np.ndarray, np.
     return probs, wins
 
 
+def _detect_feature_set(feature_names) -> str:
+    """v1/v2 detection by name prefix. The previous heuristic
+    (len > 270 -> v2) misfires at N_CHANNELS=28 because v1 itself is
+    280 features."""
+    return "v2" if any(str(n).startswith("xt_") for n in feature_names) else "v1"
+
+
 def _load_cache_pairs(
     cache_path: str = _DEFAULT_CACHE_PATH,
     model_path: str = _DEFAULT_MODEL_PATH,
@@ -148,7 +155,7 @@ def _load_cache_pairs(
     with open(features_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     feature_names = list(meta.get("feature_names", []))
-    feature_set = "v2" if len(feature_names) > 270 else "v1"
+    feature_set = _detect_feature_set(feature_names)
     features, _ = extract_features(X_val, feature_set=feature_set)
     dmat = xgb.DMatrix(features, feature_names=feature_names)
     raw = booster.predict(dmat).astype(np.float64)

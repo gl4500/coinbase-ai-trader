@@ -2,7 +2,7 @@
 
 Contract:
     xgb_prob(channels) -> float
-        - Input: 27x60 nested list (or np.ndarray of shape [27, 60]).
+        - Input: 28x60 nested list (or np.ndarray of shape [28, 60]).
         - Output: float in [0.01, 0.99] when xgb_model.json + xgb_features.json
           are present at the configured paths.
         - Graceful fallback: 0.5 (neutral) when artifacts are missing or fail
@@ -33,9 +33,9 @@ if BACKEND not in sys.path:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _synthetic_channels(seed: int = 0) -> np.ndarray:
-    """27-channel x 60-step deterministic synthetic input."""
+    """28-channel x 60-step deterministic synthetic input."""
     rng = np.random.default_rng(seed)
-    return rng.standard_normal((27, 60)).astype(np.float64)
+    return rng.standard_normal((28, 60)).astype(np.float64)
 
 
 def _train_tiny_xgb(out_dir, n_samples: int = 64, feature_set: str = "v1"):
@@ -44,7 +44,7 @@ def _train_tiny_xgb(out_dir, n_samples: int = 64, feature_set: str = "v1"):
     from tools.xgb_features import extract_features
 
     rng = np.random.default_rng(0)
-    samples = rng.standard_normal((n_samples, 27, 60)).astype(np.float64)
+    samples = rng.standard_normal((n_samples, 28, 60)).astype(np.float64)
     labels = (rng.standard_normal(n_samples) > 0).astype(np.int64)
     features, names = extract_features(samples, feature_set=feature_set)
 
@@ -119,7 +119,7 @@ class TestLiveModel:
         assert a == b
 
     def test_accepts_nested_list_input(self, tmp_path, fresh_xgb_module, monkeypatch):
-        """Mirrors _cnn_prob's contract: 27x60 nested list must work, not just np.ndarray."""
+        """Mirrors _cnn_prob's contract: 28x60 nested list must work, not just np.ndarray."""
         model_path, features_path = _train_tiny_xgb(str(tmp_path))
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)

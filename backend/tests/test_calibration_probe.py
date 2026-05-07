@@ -19,7 +19,7 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-N_CHANNELS = 27
+N_CHANNELS = 28
 SEQ_LEN = 60
 
 
@@ -207,8 +207,8 @@ class TestFeatureSetPassthrough:
             n_estimators=10, seed=0, feature_set="v2",
         )
         assert len(r2["feature_names"]) == len(r1["feature_names"]) + 10
-        assert r1["feature_names"][:270] == r2["feature_names"][:270]
-        assert r2["feature_names"][270:] == [
+        assert r1["feature_names"][:280] == r2["feature_names"][:280]
+        assert r2["feature_names"][280:] == [
             "xt_vol_regime_ratio", "xt_vol_of_vol", "xt_ret_full",
             "xt_ret_skew", "xt_ret_kurt", "xt_rsi_below_30",
             "xt_rsi_above_70", "xt_rsi_cross_up_3",

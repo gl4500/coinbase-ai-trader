@@ -1,6 +1,6 @@
 """TDD tests for tools/xgb_features.py — tabular feature extractor for XGBoost.
 
-Converts CNN's [27 channels x 60 timesteps] samples into ~270 tabular
+Converts CNN's [28 channels x 60 timesteps] samples into ~280 tabular
 features for XGBoost. Honors _TRAINING_CONSTANT_CHANNELS = {17, 18, 19}
 mask: features for those channels must be zero so XGBoost cannot exploit a
 signal that inference (which masks them) doesn't have.
@@ -16,14 +16,14 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 # Constants must match agents/cnn_agent.py
-N_CHANNELS = 27
+N_CHANNELS = 28
 SEQ_LEN = 60
 MASKED_CHANNELS = frozenset({17, 18, 19})
 
 # Per-channel stats: last, mean, std, slope, min, max,
 # percentile_rank, delta_5, delta_10, delta_30 = 10
 STATS_PER_CHANNEL = 10
-EXPECTED_N_FEATURES = N_CHANNELS * STATS_PER_CHANNEL  # 270
+EXPECTED_N_FEATURES = N_CHANNELS * STATS_PER_CHANNEL  # 280
 
 
 def _sample_zeros() -> np.ndarray:
@@ -33,6 +33,36 @@ def _sample_zeros() -> np.ndarray:
 def _sample_random(seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     return rng.standard_normal((N_CHANNELS, SEQ_LEN)).astype(np.float32)
+
+
+# ── Channel-count sync with cnn_agent ───────────────────────────────────
+
+class TestChannelCountSyncWithCnnAgent:
+    """xgb_features.N_CHANNELS must always match agents.cnn_agent.N_CHANNELS.
+
+    A drift between the two silently neutralizes XGB at inference: with
+    cnn_agent.N=28 and xgb_features.N=27, FeatureBuilder.build emits
+    [N,28,T] but extract_features raises ValueError on shape mismatch,
+    which agents/xgb_signal.py catches and returns _NEUTRAL=0.5 — every
+    XGB signal becomes neutral and the live $50k system silently degrades.
+    """
+
+    def test_n_channels_matches_cnn_agent(self):
+        from tools.xgb_features import N_CHANNELS as XGB_N
+        from agents.cnn_agent import N_CHANNELS as CNN_N
+        assert XGB_N == CNN_N, (
+            f"xgb_features.N_CHANNELS={XGB_N} != cnn_agent.N_CHANNELS={CNN_N}; "
+            f"drift would silently neutralize XGB on shape mismatch."
+        )
+
+    def test_extract_features_accepts_full_channel_sample(self):
+        from tools.xgb_features import extract_features, N_CHANNELS as XGB_N
+        from agents.cnn_agent import N_CHANNELS as CNN_N
+        sample = np.zeros((1, CNN_N, SEQ_LEN), dtype=np.float32)
+        features, names = extract_features(sample)
+        assert features.shape[1] == XGB_N * 10, (
+            f"expected {XGB_N * 10} features, got {features.shape[1]}"
+        )
 
 
 # ── Module shape & signature ────────────────────────────────────────────

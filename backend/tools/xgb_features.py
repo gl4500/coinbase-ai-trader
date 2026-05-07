@@ -1,4 +1,4 @@
-"""Tabular feature extractor: CNN [27 ch x 60 t] samples -> XGBoost features.
+"""Tabular feature extractor: CNN [28 ch x 60 t] samples -> XGBoost features.
 
 Phase 1 of the CNN -> XGBoost transition (see
 docs/superpowers/plans/2026-05-02-cnn-to-xgboost-transition.md).
@@ -19,7 +19,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-N_CHANNELS = 27
+N_CHANNELS = 28
 SEQ_LEN = 60
 
 # Mirrors agents/cnn_agent.py _TRAINING_CONSTANT_CHANNELS. If that set
@@ -85,7 +85,7 @@ def _percentile_rank(series: np.ndarray) -> np.ndarray:
 
 
 def _v2_addons(s64: np.ndarray) -> np.ndarray:
-    """Compute the 10 v2 cross-channel/temporal addons from [N, 27, 60].
+    """Compute the 10 v2 cross-channel/temporal addons from [N, 28, 60].
 
     Returns [N, 10] aligned with _V2_NEW_FEATURES order. None of the
     inputs read from MASKED_CHANNELS (17, 18, 19).
@@ -129,7 +129,7 @@ def _v2_addons(s64: np.ndarray) -> np.ndarray:
 def extract_features(
     samples: np.ndarray, feature_set: str = "v1"
 ) -> Tuple[np.ndarray, List[str]]:
-    """Convert a batch of [N, 27, 60] samples to tabular features.
+    """Convert a batch of [N, 28, 60] samples to tabular features.
 
     feature_set:
         "v1" (default): 270 per-channel stats (back-compat).

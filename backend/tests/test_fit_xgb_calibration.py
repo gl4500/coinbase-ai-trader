@@ -163,3 +163,26 @@ class TestCacheSourceCalibratorFit:
             f"backward compat: default source kwarg must keep legacy path, "
             f"got {default!r}"
         )
+
+
+class TestFeatureSetDetection:
+    """Regression: at N_CHANNELS=28 the v1 set is 280 features, which is
+    > 270. The legacy `len > 270 -> v2` heuristic flips a v1 booster to
+    the v2 extraction path and produces a 290-vs-280 column mismatch when
+    DMatrix-binding feature_names. Detect by name prefix instead."""
+
+    def test_v1_at_28_channels_detected_as_v1(self):
+        from tools.fit_xgb_calibration import _detect_feature_set
+        v1_names = [f"ch{c}_{s}" for c in range(28)
+                    for s in ("last", "mean", "std", "slope", "min", "max",
+                              "pct_rank", "delta_5", "delta_10", "delta_30")]
+        assert len(v1_names) == 280
+        assert _detect_feature_set(v1_names) == "v1"
+
+    def test_v2_at_28_channels_detected_as_v2(self):
+        from tools.fit_xgb_calibration import _detect_feature_set
+        v1_names = [f"ch{c}_{s}" for c in range(28)
+                    for s in ("last", "mean", "std", "slope", "min", "max",
+                              "pct_rank", "delta_5", "delta_10", "delta_30")]
+        v2_addons = ["xt_vol_regime_ratio", "xt_vol_of_vol", "xt_ret_full"]
+        assert _detect_feature_set(v1_names + v2_addons) == "v2"

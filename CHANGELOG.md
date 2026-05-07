@@ -5,6 +5,59 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.15] — 2026-05-06 — XGB 28-channel coordinated bump (#199 + #200)
+
+### Context
+
+`agents/cnn_agent.N_CHANNELS` was bumped to 28 (with Ch 27 OI from #143-B), but
+`tools/xgb_features.N_CHANNELS` was still 27. Inference would have raised
+`ValueError: expected shape [N, 27, 60]` on every scan and silently neutralized
+XGB to 0.5. Coordinated fix — bump xgb_features, retrain booster on the v12
+28-ch cache, refit isotonic calibrator on the new val split.
+
+### Changes (TDD)
+
+- **`backend/tools/xgb_features.py`**: `N_CHANNELS = 27 → 28`. Auto-extends
+  feature-name list to 280 (`ch0_*` through `ch27_*` × 10 stats). XGB-side
+  drops still apply (XGB_DROP_CHANNELS = {21, 24}).
+- **`backend/tools/train_xgb_prod.py`** (new): driver that pools top-20
+  products by sample count from `cnn_dataset_cache.pt`, runs 5-fold purged
+  walk-forward CV at fixed best params (`max_depth=4, mcw=1, subsample=0.7`),
+  saves `xgb_model.json` + `xgb_features.json`.
+- **`backend/tools/fit_xgb_calibration.py`**: extracted `_detect_feature_set()`
+  helper. Old heuristic `len(feature_names) > 270 -> v2` false-positives at
+  N=28 (v1 itself = 280). New rule: detect `xt_*` prefix in any name.
+- **`backend/agents/xgb_signal.py`**: same `len > 270` heuristic at the
+  inference-time loader replaced with the prefix check, otherwise live
+  calls would silently flip to the v2 extract path and raise
+  `expected 290, got 280` on every scan.
+- **`backend/tests/test_fit_xgb_calibration.py`**: regression tests for v1
+  vs v2 detection at 28 channels.
+- **`backend/tests/test_calibration_probe.py`**, **`test_train_xgb.py`**:
+  bump synthetic-data fixtures from 27→28 channels, 270→280 feature count.
+- **`backend/tests/test_channel_ablation.py`**, **`test_channel_replace.py`**,
+  **`test_xgb_signal.py`**: synthetic 27-ch fixtures bumped to 28 to match
+  `xgb_features.N_CHANNELS`.
+- **`backend/tests/test_xgb_features.py`**: regression tests asserting
+  xgb_features.N_CHANNELS == cnn_agent.N_CHANNELS (silent-neutralize guard).
+
+### Results
+
+- XGB retrain: 167,144 samples × 28 ch × 60, mean_auc=0.5182, folds=
+  [0.5123, 0.5060, 0.5172, 0.5158, 0.5399], 117s. Slight drop from May 3
+  baseline (0.5224) on 27 channels — consistent with Ch 27 OI having weak
+  per-feature gain in the May 2026 ablation.
+- Calibrator refit: 84,858 val samples, monotone curve preserved
+  (raw 0.50 → cal 0.4983, raw 0.80 → cal 0.9143, raw 0.20 → cal 0.1111).
+  POST-bucket win rates 3.3% → 93.1% across deciles.
+
+### Backups
+
+- `xgb_model.json.bak.20260506`, `xgb_features.json.bak.20260506`,
+  `xgb_calibration.pkl.bak.20260506` preserved for rollback.
+
+---
+
 ## [Session 58.14] — 2026-05-06 — Populate Ch 27 OI in FeatureBuilder.build (#143-B)
 
 ### Context

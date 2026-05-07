@@ -3,7 +3,7 @@
 The harness answers: "if I substitute channel c's data with a candidate
 signal (OI, hour-of-day, etc.), how much does mean_auc move vs the no-swap
 baseline?" Used to evaluate new feature candidates against the existing
-27-channel stack before paying the integration cost.
+28-channel stack before paying the integration cost.
 
 Pairs with channel_ablation.py — replace == ablate-then-add in one step.
 """
@@ -22,24 +22,24 @@ class TestReplaceChannel:
 
     def test_substitutes_target_channel(self):
         from tools.channel_replace import _replace_channel
-        X = np.zeros((3, 27, 60), dtype=np.float32)
+        X = np.zeros((3, 28, 60), dtype=np.float32)
         sig = np.full((3, 60), 7.0, dtype=np.float32)
         out = _replace_channel(X, 4, sig)
         assert (out[:, 4, :] == 7.0).all()
 
     def test_leaves_other_channels_intact(self):
         from tools.channel_replace import _replace_channel
-        X = np.full((2, 27, 60), 3.0, dtype=np.float32)
+        X = np.full((2, 28, 60), 3.0, dtype=np.float32)
         sig = np.zeros((2, 60), dtype=np.float32)
         out = _replace_channel(X, 10, sig)
-        for c in range(27):
+        for c in range(28):
             if c == 10:
                 continue
             assert (out[:, c, :] == 3.0).all(), f"ch{c} mutated"
 
     def test_does_not_mutate_input(self):
         from tools.channel_replace import _replace_channel
-        X = np.ones((1, 27, 60), dtype=np.float32)
+        X = np.ones((1, 28, 60), dtype=np.float32)
         original = X.copy()
         sig = np.zeros((1, 60), dtype=np.float32)
         _ = _replace_channel(X, 0, sig)
@@ -47,7 +47,7 @@ class TestReplaceChannel:
 
     def test_shape_mismatch_raises(self):
         from tools.channel_replace import _replace_channel
-        X = np.zeros((4, 27, 60), dtype=np.float32)
+        X = np.zeros((4, 28, 60), dtype=np.float32)
         bad = np.zeros((3, 60), dtype=np.float32)  # wrong N
         with pytest.raises((ValueError, AssertionError)):
             _replace_channel(X, 0, bad)
@@ -57,10 +57,10 @@ class TestReplaceChannel:
 
     def test_invalid_channel_raises(self):
         from tools.channel_replace import _replace_channel
-        X = np.zeros((1, 27, 60), dtype=np.float32)
+        X = np.zeros((1, 28, 60), dtype=np.float32)
         sig = np.zeros((1, 60), dtype=np.float32)
         with pytest.raises((IndexError, ValueError)):
-            _replace_channel(X, 27, sig)
+            _replace_channel(X, 28, sig)
         with pytest.raises((IndexError, ValueError)):
             _replace_channel(X, -1, sig)
 
@@ -72,7 +72,7 @@ class TestRunReplace:
         from tools.channel_replace import run_replace
         rng = np.random.default_rng(0)
         n = 200
-        X = rng.standard_normal((n, 27, 60)).astype(np.float32)
+        X = rng.standard_normal((n, 28, 60)).astype(np.float32)
         y = rng.integers(0, 2, size=n).astype(np.float32)
         ts = (np.arange(n) * 3600).astype(np.int64)
         sig = rng.standard_normal((n, 60)).astype(np.float32)
@@ -90,7 +90,7 @@ class TestRunReplace:
         from tools.channel_replace import run_replace
         rng = np.random.default_rng(2)
         n = 250
-        X = rng.standard_normal((n, 27, 60)).astype(np.float32)
+        X = rng.standard_normal((n, 28, 60)).astype(np.float32)
         y = rng.integers(0, 2, size=n).astype(np.float32)
         ts = (np.arange(n) * 3600).astype(np.int64)
         sig = X[:, 5, :].copy()

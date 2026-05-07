@@ -16,7 +16,7 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-N_CHANNELS = 27
+N_CHANNELS = 28
 SEQ_LEN = 60
 N_SAMPLES = 240
 
@@ -111,7 +111,7 @@ class TestArtifacts:
             schema = json.load(f)
         assert "feature_names" in schema
         assert isinstance(schema["feature_names"], list)
-        assert len(schema["feature_names"]) == 270  # 27 channels x 10 stats
+        assert len(schema["feature_names"]) == 280  # 28 channels x 10 stats
         assert schema["feature_names"] == result["feature_names"]
 
 

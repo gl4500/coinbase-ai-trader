@@ -76,7 +76,7 @@ def _try_load() -> bool:
             booster.load_model(_MODEL_PATH)
             _booster = booster
             _feature_names = names
-            _feature_set = "v2" if len(names) > 270 else "v1"
+            _feature_set = "v2" if any(str(n).startswith("xt_") for n in names) else "v1"
             _load_succeeded = True
             logger.info(
                 "xgb_signal: loaded booster (%d features, set=%s)",
