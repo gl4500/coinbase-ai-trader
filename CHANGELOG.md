@@ -5,6 +5,44 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.16] — 2026-05-07 — Cross-sectional RSI-rank single-add probe (#162) — PASS
+
+### Context
+
+After the 28-ch cache + retrain (#199 + #200) didn't lift v2 above the +0.01
+gate (#145), we needed individual probes of each candidate input. Hypothesis:
+RSI alone is a single-product signal; the cross-section "this product's RSI
+vs all peers right now" is a different information source that no per-product
+60-bar window can reconstruct.
+
+### Changes (TDD)
+
+- **`backend/tools/rsi_rank_probe.py`** (new): builds `(T, P)` RSI matrix
+  across all 107 products in the v12 cache, ranks each row with
+  `scipy.stats.rankdata` (average for ties), normalizes to `[0, 1]`, then
+  windows back to per-sample `[N, 60]` rank signals via `np.searchsorted`.
+  Replaces ch13 (obv_slope, marginal per #146) and runs through
+  `tools/channel_replace.run_replace`.
+- **`backend/tests/test_rsi_rank_probe.py`** (new): unit tests for
+  `_cross_sectional_rank` (single product → 0.5 neutral, three distinct →
+  {0, 0.5, 1}, ties → equal rank, NaN inputs dropped) and `build_rank_signal`
+  (shape, self-rank neutral, monotone vs peers, missing timestamps default
+  0.5). RED → 9/9 GREEN with vectorized loader unchanged.
+
+### Result
+
+| Implementation       | baseline_auc | replaced_auc | Δ        | gate    |
+|----------------------|--------------|--------------|----------|---------|
+| slow per-cell loop   | 0.5187       | 0.5414       | +0.0227  | PASS    |
+| vectorized (T,P) mat | 0.5201       | 0.5409       | +0.0208  | PASS    |
+
+Replaced AUC ~0.541 — closest the pooled-top-20 cell has come to the 0.55
+hard gate. Decision: integrate as a real channel in the next coordinated
+retrain cycle (after #156 BTC-dominance lands its probe), not as a one-off
+to avoid back-to-back cache rebuilds.
+
+---
+
 ## [Session 58.15] — 2026-05-06 — XGB 28-channel coordinated bump (#199 + #200)
 
 ### Context
