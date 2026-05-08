@@ -5,6 +5,95 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.32] — 2026-05-08 — OKX OI coverage audit (#210) — 17/20 pids fully zero
+
+### Context
+
+#210, follow-up to #209. The Ch 27 drift probe found that 19/20 pids
+report per-pid PSI=0.0000 — meaning the OI channel is constant in at
+least one half. This audit answers: "constant at what value, and for
+how much of the series?"
+
+### Files added
+
+- `backend/tools/oi_coverage_audit.py`
+  - `coverage_stats(values)` — n / n_zero / n_nonzero / frac_zero /
+    first_nonzero_idx for any 1-D series.
+  - `leading_zero_run(values)` — length of contiguous zero prefix
+    (distinguishes legitimate backfill gap vs. scattered zeros).
+  - `per_pid_coverage(prods)` — one coverage row per pid sorted by
+    frac_zero desc.
+  - CLI hydrates the cache and tags each pid as `all-zero`,
+    `leading-block (backfill)`, `scattered (suspect)`, or
+    `fully covered`.
+- `backend/tests/test_oi_coverage_audit.py` — 10 tests, all GREEN.
+
+### Live audit findings
+
+```
+Ch 27 (okx_oi) coverage audit (top-20 survivorship-aware pids,
+N=167,497 samples)
+
+  17/20 pids: frac_zero = 1.000 (all-zero)
+              PENGU, JTO, POPCAT, BONK, NKN, AIOZ, ZK, JASMY, TRU,
+              SKL, PEPE, FET, MOODENG, XCN, ONDO, ALGO, LRDS
+
+   3/20 pids: frac_zero ≈ 0.001-0.002 (effectively fully covered,
+              scattered)
+              DOT  (8,404 samples, 17 zeros)
+              LINK (8,161 samples, 11 zeros)
+              AVAX (8,209 samples, 11 zeros)
+
+  total samples = 167,497 | total zero = 142,762 | frac_zero = 0.852
+```
+
+**Classification:** Ch 27 has a **fetcher coverage defect**, not just a
+backfill gap. 85.2% of OI samples are zero, and the zero/non-zero
+split is not "first half zero, second half real" (which would be
+backfill) — it is "17 specific pids always zero, 3 specific pids
+always real." Almost certainly: the OKX OI fetcher only resolves the
+DOT/LINK/AVAX instrument IDs (which match OKX's perp naming
+convention) and silently returns zero for the alts/memes whose OKX
+instrument IDs don't match.
+
+**Implication for XGB:** The 28-channel XGB model trained on this
+cache has had Ch 27 = 0 for 85% of training samples. It almost
+certainly learned to ignore the channel (or, worse, learned a
+spurious "zero OI ⇒ X" pattern for the 17 alt pids). The XGB
+permutation importance (Ω 2026-04 run) ranked Ch 27 near the bottom,
+which is consistent with a near-constant feature.
+
+**Action options (deferred to a separate fix ticket):**
+1. Fix the OKX fetcher to use the correct instrument-ID convention
+   per pid (preferred: more signal, more parity across pids).
+2. Drop Ch 27 from XGB training (`XGB_DROP_CHANNELS={21,24,27}`) and
+   revert to 27-channel training. Cheap; loses any OI signal from
+   the 3 covered pids.
+3. NaN-mask Ch 27 for the 17 affected pids in the cache build so the
+   model treats the absence as "missing" rather than "zero". Requires
+   a cache rebuild and an XGB feature-extraction NaN-handling check.
+
+The reconciliation between #164 (variance ratio 10.4×) and #170
+(PSI=0.0006 stable) is now fully understood:
+- DOT/LINK/AVAX OI history backfilled into the cache *during* the
+  cache window, expanding variance second-half (caught by #164).
+- Both halves are still dominated by the 17 all-zero pids' constant-zero
+  series, so PSI sees a stable "two point masses" distribution (caught
+  by #170).
+- The drift probe wasn't lying — it was just measuring distribution
+  shape on a heavily-degenerate feature.
+
+### Verification
+
+```
+$ python -m pytest tests/test_oi_coverage_audit.py -v
+====== 10 passed in 3.57s ======
+$ python tools/oi_coverage_audit.py
+[full output captured above]
+```
+
+---
+
 ## [Session 58.31] — 2026-05-08 — Generalize drift diagnostic to any channel + Ch 27 (OI) probe (#209)
 
 ### Context
