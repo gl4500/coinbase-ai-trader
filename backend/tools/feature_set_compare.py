@@ -11,9 +11,10 @@ whether to promote v2 to default and whether to retrain BTC-only or pooled.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -24,6 +25,7 @@ if BACKEND not in sys.path:
 import torch  # noqa: E402
 
 from tools.calibration_probe import calibration_probe  # noqa: E402
+from tools.pid_snapshot import recommended_snapshot_ts, survivorship_aware_top_n  # noqa: E402
 
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _BAR_SECS = 3600  # cache built on 1h candles
@@ -51,14 +53,16 @@ def _btc_only(prods: dict):
     return _entry_to_arrays(prods["BTC-USD"])
 
 
-def _pooled_top_n(prods: dict, n: int = 20):
-    """Concat samples from the n largest-by-sample-count products, sorted by ts."""
-    sized = sorted(
-        ((pid, len(e.get("X", []))) for pid, e in prods.items()),
-        key=lambda x: -x[1],
-    )[:n]
+def _pooled_top_n(prods: dict, n: int = 20, snapshot_ts: Optional[int] = None):
+    """Concat samples from the top-N products, sorted by ts.
+
+    `snapshot_ts=None` reproduces the legacy `len(entry["X"])` ranking so prior
+    results stay reproducible. Pass an int (or use `recommended_snapshot_ts`)
+    to opt into survivorship-aware selection per #163.
+    """
+    top_pids = survivorship_aware_top_n(prods, n=n, snapshot_ts=snapshot_ts)
     Xs, ys, tss = [], [], []
-    for pid, _ in sized:
+    for pid in top_pids:
         X, y, ts = _entry_to_arrays(prods[pid])
         Xs.append(X)
         ys.append(y)
@@ -90,13 +94,36 @@ def _run_cell(name: str, X, y, ts, feature_set: str):
     return res
 
 
+def _parse_snapshot_ts(arg: Optional[str], prods: dict) -> Optional[int]:
+    if arg is None:
+        return None
+    if arg == "auto":
+        ts = recommended_snapshot_ts(prods)
+        return ts if ts > 0 else None
+    return int(arg)
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--snapshot-ts",
+        default=None,
+        help="Survivorship-aware top-N cutoff (#163). Pass 'auto' for the "
+             "median-first_ts default, or an explicit Unix-seconds int. "
+             "Omit to keep the legacy len(X) ranking.",
+    )
+    args = parser.parse_args()
+
     print(f"Loading cache: {_CACHE_PATH}")
     prods = _load_cache()
-    print(f"  products: {len(prods)}\n")
+    print(f"  products: {len(prods)}")
+    snapshot_ts = _parse_snapshot_ts(args.snapshot_ts, prods)
+    if snapshot_ts is not None:
+        print(f"  snapshot_ts (survivorship-aware): {snapshot_ts}")
+    print()
 
     Xb, yb, tb = _btc_only(prods)
-    Xp, yp, tp = _pooled_top_n(prods, n=20)
+    Xp, yp, tp = _pooled_top_n(prods, n=20, snapshot_ts=snapshot_ts)
 
     cells = {
         ("BTC-USD only", "v1"): _run_cell("BTC-USD only", Xb, yb, tb, "v1"),

@@ -5,6 +5,51 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.20] — 2026-05-08 — Migrate feature_set_compare to survivorship-aware top-N (#163 follow-up)
+
+### Context
+
+Session 58.18 introduced `survivorship_aware_top_n` and migrated
+`rsi_rank_probe.py`. Six other consumers remained on legacy
+`len(entry["X"])` ranking. This commit migrates `feature_set_compare.py`
+— the v1-vs-v2 feature-set comparison probe.
+
+### Changes (TDD)
+
+- **`backend/tools/feature_set_compare.py`**: `_pooled_top_n` now accepts
+  `snapshot_ts: Optional[int]` and delegates pid selection to
+  `survivorship_aware_top_n`. `snapshot_ts=None` preserves legacy ranking
+  so prior results stay reproducible.
+- New `_parse_snapshot_ts(arg, prods)` helper: `None` → legacy, `"auto"` →
+  `recommended_snapshot_ts(prods)` (with graceful fallback to `None` when
+  the cache has no non-empty products), or explicit int.
+- `main()` gains an `argparse` shell with `--snapshot-ts` flag.
+- **`backend/tests/test_feature_set_compare_snapshot.py`** (new): 6 tests
+  covering CLI parser (None / int / auto / empty-fallback) and
+  `_pooled_top_n` plumbing (legacy passthrough preserves sample count;
+  cutoff drops newcomer samples and clips ts.max() ≤ cutoff). 6/6 GREEN.
+
+### Validation
+
+Per-module pytest passes 6/6. Pre-commit full suite re-run as part of
+this commit. No behavioural change at the default call site
+(`_pooled_top_n(prods, n=20)` without `snapshot_ts` is byte-identical
+to the prior implementation).
+
+### Affected (still deferred)
+
+5 consumers remain on legacy ranking, queued for separate per-consumer
+migrations:
+
+1. `tools/oi_single_add_probe.py:113` (network: OKX)
+2. `tools/timescale_sweep.py:95`
+3. `tools/hour_of_day_probe.py:42`
+4. `tools/train_xgb_prod.py:53` ← production booster trainer; coordinate
+   with next planned retrain cycle
+5. `tools/_timescale_sanity.py:30`
+
+---
+
 ## [Session 58.19] — 2026-05-08 — Ch 0 norm_c strict-causality decision (#171) — accept-as-design
 
 ### Context
