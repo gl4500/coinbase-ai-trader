@@ -5,6 +5,53 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.25] — 2026-05-08 — Regime-stratified walk-forward eval (#165)
+
+### Context
+
+#165 BACKLOG calls for regime-stratified evaluation: a single overall
+AUC can hide a model that only works in one volatility regime, or
+breaks in CHAOTIC. This tool partitions val samples by realised-vol
+terciles inside the existing purged walk-forward folds and reports
+per-regime AUC alongside overall.
+
+### Helpers
+
+- `_classify_regimes(vols)` — terciles → `{'low','mid','high'}` string
+  labels. Constant input → all `'mid'` (degenerate but non-crashing).
+- `_per_regime_metrics(y_true, y_score, regimes)` — `{regime: {n,
+  base_rate, auc}}` with tie-aware Mann-Whitney AUC; `auc=None` when a
+  class is missing in a regime bucket.
+- `_window_vol(X)` — std of last 24 bars on Ch 0 (norm_close) per sample.
+
+### Changes (TDD)
+
+- **`backend/tools/regime_eval.py`** (new): helpers above + `_run_eval`
+  (XGBClassifier per fold, 100 trees / depth 4, embargo 4h) + argparse
+  runner with `--snapshot-ts`, `--n-pids`, `--n-folds` flags.
+- **`backend/tests/test_regime_eval.py`** (new): 6 tests — terciles
+  split evenly, smallest→`low`, constant-vol non-crash, per-regime row
+  count, perfect-separation AUC=1.0, single-class AUC=None. 6/6 GREEN.
+
+### Findings (10 pids, 5 folds, ~17.4k val samples per fold, ~87k pooled)
+
+| split   | n      | base   | AUC    |
+|---------|--------|--------|--------|
+| overall | 86,947 | ~0.49  | 0.5141 |
+| low-vol | 28,985 | 0.487  | 0.5174 |
+| mid-vol | 28,980 | 0.494  | **0.5067** |
+| high-vol| 28,982 | 0.489  | 0.5179 |
+
+**Mid-vol is the model's weak spot.** Low and high vol both clear
+0.517; mid sits at 0.507 (essentially uninformative). All 5 folds
+agree: mid-vol AUC is consistently the lowest. Suggests a
+regime-conditioned model (or at least a regime-gated trade size) could
+improve risk-adjusted P&L without more features.
+
+No corrective action taken in this commit. Diagnostic only.
+
+---
+
 ## [Session 58.24] — 2026-05-08 — Heuristic stationarity audit on 28 channels (#164)
 
 ### Context
