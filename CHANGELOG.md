@@ -5,6 +5,84 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.30] — 2026-05-08 — Ch 5 (macd_hist) drift diagnostic (#208)
+
+### Context
+
+Follow-up to #170. The drift monitor flagged Ch 5 (macd_hist) with
+PSI=0.198 — minor drift, but no shape information. Before the next
+retrain we needed to know *why*: real regime change, normalization
+artifact, or survivorship/composition shift. Each leads to a different
+remediation.
+
+### Files added
+
+- `backend/tools/ch5_drift_diagnose.py`
+  - `decompose_psi(a, b, n_bins=10)` — per-bin contributions
+    `(q-p)*log(q/p)` so we can see *which* bins drove the scalar PSI.
+    Returns `{total_psi, flag, n_bins, per_bin: [...]}`.
+  - `summary_stats(values)` — mean / population variance / skew / min /
+    max / n. Empty input returns NaN safely.
+  - `per_product_drift(prods, n_bins=10)` — PSI per pid sorted desc;
+    detects whether drift is concentrated or broad-based.
+  - `bin_count_sensitivity(a, b, n_bins_list)` — PSI for several
+    n_bins values to flag normalization-fragile drift.
+  - CLI hydrates `cnn_dataset_cache.pt`, runs all four against the
+    chronologically-sorted Ch 5 terminal-value series.
+
+### Tests added
+
+`backend/tests/test_ch5_drift_diagnose.py` (11 tests, all GREEN):
+- decompose_psi: total matches sum of per-bin contributions; identical
+  halves give ~0; per-bin records carry required keys; a single
+  bin-to-bin shift produces top-2 contributions >90% of total.
+- summary_stats: known mean/var; right-skewed exponential gives skew>0.5;
+  empty input returns n=0 without crashing.
+- per_product_drift: sorts by PSI desc; preserves required keys; very
+  short series return PSI=0.0 safely.
+- bin_count_sensitivity: returns one PSI per n_bins; identical halves
+  stay <1e-6 across all bin counts.
+
+### Live cache findings
+
+Ran against the production cache (N=167,346 samples, top-20
+survivorship-aware pids):
+
+```
+[1] Per-bin PSI=0.1222 — U-shaped: mass moved out of bins 0 & 9
+    (the tails) into bins 4-5 (around zero). Top contributors:
+    bin 0 (0.0401), bin 9 (0.0351), bin 4 (0.0213), bin 5 (0.0152).
+[2] First half var=0.2055, second half var=0.1057 — variance halved.
+    Mean barely moved (-0.0013 → 0.0026). Min/max clipped at ±1 in
+    both halves. No clipping shift.
+[3] Per-product PSI sorts as: alts/memes high (POPCAT 2.05, AIOZ 1.59,
+    BONK 1.08, MOODENG 0.95, PENGU 0.89, PEPE 0.77 ...);
+    blue chips stable (LINK 0.02, AVAX 0.02). 17/20 pids ≥ minor.
+[4] Bin-count sensitivity: PSI grows monotonically with n_bins
+    (0.0959 @ 5 → 0.1958 @ 40). Not a binning artifact.
+```
+
+**Classification:** real volatility regime change in alt/meme tokens.
+The post-meme-rally cooldown compressed MACD swings — same range, much
+less mass in the tails. Not a normalization artifact (variance halving
+with stable min/max indicates genuine peakedness shift). Not a
+survivorship issue (same pids in both halves).
+
+**Action:** confirms the #165 regime-conditioned model finding. Before
+the next retrain: either sample-weight more recent data heavily, or
+gate trade size by realized-volatility regime. Don't blindly retrain
+on tail-heavy historical data — current behaviour is a fundamentally
+different distribution.
+
+### Verification
+
+```
+$ python -m pytest tests/test_ch5_drift_diagnose.py -v
+====== 11 passed in 3.87s ======
+```
+
+---
+
 ## [Session 58.29] — 2026-05-08 — Silver-layer OHLCV anomaly flagger (#167a)
 
 ### Context
