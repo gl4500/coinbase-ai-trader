@@ -14,9 +14,10 @@ Run:
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -28,6 +29,7 @@ import torch  # noqa: E402
 
 from tools.channel_replace import run_replace  # noqa: E402
 from tools.feature_set_compare import _entry_to_arrays  # noqa: E402
+from tools.pid_snapshot import recommended_snapshot_ts, survivorship_aware_top_n  # noqa: E402
 
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _BAR_SECS = 3600
@@ -35,18 +37,29 @@ _SEQ_LEN = 60
 _TARGET_CHANNEL = 13  # obv_slope — most marginal per #146 (Δ -0.0002)
 
 
-def _load_pooled(n: int = 20) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _parse_snapshot_ts(arg: Optional[str], prods: dict) -> Optional[int]:
+    if arg is None:
+        return None
+    if arg == "auto":
+        ts = recommended_snapshot_ts(prods)
+        return ts if ts > 0 else None
+    return int(arg)
+
+
+def _load_pooled(
+    n: int = 20, snapshot_ts: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pooled top-N concat. `snapshot_ts=None` reproduces legacy ranking; pass
+    an int (or use `recommended_snapshot_ts`) for survivorship-aware selection
+    per #163."""
     print(f"Loading cache: {_CACHE_PATH}", flush=True)
     blob = torch.load(_CACHE_PATH, map_location="cpu", weights_only=False)
     prods = blob["products"]
-    sized = sorted(
-        ((pid, len(e.get("X", []))) for pid, e in prods.items()),
-        key=lambda x: -x[1],
-    )[:n]
-    print(f"  pooled top-{n}: {[pid for pid, _ in sized]}", flush=True)
+    top_pids = survivorship_aware_top_n(prods, n=n, snapshot_ts=snapshot_ts)
+    print(f"  pooled top-{n}: {top_pids}", flush=True)
 
     Xs, ys, tss = [], [], []
-    for pid, _ in sized:
+    for pid in top_pids:
         X, y, ts = _entry_to_arrays(prods[pid])
         Xs.append(X)
         ys.append(y)
@@ -88,7 +101,22 @@ def _run_one(label: str, X, y, ts, sig):
 
 
 def main():
-    X, y, ts = _load_pooled(n=20)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--snapshot-ts",
+        default=None,
+        help="Survivorship-aware top-N cutoff (#163). Pass 'auto' for the "
+             "median-first_ts default, or an explicit Unix-seconds int. "
+             "Omit to keep the legacy len(X) ranking.",
+    )
+    args = parser.parse_args()
+
+    blob = torch.load(_CACHE_PATH, map_location="cpu", weights_only=False)
+    snapshot_ts = _parse_snapshot_ts(args.snapshot_ts, blob["products"])
+    if snapshot_ts is not None:
+        print(f"  snapshot_ts (survivorship-aware): {snapshot_ts}", flush=True)
+
+    X, y, ts = _load_pooled(n=20, snapshot_ts=snapshot_ts)
     print(f"\npooled samples: n={len(y):,}", flush=True)
 
     sin_sig = _hour_window(ts, kind="sin")

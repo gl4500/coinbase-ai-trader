@@ -5,6 +5,46 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.21] — 2026-05-08 — Migrate hour_of_day_probe to survivorship-aware top-N (#163 follow-up)
+
+### Context
+
+Continues the per-consumer migration started in 58.18 (rsi_rank_probe)
+and 58.20 (feature_set_compare). `hour_of_day_probe.py` had its own
+inline legacy `len(entry["X"])` ranking inside `_load_pooled` —
+swapping it to `survivorship_aware_top_n` keeps the four remaining
+cache-only consumers in lockstep with the new opt-in pid snapshot.
+
+### Changes (TDD)
+
+- **`backend/tools/hour_of_day_probe.py`**: `_load_pooled(n, snapshot_ts=None)`
+  now delegates pid selection to `survivorship_aware_top_n`. Added
+  `_parse_snapshot_ts(arg, prods)` helper (mirrors feature_set_compare).
+  `main()` gains an `argparse` shell with `--snapshot-ts` flag.
+- **`backend/tests/test_hour_of_day_probe_snapshot.py`** (new): 6 tests
+  covering CLI parser (None / int / auto / empty-fallback) and
+  `_load_pooled` plumbing (legacy passthrough preserves sample count;
+  cutoff drops newcomer samples and clips ts.max() ≤ cutoff). 6/6 GREEN.
+
+### Validation
+
+Per-module pytest passes 6/6. No behavioural change at the default call
+site (`_load_pooled(n=20)` without `snapshot_ts` is byte-identical to
+the prior implementation).
+
+### Affected (still deferred)
+
+4 consumers remain on legacy ranking, queued for separate per-consumer
+migrations:
+
+1. `tools/oi_single_add_probe.py:113` (network: OKX)
+2. `tools/timescale_sweep.py:95`
+3. `tools/train_xgb_prod.py:53` ← production booster trainer; coordinate
+   with next planned retrain cycle
+4. `tools/_timescale_sanity.py:30`
+
+---
+
 ## [Session 58.20] — 2026-05-08 — Migrate feature_set_compare to survivorship-aware top-N (#163 follow-up)
 
 ### Context
