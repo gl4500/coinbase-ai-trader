@@ -5,6 +5,61 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.26] — 2026-05-08 — Per-channel distribution drift monitor (#170)
+
+### Context
+
+#170 BACKLOG. Companion to #164 (stationarity audit). #164 catches mean
+and variance shifts via drift_z / var_ratio / lag1; this catches
+distribution-shape shifts a same-mean-same-var pair would hide. Standard
+Population Stability Index (PSI) on the chronologically-ordered terminal
+value of each channel.
+
+### Helpers
+
+- `_bin_edges(values, n_bins=10)` — quantile-based edges; outer edges
+  forced to ±inf so out-of-range values in the second half get binned.
+- `_bin_counts(values, edges)` — probability vector per bin.
+- `_psi(p, q, eps=1e-6)` — `sum((q - p) * log(q / p))` with eps clip
+  to regularise zero bins (log(0)).
+- `_channel_drift(series)` — splits chronologically into halves, runs
+  PSI between bin probabilities, classifies via thresholds:
+  - PSI < 0.10 → `stable`
+  - 0.10 ≤ PSI < 0.25 → `minor`
+  - PSI ≥ 0.25 → `significant`
+
+### Changes (TDD)
+
+- **`backend/tools/drift_monitor.py`** (new): helpers + `_audit_channels_drift`
+  (uses `survivorship_aware_top_n` per #163) + argparse runner with
+  `--snapshot-ts`, `--n-pids`, `--n-bins` flags.
+- **`backend/tests/test_drift_monitor.py`** (new): 9 tests — bin-edge
+  shape, constant-input safety, identical-distribution PSI=0,
+  shifted-distribution PSI > 0.25, zero-bin epsilon regularisation,
+  per-channel stable/significant/minor cases, short-input safety.
+  9/9 GREEN.
+
+### Findings (live cache, 169,375 samples × 28 channels)
+
+| flag        | count | channels |
+|-------------|-------|----------|
+| stable      | 27    | 0–4, 6–27 |
+| minor       | 1     | **5** (PSI=0.198) |
+| significant | 0     | — |
+
+Cross-reference with #164:
+
+- **Ch 5** drifts in shape (PSI=0.198) but #164 didn't flag it — mean
+  and variance held stable, only the shape moved. Worth a probe before
+  next retrain.
+- **Ch 27 (OI)** flagged by #164 (var_ratio=10.4) but PSI=0.0006 here
+  — same distribution shape, just heavier tails. The two probes are
+  complementary, not redundant.
+
+No corrective action taken in this commit. Diagnostic only.
+
+---
+
 ## [Session 58.25] — 2026-05-08 — Regime-stratified walk-forward eval (#165)
 
 ### Context
