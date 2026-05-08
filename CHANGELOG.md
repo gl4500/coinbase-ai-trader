@@ -5,6 +5,47 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.23] — 2026-05-08 — Migrate _timescale_sanity to survivorship-aware top-N (#163 follow-up)
+
+### Context
+
+Final cache-only consumer migration. `_timescale_sanity.py` is a
+one-shot diagnostic comparing fresh-relabel vs cache-y at horizon 4h —
+no public API beyond `main()`, so we extract `_pick_pids` as a
+testable seam and delegate to `survivorship_aware_top_n`.
+
+### Changes (TDD)
+
+- **`backend/tools/_timescale_sanity.py`**: new `_pick_pids(prods, n,
+  snapshot_ts=None)` helper. `main()` rewired to use it.
+- **`backend/tests/test_timescale_sanity_snapshot.py`** (new): 2 tests
+  covering legacy passthrough and survivorship cutoff. 2/2 GREEN.
+
+### Validation
+
+Per-module pytest passes 2/2. Default behaviour preserved
+(`_pick_pids(prods, n=5, snapshot_ts=None)` reproduces the prior
+`len(entry["X"])` ranking).
+
+### #163 follow-up status
+
+All 4 cache-only consumers migrated:
+
+- ✅ `tools/rsi_rank_probe.py` (58.18)
+- ✅ `tools/feature_set_compare.py` (58.20)
+- ✅ `tools/hour_of_day_probe.py` (58.21)
+- ✅ `tools/timescale_sweep.py` (58.22)
+- ✅ `tools/_timescale_sanity.py` (58.23)
+
+2 consumers remain on legacy ranking with explicit deferral reasons:
+
+1. `tools/oi_single_add_probe.py:113` — network-bound (OKX); migration
+   blocked on offline validation strategy
+2. `tools/train_xgb_prod.py:53` — production booster trainer; coordinate
+   with next planned retrain cycle to avoid silent ranking drift
+
+---
+
 ## [Session 58.22] — 2026-05-08 — Migrate timescale_sweep to survivorship-aware top-N (#163 follow-up)
 
 ### Context

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import List, Optional
+
 import numpy as np
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,20 +20,24 @@ import torch  # noqa: E402
 
 from services.history_backfill import load_history  # noqa: E402
 from tools.feature_set_compare import _entry_to_arrays  # noqa: E402
+from tools.pid_snapshot import survivorship_aware_top_n  # noqa: E402
 from tools.timescale_sweep import _relabel_at_horizon  # noqa: E402
 
 CACHE = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 HORIZON = 4
 
 
+def _pick_pids(prods: dict, n: int, snapshot_ts: Optional[int] = None) -> List[str]:
+    """Top-n pid selection. `snapshot_ts=None` reproduces legacy
+    `len(entry["X"])` ranking; pass an int to opt into survivorship-aware
+    selection per #163."""
+    return survivorship_aware_top_n(prods, n=n, snapshot_ts=snapshot_ts)
+
+
 def main():
     blob = torch.load(CACHE, map_location="cpu", weights_only=False)
     prods = blob["products"]
-    sized = sorted(
-        ((pid, len(e.get("X", []))) for pid, e in prods.items()),
-        key=lambda x: -x[1],
-    )[:5]  # smaller sample for sanity
-    pids = [pid for pid, _ in sized]
+    pids = _pick_pids(prods, n=5, snapshot_ts=None)  # smaller sample for sanity
 
     total_n = total_match = total_both_valid = 0
     print(f"Comparing fresh relabel vs cache y at horizon={HORIZON}h", flush=True)
