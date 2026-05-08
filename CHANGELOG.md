@@ -5,6 +5,72 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.18] — 2026-05-08 — Survivorship-aware top-N pid snapshot (#163) — RSI-rank lift survives at Δ+0.0124
+
+### Context
+
+All probe tools (`rsi_rank_probe`, `feature_set_compare`, `oi_single_add_probe`,
+`timescale_sweep`, `hour_of_day_probe`, `train_xgb_prod`, `_timescale_sanity`)
+select pooled top-N pids via `len(entry["X"])` — total cache sample count.
+Bias: products that joined the tracked set recently and grew the most data
+dominate. Recent winners crowd out historically-tracked products.
+
+#163 introduces a centralized helper that takes a `snapshot_ts` cutoff and
+ranks pids by samples visible at-or-before that timestamp. With
+`snapshot_ts=None` it preserves legacy behavior so existing call sites are
+unchanged until they opt in.
+
+### Changes (TDD)
+
+- **`backend/tools/pid_snapshot.py`** (new): `survivorship_aware_top_n(prods,
+  n, snapshot_ts)` returns up to N pids ranked by samples ≤ cutoff, sorted
+  by count desc then pid asc. `recommended_snapshot_ts(prods)` returns the
+  median `first_ts` across non-empty products as a sensible default cutoff.
+- **`backend/tests/test_pid_snapshot.py`** (new): 7 unit tests covering legacy
+  passthrough, cutoff-excludes-newcomers, partial-truncation, capped-N,
+  empty-prods, skip-empty-X, and median-first_ts recommendation. RED → 7/7
+  GREEN.
+- **`backend/tools/rsi_rank_probe.py`**: opt-in `--snapshot-ts {auto|int}`
+  CLI flag. Defaults to legacy `None` so prior #162 result remains
+  reproducible. `auto` resolves to `recommended_snapshot_ts(prods)`.
+
+### Validation
+
+Re-ran RSI-rank probe with `--snapshot-ts auto` (cutoff = 1758816000 ≈
+2025-09-25, median across 113 products):
+
+| Selection mode                  | baseline_auc | replaced_auc | Δ        | gate |
+|---------------------------------|--------------|--------------|----------|------|
+| legacy (recent winners top-20)  | 0.5201       | 0.5409       | +0.0208  | PASS |
+| survivorship-aware (auto)       | 0.5229       | 0.5353       | +0.0124  | PASS |
+
+Pid set differs ~6/20: legacy includes recently-grown ALGO/DOT/STRK/IO/ADA/HBAR;
+survivorship-aware swaps in older-listed NKN/TRU/SKL/JASMY/XCN/BLUR.
+
+Lift survives the methodology fix — RSI-rank carries real cross-sectional
+information independent of selection bias. ~60% of the legacy Δ was real,
+~40% was bias artifact. The integration plan from Session 58.16 remains
+valid; the next retrain cycle should also adopt survivorship-aware
+selection in the production driver (`train_xgb_prod.py`) — deferred to a
+follow-up commit per find-list-fix.
+
+### Affected (deferred, listed not fixed)
+
+Other consumers still on legacy `len(entry["X"])` ranking:
+
+1. `tools/feature_set_compare.py:54` `_pooled_top_n`
+2. `tools/oi_single_add_probe.py:113`
+3. `tools/timescale_sweep.py:95`
+4. `tools/hour_of_day_probe.py:42`
+5. `tools/train_xgb_prod.py:53` ← production booster trainer
+6. `tools/_timescale_sanity.py:30`
+
+Migration plan: each consumer flips to `survivorship_aware_top_n` with an
+opt-in `snapshot_ts` arg in a separate commit, validated against its prior
+result.
+
+---
+
 ## [Session 58.17] — 2026-05-08 — Rank-transform generalization probes (#156 partial, #162 follow-up) — NULL
 
 ### Context

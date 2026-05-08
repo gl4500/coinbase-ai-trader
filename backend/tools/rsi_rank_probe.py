@@ -33,6 +33,10 @@ import torch  # noqa: E402
 
 from tools.channel_replace import run_replace  # noqa: E402
 from tools.feature_set_compare import _entry_to_arrays  # noqa: E402
+from tools.pid_snapshot import (  # noqa: E402
+    recommended_snapshot_ts,
+    survivorship_aware_top_n,
+)
 
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _BAR_SECS = 3600
@@ -120,10 +124,16 @@ def build_rank_signal(
 def _load_pooled_with_ranks(
     n: int = 20,
     source_channel: int = _DEFAULT_SOURCE_CHANNEL,
+    snapshot_ts: int = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Load pooled top-N samples and build aligned cross-sectional rank signal
     from `source_channel` via a vectorized (T, P) matrix. Returns (X, y, ts,
-    rank_sig, products_used)."""
+    rank_sig, products_used).
+
+    `snapshot_ts=None` (default) preserves the legacy `len(entry["X"])`
+    ordering. Pass an integer cutoff (or sentinel from
+    `recommended_snapshot_ts`) to engage survivorship-aware selection.
+    """
     from scipy.stats import rankdata
 
     print(f"Loading cache: {_CACHE_PATH}", flush=True)
@@ -189,11 +199,10 @@ def _load_pooled_with_ranks(
           flush=True)
 
     # Step 4: build per-sample rank windows for top-N products
-    sized = sorted(
-        ((pid, len(e.get("X", []))) for pid, e in prods.items()),
-        key=lambda x: -x[1],
-    )[:n]
-    print(f"  pooled top-{n} products: {[pid for pid, _ in sized]}", flush=True)
+    top_pids = survivorship_aware_top_n(prods, n=n, snapshot_ts=snapshot_ts)
+    sized = [(pid, len(prods[pid].get("X", []))) for pid in top_pids]
+    mode = "legacy" if snapshot_ts is None else f"snapshot_ts={snapshot_ts}"
+    print(f"  pooled top-{n} ({mode}): {top_pids}", flush=True)
 
     Xs, ys, tss, sigs = [], [], [], []
     products_used: List[str] = []
@@ -242,10 +251,27 @@ def main():
                         default=_DEFAULT_SOURCE_CHANNEL,
                         help="Source channel to rank cross-sectionally "
                              "(default 4 = RSI; e.g. 1 = log volume).")
+    parser.add_argument("--snapshot-ts", type=str, default=None,
+                        help="Survivorship-aware top-N selection cutoff: "
+                             "'auto' (median first_ts), an integer epoch "
+                             "seconds, or omit for legacy behavior (#163).")
     args = parser.parse_args()
     src = int(args.source_channel)
 
-    X, y, ts, rank_sig, used = _load_pooled_with_ranks(n=20, source_channel=src)
+    snapshot_ts: int = None
+    if args.snapshot_ts is not None:
+        if args.snapshot_ts == "auto":
+            blob = torch.load(_CACHE_PATH, map_location="cpu", weights_only=False)
+            snapshot_ts = recommended_snapshot_ts(blob["products"])
+            print(f"snapshot_ts=auto -> {snapshot_ts} "
+                  f"(median first_ts across {len(blob['products'])} products)",
+                  flush=True)
+        else:
+            snapshot_ts = int(args.snapshot_ts)
+            print(f"snapshot_ts={snapshot_ts}", flush=True)
+
+    X, y, ts, rank_sig, used = _load_pooled_with_ranks(
+        n=20, source_channel=src, snapshot_ts=snapshot_ts)
     print(f"\npooled samples: n={len(y):,}", flush=True)
     print(f"products & rank coverage: {used}", flush=True)
     coverage_pct = float((rank_sig != 0.5).any(axis=1).mean())
