@@ -5,6 +5,74 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.35] — 2026-05-08 — Maker (post-only LIMIT) entry path with timeout-fallback (#119)
+
+### Context
+
+Existing `OrderExecutor.execute_signal` posts a LIMIT at the signal price
+without `post_only`, so it crosses the spread and pays taker fees on the
+entry leg (~0.60% on tier 0). #119 adds a parallel maker path that posts
+at the touch with `post_only=True`, polls for fill, and falls back to a
+MARKET order if the resting limit isn't matched within `timeout_secs`.
+
+Cuts the round-trip cost from ~1.20% (taker both legs) toward 0.80% (maker
+entry, taker exit) — or 0.50% on volume tier 2 if both legs end up maker
+on a paired exit path later.
+
+### Files added / modified
+
+- `backend/agents/order_executor.py` — adds module-level helper
+  `_maker_price(side, bid, ask)` (bid for BUY, ask for SELL) and
+  `OrderExecutor.execute_maker_signal(signal, timeout_secs=30.0)`. The new
+  method shares drawdown/preflight/sizing with `execute_signal`. Uses a
+  `_wait_for_fill` poll loop (deadline-based, sleep ≤ 0.5s clamped to a
+  quarter of remaining budget) to detect FILLED status, then returns
+  `fill_mode="MAKER"`. On timeout it cancels the limit and places a
+  market order, returning `fill_mode="TAKER_FALLBACK"`. Dry-run path
+  short-circuits with `order_type="LIMIT_MAKER"` and never touches the
+  exchange — same blast-radius profile as the existing dry-run path.
+- `backend/tests/test_order_executor_maker.py` — 7 TDD tests covering
+  maker price helper (BUY→bid, SELL→ask, case-insensitive), post-only
+  LIMIT placement at the correct price for both sides, timeout
+  cancel-and-fallback to MARKET (asserts cancel_orders + place_market_order
+  both called), and dry-run no-live-call short-circuit.
+
+### Scope discipline
+
+**Purely additive.** No existing caller is migrated to
+`execute_maker_signal` in this commit. The CNN/tech signal generator and
+exit paths still call `execute_signal` / `sell()` exactly as before — so
+behavior in production is unchanged. The maker path becomes opt-in once
+the user picks a caller to migrate (likely CNN entries, since they sit on
+the longest hold horizon and most tolerate maker-fill latency).
+
+### Verification
+
+- per-module: `pytest tests/test_order_executor_maker.py -v` → 7/7 green
+- adjacent: `test_cnn_agent.py + test_signal_generator_new.py +
+  test_order_executor_maker.py` → 260 passed + 2 xfailed in 4m41s
+- pre-commit hook ran the full suite: see HEAD commit footer for count
+
+### Why scoped this way
+
+Live order-execution changes have non-zero blast radius even when written
+correctly — a stray code path that picked up `execute_maker_signal`
+unexpectedly could shift fee characteristics or fill timing on real
+trades. Keeping the migration of callers a separate user-gated step
+isolates the "code exists" decision from the "use it in prod" decision.
+
+### Open follow-ups
+
+- Migrate CNN entry path to call `execute_maker_signal` (gated by a new
+  `MAKER_ENABLED` env flag so it can be flipped per environment without
+  a redeploy)
+- Pair with a maker-side EXIT path (post-only LIMIT at ask for SELL on
+  TP, with timeout fallback to market) — would unlock the 0.50% RT tier
+- Telemetry: track `fill_mode` distribution in `signal_outcomes` so we
+  can measure realized maker-fill rate vs the model's expectation
+
+---
+
 ## [Session 58.34] — 2026-05-08 — BTC-dominance probe (#156): FAIL +0.01 gate at Δ=+0.0077
 
 ### Context
