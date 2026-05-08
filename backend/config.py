@@ -63,6 +63,9 @@ class Config:
     cnn_ranging_llm_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_LLM_W",      "0.60")))
     # How often to auto-train (in number of scans; default 4 = ~1 hour at 15-min scan interval)
     cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "8")))
+    # Scan-loop cadence in seconds (default 900 = 15 min). Lower to expedite
+    # XGB shadow accumulation; raise to ease Coinbase REST pressure.
+    scan_interval_secs:     int   = field(default_factory=lambda: int(os.getenv("SCAN_INTERVAL_SECS",       "900")))
 
     # ── Ollama LLM ─────────────────────────────────────────────────────────────
     # Central default so every module reads the same model (CLAUDE.md invariant 7).

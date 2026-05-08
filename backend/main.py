@@ -475,6 +475,7 @@ async def lifespan(app: FastAPI):
 
     app_state.cnn_task = asyncio.create_task(
         app_state.cnn_agent.run_loop(
+            interval            = config.scan_interval_secs,
             order_executor      = app_state.order_executor,
             is_trading_fn       = lambda: app_state.is_trading,
             train_every_n_scans = config.cnn_train_every_n_scans,

@@ -54,6 +54,37 @@ class TestConfigField:
         assert cfg_mod.config.model_backend == "xgb"
 
 
+# ── Scan-loop interval (#227) ─────────────────────────────────────────────────
+
+class TestScanIntervalConfig:
+    """SCAN_INTERVAL_SECS env var drives cnn_agent.run_loop cadence so the
+    XGB-eval loop can be expedited (3-5x scan rate) without code changes."""
+
+    def test_scan_interval_secs_defaults_to_900(self, monkeypatch):
+        """SCAN_INTERVAL_SECS unset → config.scan_interval_secs == 900."""
+        monkeypatch.delenv("SCAN_INTERVAL_SECS", raising=False)
+        import config as cfg_mod
+        importlib.reload(cfg_mod)
+        monkeypatch.delenv("SCAN_INTERVAL_SECS", raising=False)
+        fresh = cfg_mod.Config()
+        assert fresh.scan_interval_secs == 900
+
+    def test_scan_interval_secs_reads_env(self, monkeypatch):
+        """SCAN_INTERVAL_SECS=300 propagates into config.scan_interval_secs."""
+        monkeypatch.setenv("SCAN_INTERVAL_SECS", "300")
+        import config as cfg_mod
+        importlib.reload(cfg_mod)
+        assert cfg_mod.config.scan_interval_secs == 300
+
+    def test_scan_interval_secs_is_int(self, monkeypatch):
+        """Stored as int — used directly as asyncio.sleep argument."""
+        monkeypatch.setenv("SCAN_INTERVAL_SECS", "180")
+        import config as cfg_mod
+        importlib.reload(cfg_mod)
+        assert isinstance(cfg_mod.config.scan_interval_secs, int)
+        assert cfg_mod.config.scan_interval_secs == 180
+
+
 # ── _cnn_prob branching ───────────────────────────────────────────────────────
 
 class TestCnnProbBranching:

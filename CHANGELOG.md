@@ -5,6 +5,80 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.37] — 2026-05-08 — Expedite XGB evaluation: lower BUY gate + env-ize scan interval (#226, #227)
+
+### Context
+
+XGB shadow logging resumed today after #223 fix (Session 58.36). First
+post-restart sample showed `xgb_prob` peaking at **0.5427** (DOGE-USD) and
+averaging ~0.50 across all pairs. The active BUY gate `CNN_BUY_THRESHOLD=0.80`
+was unreachable on these outputs — the agent would never fire under XGB
+backend, so `signal_outcomes` (which feeds isotonic-calibrator refits per
+#187/#192) couldn't accumulate. The 7-day shadow eval (#136) was effectively
+running at zero throughput.
+
+User direction: with `DRY_RUN=true` (paper-only), expedite XGB evaluation
+to identify model limitations and what works. Ship config knobs first,
+gather data 24-48h, then decide on auto-recalibration / weekly retrain
+infrastructure (deferred until we see actual hit-rate numbers).
+
+### Changes
+
+**#226 — `.env` `CNN_BUY_THRESHOLD` 0.80 → 0.55**
+
+Opens the BUY gate enough that today's XGB peaks (0.54) can occasionally
+cross it. Selectivity is intentionally weak (~coinflip + tiny edge) so the
+agent fires on most positive XGB signals; goal is volume of `signal_outcomes`
+rows for the next calibrator refit, not selective trading. Inline comment
+in `.env:38-44` documents rationale + DRY_RUN constraint.
+
+**#227 — env-ize scan-loop cadence (`SCAN_INTERVAL_SECS`)**
+
+- `backend/config.py:65-67` — new `scan_interval_secs: int` field reading
+  `SCAN_INTERVAL_SECS` env, default 900s (preserves existing behavior when
+  env unset).
+- `backend/main.py:478` — `cnn_agent.run_loop` call now passes
+  `interval=config.scan_interval_secs` (was relying on `run_loop`'s
+  hardcoded 900s default).
+- `.env:28` — renamed dead `SCAN_INTERVAL_SECONDS=300` (read by nothing) to
+  the live `SCAN_INTERVAL_SECS=300` so it actually takes effect. 3× scan
+  rate → 3× signal_outcomes/day during eval.
+
+### Tests
+
+- `backend/tests/test_model_backend.py` — new `TestScanIntervalConfig` with
+  3 cases: defaults to 900, reads env, normalizes to int. RED→GREEN.
+- Existing `TestConfigField` + `TestCnnProbBranching` (5 cases) still pass.
+
+### Files modified
+
+- `backend/config.py`
+- `backend/main.py`
+- `backend/tests/test_model_backend.py`
+- `.env` (untracked, documented for posterity)
+- `CHANGELOG.md`
+- `.claude/.../coinbase_trader_architecture.md`
+
+### Verification
+
+- `tests/test_model_backend.py` 8 passed in 4.97s
+- `python -c "import main; print(...)"` — main imports cleanly
+- Backend restart pending (#231)
+
+### Open follow-ups
+
+- Once we see ~24-48h of `signal_outcomes` at the new cadence, decide:
+  - **A3**: auto-refit isotonic every N new outcome rows (small new code +
+    hooks `outcome_tracker` → `tools/fit_xgb_calibration.py` →
+    `/api/xgb/calibration/reload` endpoint that already exists from #194).
+  - **B1-B3**: append-mode cache builder + weekly booster retrain + atomic
+    booster swap endpoint (mirror of calibrator hot-reload).
+- 7-day shadow eval (#136) clock effectively restarts now that signals
+  will actually fire. Plan to revisit AUC/hit-rate gate decision around
+  2026-05-15.
+
+---
+
 ## [Session 58.36] — 2026-05-08 — Fix XGB shadow logging silently killed by CNN-checkpoint gate (#223)
 
 ### Context
