@@ -5,6 +5,61 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.28] — 2026-05-08 — Bronze PIT tagging on parquet pulls (#168)
+
+### Context
+
+#168 BACKLOG. The bronze layer (raw OHLCV in `backend/data/history/`)
+had no provenance metadata: a row's `start` told you *what bar* it
+covered but not *when it was first ingested* — so re-pulls and PIT
+backtests had no way to distinguish a row that's been in the file
+for a year from one fetched five seconds ago. Standard data-warehouse
+fix: add `ingest_ts` and `schema_version` columns at the writer.
+
+### Files changed
+
+- `backend/services/history_backfill.py`
+  - `_SCHEMA_VERSION = 1` constant — bump on bronze schema column
+    changes so consumers can branch.
+  - `_SCHEMA` extended with `ingest_ts: int64` and
+    `schema_version: int32`.
+  - `_save_to_path(path, candles, *, now_ts=None)` — new keyword-
+    only `now_ts` (defaults to `int(time.time())`). Stamps both
+    columns on rows missing them; rows that already carry
+    `ingest_ts` keep their original value across rewrites.
+    Dedup-on-collision prefers the version with `ingest_ts` so the
+    PIT history isn't dropped during merge.
+  - `_load_from_path(path)` — back-compat: reads `ingest_ts` and
+    `schema_version` when present, omits them otherwise. Pre-#168
+    parquet files still load.
+
+### Tests added
+
+`backend/tests/test_history_backfill_pit.py` (6 tests, all GREEN):
+- `_SCHEMA_VERSION` is a positive int.
+- New writes emit `ingest_ts` column with the supplied `now_ts`.
+- New writes emit `schema_version` column equal to the constant.
+- PIT preservation: existing rows keep their original `ingest_ts`
+  across a second rewrite; only newly-introduced rows pick up the
+  second-write timestamp.
+- Pre-#168 parquet (legacy 6-column schema) still loads via
+  `_load_from_path`.
+- Loaded candles carry `ingest_ts` and `schema_version` keys.
+
+### Verification
+
+```
+$ python -m pytest tests/test_history_backfill_pit.py tests/test_history_backfill.py -v
+====== 17 passed in 7.68s ======
+```
+
+Existing parquet files in production aren't migrated by this commit.
+Their first-write `ingest_ts` will be set the next time the backfill
+loop touches them (i.e. the first save after this code lands), with
+`schema_version=1` from that point forward. PIT history starts then.
+
+---
+
 ## [Session 58.27] — 2026-05-08 — Inference-time feature-freshness gate (#169)
 
 ### Context
