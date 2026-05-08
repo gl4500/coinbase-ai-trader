@@ -5,6 +5,54 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.27] — 2026-05-08 — Inference-time feature-freshness gate (#169)
+
+### Context
+
+#169 BACKLOG. Runtime counterpart to the offline diagnostics #164 / #170.
+A live (n_channels, seq_len) window can look fine on shape and norms
+yet be silently wrong if a feed pauses, geo-blocks, or gets cached. The
+cheapest detectable signature: trailing-flat tails — a channel whose
+last K bars are all the same value. The gate reports per-channel
+trailing-flat counts and flags any that exceed their budget so the
+caller (cnn_agent / xgb_signal) can skip-the-bar, warn-and-score, or
+fall back to neutral.
+
+### Files added
+
+- `backend/tools/freshness_gate.py` — pure-numpy, allocation-light:
+  - `_trailing_flat_bars(channel)` — count of trailing bars where
+    `diff == 0`, walking backward from the tail.
+  - `evaluate_freshness(window, max_flat_bars=5, per_channel_max=None,
+    ignore_channels=None)` — returns `{fresh, stale_channels,
+    channel_flat_bars, max_flat_bars}`. Per-channel overrides for
+    legitimately-slow feeds (e.g. 1h cadence at 5m bars repeats ~11),
+    and `ignore_channels` for permanently-zero geo-blocked feeds.
+- `backend/tests/test_freshness_gate.py` — 11 tests covering: zero on
+  changing tail, runs of repeated tail, all-constant edge case, short-
+  channel safety, fresh-window pass, single-stale-channel flag,
+  per-channel override respected, channel_flat_bars in report,
+  threshold-boundary semantics (exactly == max is OK; > max is stale),
+  and ignore-list excludes flagged channels from the verdict.
+
+### Decision
+
+No automatic wiring into cnn_agent / xgb_signal in this commit — that's
+a behavior change with operator implications and deserves its own
+threshold/policy follow-up. The helper is a stable API the live agents
+will call when ready, with budgets calibrated against #170's per-channel
+PSI report (Ch 5 was the only minor-drift channel; everything else
+should clear `max_flat_bars=5` at default).
+
+### Verification
+
+```
+$ python -m pytest tests/test_freshness_gate.py -v
+====== 11 passed in 3.74s ======
+```
+
+---
+
 ## [Session 58.26] — 2026-05-08 — Per-channel distribution drift monitor (#170)
 
 ### Context
