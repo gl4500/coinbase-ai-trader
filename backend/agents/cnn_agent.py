@@ -1925,7 +1925,12 @@ class CoinbaseCNNAgent:
         execute: bool = False,
         order_executor=None,
     ) -> Optional[Dict]:
-        if self._needs_retrain:
+        # #223 — XGB backend doesn't use the PyTorch CNN checkpoint, so an
+        # incompatible CNN model must not block XGB shadow logging or signal
+        # generation. Without this guard, the 28-channel migration left the
+        # 27-channel CNN checkpoint flagged incompatible and silently killed
+        # all save_cnn_scan writes for ~30 hours starting 2026-05-07 02:17 UTC.
+        if self._needs_retrain and config.model_backend != "xgb":
             logger.debug(
                 "CNN signal suppressed — checkpoint incompatible with current architecture. "
                 "Run retrain.py or trigger /api/cnn/train to generate a compatible model."

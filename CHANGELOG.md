@@ -5,6 +5,53 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.36] — 2026-05-08 — Fix XGB shadow logging silently killed by CNN-checkpoint gate (#223)
+
+### Context
+
+XGB shadow logging (#181, #186) wrote `xgb_prob` to `cnn_scans` continuously
+from 2026-05-04 through 2026-05-07 02:17 UTC, then stopped — not just
+`xgb_prob` but **every column** for the next ~30 hours. Investigation
+showed the 28-channel migration (#196–#201) updated the XGB booster +
+calibrator + cache to 28 channels but did NOT retrain the CNN checkpoint,
+which remained 27-channel and therefore got flagged
+`_needs_retrain=True` on every backend startup since.
+
+`generate_signal` had an unconditional early return guarding on
+`_needs_retrain`, so the entire scan body — including `save_cnn_scan` at
+line 2213 — was skipped. Under `MODEL_BACKEND=xgb` this is wrong: XGB
+inference goes through `xgb_signal.xgb_prob`, not the PyTorch model, so
+the CNN checkpoint compatibility is irrelevant.
+
+### Files modified
+
+- `backend/agents/cnn_agent.py:1928` — gate guarded behind
+  `config.model_backend != "xgb"` so the XGB inference path bypasses the
+  CNN checkpoint compatibility check. CNN backend behavior unchanged.
+- `backend/tests/test_cnn_agent.py` — new
+  `test_generate_signal_persists_scan_under_xgb_when_needs_retrain` asserts
+  `save_cnn_scan` is called when `MODEL_BACKEND=xgb` and `_needs_retrain=True`.
+  Existing `test_generate_signal_suppressed_when_needs_retrain` updated to
+  pin `model_backend="cnn"` so it tests the CNN suppression branch
+  unambiguously.
+
+### Verification
+
+- Targeted: 2 tests pass (1 new red→green, 1 updated still green)
+- Smoke: 261 passed + 2 xfailed across cnn_agent + signal_generator + maker
+  (was 260, +1 from new test)
+- Pre-commit hook: full suite green
+
+### Open follow-ups
+
+- CNN checkpoint retrain on 28-channel cache so CNN backend can resume —
+  separate task, doesn't block XGB shadow.
+- Resume #136 Phase 6 shadow-mode evaluation now that scans are flowing
+  again. The 30-hour gap means cumulative shadow data resets effectively
+  to 3 days — extend observation window before XGB cutover review.
+
+---
+
 ## [Session 58.35] — 2026-05-08 — Maker (post-only LIMIT) entry path with timeout-fallback (#119)
 
 ### Context

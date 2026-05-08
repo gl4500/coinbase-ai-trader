@@ -1334,13 +1334,56 @@ class TestTrainingFramework:
     @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
     @pytest.mark.asyncio
     async def test_generate_signal_suppressed_when_needs_retrain(self):
-        """generate_signal returns None when _needs_retrain is True."""
-        agent = CoinbaseCNNAgent()
-        agent._needs_retrain = True
+        """generate_signal returns None when _needs_retrain is True under default (CNN) backend."""
+        import agents.cnn_agent as ca
+        with patch.object(ca.config, "model_backend", "cnn"):
+            agent = CoinbaseCNNAgent()
+            agent._needs_retrain = True
 
-        product = {"product_id": "BTC-USD", "price": 94000.0}
-        result = await agent.generate_signal(product, execute=False)
-        assert result is None, "Signal must be suppressed when model is incompatible"
+            product = {"product_id": "BTC-USD", "price": 94000.0}
+            result = await agent.generate_signal(product, execute=False)
+            assert result is None, "Signal must be suppressed when model is incompatible (CNN backend)"
+
+    @pytest.mark.asyncio
+    async def test_generate_signal_persists_scan_under_xgb_when_needs_retrain(self, product):
+        """#223 — When MODEL_BACKEND=xgb, _needs_retrain must NOT short-circuit the scan.
+
+        XGB inference doesn't depend on the PyTorch CNN checkpoint, so an
+        incompatible CNN model must not block XGB shadow logging. Reproduces
+        the 2026-05-07 02:17 UTC outage where the 28-channel migration left
+        the CNN checkpoint at 27ch and silently killed all save_cnn_scan
+        writes for ~30 hours.
+        """
+        import agents.cnn_agent as ca
+        candles = _make_candles(80)
+        save_mock = AsyncMock()
+
+        with (
+            patch.object(ca.config, "model_backend", "xgb"),
+            patch("agents.cnn_agent._TORCH", False),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=save_mock),
+            patch("agents.cnn_agent.database.get_recent_lessons",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=0.50)),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(return_value=1)),
+        ):
+            agent = CoinbaseCNNAgent()
+            agent._needs_retrain = True
+            with patch.object(agent, "_cnn_prob", return_value=0.55):
+                await agent.generate_signal(product, execute=False)
+
+        save_mock.assert_called_once()
+        kwargs = save_mock.call_args.args[0] if save_mock.call_args.args else save_mock.call_args.kwargs
+        assert kwargs["product_id"] == "BTC-USD", \
+            "save_cnn_scan must persist the row even when CNN checkpoint is incompatible"
 
     @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
     def test_save_model_stores_n_channels(self, tmp_path, monkeypatch):
