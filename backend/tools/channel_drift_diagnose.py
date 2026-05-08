@@ -1,16 +1,17 @@
-"""Ch 5 (macd_hist) drift diagnostic (#208).
+"""Per-channel drift diagnostic (#208).
 
-Decomposes the scalar PSI=0.198 from the #170 drift monitor into
-actionable signals so we can classify the drift before the next retrain:
+Decomposes the scalar PSI from the #170 drift monitor for any channel
+into actionable signals so we can classify drift before the next retrain:
 
   - decompose_psi:        per-bin contributions — *which* mass moved
   - summary_stats:        mean / var / skew / min / max — shape sketch
   - per_product_drift:    PSI per pid sorted desc — concentrated or broad?
   - bin_count_sensitivity: PSI vs n_bins — robust or normalization-fragile?
 
-Pure numpy. CLI at the bottom hydrates the live cnn_dataset_cache and
-runs all four against the chronologically-sorted Ch 5 terminal-value
-series (same series the drift monitor saw).
+Pure numpy. CLI hydrates the live cnn_dataset_cache and runs all four
+against the chronologically-sorted terminal-value series for the channel
+selected via `--channel N` (defaults to 5 = macd_hist, the original
+investigation that motivated this tool).
 """
 from __future__ import annotations
 
@@ -147,11 +148,29 @@ def bin_count_sensitivity(
     }
 
 
-def _load_cache_and_extract_ch5() -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
-    """Load cnn_dataset_cache and extract Ch 5 terminal-value series.
+_CHANNEL_NAMES = (
+    "norm_close", "log_volume", "hl_range", "body", "rsi14",
+    "macd_hist", "ema9_dist", "ema21_dist", "bb_pos", "ret_1",
+    "bid", "ask", "mfi14", "obv_slope", "stoch_rsi_k",
+    "adx14", "vwap_dist", "fast_rsi_1h", "velocity_1h", "vol_zscore",
+    "funding_rate", "btc_corr_20", "hour_sin", "hour_cos", "ivrv_20",
+    "ivrv_60", "vol_sentiment", "okx_oi",
+)
+
+
+def _channel_label(ch: int) -> str:
+    if 0 <= ch < len(_CHANNEL_NAMES):
+        return f"Ch {ch} ({_CHANNEL_NAMES[ch]})"
+    return f"Ch {ch}"
+
+
+def _load_cache_and_extract_channel(
+    channel: int,
+) -> Tuple[np.ndarray, Dict[str, dict]]:
+    """Load cnn_dataset_cache and extract a channel's terminal-value series.
 
     Returns (sorted_global, per_pid_dict) where:
-      - sorted_global: chronologically-sorted Ch 5 terminal values
+      - sorted_global: chronologically-sorted terminal values for `channel`
       - per_pid_dict: {pid: {"channel": np.ndarray, "ts": np.ndarray}}
     """
     import torch  # local import — CLI-only path
@@ -171,26 +190,31 @@ def _load_cache_and_extract_ch5() -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         tss.append(ts)
         order = np.argsort(ts, kind="stable")
         pid_data[pid] = {
-            "channel": X[order, 5, -1],
+            "channel": X[order, channel, -1],
             "ts": ts[order],
         }
     X_all = np.concatenate(Xs, axis=0)
     ts_all = np.concatenate(tss, axis=0)
     order = np.argsort(ts_all, kind="stable")
-    return X_all[order, 5, -1], pid_data
+    return X_all[order, channel, -1], pid_data
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-bins", type=int, default=_DEFAULT_BINS)
+    parser.add_argument(
+        "--channel", type=int, default=5,
+        help="Channel index to diagnose (default: 5 = macd_hist).",
+    )
     args = parser.parse_args()
 
-    sorted_global, pid_data = _load_cache_and_extract_ch5()
+    sorted_global, pid_data = _load_cache_and_extract_channel(args.channel)
     n = sorted_global.size
     h = n // 2
     a, b = sorted_global[:h], sorted_global[h:]
 
-    print(f"\nCh 5 (macd_hist) drift diagnostic — N={n:,}", flush=True)
+    label = _channel_label(args.channel)
+    print(f"\n{label} drift diagnostic — N={n:,}", flush=True)
     print("=" * 60, flush=True)
 
     print("\n[1] Per-bin PSI decomposition", flush=True)

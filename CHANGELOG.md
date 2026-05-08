@@ -5,6 +5,81 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.31] — 2026-05-08 — Generalize drift diagnostic to any channel + Ch 27 (OI) probe (#209)
+
+### Context
+
+#209. The Ch 5 (#208) tool was hard-coded for one channel. Ch 27 (OKX
+OI) was flagged twice with conflicting signals: #164 found a 10.4×
+variance-ratio jump first→second half, while #170 found PSI=0.0006
+(stable). Two questions: (a) generalize the diagnostic so we can probe
+any channel, (b) reconcile the #164/#170 discrepancy on Ch 27.
+
+### Changes
+
+- `backend/tools/ch5_drift_diagnose.py` → `backend/tools/channel_drift_diagnose.py`
+  (renamed via `git mv`; preserves history).
+- `backend/tests/test_ch5_drift_diagnose.py` → `backend/tests/test_channel_drift_diagnose.py`
+  (renamed; imports updated to `tools.channel_drift_diagnose`).
+- New CLI flag `--channel N` (default 5 = macd_hist).
+- New `_load_cache_and_extract_channel(channel)` replaces the
+  Ch-5-specific loader.
+- New `_CHANNEL_NAMES` tuple (28 entries, last is `okx_oi`) and
+  `_channel_label(ch)` helper used in print headers.
+- Docstring in tool updated to drop Ch 5 specificity (kept Ch 5 as
+  default and the historical motivation note).
+
+### Live Ch 27 (okx_oi) findings
+
+Ran against the production cache (N=167,346 samples, top-20
+survivorship-aware pids):
+
+```
+[1] Per-bin PSI=0.0002 — flagged stable. But the bin structure is
+    *degenerate*: bin 9 holds ~90% of mass in both halves, bin 0 holds
+    ~10%, bins 1–8 are all empty (edges all 0.0000). The PSI scalar
+    is misleading because the distribution is two point masses, not a
+    continuous shape.
+[2] Half-vs-half stats reveal the real shift:
+    - first half var = 0.0000, second half var = 0.0025  (NOT zero)
+    - first half min/max = [-0.0306, 0.0000]
+    - second half min/max = [-1.0000, +1.0000]  (full clip range)
+    - skew flips -4.02 → +13.45
+    First half is essentially a constant zero series; second half is
+    real OI data spanning the clip range.
+[3] Per-product PSI: only LINK shows nonzero (0.0827); the other 19
+    pids report 0.0000. A "0.0000" per-pid PSI here means the channel
+    was *constant* (typically all-zero) in at least one half — i.e.
+    those pids had no OI data to align with their candles.
+[4] Bin sensitivity: 0.0002 → 0.0030 from 5 → 40 bins (monotonic,
+    stable). No binning artifact.
+```
+
+**Classification:** Ch 27 has a **data-availability / backfill issue**,
+not a regime drift. First half: OI history is missing or zero for ~all
+pids except LINK. Second half: real OI data populated for many. The
+#164 variance-ratio metric correctly flagged this (variance grew as
+data backfilled). The #170 PSI metric correctly reported "stable shape"
+because both halves are dominated by the same clip-bin extremes. Both
+were correct; they measured different things.
+
+**Action:** before any further OI-feature work, audit OKX OI coverage
+per-pid and per-period. If first-half OI is artificially zero (rather
+than legitimately missing), the cache build needs to forward-fill or
+NaN-mask those rows so the model doesn't learn a "zero OI = X behaviour"
+spurious pattern. New BACKLOG ticket #210 will track the audit.
+
+### Verification
+
+```
+$ python -m pytest tests/test_channel_drift_diagnose.py -v
+====== 11 passed in 3.97s ======
+$ python tools/channel_drift_diagnose.py --channel 27
+[runs to completion; per-bin / stats / per-pid / sensitivity output]
+```
+
+---
+
 ## [Session 58.30] — 2026-05-08 — Ch 5 (macd_hist) drift diagnostic (#208)
 
 ### Context

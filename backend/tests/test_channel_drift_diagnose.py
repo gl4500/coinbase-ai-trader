@@ -1,14 +1,14 @@
-"""TDD tests for Ch 5 (macd_hist) drift diagnostic (#208).
+"""TDD tests for per-channel drift diagnostic (#208/#209).
 
 Follow-up to #170. The drift monitor flagged Ch 5 with PSI=0.198 (minor).
-This module decomposes that scalar into actionable pieces:
+This module decomposes that scalar into actionable pieces for any channel:
 
   - decompose_psi: per-bin contribution breakdown (which bins moved?)
   - summary_stats: mean/var/skew/min/max for a numeric vector
   - per_product_drift: PSI per pid, sorted desc (is drift concentrated?)
   - bin_count_sensitivity: PSI as a function of n_bins (normalization probe)
 
-No I/O, pure numpy. The CLI lives in tools/ch5_drift_diagnose.py.
+No I/O, pure numpy. CLI lives in tools/channel_drift_diagnose.py.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ if BACKEND not in sys.path:
 class TestDecomposePSI:
 
     def test_total_matches_sum_of_per_bin_contributions(self):
-        from tools.ch5_drift_diagnose import decompose_psi
+        from tools.channel_drift_diagnose import decompose_psi
         rng = np.random.default_rng(0)
         a = rng.normal(0, 1, 500)
         b = rng.normal(0.2, 1.1, 500)
@@ -36,14 +36,14 @@ class TestDecomposePSI:
         assert len(out["per_bin"]) == 10
 
     def test_identical_halves_give_near_zero_psi(self):
-        from tools.ch5_drift_diagnose import decompose_psi
+        from tools.channel_drift_diagnose import decompose_psi
         rng = np.random.default_rng(1)
         a = rng.normal(0, 1, 1000)
         out = decompose_psi(a, a.copy(), n_bins=10)
         assert abs(out["total_psi"]) < 1e-6
 
     def test_per_bin_records_have_required_keys(self):
-        from tools.ch5_drift_diagnose import decompose_psi
+        from tools.channel_drift_diagnose import decompose_psi
         a = np.linspace(-1, 1, 200)
         b = np.linspace(-0.5, 1.5, 200)
         out = decompose_psi(a, b, n_bins=5)
@@ -57,7 +57,7 @@ class TestDecomposePSI:
         Uniform [0, 10) reference; second half drops bin 0 entirely and
         doubles the mass in bin 9 (the rest remains uniform). Bins 0
         and 9 should dominate the contribution sum."""
-        from tools.ch5_drift_diagnose import decompose_psi
+        from tools.channel_drift_diagnose import decompose_psi
         a = np.linspace(0.0, 10.0, 1000, endpoint=False)
         # b drops values that fell in [0, 1) (200 of them) and adds them
         # to [9, 10): the result has 800 values in [1, 9) and 200 in
@@ -78,7 +78,7 @@ class TestDecomposePSI:
 class TestSummaryStats:
 
     def test_known_mean_and_var(self):
-        from tools.ch5_drift_diagnose import summary_stats
+        from tools.channel_drift_diagnose import summary_stats
         s = summary_stats(np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
         assert s["n"] == 5
         assert pytest.approx(s["mean"], abs=1e-9) == 3.0
@@ -89,14 +89,14 @@ class TestSummaryStats:
 
     def test_includes_skew_for_asymmetric(self):
         """A right-skewed distribution should produce positive skew."""
-        from tools.ch5_drift_diagnose import summary_stats
+        from tools.channel_drift_diagnose import summary_stats
         rng = np.random.default_rng(7)
         # exponential is right-skewed
         s = summary_stats(rng.exponential(1.0, 5000))
         assert s["skew"] > 0.5
 
     def test_handles_empty_safely(self):
-        from tools.ch5_drift_diagnose import summary_stats
+        from tools.channel_drift_diagnose import summary_stats
         s = summary_stats(np.array([]))
         assert s["n"] == 0
         # Empty stats are NaN/0 — caller decides how to render. Just don't crash.
@@ -105,7 +105,7 @@ class TestSummaryStats:
 class TestPerProductDrift:
 
     def test_returns_sorted_by_psi_desc(self):
-        from tools.ch5_drift_diagnose import per_product_drift
+        from tools.channel_drift_diagnose import per_product_drift
         rng = np.random.default_rng(2)
         # Three pids: pid_A drifts hard, pid_B moderate, pid_C stable
         n = 400
@@ -136,7 +136,7 @@ class TestPerProductDrift:
                 assert key in r
 
     def test_skips_short_series_safely(self):
-        from tools.ch5_drift_diagnose import per_product_drift
+        from tools.channel_drift_diagnose import per_product_drift
         prods = {
             "TINY": {"channel": np.array([0.1, 0.2]), "ts": np.array([0, 1])},
         }
@@ -148,7 +148,7 @@ class TestPerProductDrift:
 class TestBinCountSensitivity:
 
     def test_returns_psi_per_n_bins(self):
-        from tools.ch5_drift_diagnose import bin_count_sensitivity
+        from tools.channel_drift_diagnose import bin_count_sensitivity
         rng = np.random.default_rng(3)
         a = rng.normal(0, 1, 500)
         b = rng.normal(0.3, 1, 500)
@@ -159,7 +159,7 @@ class TestBinCountSensitivity:
             assert v >= 0.0
 
     def test_stable_for_identical_halves(self):
-        from tools.ch5_drift_diagnose import bin_count_sensitivity
+        from tools.channel_drift_diagnose import bin_count_sensitivity
         a = np.linspace(-1, 1, 800)
         result = bin_count_sensitivity(a, a.copy(), n_bins_list=(4, 10, 20))
         for v in result.values():
