@@ -5,6 +5,42 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.22] — 2026-05-08 — Migrate timescale_sweep to survivorship-aware top-N (#163 follow-up)
+
+### Context
+
+Continues the per-consumer #163 migration. `timescale_sweep.py` is the
+horizon-sweep probe that pivots the question from "which channels?" to
+"which forward_hours?" by relabeling at `h ∈ {1,4,12,24,72}` against
+the existing 27-channel feature stack.
+
+### Changes (TDD)
+
+- **`backend/tools/timescale_sweep.py`**: `_load_pooled_with_pids(n,
+  snapshot_ts=None)` delegates pid selection to
+  `survivorship_aware_top_n`. Added `_parse_snapshot_ts(arg, prods)`
+  helper. `main()` gains an `argparse` shell with `--snapshot-ts` flag.
+- **`backend/tests/test_timescale_sweep_snapshot.py`** (new): 6 tests
+  covering CLI parser (None / int / auto / empty-fallback) and
+  `_load_pooled_with_pids` plumbing. 6/6 GREEN.
+
+### Validation
+
+Per-module pytest passes 6/6. Default call site
+(`_load_pooled_with_pids(n=20)` without `snapshot_ts`) is byte-identical
+to the prior implementation.
+
+### Affected (still deferred)
+
+3 consumers remain on legacy ranking:
+
+1. `tools/oi_single_add_probe.py:113` (network: OKX)
+2. `tools/train_xgb_prod.py:53` ← production booster trainer; coordinate
+   with next planned retrain cycle
+3. `tools/_timescale_sanity.py:30`
+
+---
+
 ## [Session 58.21] — 2026-05-08 — Migrate hour_of_day_probe to survivorship-aware top-N (#163 follow-up)
 
 ### Context

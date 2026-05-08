@@ -16,9 +16,10 @@ Run:
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -33,6 +34,7 @@ from sklearn.metrics import roc_auc_score  # noqa: E402
 from agents.cnn_agent import _label_triple_barrier  # noqa: E402
 from services.history_backfill import load_history  # noqa: E402
 from tools.feature_set_compare import _entry_to_arrays  # noqa: E402
+from tools.pid_snapshot import recommended_snapshot_ts, survivorship_aware_top_n  # noqa: E402
 from tools.walk_forward import purged_walk_forward_splits  # noqa: E402
 from tools.xgb_features import extract_features  # noqa: E402
 
@@ -87,16 +89,26 @@ def _relabel_at_horizon(
     return y, mask
 
 
-def _load_pooled_with_pids(n: int = 20):
-    """Pooled top-n cache load, retaining per-sample pid for relabeling."""
+def _parse_snapshot_ts(arg: Optional[str], prods: dict) -> Optional[int]:
+    if arg is None:
+        return None
+    if arg == "auto":
+        ts = recommended_snapshot_ts(prods)
+        return ts if ts > 0 else None
+    return int(arg)
+
+
+def _load_pooled_with_pids(n: int = 20, snapshot_ts: Optional[int] = None):
+    """Pooled top-n cache load, retaining per-sample pid for relabeling.
+
+    `snapshot_ts=None` reproduces legacy `len(entry["X"])` ranking; pass an
+    int (or use `recommended_snapshot_ts`) for survivorship-aware selection
+    per #163.
+    """
     print(f"Loading cache: {_CACHE_PATH}", flush=True)
     blob = torch.load(_CACHE_PATH, map_location="cpu", weights_only=False)
     prods = blob["products"]
-    sized = sorted(
-        ((pid, len(e.get("X", []))) for pid, e in prods.items()),
-        key=lambda x: -x[1],
-    )[:n]
-    pids = [pid for pid, _ in sized]
+    pids = survivorship_aware_top_n(prods, n=n, snapshot_ts=snapshot_ts)
     print(f"  pooled top-{n}: {pids}", flush=True)
 
     Xs, tss, pid_idx = [], [], []
@@ -176,7 +188,22 @@ def _run_horizon(
 
 
 def main():
-    pids, X, ts, pid_idx = _load_pooled_with_pids(n=20)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--snapshot-ts",
+        default=None,
+        help="Survivorship-aware top-N cutoff (#163). Pass 'auto' for the "
+             "median-first_ts default, or an explicit Unix-seconds int. "
+             "Omit to keep the legacy len(X) ranking.",
+    )
+    args = parser.parse_args()
+
+    blob = torch.load(_CACHE_PATH, map_location="cpu", weights_only=False)
+    snapshot_ts = _parse_snapshot_ts(args.snapshot_ts, blob["products"])
+    if snapshot_ts is not None:
+        print(f"  snapshot_ts (survivorship-aware): {snapshot_ts}", flush=True)
+
+    pids, X, ts, pid_idx = _load_pooled_with_pids(n=20, snapshot_ts=snapshot_ts)
     print(f"\npooled samples: n={len(ts):,}", flush=True)
 
     print("Loading raw candles per pid...", flush=True)
