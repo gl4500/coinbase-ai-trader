@@ -5,6 +5,46 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.17] — 2026-05-08 — Rank-transform generalization probes (#156 partial, #162 follow-up) — NULL
+
+### Context
+
+#162's RSI-rank cross-sectional transform PASSED the +0.01 gate (Δ+0.0208).
+Question: does the rank transform itself carry information, or was the win
+specific to RSI's bounded mean-reverting nature? Two follow-up probes via
+`--source-channel` flag (added in same `tools/rsi_rank_probe.py`):
+
+- **Volume-rank (Ch 1)** as a BTC-dominance proxy for #156.
+- **MFI-rank (Ch 12)** to test generality on other bounded mean-reverting
+  indicators (MFI = volume-weighted RSI).
+
+### Results
+
+| source channel       | baseline_auc | replaced_auc | Δ        | gate    |
+|----------------------|--------------|--------------|----------|---------|
+| Ch 4  RSI            | 0.5201       | 0.5409       | +0.0208  | PASS    |
+| Ch 1  log10 volume   | 0.5134       | 0.5124       | -0.0010  | FAIL    |
+| Ch 12 MFI            | 0.5124       | 0.5155       | +0.0031  | FAIL    |
+
+### Interpretation
+
+- **Volume-rank failure** confirms unbounded skewed channels don't transform
+  usefully — BTC-USD always rank-1 of volume → near-constant signal, no lift.
+- **MFI-rank failure** rules out the "any bounded mean-reverting indicator
+  works" hypothesis. RSI(14)/100 carries cross-sectional information that MFI
+  does not, despite both being bounded oscillators.
+- **#156 BTC-dominance** cannot be approximated from cache contents; needs
+  external data source (CoinGecko Pro / CryptoCompare) — deferred.
+- RSI-rank stands as a single channel-specific win; integration still bundled
+  with next coordinated retrain cycle (per Session 58.16 plan).
+
+### Files
+
+No code changes — `tools/rsi_rank_probe.py` already supported `--source-channel N`
+from Session 58.16. CHANGELOG + memory updates only.
+
+---
+
 ## [Session 58.16] — 2026-05-07 — Cross-sectional RSI-rank single-add probe (#162) — PASS
 
 ### Context

@@ -1,17 +1,23 @@
 """Single-add probe (#162): replace ch13 (obv_slope, marginal per #146) with
-the cross-sectional RSI rank — at each per-bar timestamp, the percentile rank
-of this product's RSI vs all other products' RSI at the same hour.
+the cross-sectional rank of a chosen source channel — at each per-bar
+timestamp, the percentile rank of this product's value vs all other
+products' values at the same hour.
 
-Hypothesis: a product whose RSI is at the top of the cross-section (most
-overbought relative to peers) carries different mean-reversion / momentum
-information than its raw RSI value alone. If the probe lifts mean_auc by
-≥+0.01, integrate the rank as a real channel; otherwise keep the slot.
+Default source channel is RSI (Ch 4). Override with `--source-channel N`
+to scout other candidates (e.g. Ch 1 volume = BTC-dominance proxy for #156,
+Ch 12 MFI, Ch 22 funding sin component, etc.) — a channel-agnostic
+cross-section harness.
+
+Hypothesis: cross-sectional position carries information that no single
+product's 60-bar window can reconstruct. Integration gate: Δ ≥ +0.01.
 
 Run:
     cd backend && python tools/rsi_rank_probe.py
+    cd backend && python tools/rsi_rank_probe.py --source-channel 1
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import time
@@ -31,8 +37,8 @@ from tools.feature_set_compare import _entry_to_arrays  # noqa: E402
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _BAR_SECS = 3600
 _SEQ_LEN = 60
-_RSI_CHANNEL = 4         # Ch 4 = RSI(14) / 100 (per cnn_agent.py header)
-_TARGET_CHANNEL = 13     # obv_slope — most marginal per #146 (Δ -0.0002)
+_DEFAULT_SOURCE_CHANNEL = 4    # Ch 4 = RSI(14) / 100 (default — #162 winner)
+_TARGET_CHANNEL = 13           # obv_slope — most marginal per #146 (Δ -0.0002)
 
 
 def _cross_sectional_rank(rsi_by_pid: Dict[str, float]) -> Dict[str, float]:
@@ -113,18 +119,18 @@ def build_rank_signal(
 
 def _load_pooled_with_ranks(
     n: int = 20,
+    source_channel: int = _DEFAULT_SOURCE_CHANNEL,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    """Load pooled top-N samples and build aligned cross-sectional RSI-rank
-    signal via a vectorized (T, P) matrix. Returns (X, y, ts, rank_sig,
-    products_used)."""
+    """Load pooled top-N samples and build aligned cross-sectional rank signal
+    from `source_channel` via a vectorized (T, P) matrix. Returns (X, y, ts,
+    rank_sig, products_used)."""
     from scipy.stats import rankdata
 
     print(f"Loading cache: {_CACHE_PATH}", flush=True)
     blob = torch.load(_CACHE_PATH, map_location="cpu", weights_only=False)
     prods = blob["products"]
 
-    # Step 1: collect all (pid, ts_hour, rsi) triples.
-    print("Building (T, P) RSI matrix...", flush=True)
+    print(f"Building (T, P) matrix for source ch={source_channel}...", flush=True)
     t0 = time.time()
     pid_list: List[str] = []
     rsi_per_pid: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -133,7 +139,7 @@ def _load_pooled_with_ranks(
         X_p, _, ts_p = _entry_to_arrays(e)
         if X_p.shape[0] == 0:
             continue
-        rsi_chan = X_p[:, _RSI_CHANNEL, :].astype(np.float32)  # [n, 60]
+        rsi_chan = X_p[:, source_channel, :].astype(np.float32)  # [n, 60]
         offsets = (np.arange(_SEQ_LEN)[::-1] * _BAR_SECS).astype(np.int64)
         bar_ts = (ts_p[:, None] - offsets[None, :]).astype(np.int64)  # [n, 60]
         flat_ts = bar_ts.reshape(-1)
@@ -231,21 +237,29 @@ def _load_pooled_with_ranks(
 
 
 def main():
-    X, y, ts, rank_sig, used = _load_pooled_with_ranks(n=20)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-channel", type=int,
+                        default=_DEFAULT_SOURCE_CHANNEL,
+                        help="Source channel to rank cross-sectionally "
+                             "(default 4 = RSI; e.g. 1 = log volume).")
+    args = parser.parse_args()
+    src = int(args.source_channel)
+
+    X, y, ts, rank_sig, used = _load_pooled_with_ranks(n=20, source_channel=src)
     print(f"\npooled samples: n={len(y):,}", flush=True)
     print(f"products & rank coverage: {used}", flush=True)
     coverage_pct = float((rank_sig != 0.5).any(axis=1).mean())
     print(f"per-sample non-neutral rank coverage: {coverage_pct:.1%}", flush=True)
 
     print(f"\nReplacing ch{_TARGET_CHANNEL} (obv_slope) with cross-sectional "
-          f"RSI rank; running 5-fold purged CV (4h embargo)...", flush=True)
+          f"rank of ch{src}; running 5-fold purged CV (4h embargo)...", flush=True)
     result = run_replace(
         X, y, ts,
         channel_idx=_TARGET_CHANNEL,
         replacement=rank_sig,
         n_folds=5, embargo_hours=4, n_estimators=200,
     )
-    print(f"\n=== single-add probe: RSI-rank -> ch{_TARGET_CHANNEL} ===")
+    print(f"\n=== single-add probe: ch{src}-rank -> ch{_TARGET_CHANNEL} ===")
     print(f"  baseline mean_auc = {result['baseline_auc']:.4f}")
     print(f"  replaced mean_auc = {result['replaced_auc']:.4f}")
     print(f"  delta             = {result['delta']:+.4f}")
