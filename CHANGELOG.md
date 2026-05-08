@@ -5,6 +5,61 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.29] — 2026-05-08 — Silver-layer OHLCV anomaly flagger (#167a)
+
+### Context
+
+#167 BACKLOG. The bronze layer (#168) has provenance; silver should
+have *quality*. This commit ships the anomaly-flagging primitive —
+cheap, deterministic sanity rules over a candle list — so an audit
+script or dashboard can highlight bars worth investigating before
+they pollute training. Cross-exchange reconciliation (the second
+half of #167) needs a second data source and is deferred to its own
+follow-up; isolating the primitive keeps this commit shippable.
+
+### Files added
+
+- `backend/tools/anomaly_flagger.py`
+  - `flag_ohlc_consistency(bars)` — high < low, or open/close outside
+    [low, high].
+  - `flag_zero_volume_runs(bars, min_run=5)` — runs of consecutive
+    zero-volume bars at or above `min_run`.
+  - `flag_return_z_outliers(bars, window=30, k=4.0)` — bars where
+    `|log-return| > k * trailing-window stdev` (skips degenerate
+    `sd <= 0` baselines).
+  - `flag_volume_spikes(bars, window=20, k=10.0)` — bars where
+    `volume > k * trailing-window median`.
+  - `scan_bars(bars)` — runs all detectors, returns
+    `{n_bars, anomalies, by_kind}`.
+
+### Tests added
+
+`backend/tests/test_anomaly_flagger.py` (13 tests, all GREEN):
+- OHLC: high<low flagged, open>high flagged, close<low flagged,
+  consistent bars pass.
+- Zero-volume: long run flagged, short run ignored, isolated zero
+  not flagged.
+- Return z: 50% jump in otherwise-quiet series flagged; seeded
+  random-walk produces no outliers (test corrected from a
+  deterministic-linear-prices series whose log-returns have a
+  near-zero stdev and produced spurious z-scores).
+- Volume: 1000× spike flagged; steady volume passes.
+- Combined: scan_bars surfaces ohlc kind in `by_kind`; 100 clean
+  bars produce empty anomalies list.
+
+### Verification
+
+```
+$ python -m pytest tests/test_anomaly_flagger.py -v
+====== 13 passed in 3.64s ======
+```
+
+Cross-exchange reconciliation (Coinbase vs OKX/Binance closes) is
+the natural follow-up — would extend `scan_bars` with a new detector
+once the second feed is wired in.
+
+---
+
 ## [Session 58.28] — 2026-05-08 — Bronze PIT tagging on parquet pulls (#168)
 
 ### Context
