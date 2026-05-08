@@ -5,6 +5,82 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.33] — 2026-05-08 — OKX OI fetcher coverage fix (#211): map +19 alts/memes
+
+### Context
+
+#211 closes the loop on #210. #210 found 17 of 20 top-N
+survivorship-aware pids had all-zero OI in the cache because both
+`services/okx_oi_history.py` and `services/okx_funding_history.py`
+shared a hand-curated `_PRODUCT_TO_OKX` map of only 30 large-caps.
+Unmapped pids fell through `_coinbase_to_okx() → None`, making
+`fetch_oi_history()` short-circuit to `[]` and the cache build store
+zero. That is option 1 in the #210 action menu and the only option
+that actually reclaims signal.
+
+### Files added
+
+- `backend/tools/probe_okx_swap_listings.py` — diagnostic script that
+  hits OKX's public `/api/v5/public/instruments?instType=SWAP`
+  endpoint and reports which Coinbase pids in the #210 zero set have
+  a live `<TICKER>-USDT-SWAP` instrument. Writes nothing; safe to
+  re-run as OKX adds listings. Kept as a tool because the listing
+  set is a moving target and we will need this again.
+
+### Files patched
+
+- `backend/services/okx_oi_history.py` and
+  `backend/services/okx_funding_history.py`: extend `_PRODUCT_TO_OKX`
+  with 19 verified entries (PENGU, JTO, POPCAT, BONK, ZK, PEPE,
+  MOODENG, ONDO, ALGO, ZORA, WIF, RENDER, FLOKI, WLD, BERA, ENA,
+  STRK, TON, JUP). Both maps stay in lockstep so the
+  supported-symbol set is shared.
+
+  Eight pids from the #210 zero set are intentionally left out
+  because the live probe confirmed they have NO `<TICKER>-USDT-SWAP`
+  on OKX as of 2026-05-08 (NKN, AIOZ, JASMY, TRU, SKL, FET, XCN,
+  LRDS). They will keep returning `[]` without a wasted HTTP call.
+
+### Files modified — tests
+
+- `backend/tests/test_okx_oi_history.py`,
+  `backend/tests/test_okx_funding_history.py`: each gains
+  `test_alt_meme_pids_added_per_211` (asserts all 19 expected
+  mappings) and `test_alts_with_no_okx_swap_still_return_none`
+  (asserts the 8 OKX-absent pids stay `None`). RED prior to the map
+  patch, GREEN after.
+
+### Test result
+
+```
+$ pytest tests/test_okx_oi_history.py tests/test_okx_funding_history.py -v
+33 passed in 3.88s
+```
+
+### Coverage impact (expected, will measure post-rebuild)
+
+Of the 17 zero-OI pids #210 flagged:
+- 9 are now fixable in the next cache rebuild (PENGU, JTO, POPCAT,
+  BONK, ZK, PEPE, MOODENG, ONDO, ALGO).
+- 8 remain `[]`-by-design — OKX simply doesn't list those perps.
+
+Once a fresh cache rebuild runs, the per-pid coverage report should
+flip from 17/20 all-zero to 8/20 all-zero (the OKX-absent set).
+Aggregate frac_zero on Ch 27 should drop from 0.852 toward roughly
+0.40, restoring the channel as a useful XGB input. A coverage-audit
+re-run after the rebuild will confirm.
+
+### Why no cache rebuild in this commit
+
+The map fix is a code change with zero behavioural risk to a running
+backend (the new keys add lookups, never mutate existing ones). The
+rebuild is the heavy step and runs out-of-band, gated on the current
+CNN retrain finishing per `feedback_no_restart_during_retrain.md`.
+Treating fix and rebuild as separate commits keeps each one
+reviewable.
+
+---
+
 ## [Session 58.32] — 2026-05-08 — OKX OI coverage audit (#210) — 17/20 pids fully zero
 
 ### Context

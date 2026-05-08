@@ -78,6 +78,30 @@ _PRODUCT_TO_OKX = {
     "ZEC-USD":   "ZEC-USDT-SWAP",
     "SHIB-USD":  "SHIB-USDT-SWAP",
     "TRX-USD":   "TRX-USDT-SWAP",
+    # #211: alts/memes that #210 audit found all-zero in the cache. Live OKX
+    # SWAP probe (probe_okx_swap_listings.py, 2026-05-08) confirmed each one
+    # has a `<TICKER>-USDT-SWAP` instrument. Pids in the #210 zero set that
+    # are NOT listed on OKX (NKN, AIOZ, JASMY, TRU, SKL, FET, XCN, LRDS) are
+    # intentionally omitted so they keep returning [] without an HTTP call.
+    "PENGU-USD":   "PENGU-USDT-SWAP",
+    "JTO-USD":     "JTO-USDT-SWAP",
+    "POPCAT-USD":  "POPCAT-USDT-SWAP",
+    "BONK-USD":    "BONK-USDT-SWAP",
+    "ZK-USD":      "ZK-USDT-SWAP",
+    "PEPE-USD":    "PEPE-USDT-SWAP",
+    "MOODENG-USD": "MOODENG-USDT-SWAP",
+    "ONDO-USD":    "ONDO-USDT-SWAP",
+    "ALGO-USD":    "ALGO-USDT-SWAP",
+    "ZORA-USD":    "ZORA-USDT-SWAP",
+    "WIF-USD":     "WIF-USDT-SWAP",
+    "RENDER-USD":  "RENDER-USDT-SWAP",
+    "FLOKI-USD":   "FLOKI-USDT-SWAP",
+    "WLD-USD":     "WLD-USDT-SWAP",
+    "BERA-USD":    "BERA-USDT-SWAP",
+    "ENA-USD":     "ENA-USDT-SWAP",
+    "STRK-USD":    "STRK-USDT-SWAP",
+    "TON-USD":     "TON-USDT-SWAP",
+    "JUP-USD":     "JUP-USDT-SWAP",
 }
 
 

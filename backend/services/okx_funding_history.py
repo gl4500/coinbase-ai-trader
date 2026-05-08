@@ -83,6 +83,29 @@ _PRODUCT_TO_OKX = {
     "ZEC-USD":   "ZEC-USDT-SWAP",
     "SHIB-USD":  "SHIB-USDT-SWAP",
     "TRX-USD":   "TRX-USDT-SWAP",
+    # #211: alts/memes that #210 audit found all-zero in the OI cache. Same
+    # set is added here so both fetchers share one supported-symbol set.
+    # Pids in the zero set that aren't listed on OKX (NKN, AIOZ, JASMY,
+    # TRU, SKL, FET, XCN, LRDS) are intentionally omitted.
+    "PENGU-USD":   "PENGU-USDT-SWAP",
+    "JTO-USD":     "JTO-USDT-SWAP",
+    "POPCAT-USD":  "POPCAT-USDT-SWAP",
+    "BONK-USD":    "BONK-USDT-SWAP",
+    "ZK-USD":      "ZK-USDT-SWAP",
+    "PEPE-USD":    "PEPE-USDT-SWAP",
+    "MOODENG-USD": "MOODENG-USDT-SWAP",
+    "ONDO-USD":    "ONDO-USDT-SWAP",
+    "ALGO-USD":    "ALGO-USDT-SWAP",
+    "ZORA-USD":    "ZORA-USDT-SWAP",
+    "WIF-USD":     "WIF-USDT-SWAP",
+    "RENDER-USD":  "RENDER-USDT-SWAP",
+    "FLOKI-USD":   "FLOKI-USDT-SWAP",
+    "WLD-USD":     "WLD-USDT-SWAP",
+    "BERA-USD":    "BERA-USDT-SWAP",
+    "ENA-USD":     "ENA-USDT-SWAP",
+    "STRK-USD":    "STRK-USDT-SWAP",
+    "TON-USD":     "TON-USDT-SWAP",
+    "JUP-USD":     "JUP-USDT-SWAP",
 }
 
 

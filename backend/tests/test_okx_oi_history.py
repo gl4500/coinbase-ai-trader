@@ -67,6 +67,45 @@ class TestProductSymbolMapping:
         assert okx._coinbase_to_okx("VVV-USD") is None
         assert okx._coinbase_to_okx("UNKNOWN-USD") is None
 
+    def test_alt_meme_pids_added_per_211(self):
+        """#211 fix: top-N survivorship-aware alts/memes that #210 found
+        all-zero in the cache must now resolve to their OKX SWAP instIds.
+        Verified live on OKX SWAP listing 2026-05-08."""
+        expected = {
+            "PENGU-USD":   "PENGU-USDT-SWAP",
+            "JTO-USD":     "JTO-USDT-SWAP",
+            "POPCAT-USD":  "POPCAT-USDT-SWAP",
+            "BONK-USD":    "BONK-USDT-SWAP",
+            "ZK-USD":      "ZK-USDT-SWAP",
+            "PEPE-USD":    "PEPE-USDT-SWAP",
+            "MOODENG-USD": "MOODENG-USDT-SWAP",
+            "ONDO-USD":    "ONDO-USDT-SWAP",
+            "ALGO-USD":    "ALGO-USDT-SWAP",
+            "ZORA-USD":    "ZORA-USDT-SWAP",
+            "WIF-USD":     "WIF-USDT-SWAP",
+            "RENDER-USD":  "RENDER-USDT-SWAP",
+            "FLOKI-USD":   "FLOKI-USDT-SWAP",
+            "WLD-USD":     "WLD-USDT-SWAP",
+            "BERA-USD":    "BERA-USDT-SWAP",
+            "ENA-USD":     "ENA-USDT-SWAP",
+            "STRK-USD":    "STRK-USDT-SWAP",
+            "TON-USD":     "TON-USDT-SWAP",
+            "JUP-USD":     "JUP-USDT-SWAP",
+        }
+        for pid, inst_id in expected.items():
+            assert okx._coinbase_to_okx(pid) == inst_id, (pid, inst_id)
+
+    def test_alts_with_no_okx_swap_still_return_none(self):
+        """#211: pids that #210 flagged all-zero AND probe confirmed are
+        NOT listed on OKX SWAP must continue returning None (rather than
+        being added speculatively, which would just trigger wasted HTTP
+        calls)."""
+        for pid in (
+            "NKN-USD", "AIOZ-USD", "JASMY-USD", "TRU-USD",
+            "SKL-USD", "FET-USD", "XCN-USD", "LRDS-USD",
+        ):
+            assert okx._coinbase_to_okx(pid) is None, pid
+
 
 # ── Happy path: single-page fetch ────────────────────────────────────────────
 
