@@ -155,7 +155,6 @@ class TestCoinbaseCNNAgent:
         "agents.cnn_agent.database.save_cnn_scan":       None,
     }
 
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); model_prob below gate yields None", strict=False)
     @pytest.mark.asyncio
     async def test_generate_signal_buy(self, agent, product):
         """High model_prob → BUY signal returned.
@@ -1507,7 +1506,6 @@ class TestRegimeLabelAndVWAPDisplay:
             f"got regime={saved.get('regime')!r}"
         )
 
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); reasoning text not produced when signal blocked", strict=False)
     @pytest.mark.asyncio
     async def test_reasoning_vwap_percent_matches_actual_price_delta(self, agent, product):
         """
@@ -2792,7 +2790,6 @@ class TestInferenceRegimeGate:
         t.record      = AsyncMock()
         return t
 
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); upstream signal blocked, regime gate untestable", strict=False)
     @pytest.mark.asyncio
     async def test_buy_blocked_when_regime_is_trending(self, agent, product):
         """TRENDING regime → BUY signal returned but book.buy is NOT called."""
@@ -2834,7 +2831,6 @@ class TestInferenceRegimeGate:
             f"Expected reason to mention regime/CHAOTIC, got: {sig['execution']['reason']!r}"
         )
 
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); upstream signal blocked, regime gate untestable", strict=False)
     @pytest.mark.asyncio
     async def test_buy_allowed_when_regime_is_chaotic(self, agent, product):
         """CHAOTIC regime + all other gates open → book.buy IS called."""
@@ -2873,7 +2869,6 @@ class TestInferenceRegimeGate:
         assert sig["execution"]["success"] is True
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); upstream signal blocked, regime gate untestable", strict=False)
     async def test_regime_gate_disabled_via_env(self, agent, product, monkeypatch):
         """CNN_REGIME_GATE=off → BUY executes even in TRENDING."""
         monkeypatch.setenv("CNN_REGIME_GATE", "off")
