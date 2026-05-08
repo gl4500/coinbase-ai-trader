@@ -5,6 +5,72 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.34] — 2026-05-08 — BTC-dominance probe (#156): FAIL +0.01 gate at Δ=+0.0077
+
+### Context
+
+#156 was last left in_progress and noted "blocked on data source" — earlier
+scopings assumed CoinGecko/CMC historical BTC market cap, both gated behind
+paid APIs and exchange-agnostic (don't reflect the Coinbase USD universe).
+The unblocker: BTC USD-volume share is a faithful dominance proxy
+computable from local parquet history we already backfill, and it captures
+the same "how much of activity is in BTC vs alts" signal that drives BTC-
+dominance trading wisdom — for the universe we actually deploy on.
+
+### Files added
+
+- `backend/tools/btc_dominance_probe.py` — pure helpers
+  (`compute_btc_usd_volume_share`, `build_btc_dom_signal`,
+  `build_pid_history_from_basket`) plus probe runner. Mirrors
+  `tools/oi_single_add_probe.py` pattern: replace ch13 (obv_slope, most
+  marginal noise channel per #146 ablation) with a market-wide BTC-
+  dominance signal broadcast to all top-20 sample products.
+- `backend/tests/test_btc_dominance_probe.py` — 13 tests covering pure
+  share math, alignment + z-scoring, lookahead-safety on the WINDOW
+  (z-score uses full-series stats per the OI probe pattern), and a
+  regression for the basket-vs-sample-universe bug found mid-loop.
+
+### First-run bug found and fixed mid-loop
+
+First probe run showed **0 hours covered, 0% per-sample coverage,
+Δ=+0.0001**. Root cause: `_load_pooled_with_btc_dom` reused the pooled
+top-20 (by cache sample count) for the dominance computation, and that
+list happened to be all alts/memes — BTC-USD wasn't in it, so
+`compute_btc_usd_volume_share` short-circuited to `{}`. Fix: introduced a
+fixed `_DOMINANCE_BASKET = (BTC, ETH, SOL, XRP, DOGE, ADA, LTC, AVAX, LINK,
+DOT)` and a `build_pid_history_from_basket(basket, history_dir)` loader
+decoupled from the sample universe. Three regression tests pin the basket
+constant + skip-missing behavior. Re-run gave a meaningful series:
+hours_covered=9,346, share mean=0.431, std=0.127, min=0.028, max=0.854.
+
+### Result
+
+- baseline mean_auc (5-fold purged CV, 4h embargo, 200 estimators) = 0.5134
+- replaced  mean_auc = 0.5212
+- **delta = +0.0077  →  +0.01 gate: FAIL**
+
+### Decision
+
+Abandon the BTC-dominance path per the #156 gate spec. The signal is
+marginally positive — it does add information — but doesn't clear the
+deployment threshold. Per the same logic that retired ch13 candidates
+hour-of-day-sin/cos and others, +0.0077 isn't enough to justify a cache-
+version bump and full retrain.
+
+The probe tool stays in `tools/` for future reuse if we want to revisit
+the denominator (e.g. include more pids, or weight by depth instead of
+volume) before retiring the idea entirely.
+
+### Tests
+
+`pytest tests/test_btc_dominance_probe.py -v` → **13/13 passed in 4.13s**.
+
+### Tasks completed
+- #156, #156a-e (probe TDD + run), #156-bug (basket-vs-sample-universe fix
+  via #217–#219 RED/GREEN/RUN)
+
+---
+
 ## [Session 58.33] — 2026-05-08 — OKX OI fetcher coverage fix (#211): map +19 alts/memes
 
 ### Context
