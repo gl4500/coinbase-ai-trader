@@ -5,6 +5,58 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.24] — 2026-05-08 — Heuristic stationarity audit on 28 channels (#164)
+
+### Context
+
+#164 calls for an ADF stationarity audit. statsmodels is not in the
+deps tree, so this commit ships a heuristic first-pass using only
+numpy/scipy. Formal ADF deferred until a finding warrants the dep.
+
+### Helper: `_stationarity_metrics`
+
+Per-channel proxies on the chronologically-ordered terminal value of
+each window:
+
+- `drift_z` — |mean(first_half) − mean(second_half)| / overall_std
+- `var_ratio` — std(second_half) / std(first_half)
+- `lag1` — lag-1 autocorrelation
+- `flag` — `'stationary'` unless drift_z > 0.5, |1 − var_ratio| > 0.5,
+  or |lag1| > 0.95 → `'suspect'`
+
+### Changes (TDD)
+
+- **`backend/tools/stationarity_audit.py`** (new): `_stationarity_metrics`
+  helper, `_audit_channels` orchestrator (uses
+  `survivorship_aware_top_n` per #163), `argparse` runner with
+  `--snapshot-ts` flag.
+- **`backend/tests/test_stationarity_audit.py`** (new): 7 tests —
+  constant / white-noise / random-walk / linear-trend / variance-blowout
+  series + a short-input safety case + `_audit_channels` integration.
+  7/7 GREEN.
+
+### Findings (live cache, 169,367 samples × 28 channels)
+
+| flag        | count | channels |
+|-------------|-------|----------|
+| stationary  | 27    | 0–26 |
+| suspect     | 1     | **27 (OKX OI)** — var_ratio=10.4 (10× volatility regime change between halves) |
+
+Sub-observations:
+
+- **Ch 17, 18, 19**: constant zero (std=0). Expected — these are the
+  remaining `_TRAINING_CONSTANT_CHANNELS` masked at training time.
+- **Ch 22, 23**: lag1 ≈ 0.75 (BTC-corr / RV60-related). Borderline but
+  below the 0.95 threshold.
+- **Ch 27 (OI)**: var_ratio=10.4 means the second half has 10× the
+  volatility of the first half. Likely cause: OKX OI history coverage
+  asymmetry — older bars use shorter or sparser OI windows. Worth
+  investigating before relying on Ch 27 as a strong feature.
+
+No corrective action taken in this commit. The audit is diagnostic only.
+
+---
+
 ## [Session 58.23] — 2026-05-08 — Migrate _timescale_sanity to survivorship-aware top-N (#163 follow-up)
 
 ### Context
