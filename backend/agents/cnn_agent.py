@@ -1301,6 +1301,14 @@ class FeatureBuilder:
         volumes = [c["volume"] for c in candles]
 
         # ── Ch 0: Normalised close ────────────────────────────────────────────
+        # Within-window min/max normalization. Strict-causality test in
+        # test_feature_builder_causality.py::TestAllChannelsLookahead xfails
+        # this channel: every value depends on global min/max across the
+        # whole input. Per #171 decision: accept-as-design — normalization
+        # is anchored at the terminal of the SEQ_LEN window the CNN sees,
+        # so the backward dependency does not cross the prediction
+        # boundary. Switching to per-bar expanding min/max would change
+        # the normalization scale and require a full retrain.
         mn, mx = min(closes), max(closes)
         rng    = mx - mn if mx != mn else 1.0
         norm_c = [(v - mn) / rng for v in closes]

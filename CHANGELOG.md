@@ -5,6 +5,49 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.19] — 2026-05-08 — Ch 0 norm_c strict-causality decision (#171) — accept-as-design
+
+### Context
+
+The #161 generic lookahead harness flagged Ch 0 (`norm_c`) as a strict-causality
+leak: `mn, mx = min(closes), max(closes); norm_c = [(v - mn)/rng for v in
+closes]` — every candle's normalized value depends on the global min/max
+across the whole input window. Diff at candle 79 between full-input and
+truncated-window builds: 5e-5.
+
+Two options:
+- **(a) Accept as design**: within-window normalization is a defensible CNN
+  pattern. The model sees the SEQ_LEN window with terminal at the prediction
+  bar; any backward dependency stays inside that window and does not cross
+  the prediction boundary into bars > k that the model would otherwise
+  never see at inference.
+- **(b) Switch to per-bar expanding min/max** for strict causality. Changes
+  the normalization scale, would require a full retrain + cache version
+  bump, and pollutes the early-window distribution where expanding stats
+  are noisy.
+
+### Decision
+
+**Option (a)** — accept as design. The strict-causality test stays xfailed
+with `strict=True` so any accidental "fix" that changes the property without
+explicit re-decision will surface as an xpassed regression. Documented the
+rationale inline next to the Ch 0 build code so a future reader hits the
+explanation before the test.
+
+### Changes
+
+- **`backend/agents/cnn_agent.py`**: inline comment at the Ch 0 build site
+  documenting the within-window-normalization decision and pointing to
+  the test-harness xfail for the property.
+- No behavioral change. No test changes. No retrain.
+
+### Validation
+
+`backend/tests/test_feature_builder_causality.py`: 21 passed, 1 xfailed
+(Ch 0) — exactly the documented expected state.
+
+---
+
 ## [Session 58.18] — 2026-05-08 — Survivorship-aware top-N pid snapshot (#163) — RSI-rank lift survives at Δ+0.0124
 
 ### Context
