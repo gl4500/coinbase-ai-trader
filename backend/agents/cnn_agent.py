@@ -2146,31 +2146,33 @@ class CoinbaseCNNAgent:
         # ── Option 2: skip LLM when CNN is already decisive ───────────────────
         # If cnn_prob is far from 0.5 (beyond llm_skip_threshold), the LLM
         # cannot flip the direction — skip the 10–30s Ollama call entirely.
-        # Fetch outcome lessons so Ollama can learn from past signals
-        lessons = await get_tracker().get_lessons(pid, limit=5)
-
-        # Fetch Fear & Greed score as soft context for Ollama (not a hard gate)
-        try:
-            fg_data  = await get_fear_greed().fetch()
-            fg_score: Optional[int] = fg_data.get("value")
-        except Exception:
-            fg_score = None
-
         cnn_dist = abs(cnn_prob - 0.5)
         # Multiplicative regime gate: skip Ollama when regime is ambiguous (random walk)
         # AND price has deviated significantly from its SMA (DI high = unreliable features)
         regime_ambiguous = _HURST_MR_THRESH < hurst < _HURST_TREND_THRESH
         di_high          = di > _DI_SUPPRESS_THRESH
         entropy_noisy    = entropy > _ENTROPY_SKIP_THRESH
+        # #250 — under MODEL_BACKEND != "cnn" the LLM is fed the active backend's
+        # probability as an anchor and almost always confirms it. Drop the call
+        # entirely (and the lessons + Fear-and-Greed fetches that only feed it).
+        backend_is_cnn   = config.model_backend == "cnn"
         skip_llm = (
-            cnn_dist >= (config.llm_skip_threshold - 0.5)
+            not backend_is_cnn
+            or cnn_dist >= (config.llm_skip_threshold - 0.5)
             or (regime_ambiguous and di_high)
             or entropy_noisy
             or self.training_active
         )
         if skip_llm:
             llm_prob = None
-            if self.training_active:
+            lessons  = []
+            fg_score: Optional[int] = None
+            if not backend_is_cnn:
+                logger.debug(
+                    f"LLM skipped for {pid}: MODEL_BACKEND={config.model_backend} "
+                    f"(LLM is anchored to backend prob — redundant)"
+                )
+            elif self.training_active:
                 logger.debug(f"LLM skipped for {pid}: training subprocess active (GPU busy)")
             elif entropy_noisy:
                 logger.debug(
@@ -2187,6 +2189,16 @@ class CoinbaseCNNAgent:
                     f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
                 )
         else:
+            # Fetch outcome lessons so Ollama can learn from past signals
+            lessons = await get_tracker().get_lessons(pid, limit=5)
+
+            # Fetch Fear & Greed score as soft context for Ollama (not a hard gate)
+            try:
+                fg_data  = await get_fear_greed().fetch()
+                fg_score = fg_data.get("value")
+            except Exception:
+                fg_score = None
+
             llm_prob, _pt, _rt = await _ollama_prob(pid, context, adx_val, rsi_val,
                                                      macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
                                                      lessons=lessons, fg_score=fg_score)

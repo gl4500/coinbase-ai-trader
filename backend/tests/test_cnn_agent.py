@@ -3098,6 +3098,119 @@ class TestSuppressionsGatedByBackend:
         assert sig["execution"]["success"] is True
 
 
+# ── #250 — LLM is dropped entirely when MODEL_BACKEND != "cnn" ───────────────
+
+class TestLLMSkippedUnderXgb:
+    """#250 — Under MODEL_BACKEND=xgb the Ollama call is redundant: the LLM
+    receives the XGB probability as an anchor and almost always confirms it,
+    while burning ~5–25s of GPU budget that could be spent on the next scan.
+
+    Contract: when config.model_backend != "cnn", `_ollama_prob` MUST NOT be
+    awaited regardless of cnn_prob, regime, DI, entropy, or training_active.
+    The corresponding lesson + Fear-and-Greed fetches MUST also be skipped
+    since their only consumer is the prompt builder.
+    """
+
+    @staticmethod
+    def _make_tracker_mock():
+        from unittest.mock import MagicMock
+        t = MagicMock()
+        t.get_lessons = AsyncMock(return_value=[])
+        t.record      = AsyncMock()
+        return t
+
+    @staticmethod
+    def _make_fg_mock():
+        from unittest.mock import MagicMock
+        fg = MagicMock()
+        fg.fetch = AsyncMock(return_value={"value": 50, "label": "Neutral"})
+        return fg
+
+    @pytest.mark.asyncio
+    async def test_ollama_prob_not_awaited_when_backend_is_xgb(self, agent, product):
+        """cnn_prob=0.62 sits inside [0.25, 0.75] so the decisive-LLM skip does NOT
+        trigger; hurst=0.30 keeps regime not-ambiguous; DI/entropy held low; no
+        training subprocess. Under MODEL_BACKEND=cnn this configuration would call
+        _ollama_prob. Under MODEL_BACKEND=xgb the call MUST be skipped."""
+        import agents.cnn_agent as ca
+        candles    = _make_candles(80)
+        ollama_mock = AsyncMock(return_value=(0.70, 0, 0))
+        tracker     = self._make_tracker_mock()
+        fg          = self._make_fg_mock()
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.70, 2))
+        })()
+
+        with (
+            patch.object(ca.config, "model_backend", "xgb"),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",     new=ollama_mock),
+            patch("agents.cnn_agent._hurst_exponent",  return_value=0.30),
+            patch("agents.cnn_agent._dissimilarity_index", return_value=1.0),
+            patch("agents.cnn_agent._shannon_entropy", return_value=0.40),
+            patch("agents.cnn_agent.get_detector",     return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",      return_value=tracker),
+            patch("agents.cnn_agent.get_fear_greed",   return_value=fg),
+            patch.object(agent, "_cnn_prob",           return_value=0.62),
+            patch.object(agent, "training_active",     False, create=True),
+        ):
+            await agent.generate_signal(product, execute=False)
+
+        ollama_mock.assert_not_awaited(), \
+            "MODEL_BACKEND=xgb must skip _ollama_prob entirely"
+        tracker.get_lessons.assert_not_awaited(), \
+            "lessons fetch is dead work when LLM is skipped"
+        fg.fetch.assert_not_awaited(), \
+            "Fear & Greed fetch is dead work when LLM is skipped"
+
+    @pytest.mark.asyncio
+    async def test_ollama_prob_still_awaited_when_backend_is_cnn(self, agent, product):
+        """Sanity guard: under MODEL_BACKEND=cnn the LLM still fires for non-decisive
+        cnn_prob. Without this, the new gate could silently kill the CNN path too."""
+        import agents.cnn_agent as ca
+        candles     = _make_candles(80)
+        ollama_mock = AsyncMock(return_value=(0.70, 0, 0))
+        tracker     = self._make_tracker_mock()
+        fg          = self._make_fg_mock()
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.70, 2))
+        })()
+
+        with (
+            patch.object(ca.config, "model_backend", "cnn"),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",     new=ollama_mock),
+            patch("agents.cnn_agent._hurst_exponent",  return_value=0.30),
+            patch("agents.cnn_agent._dissimilarity_index", return_value=1.0),
+            patch("agents.cnn_agent._shannon_entropy", return_value=0.40),
+            patch("agents.cnn_agent.get_detector",     return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",      return_value=tracker),
+            patch("agents.cnn_agent.get_fear_greed",   return_value=fg),
+            patch.object(agent, "_cnn_prob",           return_value=0.62),
+            patch.object(agent, "training_active",     False, create=True),
+        ):
+            await agent.generate_signal(product, execute=False)
+
+        ollama_mock.assert_awaited_once(), \
+            "MODEL_BACKEND=cnn must still call _ollama_prob for non-decisive cnn_prob"
+
+
 # ── #57 stage (a): real BTC + real 5m into _build_dataset, mask shrink ────────
 
 

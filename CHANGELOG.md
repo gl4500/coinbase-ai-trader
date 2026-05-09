@@ -5,6 +5,67 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.42] — 2026-05-09 — Drop LLM under `MODEL_BACKEND != "cnn"` (#250)
+
+### Context
+
+Tracing the XGB decision flow surfaced the LLM blend as redundant work under
+`MODEL_BACKEND=xgb`. The `_ollama_prob` prompt explicitly hands the active
+backend's probability to the LLM as an anchor (`"CNN model probability:
+{cnn_prob:.3f}"`), so for confident XGB outputs (the majority) the LLM almost
+always confirms — burning ~5–25 s of GPU + Ollama coord per scan. For
+borderline scans (0.50–0.55 zone where the LLM could plausibly swing the
+result), the 0.55 BUY threshold gate kills the signal anyway.
+
+Net effect under XGB: the LLM rarely moves an outcome but always pays the
+latency. With XGB driving inference since Session 58.31 and the LLM blend
+having no edge to add, the cleanest fix is to skip it entirely under any
+non-CNN backend.
+
+### Change
+
+`agents/cnn_agent.py` — extended `skip_llm` to fire when
+`config.model_backend != "cnn"`:
+
+- New early term: `not backend_is_cnn` short-circuits the whole LLM branch.
+- The `lessons = await get_tracker().get_lessons(...)` and
+  `fg_data = await get_fear_greed().fetch()` calls — whose only consumer was
+  the prompt builder — moved *into* the `else` branch so they're only
+  performed when the LLM will actually run.
+- New skip-debug log line surfaces the backend reason:
+  `LLM skipped for {pid}: MODEL_BACKEND=xgb (LLM is anchored to backend prob — redundant)`.
+- When LLM is skipped, `lessons` and `fg_score` default to `[]` / `None` so
+  any downstream code that reads them stays safe.
+
+The CNN path is unchanged: when `MODEL_BACKEND=cnn`, the original four
+skip conditions (decisive cnn_prob, ambiguous regime + DI, noisy entropy,
+training subprocess active) still govern whether Ollama runs. This mirrors
+the #232 pattern of code-gating CNN-tuned behaviour on `model_backend`
+rather than per-feature env knobs (per `feedback_cnn_safeguards_backend_gating.md`).
+
+### Tests
+
+`tests/test_cnn_agent.py` — added `TestLLMSkippedUnderXgb` (2 tests):
+
+- `test_ollama_prob_not_awaited_when_backend_is_xgb` — RED-confirmed before
+  fix. Pins cnn_prob=0.62, hurst=0.30, low DI/entropy → would normally fire
+  Ollama. Asserts `_ollama_prob`, `tracker.get_lessons`, and `fg.fetch` all
+  remain unawaited under `MODEL_BACKEND=xgb`.
+- `test_ollama_prob_still_awaited_when_backend_is_cnn` — sanity guard so
+  the new gate cannot silently kill the CNN path. Same fixture pinned to
+  `MODEL_BACKEND=cnn` → asserts `_ollama_prob.assert_awaited_once()`.
+
+Full `tests/test_cnn_agent.py` suite: **233 passed, 2 xpassed** (no
+regressions).
+
+### Files Changed
+
+- `backend/agents/cnn_agent.py` — gate `_ollama_prob` + lessons + F&G fetches behind `model_backend == "cnn"`
+- `backend/tests/test_cnn_agent.py` — `TestLLMSkippedUnderXgb` (2 new tests)
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.41] — 2026-05-09 — BTC lead-lag probe (#246-#248): all 5 candidates FAIL — 6th sequential probe miss on 0.55 gate
 
 ### Context
