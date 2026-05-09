@@ -5,6 +5,85 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.40] — 2026-05-09 — Long-trend probe (#243-#245, #249): all 5 candidates FAIL post-leak-fix; daily_resample lookahead bug found and squashed
+
+### Context
+
+The +0.01 AUC gate has resisted four positioning candidates (MFI-rank,
+log10-vol-rank, BTC-dominance, OKX L/S — see Session 58.39b). The
+xgb_feature_optimization_findings memo flagged "no long-horizon trend
+feature" as a remaining inputs gap: longest MA distance in the 28
+channels is `ema21_dist` (~0.9 days on 1h bars). #243-#245 tested whether
+SMA50/SMA200 distance or a daily golden-cross sign lifts AUC.
+
+### Probes
+
+`backend/tools/long_trend_probe.py` — single-add probe (replace ch13
+obv_slope, the most marginal channel per #146). Five candidates:
+
+| Candidate          | What it measures                              |
+|--------------------|-----------------------------------------------|
+| `sma50_1h`         | hourly close vs 50-bar SMA (~2 days)          |
+| `sma200_1h`        | hourly close vs 200-bar SMA (~8.3 days)       |
+| `sma50_d1`         | hourly close vs daily-resampled 50-bar SMA    |
+| `sma200_d1`        | hourly close vs daily-resampled 200-bar SMA   |
+| `golden_cross_d1`  | sign(SMA50_d1 − SMA200_d1) ∈ {−1, 0, +1}      |
+
+`backend/tests/test_long_trend_probe.py` — 19 tests covering
+`compute_sma_dist_series`, `daily_resample`, `golden_cross_signal`,
+`build_trend_signal` (no-lookahead, constant-input zero z, pre-history
+neutral mean) plus an integration regression for the leak fix below.
+
+### Lookahead leak in `daily_resample` — found mid-sweep, squashed
+
+The first sweep returned `sma50_d1` Δ=+0.0852 (apparent PASS). On
+inspection that was a **lookahead leak**: `daily_resample` keyed each
+day's last-hour close at `day_start` (00:00 UTC). When the downstream
+`build_trend_signal` forward-filled hourly samples from that dict, a
+sample aligned at e.g. 14:00 of day D would resolve to the SMA computed
+using **23:00 of day D** — ~9 hours of future close data per sample on
+average; up to 24 hours at midnight. Fix: key by the actual
+last-observation timestamp (`v[0]`) instead of `day_start`. Added
+`test_no_lookahead_via_build_trend_signal` to pin the integration so
+the leak cannot recur.
+
+### Result — all 5 candidates FAIL post-fix
+
+Pooled top-20 with `--snapshot-ts auto` (cutoff 1756735200, 167,861
+samples):
+
+| Candidate         | Baseline AUC | Replaced AUC | Δ        | Gate |
+|-------------------|-------------:|-------------:|---------:|------|
+| sma50_1h          | 0.5195       | 0.5201       | +0.0007  | FAIL |
+| sma200_1h         | 0.5195       | 0.5201       | +0.0007  | FAIL |
+| sma50_d1          | 0.5203       | 0.5201       | −0.0002  | FAIL (was leaky +0.0852) |
+| sma200_d1         | 0.5203       | 0.5206       | +0.0004  | FAIL |
+| golden_cross_d1   | 0.5203       | 0.5208       | +0.0006  | FAIL |
+
+`golden_cross_d1` had only **7.1%** per-sample non-zero coverage:
+`survivorship_aware_top_n` returned pids with ~167–193 daily bars but
+the slow=200-day window needs more, so 17/20 pids emitted constant −1
+(never warm). Even on the 3 pids that did warm up (PENGU, AVAX, LINK),
+the cross adds no measurable signal vs ch13.
+
+### Verdict
+
+5th probe failure in the sequence. The "long-horizon trend gap" called
+out in the memo is not, on this cache, a missing-information gap — at
+least not at the SMA50/SMA200 horizons we can measure. Path forward
+options unchanged from Session 58.39b (relax the gate, OR pursue OI as
+a true new input class — Loop2 still on deck).
+
+### Side fixes
+
+- **#249** — Δ Unicode crash in long_trend_probe.py:383 SUMMARY printer
+  (Windows cp1252 console can't encode `\u0394`; same bug as #153).
+  Fixed in long_trend_probe.py and preemptively in btc_leadlag_probe.py.
+- TDD red→green→run for the leak fix; 19/19 long-trend tests + 20/20
+  BTC lead-lag tests pass.
+
+---
+
 ## [Session 58.39b] — 2026-05-08 — OKX L/S probe: URL bug fixed (#235g), real result Δ=+0.0014 — TRUE FAIL
 
 ### Context
