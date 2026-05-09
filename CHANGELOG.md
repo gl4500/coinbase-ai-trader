@@ -5,6 +5,17 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.53] — 2026-05-09 — Leader Filter Task 3: pure-function merger with divergence audit (#leader-filter)
+
+### What changed
+
+- New `services/leader_fundamentals_merge.py` — pure merger of two `MarketcapRow` (CG, CMC) into a single `FundamentalsRow` plus audit metadata.
+- Per-field rules: median for circ/total/price/chg, average for volume_24h, recomputed market_cap/fdv from primitives.
+- `MergeOutcome` carries `merge_quality` ('BOTH'/'CG_ONLY'/'CMC_ONLY'), raw provider values for audit, and per-field divergence audit entries (flagged when |Δ|/median > divergence_threshold).
+- 14 new tests in `test_leader_fundamentals_merge.py`. All pass.
+
+---
+
 ## [Session 58.52] — 2026-05-09 — Leader Filter Task 2: pure-function ranker (#leader-filter)
 
 ### What changed
