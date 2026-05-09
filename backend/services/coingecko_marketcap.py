@@ -105,6 +105,9 @@ class MarketcapRow:
     total_supply: float
     ingest_ts: int           # PIT column per #164b
     schema_version: int      # PIT column per #164b
+    price: float = 0.0       # added #leader-filter — spot price USD
+    volume_24h: float = 0.0  # added #leader-filter — 24h reported volume USD
+    price_chg_24h_pct: float = 0.0  # added #leader-filter — 24h % change
 
 
 # ── Current snapshot ────────────────────────────────────────────────────────
@@ -178,6 +181,9 @@ async def fetch_marketcap_snapshot(pids: Iterable[str]) -> Dict[str, MarketcapRo
             total_supply=float(total),
             ingest_ts=now_ts,
             schema_version=_SCHEMA_VERSION,
+            price=float(entry.get("current_price") or 0.0),
+            volume_24h=float(entry.get("total_volume") or 0.0),
+            price_chg_24h_pct=float(entry.get("price_change_percentage_24h") or 0.0),
         )
     return out
 

@@ -5,6 +5,20 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.51] — 2026-05-09 — Leader Filter Task 1: extend MarketcapRow (#leader-filter)
+
+### What changed
+
+- Extended `services/coingecko_marketcap.MarketcapRow` with `price`, `volume_24h`,
+  `price_chg_24h_pct` fields (additive, default 0.0).
+- `fetch_marketcap_snapshot` now parses `current_price`, `total_volume`,
+  `price_change_percentage_24h` from the CG `/coins/markets` response.
+- Backward-compat: existing 18 tests in `test_coingecko_marketcap.py` still pass.
+- 5 new tests in `test_coingecko_marketcap.py` (23 total).
+- Sets up #leader-filter: dual-source merger + ranker for top-N "real movers".
+
+---
+
 ## [Session 58.50] — 2026-05-09 — Frontend CNN→XGB relabel + remove training UI (#267e/f)
 
 ### Why

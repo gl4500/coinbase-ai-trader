@@ -314,3 +314,105 @@ class TestMarketcapRowShape:
         assert row.total_supply == 1.0
         assert row.ingest_ts == 1700000000
         assert row.schema_version == 1
+
+
+# ── Field extension #leader-filter ────────────────────────────────────────
+
+def test_marketcap_row_carries_price_field():
+    """After extension, MarketcapRow exposes spot price."""
+    from services.coingecko_marketcap import MarketcapRow
+    row = MarketcapRow(
+        market_cap=1.3e12, fdv=1.4e12, circ_supply=1.97e7, total_supply=2.1e7,
+        ingest_ts=1_700_000_000, schema_version=1,
+        price=67000.0, volume_24h=2.5e10, price_chg_24h_pct=2.5,
+    )
+    assert row.price == 67000.0
+
+
+def test_marketcap_row_carries_volume_24h_field():
+    from services.coingecko_marketcap import MarketcapRow
+    row = MarketcapRow(
+        market_cap=1.3e12, fdv=1.4e12, circ_supply=1.97e7, total_supply=2.1e7,
+        ingest_ts=1, schema_version=1,
+        price=1.0, volume_24h=2.5e10, price_chg_24h_pct=0.0,
+    )
+    assert row.volume_24h == 2.5e10
+
+
+def test_marketcap_row_carries_price_chg_24h_pct_field():
+    from services.coingecko_marketcap import MarketcapRow
+    row = MarketcapRow(
+        market_cap=1e9, fdv=1e9, circ_supply=1e9, total_supply=1e9,
+        ingest_ts=1, schema_version=1,
+        price=1.0, volume_24h=0.0, price_chg_24h_pct=-3.5,
+    )
+    assert row.price_chg_24h_pct == -3.5
+
+
+@pytest.mark.asyncio
+async def test_fetch_marketcap_snapshot_parses_extended_fields(monkeypatch):
+    """CG response includes current_price, total_volume, price_change_percentage_24h —
+    snapshot fetcher must surface them on MarketcapRow."""
+    from services.coingecko_marketcap import fetch_marketcap_snapshot
+
+    payload = [{
+        "id": "bitcoin",
+        "current_price": 67500.0,
+        "market_cap": 1.32e12,
+        "fully_diluted_valuation": 1.42e12,
+        "total_volume": 2.6e10,
+        "circulating_supply": 19_700_000.0,
+        "total_supply": 21_000_000.0,
+        "price_change_percentage_24h": 3.1,
+    }]
+
+    class FakeResp:
+        status_code = 200
+        def json(self): return payload
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **kw): return FakeResp()
+
+    monkeypatch.setattr("services.coingecko_marketcap.httpx.AsyncClient", FakeClient)
+
+    rows = await fetch_marketcap_snapshot(["BTC-USD"])
+    btc = rows["BTC-USD"]
+    assert btc.price == 67500.0
+    assert btc.volume_24h == 2.6e10
+    assert btc.price_chg_24h_pct == 3.1
+
+
+@pytest.mark.asyncio
+async def test_fetch_marketcap_snapshot_handles_missing_extended_fields(monkeypatch):
+    """If CG omits any of the new fields, surface 0.0 / 0.0 / 0.0 (defensive)."""
+    from services.coingecko_marketcap import fetch_marketcap_snapshot
+
+    payload = [{
+        "id": "bitcoin",
+        "market_cap": 1.32e12,
+        "fully_diluted_valuation": 1.42e12,
+        "circulating_supply": 19_700_000.0,
+        "total_supply": 21_000_000.0,
+        # current_price / total_volume / price_change_percentage_24h missing
+    }]
+
+    class FakeResp:
+        status_code = 200
+        def json(self): return payload
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **kw): return FakeResp()
+
+    monkeypatch.setattr("services.coingecko_marketcap.httpx.AsyncClient", FakeClient)
+
+    rows = await fetch_marketcap_snapshot(["BTC-USD"])
+    btc = rows["BTC-USD"]
+    assert btc.price == 0.0
+    assert btc.volume_24h == 0.0
+    assert btc.price_chg_24h_pct == 0.0
