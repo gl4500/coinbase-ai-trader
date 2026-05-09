@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Signal, Order } from '../App'
 import { buildAgentByProduct } from '../utils/agentByProduct'
 import type { AgentDecision } from '../utils/agentByProduct'
@@ -166,13 +166,8 @@ interface DryRunTrade {
 }
 
 export default function CNNDashboard({ signals, orders, postJSON }: Props) {
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [status,      setStatus]      = useState<CNNStatus | null>(null)
   const [scanning,    setScanning]    = useState(false)
-  const [training,    setTraining]    = useState(false)
-  const [trainResult, setTrainResult] = useState<string | null>(null)
-  const [epochs,      setEpochs]      = useState(50)
-  const [trainSecs,   setTrainSecs]   = useState(0)
   const [backfilling, setBackfilling] = useState(false)
   const [backfillResult, setBackfillResult] = useState<string | null>(null)
   const [backfillDays, setBackfillDays] = useState(365)
@@ -188,72 +183,6 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
   const [showScans,        setShowScans]        = useState(false)
   const [showLegend,       setShowLegend]       = useState(false)
   const [agentDecisions,   setAgentDecisions]   = useState<AgentDecision[]>([])
-
-  const startTrainPoll = useCallback(() => {
-    if (pollRef.current !== null) clearInterval(pollRef.current)
-    let errStreak = 0
-    const MAX_ERR = 5
-    const poll = setInterval(async () => {
-      try {
-        const r = await postJSON('/api/cnn/train/status', { method: 'GET' })
-        const d = await r.json()
-        errStreak = 0
-        setTrainSecs(d.elapsed_secs ?? 0)
-
-        if (d.status === 'idle') {
-          clearInterval(poll)
-          setTraining(false)
-          setTrainResult('Training state lost — backend was restarted while training. Check VRAM/logs; model may still be training.')
-          return
-        }
-
-        if (d.status === 'completed' || d.status === 'failed') {
-          clearInterval(poll)
-          setTraining(false)
-          const res = d.result ?? {}
-          if (d.status === 'failed' || res.error) {
-            setTrainResult(`Error: ${res.error ?? 'unknown'}`)
-          } else {
-            const fitIcon = res.fit_status === 'OK'       ? '✅'
-              : res.fit_status === 'REJECTED'             ? '⏭ REJECTED (no improvement)'
-              : res.fit_status === 'OVERFIT'              ? '⚠️ OVERFIT'
-              :                                             '⚠️ UNDERFIT'
-            setTrainResult(
-              `${fitIcon} | ${res.train_samples}t/${res.val_samples}v samples | ` +
-              `stopped ep ${res.stopped_epoch}/${res.epochs} | ${d.elapsed_secs}s | ` +
-              `train ${res.initial_loss?.toFixed(4)}→${res.final_train_loss?.toFixed(4)} | ` +
-              `best val ${res.best_val_loss?.toFixed(4)} | ${res.fit_advice}`
-            )
-          }
-        }
-      } catch {
-        errStreak++
-        if (errStreak >= MAX_ERR) {
-          clearInterval(poll)
-          setTraining(false)
-          setTrainResult(`Poll failed ${MAX_ERR}× in a row — backend may be unreachable. Training may still be running on GPU; check /api/cnn/train/status manually.`)
-        }
-      }
-    }, 3000)
-    pollRef.current = poll
-    return poll
-  }, [postJSON])
-
-  // On mount, check if training is already running (e.g. user switched tabs mid-training)
-  // and resume the counter + polling automatically.
-  useEffect(() => {
-    postJSON('/api/cnn/train/status', { method: 'GET' })
-      .then(r => r.json())
-      .then(d => {
-        if (d.status === 'running') {
-          setTraining(true)
-          setTrainSecs(d.elapsed_secs ?? 0)
-          startTrainPoll()
-        }
-      })
-      .catch(() => {})
-    return () => { if (pollRef.current !== null) clearInterval(pollRef.current) }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -350,34 +279,6 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
     }
   }
 
-  const handleTrain = async () => {
-    setTraining(true)
-    setTrainResult(null)
-    setStatusMsg('')
-    setTrainSecs(0)
-
-    try {
-      // Fire-and-forget: POST returns immediately with {"status":"started"}
-      const r = await postJSON(`/api/cnn/train?epochs=${epochs}`)
-      const d = await r.json()
-
-      if (d.status === 'running') {
-        // Already running — adopt its elapsed time and keep polling
-        setTrainSecs(d.elapsed_secs ?? 0)
-      } else if (d.status !== 'started') {
-        setTrainResult(`Error: ${d.detail ?? JSON.stringify(d)}`)
-        setTraining(false)
-        return
-      }
-    } catch {
-      setTrainResult('Failed to start training')
-      setTraining(false)
-      return
-    }
-
-    startTrainPoll()  // stores interval in pollRef; cleaned up on unmount
-  }
-
   const handleBackfill = async () => {
     setBackfilling(true)
     setBackfillResult(null)
@@ -423,7 +324,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
           color={status?.dry_run_balance != null && status.dry_run_balance >= 0 ? 'text-green-400' : 'text-red-400'}
         />
         <StatCard
-          label="CNN Signals (session)"
+          label="XGB Signals (session)"
           value={status?.signals_total ?? cnnSignals.length}
           sub={`${status?.signals_buy ?? buySigs} buy · ${status?.signals_sell ?? sellSigs} sell`}
         />
@@ -445,11 +346,9 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
       </div>
 
       {/* ── Timing row ── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <StatCard label="Last Scan"     value={timeAgo(status?.last_scan_at ?? null)} sub="every 15 min" />
         <StatCard label="Next Scan"     value={timeUntil(status?.next_scan_at ?? null)} />
-        <StatCard label="Last Trained"  value={timeAgo((status as any)?.last_trained_at ?? null)}
-          sub={`auto every ~1 hr · ${(status as any)?.train_count ?? 0} runs`} />
         <StatCard label="Trading"       value={status?.is_trading ? 'Active' : 'Paused'}
           color={status?.is_trading ? 'text-green-400' : 'text-gray-500'} />
       </div>
@@ -525,36 +424,9 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
           {scanning ? '⏳ Scanning…' : '🔍 Scan Now'}
         </button>
 
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-gray-400">Train epochs:</label>
-          <input
-            type="number"
-            min={1} max={200}
-            value={epochs}
-            disabled={training}
-            onChange={e => setEpochs(Number(e.target.value))}
-            className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white text-center disabled:opacity-50"
-          />
-          <button
-            onClick={handleTrain}
-            disabled={training}
-            className="btn-secondary text-sm px-4 py-2 disabled:opacity-50"
-          >
-            {training ? `⏳ ${trainSecs}s elapsed…` : '🧠 Train Model'}
-          </button>
-        </div>
-
-        {(statusMsg || trainResult) && (
-          <span className={`text-xs px-3 py-1.5 rounded border ${
-            !trainResult
-              ? 'text-blue-300 bg-blue-900/30 border-blue-800 animate-pulse'
-              : trainResult.includes('OVERFIT') || trainResult.includes('UNDERFIT')
-                ? 'text-amber-300 bg-amber-900/30 border-amber-700'
-                : trainResult.startsWith('Error') || trainResult.includes('failed')
-                  ? 'text-red-300 bg-red-900/30 border-red-800'
-                  : 'text-green-300 bg-green-900/30 border-green-800'
-          }`}>
-            {statusMsg || trainResult}
+        {statusMsg && (
+          <span className="text-xs px-3 py-1.5 rounded border text-blue-300 bg-blue-900/30 border-blue-800 animate-pulse">
+            {statusMsg}
           </span>
         )}
 
@@ -601,15 +473,15 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
       {/* ── Main grid: Signals + Orders ── */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
 
-        {/* CNN Signals */}
+        {/* XGB Signals */}
         <div>
           <h2 className="text-base font-bold text-white mb-3">
-            CNN Signals
+            XGB Signals
             <span className="text-sm text-gray-500 font-normal ml-2">({cnnSignals.length})</span>
           </h2>
           {cnnSignals.length === 0 ? (
             <div className="card text-center py-10">
-              <p className="text-gray-500 text-sm">No CNN signals yet — click Scan Now or wait for auto-scan</p>
+              <p className="text-gray-500 text-sm">No XGB signals yet — click Scan Now or wait for auto-scan</p>
             </div>
           ) : (
             <div className="space-y-3 max-h-[340px] overflow-y-auto pr-1">
@@ -645,7 +517,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                   {/* Probability bars */}
                   <div className="grid grid-cols-3 gap-2 mb-2">
                     <div>
-                      <div className="text-xs text-gray-500 mb-0.5">CNN</div>
+                      <div className="text-xs text-gray-500 mb-0.5">XGB</div>
                       <ProbBar value={cnnProb} color={s.side === 'BUY' ? 'bg-blue-500' : 'bg-orange-500'} />
                     </div>
                     <div>
@@ -777,7 +649,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
           className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-800/50 transition-colors"
         >
           <div className="flex items-center gap-3">
-            <span className="text-sm font-semibold text-white">CNN Confidence Ratings</span>
+            <span className="text-sm font-semibold text-white">XGB Confidence Ratings</span>
             <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded">
               {scans.length} scanned
             </span>
@@ -856,7 +728,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                   <div>
                     <span className="text-gray-500 font-medium">ADX</span>
                     <div className="text-gray-400 mt-0.5">Trend strength (0–100)</div>
-                    <div className="text-green-400">25–50 = strong trend (best for CNN signals)</div>
+                    <div className="text-green-400">25–50 = strong trend (best for XGB signals)</div>
                     <div className="text-yellow-400">50+ = very strong, may reverse</div>
                     <div className="text-gray-500">&lt; 20 = ranging / choppy, avoid</div>
                   </div>
@@ -896,7 +768,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                     {([
                       ['product_id','Symbol'],
                       ['model_prob','Blended'],
-                      ['cnn_prob',  'CNN'],
+                      ['cnn_prob',  'XGB'],
                       ['llm_prob',  'LLM'],
                       ['strength',  'Strength'],
                       ['vwap_dist', 'VWAP Δ'],

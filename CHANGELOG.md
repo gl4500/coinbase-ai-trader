@@ -5,6 +5,71 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.50] — 2026-05-09 — Frontend CNN→XGB relabel + remove training UI (#267e/f)
+
+### Why
+
+The system already routes decisions through XGB (`MODEL_BACKEND=xgb`) but the UI
+still showed a "CNN" tab, "CNN Signals" headers, "CNN" probability columns, and
+a "Train Model" button — all aliased to backend training endpoints CNN no longer
+uses. User: "change the front end labels as well" + "remove any CNN related
+buttons for training/references."
+
+### What changed (display-only, no API renames)
+
+- **Tabs / header (`App.tsx`)** — `'CNN'` tab → `'XGB'`; tagline
+  `RSI · MACD · CNN signals` → `RSI · MACD · XGB signals`.
+- **CNNDashboard.tsx** — kept filename + component name (avoids touching imports
+  and the unchanged `/api/cnn/*` REST routes), but stripped all training UI:
+  removed `pollRef`, `training` / `trainResult` / `trainSecs` / `epochs` state,
+  `startTrainPoll` callback, on-mount training-status useEffect, `handleTrain`
+  handler, "Train epochs" input, "Train Model" button, and the trainResult
+  status pill. The "Last Trained" stat card was removed and the timing row
+  collapsed from 4 → 3 columns. Display labels CNN → XGB on signals header,
+  empty-state, probability label, confidence-table title, table column, and
+  ADX-band tooltip.
+- **AgentsDashboard.tsx** — combined-PnL sub `Tech + CNN` → `Tech + XGB`;
+  per-agent label `CNN Agent` → `XGB Agent`. State field names (`cnn`,
+  `cnnSignals`, `cnnAg`) and the `d.agent === 'CNN'` filter kept — DB-side
+  identifier still `'CNN'`, this is presentation only.
+- **FiringCounter.tsx** — section header `CNN` → `XGB`; removed "Trains" stat
+  pill (train_count is no longer surfaced in the UI).
+- **PerformanceDashboard.tsx** — added a tiny `agentLabel(name)` helper that
+  maps `'CNN' → 'XGB'` for display. Used in trade-ledger pills, decision-history
+  pills, trade row badges, and decision row badges. The `AgentFilter` type and
+  filter comparisons still use `'CNN'` since DB rows have `agent='CNN'` — only
+  the rendered text changes.
+
+### Not changed
+
+- Backend `/api/cnn/*` routes (status, scan, scans, train/status). They still
+  exist; the train endpoint just has no UI affordance now.
+- Database `agent` column — trades and decisions persist with `agent='CNN'` so
+  historical filters keep working.
+- Component name `CNNDashboard` and import path — internal-only naming; renaming
+  would touch the build graph for no user-visible benefit.
+
+### Build verification
+
+```
+$ npm run build
+tsc && vite build
+✓ 41 modules transformed.
+✓ built in 1.89s
+```
+
+No type errors, no removed-symbol warnings.
+
+### Files Changed
+
+- `frontend/src/App.tsx`
+- `frontend/src/components/CNNDashboard.tsx`
+- `frontend/src/components/AgentsDashboard.tsx`
+- `frontend/src/components/FiringCounter.tsx`
+- `frontend/src/components/PerformanceDashboard.tsx`
+
+---
+
 ## [Session 58.49] — 2026-05-09 — Backend-aware log labels: "CNN [BUY]" → "XGB [BUY]" when MODEL_BACKEND=xgb (#267)
 
 ### Why

@@ -132,6 +132,7 @@ export default function AgentsDashboard() {
   }, [fetchStatus, fetchSignals])
 
   const techSignals = useMemo(() => signals.filter(d => d.agent === 'TECH'), [signals])
+  const cnnSignals  = useMemo(() => signals.filter(d => d.agent === 'CNN'),  [signals])
 
   // ── Aggregate stats ─────────────────────────────────────────────────────────
   const techAg  = agentStatus.tech
@@ -154,7 +155,7 @@ export default function AgentsDashboard() {
         <StatCard
           label="Combined PnL"
           value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`}
-          sub="Tech + CNN"
+          sub="Tech + XGB"
           color={totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}
         />
         <StatCard
@@ -169,11 +170,11 @@ export default function AgentsDashboard() {
         />
       </div>
 
-      {/* ── Per-agent stat cards ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
+      {/* ── Per-agent columns: stat card + signal feed for each agent ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
         {(['tech', 'cnn'] as const).map(key => {
           const ag    = agentStatus[key]
-          const label = key === 'tech' ? 'TechAgent' : 'CNN Agent'
+          const label = key === 'tech' ? 'TechAgent' : 'XGB Agent'
           const color = key === 'tech' ? 'text-purple-400' : 'text-yellow-400'
           const borderClass = key === 'tech'
             ? 'border border-purple-900/50'
@@ -181,15 +182,15 @@ export default function AgentsDashboard() {
           const pnlColor = !ag ? 'text-gray-500' : ag.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'
 
           return (
-            <div key={key} className={`card p-4 ${borderClass}`}>
-              <div className="flex items-center justify-between mb-3">
-                <span className={`text-sm font-semibold ${color}`}>{label}</span>
+            <div key={key} className={`card p-5 ${borderClass}`}>
+              <div className="flex items-center justify-between mb-4">
+                <span className={`text-base font-semibold ${color}`}>{label}</span>
                 <span className="text-xs text-gray-600">
                   {ag?.last_scan_at ? timeAgo(ag.last_scan_at) : 'not scanned yet'}
                 </span>
               </div>
               {/* Summary row */}
-              <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+              <div className="grid grid-cols-5 gap-4 text-xs mb-4">
                 <div>
                   <div className="text-gray-500 mb-0.5">Balance</div>
                   <div className="font-mono text-white text-sm">${ag?.balance?.toFixed(2) ?? '1000.00'}</div>
@@ -283,7 +284,7 @@ export default function AgentsDashboard() {
       </div>
 
       {/* ── Tech signal feed ── */}
-      <div className="max-w-3xl">
+      <div>
 
         {/* Tech signals */}
         <div>

@@ -106,7 +106,7 @@ interface AppData {
   products:   Product[]
 }
 
-const TABS = ['Markets', 'Order Book', 'Positions', 'Signals', 'CNN', 'Agents', 'Performance', 'Logs'] as const
+const TABS = ['Markets', 'Order Book', 'Positions', 'Signals', 'XGB', 'Agents', 'Performance', 'Logs'] as const
 type Tab = typeof TABS[number]
 
 // ── App ────────────────────────────────────────────────────────────────────────
@@ -227,7 +227,7 @@ export default function App() {
             <div className="text-2xl">🪙</div>
             <div>
               <h1 className="text-lg font-bold text-white leading-none">Coinbase Trader</h1>
-              <p className="text-xs text-gray-500 mt-0.5">Advanced Trade · RSI · MACD · CNN signals</p>
+              <p className="text-xs text-gray-500 mt-0.5">Advanced Trade · RSI · MACD · XGB signals</p>
             </div>
           </div>
 
@@ -305,7 +305,7 @@ export default function App() {
         {activeTab === 'Signals' && (
           <SignalDashboard signals={appData.signals} />
         )}
-        {activeTab === 'CNN' && (
+        {activeTab === 'XGB' && (
           <CNNDashboard signals={appData.signals} orders={appData.orders} postJSON={postJSON} />
         )}
         {activeTab === 'Agents' && (

@@ -92,6 +92,8 @@ interface Decision {
 type AgentFilter = 'ALL' | 'TECH' | 'CNN'
 type TradeView   = 'ALL' | 'OPEN' | 'CLOSED'
 
+const agentLabel = (name: string): string => (name === 'CNN' ? 'XGB' : name)
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmtHold(secs: number | null): string {
@@ -340,7 +342,7 @@ export default function PerformanceDashboard() {
           </div>
           <div className="flex gap-1 ml-2">
             {AGENTS.map(a => (
-              <Pill key={a} active={tradeAgent === a} onClick={() => setTradeAgent(a)}>{a}</Pill>
+              <Pill key={a} active={tradeAgent === a} onClick={() => setTradeAgent(a)}>{agentLabel(a)}</Pill>
             ))}
           </div>
         </SectionHeader>
@@ -368,7 +370,7 @@ export default function PerformanceDashboard() {
                 <tr key={t.id} className="border-b border-gray-800 hover:bg-gray-800/40">
                   <td className="py-1 pr-3">
                     <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${AGENT_BADGES[t.agent] ?? 'bg-gray-700 text-gray-300'}`}>
-                      {t.agent}
+                      {agentLabel(t.agent)}
                     </span>
                   </td>
                   <td className="pr-3 text-white font-mono">{t.product_id.replace('-USD', '')}</td>
@@ -400,7 +402,7 @@ export default function PerformanceDashboard() {
         <SectionHeader title="Agent Decision History" count={filteredDecisions.length}>
           <div className="flex gap-1">
             {AGENTS.map(a => (
-              <Pill key={a} active={decisionAgent === a} onClick={() => setDecisionAgent(a)}>{a}</Pill>
+              <Pill key={a} active={decisionAgent === a} onClick={() => setDecisionAgent(a)}>{agentLabel(a)}</Pill>
             ))}
           </div>
         </SectionHeader>
@@ -425,7 +427,7 @@ export default function PerformanceDashboard() {
                 <tr key={d.id} className="border-b border-gray-800 hover:bg-gray-800/40">
                   <td className="py-1 pr-3">
                     <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${AGENT_BADGES[d.agent] ?? 'bg-gray-700 text-gray-300'}`}>
-                      {d.agent}
+                      {agentLabel(d.agent)}
                     </span>
                   </td>
                   <td className="pr-3 text-white font-mono">{d.product_id.replace('-USD', '')}</td>
