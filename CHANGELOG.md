@@ -5,6 +5,91 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.41] — 2026-05-09 — BTC lead-lag probe (#246-#248): all 5 candidates FAIL — 6th sequential probe miss on 0.55 gate
+
+### Context
+
+After Session 58.40 ruled out long-horizon SMA/golden-cross features,
+the remaining structural gap in the 28-channel set is *temporal*
+BTC→altcoin influence. Existing Ch 21 `btc_corr_20` is contemporaneous
+(rolling correlation at the same t). Lead-lag asks the different
+question: does BTC's move at t−k predict alt's move at t? β-residual
+strips current-bar BTC influence to expose the idiosyncratic alt
+component. Both are structurally novel relative to the 28-channel set
+and the four positioning probes that came before.
+
+### Probes
+
+`backend/tools/btc_leadlag_probe.py` — single-add probe (replace ch13
+obv_slope, the most marginal channel per #146). Five candidates:
+
+| Candidate              | What it measures                                  |
+|------------------------|---------------------------------------------------|
+| `btc_ret_lag_1`        | BTC log-return at t−1 (1h ago)                    |
+| `btc_ret_lag_4`        | BTC log-return at t−4 (4h ago)                    |
+| `btc_ret_lag_12`       | BTC log-return at t−12 (12h ago)                  |
+| `btc_beta_60`          | rolling 60-bar OLS β of alt_ret on btc_ret        |
+| `btc_beta_residual_60` | alt_ret − β·btc_ret (60-bar window)               |
+
+`backend/tests/test_btc_leadlag_probe.py` — 20 tests covering
+`log_returns`, `lag_dict`, `align_pair`, `rolling_beta`,
+`beta_residual`, `build_leadlag_signal` (no-lookahead, warm-window
+correctness, zero-variance carry, pre-history neutral mean).
+
+BTC-USD itself is skipped in the loop: lag-of-self is autocorrelation,
+not lead-lag. The probe runs on all 20 of the survivorship-aware top-20
+when BTC is not in the snapshot (which it wasn't here — pooled basket
+is altcoin-heavy by construction).
+
+### Result — all 5 candidates FAIL
+
+Pooled top-20 with `--snapshot-ts auto` (cutoff 1756735200, 167,864
+samples):
+
+| Candidate              | Baseline AUC | Replaced AUC | Δ        | Gate |
+|------------------------|-------------:|-------------:|---------:|------|
+| btc_ret_lag_1          | 0.5199       | 0.5178       | −0.0021  | FAIL |
+| btc_ret_lag_4          | 0.5199       | 0.5099       | −0.0100  | FAIL |
+| btc_ret_lag_12         | 0.5199       | 0.5162       | −0.0038  | FAIL |
+| btc_beta_60            | 0.5199       | 0.5196       | −0.0003  | FAIL |
+| btc_beta_residual_60   | 0.5199       | 0.5196       | −0.0003  | FAIL |
+
+All five replacements *degraded* AUC (no positive Δ even before the
++0.01 gate). The 4h-lag candidate's −0.0100 hit is the strongest
+negative — replacing obv_slope with stale BTC return at the 4h horizon
+actively confuses the booster.
+
+### Verdict
+
+**6th sequential probe failure** on the +0.01 gate (after MFI-rank,
+log10-vol-rank, BTC-dominance, OKX L/S, long-trend). The pattern across
+all six is consistent: at the **0.5199 baseline** AUC and **±0.005**
+fold-noise, neither *positioning* (volume rank, dominance, L/S),
+*long-horizon trend* (SMA50/200, golden cross), nor *cross-asset
+temporal* (BTC lag, β, β-residual) features clear the gate on the
+existing 28-channel survivorship-aware top-20 cache.
+
+This makes the `xgb_feature_optimization_findings` conclusion sharper:
+the 0.55 production gate is **not reachable on price/orderflow features
+alone** at this sample regime. Path forward narrows to: (a) relax the
+0.55 gate to something the 0.5199 baseline can clear after calibration,
+or (b) bring in genuinely new input *classes* (per-product OKX OI
+panel, options term structure, on-chain flows) — not more transforms
+of the same OHLC+volume cache.
+
+### Side notes
+
+- The Δ Unicode crash that bit long_trend_probe was preemptively fixed
+  in btc_leadlag_probe at write time (no second occurrence).
+- Backend restart deferred: a CNN retrain (pid 44048) is currently
+  running per `cnn_train_progress.json`, and per
+  `feedback_no_restart_during_retrain.md` we never bounce the backend
+  while a retrain holds the cache file. Restart to bring the new XGB
+  inputs live (none, in this case — probe was read-only) is unnecessary
+  for this task; we'll let the in-flight retrain finish.
+
+---
+
 ## [Session 58.40] — 2026-05-09 — Long-trend probe (#243-#245, #249): all 5 candidates FAIL post-leak-fix; daily_resample lookahead bug found and squashed
 
 ### Context
