@@ -5,6 +5,20 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.6] — 2026-05-09 — Leader Filter Task 6: CLI runner (#leader-filter)
+
+### What changed
+
+- New `tools/leader_filter_runner.py` — CLI orchestrator (`--mode=forward` / `--mode=inspect`).
+- Forward: fetch CG + CMC in parallel via asyncio.gather → merge per-pid → persist with PIT columns → rank → write `data/leader_filter/top_leaders.json` and append `divergence_log.jsonl`.
+- Inspect: read-only print last N days of rows for one pid.
+- Mirrors `tools/marketcap_probe.py` pattern (sys.path injection, `cd backend && python tools/...`).
+- Default tracked pid universe is the intersection of CG and CMC mapping dicts.
+- New `.env.example` keys (`COINMARKETCAP_API_KEY`, `LEADER_*`); new gitignore rules for `backend/data/leader_filter/*.{json,jsonl}` (with `.gitkeep` preservation).
+- 7 new tests in `test_leader_filter_runner.py`. All pass.
+
+---
+
 ## [Session 58.55] — 2026-05-09 — Leader Filter Task 5: coin_fundamentals DDL + persistence helpers (#leader-filter)
 
 ### What changed

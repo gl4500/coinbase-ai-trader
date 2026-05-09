@@ -2,6 +2,7 @@
 .env
 *.env
 .env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -81,3 +82,8 @@ cnn_*.html
 training_audit.txt
 tools/claude_train_results.jsonl
 tools/__pycache__/
+
+# leader filter runtime data
+backend/data/leader_filter/*.json
+backend/data/leader_filter/*.jsonl
+!backend/data/leader_filter/.gitkeep
