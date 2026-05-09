@@ -5,6 +5,64 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.44] — 2026-05-09 — Ch 9 β-residual probe runner (#253c GREEN)
+
+### Context
+
+Helpers from Session 58.43 are pure-array math; this commit adds the
+runner that wires them into the channel-replacement harness so the +0.01
+AUC gate can be evaluated.
+
+### Probe runner
+
+`backend/tools/btc_residual_ch9_probe.py` — single-add probe over the top-20
+survivorship-aware pids:
+
+- Target: **Ch 9** (1-bar price change). Spec (#253a) chose this as the
+  cleanest β-decomposable channel — every other close-derived channel
+  (EMA-dist, BB-pos, norm_c, MACD) is a non-linear transform of multiple
+  close points and doesn't admit a simple `r_alt = β·r_btc + ε` substitution.
+- β window: **W=24** on the hourly grid. Spec said "288 bars (24h on 5m
+  candles)"; this probe consumes hourly parquet history per the
+  `btc_leadlag_probe._BAR_SECS=3600` convention, so 24h maps to W=24.
+  Calendar context preserved; bar size differs.
+- Per-pid signal: `residualize_returns(alt_log_ret, btc_log_ret, window=24)`
+  → `{ts: ε_t}` filtered to finite values only (warm-up NaNs dropped).
+- BTC-USD passthrough: skipped at the per-pid stage. ε_t for BTC vs itself
+  is identically zero — no information; emitting it would skew downstream
+  z-scoring with a flat-zero channel.
+- Reuses `btc_leadlag_probe.build_leadlag_signal` for the [N, T=60]
+  z-scoring + sample alignment so the probe matches the harness used in
+  #246-#248.
+
+### Tests
+
+`backend/tests/test_btc_residual_ch9_probe.py` — 9 tests:
+
+- `TestProbeConstants` (3): pin `_TARGET_CHANNEL=9`, `_BETA_WINDOW=24`, and
+  `_BTC_PID == btc_leadlag_probe._BTC_PID`.
+- `TestBuildResidualSignalForPid` (6): BTC-pid empty-dict passthrough,
+  short-history empty, dict-typed output (int keys, float finite values),
+  warm-up entries excluded, that the probe routes through
+  `tools.btc_residualize.residualize_returns` (mock-asserted), and an
+  end-to-end smoke (alt = exp(1.5·btc_log_ret + idio); residual must
+  correlate with idio at corr > 0.7).
+
+All 9 pass.
+
+### Status
+
+Probe runner is GREEN locally. The +0.01 AUC verdict (#253d) is the
+next step — running the probe over the cache.
+
+### Files Changed
+
+- `backend/tools/btc_residual_ch9_probe.py` (new)
+- `backend/tests/test_btc_residual_ch9_probe.py` (new)
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.43] — 2026-05-09 — BTC β-residualization helpers (#253b/#253c)
 
 ### Context
