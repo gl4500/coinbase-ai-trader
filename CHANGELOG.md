@@ -5,6 +5,67 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.47] — 2026-05-09 — Marketcap probe NULL-COVERAGE (#260d/e/f)
+
+### Verdict
+
+```
+=== single-add probe: log_marketcap -> ch13 ===
+  baseline mean_auc = 0.5202
+  replaced mean_auc = 0.5206
+  delta             = +0.0004
+  +0.01 gate:        FAIL  (null-coverage caveat)
+```
+
+**Δ is meaningless** — CoinGecko returned HTTP 401 for the first 5 pids
+and 429 for the remaining 15, so per-sample non-zero marketcap coverage
+was **0.0%** across all 167,938 pooled samples. ch13 was effectively
+replaced with all-zeros. The +0.0004 lift is just XGB getting a
+near-neutral signal vs a slightly noisy one — not evidence about
+marketcap as a feature.
+
+### Root cause
+
+CoinGecko free tier no longer permits the
+`/coins/{id}/market_chart/range` endpoint without a paid API key
+(`COINGECKO_API_KEY`). The `/coins/markets` snapshot endpoint that the
+service was tested against still works (and remains free), but the
+historical timeseries needed for backtesting is gated.
+
+### What landed
+
+- `backend/tools/marketcap_probe.py` — single-add probe runner mirroring
+  `okx_ls_probe` shape. Replaces ch13 (obv_slope) with per-pid
+  log(market_cap) z-score, 1-day strict-causal lag.
+- `backend/tests/test_marketcap_probe.py` — 15 tests covering target
+  channel, lag/seq_len constants, log-transform, lag application,
+  forward-fill, pre-history neutral-zero, empty-history fallback. **15/15
+  PASS.**
+
+### What this means
+
+Probe pipeline is correct (tests pass; probe runs end-to-end). Data
+source is the blocker. Three viable paths forward:
+1. **Apply for CoinGecko Demo plan** — free tier API key (10k req/month);
+   probe re-runs would gate cleanly.
+2. **Switch to CoinPaprika** — historical OHLC + marketcap free, ~25k
+   req/day, no key required.
+3. **Defer marketcap and try a different exogenous input** — e.g. CME
+   BTC futures basis, FRED 10y-2y spread, on-chain metrics (Glassnode
+   Explorer free tier).
+
+This probe is **not** the 8th BTC-flavored exogenous failure (those tested
+real signal); it's the first data-availability blocker. Catalogued
+separately so the verdict pattern stays interpretable.
+
+### Files Changed
+
+- `backend/tools/marketcap_probe.py` (new)
+- `backend/tests/test_marketcap_probe.py` (new)
+- `CHANGELOG.md`
+
+---
+
 ## [Session 58.46] — 2026-05-09 — CoinGecko marketcap/FDV service scaffold (#260a/b/c)
 
 ### Why
