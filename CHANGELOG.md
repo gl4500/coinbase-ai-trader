@@ -5,6 +5,94 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.39] — 2026-05-08 — OKX long/short ratio single-add probe: 0/20 coverage, INCONCLUSIVE (#235)
+
+### Context
+
+After #156 (BTC-dominance, +0.0077 FAIL) the remaining "new input" candidates
+to break the 0.528 AUC ceiling were OKX OI (#141–#145, already integrated as
+Ch 27) and OKX long/short *account* ratio. L/S ratio measures retail
+positioning skew (>1 = more accounts net-long than net-short); hypothesis
+was that extreme positioning crowding precedes mean reversion that the
+60-bar single-product window can't reconstruct from price/volume alone.
+
+### Change
+
+**New service** — `backend/services/okx_long_short_history.py` mirroring
+`okx_oi_history.py`: `fetch_long_short_ratio_history(product_id, start_ms,
+end_ms, bar="1H")` paginated via `after=` cursor, accepts both
+`[ts, ratio]` array and `{"ts": ..., "ratio": ...}` dict row shapes,
+imports `_PRODUCT_TO_OKX` from `okx_oi_history` (single source of truth so
+L/S and OI never drift), `OKX_LS_DISABLED=1` kill switch.
+
+**New probe** — `backend/tools/okx_ls_probe.py` (single-add harness, ch13
+obv_slope target, +0.01 gate). Pure helpers (`ls_history_to_bar_grid`,
+`build_ls_signal`) tested at module level; heavy imports (torch, services,
+tools.feature_set_compare, tools.pid_snapshot) deferred inside the runner
+functions so the test module can be collected without torch.
+
+### Tests
+
+`tests/test_okx_long_short_history.py` — 16 tests mirroring
+`test_okx_oi_history.py`: symbol mapping, single-page fetch, dict/array
+row shapes, failure modes (non-200, non-zero `code`, network exception,
+malformed rows), kill switch (`OKX_LS_DISABLED`), pagination, plus the
+critical contract test `test_supported_set_matches_oi_history` ensuring
+the L/S map mirrors OI exactly.
+
+`tests/test_okx_ls_probe.py` — 9 tests on pure helpers
+(`build_ls_signal` empty/single/two-value/forward-fill/pre-history-zero,
+`ls_history_to_bar_grid` ms→sec/off-grid-skip/empty,
+`TestPerPidSignalCoverage`).
+
+Full suite green pre-commit (16/16 service, 9/9 probe, OI 18/18 still
+passing).
+
+### Result — INCONCLUSIVE
+
+Pooled top-20 with `--snapshot-ts auto` (cutoff 1758816000, 165,551 samples):
+
+| metric        | value   |
+|---------------|---------|
+| baseline AUC  | 0.5213  |
+| replaced AUC  | 0.5239  |
+| Δ             | +0.0026 |
+| +0.01 gate    | FAIL    |
+| L/S coverage  | **0/20 pids** |
+
+**Critical caveat:** OKX returned zero L/S history for every one of the
+top-20 survivorship-aware pids (PENGU, POPCAT, JTO, BONK, NKN, ZK, AIOZ,
+TRU, SKL, AVAX, MOODENG, PEPE, JASMY, LINK, ZORA, FET, LRDS, ONDO, XCN,
+BLUR). The +0.0026 Δ is just the dropout effect of replacing ch13 with
+all-zeros, **not a real evaluation of the L/S signal**.
+
+### Why 0/20 coverage
+
+The L/S endpoint
+(`/api/v5/rubik/stat/contracts/long-short-account-ratio`) appears to have
+narrower symbol coverage than OI on OKX, or the same `_PRODUCT_TO_OKX`
+map needs different inst-id formatting for L/S. Filed as #235g for
+diagnosis: pick one known-on-OKX pid (e.g. AVAX-USDT-SWAP), curl the
+endpoint directly, determine whether this is a fetcher bug, an OKX
+coverage gap, or a different inst-id convention.
+
+**Decision:** do NOT mark L/S as the third L/S-style probe failure
+(alongside MFI-rank, log10-vol-rank, BTC-dominance) yet. The probe is
+inconclusive — the signal was never actually under test. Diagnose
+coverage first (#235g); if coverage gap is fixable, re-run; if it's a
+hard OKX limitation, then document as "L/S not testable at the pids we
+need" and move on.
+
+### Files Changed
+
+- `backend/services/okx_long_short_history.py` — new fetcher
+- `backend/tools/okx_ls_probe.py` — new single-add probe runner
+- `backend/tests/test_okx_long_short_history.py` — 16 service tests
+- `backend/tests/test_okx_ls_probe.py` — 9 probe-helper tests
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.38] — 2026-05-08 — Gate CNN-tuned BUY suppressions on `model_backend == "cnn"` (#232)
 
 ### Context
