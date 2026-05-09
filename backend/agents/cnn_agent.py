@@ -2301,45 +2301,48 @@ class CoinbaseCNNAgent:
         # ── Dry-run execution via _CNNBook (tracks positions + writes to trades table) ──
         if execute:
             if side == "BUY" and not self.book.has_position(pid):
-                # Hurst regime gate — suppress BUY in pure random-walk regime
-                hurst_ok = hurst >= _HURST_MR_THRESH
+                # #232 — Hurst, HMM regime, and LGBMFilter were calibrated on
+                # CNN outcome data (Phase-1: CNN BUY edge is CHAOTIC-only).
+                # When MODEL_BACKEND != "cnn" they don't transfer, so skip them
+                # and let the active backend's own probability drive the BUY.
+                _cnn_only = config.model_backend == "cnn"
+                hurst_ok  = hurst >= _HURST_MR_THRESH
 
-                if not hurst_ok:
-                    signal["execution"] = {
-                        "success": False,
-                        "reason": f"Hurst={hurst:.2f} random-walk regime — no edge",
-                    }
-                    logger.info(
-                        f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
-                    )
-                elif _regime_gate_enabled() and hmm_regime != "CHAOTIC":
+                _suppress_reason: Optional[str] = None
+                _suppress_log:    Optional[str] = None
+                if _cnn_only and not hurst_ok:
+                    _suppress_reason = f"Hurst={hurst:.2f} random-walk regime — no edge"
+                    _suppress_log    = f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
+                elif _cnn_only and _regime_gate_enabled() and hmm_regime != "CHAOTIC":
                     # Phase-1 finding: CNN BUY edge is CHAOTIC-only (58.5% wr) —
                     # TRENDING/RANGING BUYs win 44-46%. Set CNN_REGIME_GATE=off to disable.
-                    signal["execution"] = {
-                        "success": False,
-                        "reason": f"Regime {hmm_regime} — CNN BUY edge is CHAOTIC only",
-                    }
-                    logger.info(
-                        f"CNN BUY {pid} suppressed: regime={hmm_regime} != CHAOTIC"
-                    )
+                    _suppress_reason = f"Regime {hmm_regime} — CNN BUY edge is CHAOTIC only"
+                    _suppress_log    = f"CNN BUY {pid} suppressed: regime={hmm_regime} != CHAOTIC"
+
+                if _suppress_reason is not None:
+                    signal["execution"] = {"success": False, "reason": _suppress_reason}
+                    logger.info(_suppress_log)
                 else:
-                    # LightGBM entry filter — secondary gate trained on real outcomes
-                    from datetime import datetime as _dt
-                    _now_dt = _dt.utcnow()
-                    _lgbm_feat = {
-                        "cnn_prob":    cnn_prob,
-                        "rsi":         rsi_val,
-                        "adx":         adx_val,
-                        "strength":    strength,
-                        "macd":        macd_h,
-                        "mfi":         mfi_val,
-                        "stoch_k":     stoch_k,
-                        "hour_of_day": _now_dt.hour,
-                        "day_of_week": _now_dt.weekday(),
-                        "usd_open":    self.book.balance * min(_kelly_fraction(model_prob), _CNN_MAX_FRAC),
-                    }
-                    _lgbm_prob  = self._lgbm.predict(_lgbm_feat)
-                    _lgbm_allow = self._lgbm.allow_buy(_lgbm_feat)
+                    # LightGBM entry filter — also CNN-tuned, gated on backend.
+                    _lgbm_prob: float = 0.0
+                    _lgbm_allow: bool = True
+                    if _cnn_only:
+                        from datetime import datetime as _dt
+                        _now_dt = _dt.utcnow()
+                        _lgbm_feat = {
+                            "cnn_prob":    cnn_prob,
+                            "rsi":         rsi_val,
+                            "adx":         adx_val,
+                            "strength":    strength,
+                            "macd":        macd_h,
+                            "mfi":         mfi_val,
+                            "stoch_k":     stoch_k,
+                            "hour_of_day": _now_dt.hour,
+                            "day_of_week": _now_dt.weekday(),
+                            "usd_open":    self.book.balance * min(_kelly_fraction(model_prob), _CNN_MAX_FRAC),
+                        }
+                        _lgbm_prob  = self._lgbm.predict(_lgbm_feat)
+                        _lgbm_allow = self._lgbm.allow_buy(_lgbm_feat)
 
                     if not _lgbm_allow:
                         signal["execution"] = {
@@ -2359,11 +2362,12 @@ class CoinbaseCNNAgent:
                         if spent > 0:
                             self.signals_executed += 1
                             signal["execution"] = {"success": True, "spent": round(spent, 2)}
+                            _lgbm_str = f"lgbm_p={_lgbm_prob:.2f} " if _cnn_only else ""
                             logger.info(
                                 f"CNN BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
                                 f"kelly_frac={frac:.2f} spent=${spent:.2f} "
                                 f"H={hurst:.2f} DI={di:.1f}% "
-                                f"lgbm_p={_lgbm_prob:.2f} balance=${self.book.balance:.2f}"
+                                f"{_lgbm_str}balance=${self.book.balance:.2f}"
                             )
                         else:
                             signal["execution"] = {"success": False, "reason": "Insufficient balance"}

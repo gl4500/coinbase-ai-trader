@@ -5,6 +5,72 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.38] — 2026-05-08 — Gate CNN-tuned BUY suppressions on `model_backend == "cnn"` (#232)
+
+### Context
+
+After #226 lowered `CNN_BUY_THRESHOLD` to 0.55 to expedite XGB evaluation, the
+firehose opened: 43 BUY signals fired in 2h. But `signals_executed=0` and
+nothing populated the CNN Agent tab — every signal was suppressed before
+`_CNNBook.buy()` ran.
+
+Root cause: three CNN-tuned safeguards in `agents/cnn_agent.py` fire
+unconditionally on every BUY:
+1. **Hurst random-walk gate** (`hurst < 0.45`) — Phase-1 CNN edge requires
+   trending price action.
+2. **HMM regime gate** (`regime != CHAOTIC`) — Phase-1 finding: CNN BUY edge
+   is CHAOTIC-only (58.5% wr vs 44–46% in TRENDING/RANGING).
+3. **LGBMFilter** — secondary gate calibrated on CNN outcome data.
+
+Today the regime distribution was 98% TRENDING/RANGING + 2% CHAOTIC, so
+the regime gate alone was suppressing nearly every BUY — and even those
+that survived hit Hurst or LGBM. With `MODEL_BACKEND=xgb` driving inference
+since Session 58.31, these CNN-only safeguards have no theoretical basis to
+apply: XGB has its own edge profile and isn't restricted to CHAOTIC.
+
+### Change
+
+`agents/cnn_agent.py` — wrapped the three suppressions in
+`_cnn_only = config.model_backend == "cnn"`:
+
+- **Hurst gate**: `if _cnn_only and not hurst_ok` (was: `if not hurst_ok`)
+- **Regime gate**: `elif _cnn_only and _regime_gate_enabled() and hmm_regime != "CHAOTIC"`
+- **LGBMFilter eval block**: wrapped entire `_lgbm.predict` / `_lgbm.allow_buy`
+  call in `if _cnn_only:`. Defaults `_lgbm_allow=True` so non-CNN backends
+  fall straight through to `_CNNBook.buy()`.
+- **Log line**: `lgbm_p={...}` portion of `CNN BOOK BUY` line is now
+  conditional via `_lgbm_str`.
+
+When `MODEL_BACKEND=cnn` (the original tuned configuration), all three gates
+remain armed exactly as before. When the backend is anything else, they
+auto-disable. Per `feedback_cnn_safeguards_backend_gating.md`: this code-gate
+beats per-gate env knobs (e.g. `CNN_REGIME_GATE=off`) because (a) one knob =
+one gate, so a partial fix leaves the other two blocking; (b) env disables
+persist across `MODEL_BACKEND` flips, silently disarming the protection
+when CNN reactivates.
+
+### Tests
+
+`tests/test_cnn_agent.py` — added `TestSuppressionsGatedByBackend` (3 tests):
+
+- `test_regime_gate_skipped_when_backend_is_xgb` — TRENDING + xgb → BUY executes.
+- `test_hurst_gate_skipped_when_backend_is_xgb` — Hurst=0.30 + xgb → BUY executes.
+- `test_lgbm_gate_skipped_when_backend_is_xgb` — LGBM disallow + xgb → BUY executes.
+
+Updated `TestInferenceRegimeGate.test_buy_blocked_when_regime_is_trending`
+to set `model_backend="cnn"` so the gate-blocks-TRENDING contract is still
+exercised under its intended backend.
+
+Full suite: 914 passed.
+
+### Files Changed
+
+- `backend/agents/cnn_agent.py` — backend-conditional suppression gate
+- `backend/tests/test_cnn_agent.py` — 3 new tests + 1 stale-assert update
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.37] — 2026-05-08 — Expedite XGB evaluation: lower BUY gate + env-ize scan interval (#226, #227)
 
 ### Context

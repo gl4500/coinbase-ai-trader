@@ -2835,7 +2835,8 @@ class TestInferenceRegimeGate:
 
     @pytest.mark.asyncio
     async def test_buy_blocked_when_regime_is_trending(self, agent, product):
-        """TRENDING regime → BUY signal returned but book.buy is NOT called."""
+        """TRENDING regime + CNN backend → BUY signal returned but book.buy is NOT called."""
+        import agents.cnn_agent as ca
         candles  = _make_candles(80)
         buy_mock = AsyncMock(return_value=(0.0, 0))
 
@@ -2844,6 +2845,7 @@ class TestInferenceRegimeGate:
         })()
 
         with (
+            patch.object(ca.config, "model_backend", "cnn"),
             patch("agents.cnn_agent.database.get_candles",
                   new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.database.get_agent_decisions",
@@ -2949,6 +2951,150 @@ class TestInferenceRegimeGate:
         assert sig is not None
         assert sig["side"] == "BUY"
         buy_mock.assert_called_once()
+        assert sig["execution"]["success"] is True
+
+
+# ── #232 — CNN-tuned BUY suppressions must be gated on model_backend ─────────
+
+class TestSuppressionsGatedByBackend:
+    """#232 — Hurst random-walk gate, HMM regime gate, and LGBMFilter were
+    all calibrated on CNN-only outcome data (Phase-1 finding: CNN BUY edge
+    is CHAOTIC-only, 58.5% wr vs 44–46% in TRENDING/RANGING). When
+    config.model_backend != "cnn" they must NOT fire — XGB has its own
+    edge profile and cross-regime, so blanket suppression starves the
+    paper-trade firehose.
+
+    Live evidence (2026-05-08): 43 BUY signals fired in 2h with
+    signals_executed=0 because TRENDING regime gate suppressed every one
+    while MODEL_BACKEND=xgb.
+    """
+
+    @staticmethod
+    def _make_tracker_mock():
+        from unittest.mock import MagicMock
+        t = MagicMock()
+        t.get_lessons = AsyncMock(return_value=[])
+        t.record      = AsyncMock()
+        return t
+
+    @pytest.mark.asyncio
+    async def test_regime_gate_skipped_when_backend_is_xgb(self, agent, product):
+        """TRENDING regime + MODEL_BACKEND=xgb → book.buy IS called."""
+        import agents.cnn_agent as ca
+        candles  = _make_candles(80)
+        buy_mock = AsyncMock(return_value=(50.0, 1))
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("TRENDING", 0.80, 0))
+        })()
+
+        with (
+            patch.object(ca.config, "model_backend", "xgb"),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),
+            patch("agents.cnn_agent.get_detector",    return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",     return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob",          return_value=0.82),
+            patch.object(agent._lgbm, "allow_buy",    return_value=True),
+            patch.object(agent._lgbm, "predict",      return_value=0.7),
+            patch.object(agent.book, "buy",           buy_mock),
+            patch.object(agent.book, "has_position",  return_value=False),
+        ):
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        buy_mock.assert_called_once(), \
+            "MODEL_BACKEND=xgb must bypass CNN-tuned regime gate"
+        assert sig["execution"]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_hurst_gate_skipped_when_backend_is_xgb(self, agent, product):
+        """Hurst < _HURST_MR_THRESH + MODEL_BACKEND=xgb → book.buy IS called."""
+        import agents.cnn_agent as ca
+        candles  = _make_candles(80)
+        buy_mock = AsyncMock(return_value=(50.0, 1))
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.70, 2))
+        })()
+
+        with (
+            patch.object(ca.config, "model_backend", "xgb"),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.30),
+            patch("agents.cnn_agent.get_detector",    return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",     return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob",          return_value=0.82),
+            patch.object(agent._lgbm, "allow_buy",    return_value=True),
+            patch.object(agent._lgbm, "predict",      return_value=0.7),
+            patch.object(agent.book, "buy",           buy_mock),
+            patch.object(agent.book, "has_position",  return_value=False),
+        ):
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        buy_mock.assert_called_once(), \
+            "MODEL_BACKEND=xgb must bypass CNN-tuned Hurst random-walk gate"
+        assert sig["execution"]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_lgbm_gate_skipped_when_backend_is_xgb(self, agent, product):
+        """LGBMFilter disallow + MODEL_BACKEND=xgb → book.buy IS called."""
+        import agents.cnn_agent as ca
+        candles  = _make_candles(80)
+        buy_mock = AsyncMock(return_value=(50.0, 1))
+
+        fake_detector = type("D", (), {
+            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.70, 2))
+        })()
+
+        with (
+            patch.object(ca.config, "model_backend", "xgb"),
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal",     new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent._ollama_prob",
+                  new=AsyncMock(return_value=(0.82, 0, 0))),
+            patch("agents.cnn_agent._hurst_exponent", return_value=0.55),
+            patch("agents.cnn_agent.get_detector",    return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker",     return_value=self._make_tracker_mock()),
+            patch.object(agent, "_cnn_prob",          return_value=0.82),
+            patch.object(agent._lgbm, "allow_buy",    return_value=False),
+            patch.object(agent._lgbm, "predict",      return_value=0.20),
+            patch.object(agent.book, "buy",           buy_mock),
+            patch.object(agent.book, "has_position",  return_value=False),
+        ):
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        buy_mock.assert_called_once(), \
+            "MODEL_BACKEND=xgb must bypass CNN-tuned LGBMFilter"
         assert sig["execution"]["success"] is True
 
 
