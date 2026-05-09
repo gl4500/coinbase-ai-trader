@@ -5,6 +5,18 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.54] — 2026-05-09 — Leader Filter Task 4: CoinMarketCap snapshot service (#leader-filter)
+
+### What changed
+
+- New `services/coinmarketcap_marketcap.py` — exact-shape mirror of `coingecko_marketcap` (#260) for CMC `/cryptocurrency/quotes/latest`.
+- 28-pid `_PRODUCT_TO_CMC_ID` map matching CG coverage.
+- Kill switch `COINMARKETCAP_DISABLED=1`.
+- Returns shared `MarketcapRow` type — interoperable with merger (Task 3).
+- 12 new tests in `test_coinmarketcap_marketcap.py`. All pass.
+
+---
+
 ## [Session 58.53] — 2026-05-09 — Leader Filter Task 3: pure-function merger with divergence audit (#leader-filter)
 
 ### What changed
