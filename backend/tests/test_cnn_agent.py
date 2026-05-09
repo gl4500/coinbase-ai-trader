@@ -3211,6 +3211,37 @@ class TestLLMSkippedUnderXgb:
             "MODEL_BACKEND=cnn must still call _ollama_prob for non-decisive cnn_prob"
 
 
+# ── #267 — Log labels reflect active backend (CNN vs XGB) ────────────────────
+
+class TestBackendLabelHelper:
+    """#267 — When MODEL_BACKEND=xgb, `_cnn_prob` already delegates to
+    `xgb_signal.xgb_prob`, so the active decider is XGB. But the scan-loop
+    log lines still print "CNN [BUY]/[SELL]" / "CNN BOOK BUY/SELL", which
+    misled the operator into thinking CNN was still firing.
+
+    Contract: a `_backend_label()` helper returns "XGB" when
+    `config.model_backend == "xgb"` and "CNN" otherwise. The four
+    user-facing log strings in `generate_signal` use this helper.
+    """
+
+    def test_returns_xgb_when_backend_is_xgb(self):
+        import agents.cnn_agent as ca
+        with patch.object(ca.config, "model_backend", "xgb"):
+            assert ca._backend_label() == "XGB"
+
+    def test_returns_cnn_when_backend_is_cnn(self):
+        import agents.cnn_agent as ca
+        with patch.object(ca.config, "model_backend", "cnn"):
+            assert ca._backend_label() == "CNN"
+
+    def test_returns_cnn_when_backend_is_unknown(self):
+        """Defensive: any non-xgb value falls back to CNN — the label
+        should never print as a raw env value or 'unknown'."""
+        import agents.cnn_agent as ca
+        with patch.object(ca.config, "model_backend", "ensemble"):
+            assert ca._backend_label() == "CNN"
+
+
 # ── #57 stage (a): real BTC + real 5m into _build_dataset, mask shrink ────────
 
 

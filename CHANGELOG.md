@@ -5,6 +5,49 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.49] — 2026-05-09 — Backend-aware log labels: "CNN [BUY]" → "XGB [BUY]" when MODEL_BACKEND=xgb (#267)
+
+### Why
+
+User reported: with `MODEL_BACKEND=xgb` set, the scan-loop log lines
+still print `CNN [BUY]`, `CNN BOOK BUY`, `CNN BOOK SELL`, which read as
+if CNN is making decisions. Reality: `_cnn_prob` already delegates to
+`xgb_signal.xgb_prob` when backend is xgb (since #135 / #232), so those
+log lines are *XGB* decisions wearing a misleading prefix.
+
+### What changed
+
+- `agents/cnn_agent.py` — added module-level `_backend_label()` helper
+  that returns `"XGB"` if `config.model_backend == "xgb"` else `"CNN"`.
+  Defensive fallback: any other value (incl. `"ensemble"`) prints `CNN`.
+- 4 user-facing log strings in `generate_signal` now use the helper:
+  - signal info: `f"{lbl} [{side}] {pid} | {lbl.lower()}={prob:.2%}..."`
+  - book buy: `f"{lbl} BOOK BUY {pid} @{price:.4f}..."`
+  - book buy skip (insufficient balance)
+  - book sell
+
+### Not changed
+
+- CNN-internal logs (training, model load, dataset cache, book restore,
+  retrain triggers) keep `CNN` prefix — they refer to actual CNN
+  infrastructure regardless of decider backend.
+- LGBM gate / Hurst / regime suppression logs already gated to
+  `_cnn_only` (#232), so they only fire under MODEL_BACKEND=cnn and
+  correctly print `CNN`.
+
+### Tests
+
+- `TestBackendLabelHelper` — 3 tests (xgb→XGB, cnn→CNN, unknown→CNN)
+- All `TestSuppressionsGatedByBackend` tests still GREEN (no change to
+  signal-generation control flow, just log-string formatting).
+
+### Files Changed
+
+- `backend/agents/cnn_agent.py` — added `_backend_label()`, 4 log lines
+- `backend/tests/test_cnn_agent.py` — added `TestBackendLabelHelper`
+
+---
+
 ## [Session 58.48] — 2026-05-09 — Timescale sweep on 28-ch survivorship-aware (#242)
 
 ### Verdict

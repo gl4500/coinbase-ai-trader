@@ -103,6 +103,17 @@ def _regime_gate_enabled() -> bool:
     return os.getenv("CNN_REGIME_GATE", "on").strip().lower() != "off"
 
 
+def _backend_label() -> str:
+    """#267 — User-facing log prefix that reflects the active decider.
+
+    When MODEL_BACKEND=xgb, `_cnn_prob` delegates to xgb_signal.xgb_prob,
+    so signals printed by the scan loop are XGB decisions, not CNN. Using
+    "CNN" in those log lines misled the operator. Any non-"xgb" value
+    falls back to "CNN" so the label never prints a raw env value.
+    """
+    return "XGB" if config.model_backend == "xgb" else "CNN"
+
+
 class _CNNBook:
     """Lightweight dry-run portfolio book for the CNN agent.
     Mirrors the _Book class in tech_agent_cb so that
@@ -2304,8 +2315,9 @@ class CoinbaseCNNAgent:
             self.signals_sell += 1
 
         llm_str = f"{llm_prob:.2%}" if llm_prob is not None else "n/a"
+        _lbl = _backend_label()
         logger.info(
-            f"CNN [{side}] {pid} | cnn={cnn_prob:.2%} llm={llm_str} "
+            f"{_lbl} [{side}] {pid} | {_lbl.lower()}={cnn_prob:.2%} llm={llm_str} "
             f"blend={model_prob:.2%} adx={adx_val:.1f}({'trend' if trending else 'range'}) "
             f"strength={strength:.2f} size=${quote_size:.2f}"
         )
@@ -2376,7 +2388,7 @@ class CoinbaseCNNAgent:
                             signal["execution"] = {"success": True, "spent": round(spent, 2)}
                             _lgbm_str = f"lgbm_p={_lgbm_prob:.2f} " if _cnn_only else ""
                             logger.info(
-                                f"CNN BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
+                                f"{_backend_label()} BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
                                 f"kelly_frac={frac:.2f} spent=${spent:.2f} "
                                 f"H={hurst:.2f} DI={di:.1f}% "
                                 f"{_lgbm_str}balance=${self.book.balance:.2f}"
@@ -2384,7 +2396,7 @@ class CoinbaseCNNAgent:
                         else:
                             signal["execution"] = {"success": False, "reason": "Insufficient balance"}
                             logger.warning(
-                                f"CNN BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
+                                f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
                                 f"too low for kelly_frac={frac:.2f}"
                             )
             elif side == "SELL" and self.book.has_position(pid):
@@ -2392,7 +2404,7 @@ class CoinbaseCNNAgent:
                 self.signals_executed += 1
                 signal["execution"] = {"success": True, "pnl": round(pnl, 4)}
                 logger.info(
-                    f"CNN BOOK SELL {pid} @{price:.4f} pnl=${pnl:+.2f} "
+                    f"{_backend_label()} BOOK SELL {pid} @{price:.4f} pnl=${pnl:+.2f} "
                     f"balance=${self.book.balance:.2f}"
                 )
             elif side == "BUY" and self.book.has_position(pid):
