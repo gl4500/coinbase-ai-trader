@@ -5,6 +5,63 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.45] — 2026-05-09 — Ch 9 β-residual probe verdict (#253d FAIL) + cp1252 print fix
+
+### Verdict
+
+```
+=== single-add probe: btc_residual_ret -> ch9 ===
+  baseline mean_auc = 0.5199
+  replaced mean_auc = 0.5199
+  delta             = -0.0000
+  +0.01 gate:        FAIL
+```
+
+Pooled top-20 survivorship-aware (snapshot_ts=1757775600), n=167,933 samples,
+20/20 pids 100% non-zero coverage, 5-fold purged CV with 4h embargo. The
+β-residualized 1-bar return at Ch 9 carries no incremental signal vs the
+raw 1-bar price change.
+
+### What this means
+
+This is the **7th sequential BTC-flavored probe to miss the +0.01 gate**:
+#156 BTC-dominance, #235 OKX L/S, #243 long-trend, #246-#248 BTC lead-lag at
+five horizons (1/3/6/12/24h), and now #253 β-residualization. The
+empirical pattern is consistent: explicit BTC structure — whether injected
+into the channel (lead-lag, dominance) or stripped from it (β-residual) —
+does not move AUC at the Ch-9 substitution point on this 28-channel cache.
+
+The user's domain intuition (BTC leads alts) is sound, but XGB on the
+existing channel set already captures whatever marginal information that
+relationship offers. Further BTC-derived single-add probes are unlikely to
+clear the gate without a structural change (different timeframe grid,
+different target channel, regime-conditional features, or new exogenous
+inputs).
+
+### Probe fix landed in this commit
+
+`tools/btc_residual_ch9_probe.py` initially crashed mid-run on Windows
+console (`UnicodeEncodeError: 'charmap' codec can't encode '\u03b2'`) —
+two `print` calls embedded the literal `β` character, same class of bug
+as #153 (hour_of_day_probe) and #249 (long_trend_probe Δ). Replaced both
+print-side `β` occurrences with the ASCII string `beta`. Docstrings keep
+the math notation (β/ε/←) — they are never written to stdout.
+
+### Status
+
+Probe runner is now Windows-stdout-safe. Verdict recorded. Task #253
+(BTC-residualization, Option A) closes as **decided FAIL** per gate rule.
+Next direction is at the user's discretion — channel weighting was the
+follow-up gated on this verdict.
+
+### Files Changed
+
+- `backend/tools/btc_residual_ch9_probe.py` — replace two `β` chars in
+  print f-strings with `beta` (cp1252 fix)
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.44] — 2026-05-09 — Ch 9 β-residual probe runner (#253c GREEN)
 
 ### Context

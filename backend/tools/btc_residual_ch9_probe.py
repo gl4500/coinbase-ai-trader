@@ -127,7 +127,7 @@ def _load_pooled_with_residual(
         raise RuntimeError("BTC-USD parquet missing — cannot build residual")
 
     print(
-        f"Computing β-residual (W={_BETA_WINDOW}h) per pid...",
+        f"Computing beta-residual (W={_BETA_WINDOW}h) per pid...",
         flush=True,
     )
     t0 = time.time()
@@ -196,7 +196,7 @@ def _run_probe(snapshot_ts: int) -> Dict[str, float]:
     print(f"per-sample non-zero coverage: {coverage_pct:.1%}", flush=True)
 
     print(
-        f"\nReplacing ch{_TARGET_CHANNEL} (1-bar price change) with β-residual "
+        f"\nReplacing ch{_TARGET_CHANNEL} (1-bar price change) with beta-residual "
         f"(W={_BETA_WINDOW}h) z-score; running 5-fold purged CV (4h embargo)...",
         flush=True,
     )
