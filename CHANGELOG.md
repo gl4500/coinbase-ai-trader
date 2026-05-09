@@ -5,6 +5,64 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.43] — 2026-05-09 — BTC β-residualization helpers (#253b/#253c)
+
+### Context
+
+Six sequential probes have now missed the +0.01 AUC gate (#156, #235,
+#243, #246-#248), each carrying a BTC-related signal *into* a channel.
+User raised the empirical-economics frame: BTC leads alts on aggregate,
+but every prior attempt encoded the common factor rather than stripping
+it. β-residualization inverts the polarity — decompose
+`r_alt[t] = β[t] · r_btc[t] + ε[t]` and let ε (the alt-specific component
+*after* removing the BTC-correlated piece) drive the channel. This is
+the candidate replacement for Ch 9 (1-bar price change) under #253c.
+
+### Helpers
+
+`backend/tools/btc_residualize.py` — pure-array, timeframe-agnostic:
+
+- `compute_rolling_beta(alt, btc, window) -> np.ndarray` — β at index t
+  fits OLS on the strictly-prior window `[t-W, t-1]`. Warm-up entries
+  (`t < W`) are NaN. Zero-variance windows fall back to β=0.0 so the
+  channel stays finite.
+- `residualize_returns(alt, btc, window) -> np.ndarray` — ε[t] = alt[t]
+  − β[t]·btc[t]. Shape preserved. When β=0 fallback fires, residual
+  passes through the raw alt return.
+
+Causality is the load-bearing invariant: `test_strict_causality_no_lookahead`
+mutates `alt[t+1:]` and `btc[t+1:]` post-hoc and asserts every β[i] for
+i ≤ t is unchanged. Same lookahead discipline as #157 ADX fix.
+
+### Tests
+
+`backend/tests/test_btc_residualize.py` — 18 tests across two classes:
+
+- `TestComputeRollingBeta` (9): known-β recovery (alt = 2·btc → β=2),
+  warm-up NaN, strict causality, zero-btc-variance fallback, shape
+  preservation, mismatched-length guard, invalid-window guard.
+- `TestResidualizeReturns` (9): zero-residual when alt = β·btc,
+  idiosyncratic recovery (corr(ε, idio) > 0.7), warm-up, causality,
+  BTC-self passthrough, zero-variance passthrough, shape, validation.
+
+All 18 pass.
+
+### Status
+
+This commit lands the helpers and tests. The runner
+`tools/btc_residual_ch9_probe.py` (#253c) and the +0.01 AUC gate
+verdict (#253d) follow in subsequent commits. Nothing wired into
+`cnn_agent.py` yet — channel mapping is a separate decision after the
+probe gate result.
+
+### Files Changed
+
+- `backend/tools/btc_residualize.py` (new)
+- `backend/tests/test_btc_residualize.py` (new)
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.42] — 2026-05-09 — Drop LLM under `MODEL_BACKEND != "cnn"` (#250)
 
 ### Context
