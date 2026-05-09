@@ -5,6 +5,66 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.48] — 2026-05-09 — Timescale sweep on 28-ch survivorship-aware (#242)
+
+### Verdict
+
+```
+   horizon          n   pos_rate   mean_auc
+        1h    126,352      0.488     0.6095
+        4h    160,129      0.489     0.6417   <- best
+       12h    165,357      0.488     0.6411
+       24h    165,722      0.488     0.6410
+       72h    165,750      0.488     0.6405
+
+best horizon: 4h  mean_auc=0.6417
+```
+
+### What this means
+
+- **4h remains optimal**, matching prior #152 finding on the legacy 27-ch
+  cache. Best alternative (12h) is 0.6411 — Δ = -0.0006, well below the
+  +0.01 threshold that would justify a cache rebuild at a different
+  horizon.
+- **1h is meaningfully worse** (-0.032 vs 4h) — too noisy for the
+  ±0.3% triple-barrier formulation; many samples bounce inside the
+  barrier and label as 0 dead-zone, dropping labeled-sample count to
+  126k from ~165k at longer horizons.
+- **24h / 72h offer no lift** despite labeling more samples — long
+  horizons don't unlock new signal in the existing 28-channel feature
+  set.
+
+### Caveat: fold variance
+
+Folds at 4h: `[0.531, 0.533, 0.579, 0.772, 0.793]`. The mean 0.6417
+is dominated by the most recent two folds (Q4-Q5) at 0.77-0.79, while
+older folds (Q1-Q2) sit at chance (0.53). Same pattern across all
+horizons. Implies either:
+- The dataset has entered a more-learnable regime in the recent half
+  (consistent with cleaner 28-ch coverage post-#177/#197 OI rebuild)
+- A subtle leakage near the fold boundary that gets worse for newer
+  data (the per-product feature normalization is built on the full
+  ts range — strict-causality should reject this hypothesis but worth
+  re-checking)
+
+The relative ordering across horizons is robust to the variance source
+since all five horizons exhibit the same fold pattern. The absolute
+0.6417 number should be treated as an upper bound until the variance
+source is understood.
+
+### Decision
+
+**Keep `forward_hours=4` as the production label horizon.** No cache
+rebuild justified. Files #242 closed.
+
+### Files Changed
+
+- `CHANGELOG.md` — this entry
+- (no code changes; this was a diagnostic sweep using existing
+  `tools/timescale_sweep.py`)
+
+---
+
 ## [Session 58.47] — 2026-05-09 — Marketcap probe NULL-COVERAGE (#260d/e/f)
 
 ### Verdict
