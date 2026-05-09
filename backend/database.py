@@ -265,6 +265,35 @@ async def init_db() -> None:
                 val_recall_at_thresh     REAL,
                 val_threshold            REAL
             );
+
+            CREATE TABLE IF NOT EXISTS coin_fundamentals (
+                snapshot_ts        INTEGER NOT NULL,
+                product_id         TEXT    NOT NULL,
+                price              REAL,
+                market_cap         REAL,
+                fdv                REAL,
+                volume_24h         REAL,
+                circulating_supply REAL,
+                total_supply       REAL,
+                price_chg_24h_pct  REAL,
+                cg_market_cap      REAL,
+                cmc_market_cap     REAL,
+                cg_circ_supply     REAL,
+                cmc_circ_supply    REAL,
+                cg_total_supply    REAL,
+                cmc_total_supply   REAL,
+                cg_volume_24h      REAL,
+                cmc_volume_24h     REAL,
+                merge_quality      TEXT,
+                divergence_flags   TEXT,
+                source             TEXT,
+                ingest_ts          INTEGER NOT NULL,
+                schema_version     INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (snapshot_ts, product_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_coin_fundamentals_pid_ts
+                ON coin_fundamentals(product_id, snapshot_ts);
         """)
         await db.commit()
 

@@ -5,6 +5,18 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.55] — 2026-05-09 — Leader Filter Task 5: coin_fundamentals DDL + persistence helpers (#leader-filter)
+
+### What changed
+
+- Added `coin_fundamentals` table DDL to `database.py:init_db()` — additive, with PIT columns `ingest_ts` + `schema_version` per #164b.
+- New `services/leader_fundamentals_db.py` — `FundamentalsDB` class with `ensure_schema`, `insert`, `query_by_pid`, `query_latest_per_pid`. `PersistRecord` dataclass.
+- INSERT OR REPLACE on PK collision (snapshot_ts, product_id).
+- `divergence_flags` serialized as JSON list.
+- 7 new tests in `test_leader_fundamentals_db.py`. All pass.
+
+---
+
 ## [Session 58.54] — 2026-05-09 — Leader Filter Task 4: CoinMarketCap snapshot service (#leader-filter)
 
 ### What changed
