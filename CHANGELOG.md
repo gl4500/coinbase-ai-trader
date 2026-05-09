@@ -5,6 +5,47 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.46] — 2026-05-09 — CoinGecko marketcap/FDV service scaffold (#260a/b/c)
+
+### Why
+
+After 7 sequential BTC-flavored probes failed the +0.01 mean-AUC gate
+(#156, #235, #243, #246-#248, #253), the recommended path forward in
+`xgb_feature_optimization_findings.md` is *new exogenous inputs*. Marketcap
+and fully-diluted-valuation are the next candidate set: CoinGecko exposes
+both for free, and rank-z marketcap is a textbook cross-sectional alpha
+signal that the existing 28-channel set cannot derive from price/volume
+alone.
+
+### What landed
+
+- `backend/services/coingecko_marketcap.py` — async fetcher + alignment
+  helpers. Public API:
+    - `fetch_marketcap_snapshot(pids)` → `{pid: MarketcapRow}`
+    - `fetch_marketcap_history(pid, start_ms, end_ms)` → `[(ts_ms, mc), …]`
+    - `align_to_hourly(rows, grid, lag_secs=86400)` — strict-causal forward fill
+- `_PRODUCT_TO_CG_ID` map covers BTC + 18 of the 20-pid survivorship-aware
+  basket used by `btc_residual_ch9_probe`. PIT columns (`ingest_ts`,
+  `schema_version`) per #164b. Kill switch via `COINGECKO_DISABLED=1`.
+- `backend/tests/test_coingecko_marketcap.py` — 18 tests covering
+  id-mapping, snapshot parser, history parser, kill switch, 429 handling,
+  null-FDV fallback, strict-causal forward-fill semantics. **18/18 PASS.**
+
+### What's next
+
+- #260d/e — RED + GREEN for `tools/marketcap_probe.py` (single-add probe
+  vs ch13 obv_slope, mirrors `btc_residual_ch9_probe` structure).
+- #260f — RUN; gate on Δ ≥ +0.01. Probe v1 will test two historical-capable
+  candidates: `log_marketcap` and `marketcap_rank_z`.
+
+### Files Changed
+
+- `backend/services/coingecko_marketcap.py` (new)
+- `backend/tests/test_coingecko_marketcap.py` (new)
+- `CHANGELOG.md`
+
+---
+
 ## [Session 58.45] — 2026-05-09 — Ch 9 β-residual probe verdict (#253d FAIL) + cp1252 print fix
 
 ### Verdict
