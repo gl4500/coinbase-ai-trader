@@ -14,7 +14,12 @@ Public API (mirrors OI fetcher):
            empty list if symbol not on OKX or fetch fails.
 
 OKX details:
-  - URL: https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio
+  - URL: https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract
+  - Per-instrument endpoint: takes `instId=BTC-USDT-SWAP` (not `ccy=BTC`).
+    The currency-level `/long-short-account-ratio` (no `-contract` suffix)
+    keys off coin codes and returns coarser precision; we want
+    per-instrument so we can re-use `_PRODUCT_TO_OKX` from `okx_oi_history`.
+    See #235g for the discovery (#235e shipped wrong URL → 0/20 coverage).
   - Response: {"code": "0", "msg": "", "data": [...]} — `code != "0"` means
     OKX rejected the call (treat like non-200).
   - Each row is a positional array [ts_ms, ratio] (both strings on the live
@@ -38,7 +43,7 @@ from services.okx_oi_history import _PRODUCT_TO_OKX  # single source of truth
 
 logger = logging.getLogger(__name__)
 
-_URL = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio"
+_URL = "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract"
 
 _PAGE_SIZE = 100
 _MAX_PAGES = 60

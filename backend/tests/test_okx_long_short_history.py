@@ -4,8 +4,12 @@ fetcher.
 
 Sibling of services/okx_oi_history (#141 / #142). OKX exposes per-instrument
 historical long/short *account* ratio at:
-    GET https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio
+    GET https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract
         ?instId=BTC-USDT-SWAP&period=1H
+
+(NOT the currency-level `/long-short-account-ratio` endpoint — that one
+takes `ccy=BTC`, returns coarser precision, and is keyed off coin codes
+rather than per-instrument SWAP ids; see #235g for the discovery.)
 
 The fetcher mirrors the OI-history contract:
   - Public coroutine: fetch_long_short_ratio_history(product_id, start_ms,
@@ -126,7 +130,12 @@ class TestFetchLSRatioHistorySinglePage:
             )
 
         args, kwargs = mock_client.get.call_args
-        assert "long-short-account-ratio" in args[0]
+        assert args[0].endswith("/long-short-account-ratio-contract"), (
+            f"Expected per-instrument endpoint, got {args[0]!r}. "
+            "OKX has TWO L/S endpoints: `/long-short-account-ratio` (takes "
+            "ccy=BTC) and `/long-short-account-ratio-contract` (takes "
+            "instId=BTC-USDT-SWAP). We need the per-instrument one — see #235g."
+        )
         params = kwargs.get("params") or {}
         assert params["instId"] == "ETH-USDT-SWAP"
         assert params["period"] == "1H"

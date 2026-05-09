@@ -5,7 +5,101 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.39b] — 2026-05-08 — OKX L/S probe: URL bug fixed (#235g), real result Δ=+0.0014 — TRUE FAIL
+
+### Context
+
+The Session 58.39 probe (commit `1ff997a`) returned 0/20 L/S coverage and a
+meaningless Δ=+0.0026 (just the dropout effect of replacing ch13 with
+zeros). #235g was filed to diagnose whether this was a fetcher bug or an
+OKX coverage gap.
+
+### Diagnosis
+
+Direct curl revealed OKX has **two** L/S endpoints:
+
+- `/api/v5/rubik/stat/contracts/long-short-account-ratio` — currency-level,
+  takes `ccy=BTC`, returns coarser precision (e.g. `1.46`).
+- `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract` —
+  per-instrument, takes `instId=BTC-USDT-SWAP`, finer precision
+  (e.g. `1.3946...`).
+
+Session 58.39 shipped the currency-level URL but called it with `instId=`
+params, so OKX rejected every call (`code 50014: ccy can't be empty`).
+That's why coverage was 0/20.
+
+### Fix
+
+`backend/services/okx_long_short_history.py`: change `_URL` to the
+`-contract` variant. Preserves the existing `instId=` param contract
+and `_PRODUCT_TO_OKX` symmetry with the OI fetcher. Updated docstring
+explains both endpoints to prevent recurrence.
+
+`backend/tests/test_okx_long_short_history.py`: tighten URL assertion
+from substring (`"long-short-account-ratio" in args[0]`) to suffix
+(`args[0].endswith("/long-short-account-ratio-contract")`) so a future
+silent revert to the currency-level endpoint will RED.
+
+### Tests
+
+`tests/test_okx_long_short_history.py` — 16/16 pass post-fix.
+RED→GREEN verified: pre-fix the new endswith assertion failed; post-fix
+passes.
+
+### Result — TRUE FAIL post-fix
+
+Pooled top-20 with `--snapshot-ts auto` (same cutoff 1758816000, 165,551
+samples):
+
+| metric        | value   |
+|---------------|---------|
+| baseline AUC  | 0.5213  |
+| replaced AUC  | 0.5226  |
+| Δ             | +0.0014 |
+| +0.01 gate    | FAIL    |
+| L/S coverage  | **11/20 pids** (vs 0/20 pre-fix) |
+| per-sample non-zero L/S | **0.3%** |
+
+Per-pid coverage went from 0/20 to 11/20 — confirms the URL fix worked
+on the 11 pids OKX has data for. But OKX only retains ~86 hours of L/S
+history per pid, vs the dataset's months-long sample window — so even
+where coverage exists, only 0.3% of samples have a non-zero L/S value.
+The L/S signal is now **truly evaluated** (not always-zero) and falls
++0.0014 short of the +0.01 gate.
+
+### Verdict
+
+L/S joins **MFI-rank, log10-vol-rank, BTC-dominance** as the 4th
+L/S-style/positioning probe failure. The +0.528 AUC ceiling on the
+existing 27 channels is reaffirmed — none of these single-add candidates
+breach the +0.01 gate.
+
+The "four remaining moves" punchlist (`xgb_feature_optimization_findings.md`,
+2026-05-08 #156) is now exhausted on positioning candidates. Path forward
+options:
+1. Relax gate from +0.01 to +0.005 (would let L/S, BTC-dominance, MFI-rank
+   contribute marginally — but ensemble of marginal signals tends to
+   overfit on small AUC margins)
+2. Try larger structural changes (different label horizon, regime-conditional
+   models, longer seq_len)
+3. Accept 0.528 AUC and ship XGB shadow-mode results as-is
+
+### Files Changed
+
+- `backend/services/okx_long_short_history.py` — URL: `-contract` variant
+- `backend/tests/test_okx_long_short_history.py` — tighter endpoint assertion
+- `CHANGELOG.md` — this entry
+
+---
+
 ## [Session 58.39] — 2026-05-08 — OKX long/short ratio single-add probe: 0/20 coverage, INCONCLUSIVE (#235)
+
+### Note
+
+Superseded by Session 58.39b (#235g) — the 0/20 coverage was a fetcher
+URL bug, not an OKX coverage gap. After the fix, real coverage is 11/20
+pids and the probe is a TRUE FAIL with Δ=+0.0014. Original entry kept
+below for the audit trail.
 
 ### Context
 
