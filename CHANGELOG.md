@@ -5,6 +5,19 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.52] — 2026-05-09 — Leader Filter Task 2: pure-function ranker (#leader-filter)
+
+### What changed
+
+- New `services/leader_ranker.py` — pure-function floor + multiplier + top-N.
+- Defines `FundamentalsRow`, `ScoreRow`, `RankerResult`, `LeaderRankerConfig` types (all `@dataclass(frozen=True)`).
+- `supply_multiplier()` — tier-based (0.90+/0.50-0.90/0.20-0.50/<0.20 → 1.00/0.85/0.70/0.50).
+- `rank_leaders()` — applies divergence drop + fundamentals floor + score formula `abs(chg) * vol/mcap` × supply multiplier; returns top-N with RANKED_OUT reasons for survivors past N.
+- `load_config_from_env()` reads `LEADER_*` env vars with hard-coded defaults.
+- 24 new tests in `test_leader_ranker.py`. All pass.
+
+---
+
 ## [Session 58.51] — 2026-05-09 — Leader Filter Task 1: extend MarketcapRow (#leader-filter)
 
 ### What changed
