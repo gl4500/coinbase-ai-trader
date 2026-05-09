@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>XGB Feature Optimization · Decision Tree</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600;9..144,800&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper:        #f3eee3;
+    --paper-deep:   #e9e1d1;
+    --ink:          #1a1815;
+    --ink-soft:     #3a352c;
+    --rule:         #c8bea8;
+    --rule-soft:    #ddd2bb;
+    --pass:         #2f6b3c;
+    --pass-bg:      #d8e6cf;
+    --fail:         #8b2a17;
+    --fail-bg:      #ecd6cc;
+    --noted:        #6b5a2a;
+    --noted-bg:     #e9dcb1;
+    --display:      'Fraunces', 'Times New Roman', serif;
+    --mono:         'JetBrains Mono', ui-monospace, Menlo, monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    background-image:
+      radial-gradient(circle at 0% 0%, rgba(150, 130, 90, 0.06), transparent 40%),
+      radial-gradient(circle at 100% 100%, rgba(60, 80, 60, 0.05), transparent 50%),
+      repeating-linear-gradient(0deg, transparent 0 30px, rgba(110, 90, 50, 0.025) 30px 31px);
+    min-height: 100vh;
+  }
+
+  .frame {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 56px 56px 96px;
+  }
+
+  /* ---------- Masthead ---------- */
+  .mast {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+    gap: 24px;
+    border-bottom: 1.5px solid var(--ink);
+    padding-bottom: 18px;
+    margin-bottom: 6px;
+  }
+  .mast .lab {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.28em;
+    color: var(--ink-soft);
+  }
+  .mast h1 {
+    font-family: var(--display);
+    font-weight: 300;
+    font-style: italic;
+    font-size: clamp(40px, 5.5vw, 72px);
+    line-height: 0.95;
+    margin: 8px 0 0;
+    letter-spacing: -0.02em;
+  }
+  .mast h1 em {
+    font-style: italic;
+    font-weight: 800;
+    background: var(--ink);
+    color: var(--paper);
+    padding: 0 12px;
+    margin-left: -4px;
+    transform: skew(-2deg);
+    display: inline-block;
+  }
+  .mast .meta {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-align: right;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    line-height: 1.7;
+  }
+  .mast .meta strong { color: var(--ink); font-weight: 500; }
+
+  .subline {
+    font-family: var(--display);
+    font-size: 17px;
+    font-style: italic;
+    color: var(--ink-soft);
+    border-bottom: 0.5px solid var(--rule);
+    padding: 14px 0 22px;
+    margin-bottom: 40px;
+    max-width: 780px;
+  }
+
+  /* ---------- Section headings ---------- */
+  .section {
+    margin-top: 56px;
+  }
+  .section-num {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 8px;
+  }
+  .section-num::before {
+    content: '';
+    flex: 0 0 36px;
+    height: 1px;
+    background: var(--ink-soft);
+  }
+  .section h2 {
+    font-family: var(--display);
+    font-weight: 400;
+    font-size: clamp(28px, 3.5vw, 40px);
+    line-height: 1.05;
+    margin: 0 0 26px;
+    letter-spacing: -0.012em;
+  }
+  .section h2 em { font-style: italic; }
+
+  /* ---------- The tree ---------- */
+  .tree {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) 36px minmax(360px, 1.6fr);
+    gap: 0;
+    margin-top: 32px;
+  }
+  .node {
+    background: var(--paper-deep);
+    border: 1px solid var(--rule);
+    padding: 18px 22px;
+    position: relative;
+  }
+  .node.root {
+    grid-column: 1 / -1;
+    background: var(--ink);
+    color: var(--paper);
+    border-color: var(--ink);
+    text-align: center;
+    padding: 26px;
+    margin-bottom: 36px;
+  }
+  .node.root .node-tag { color: var(--paper-deep); }
+  .node.root .node-q {
+    font-family: var(--display);
+    font-style: italic;
+    font-size: clamp(22px, 2.6vw, 30px);
+    font-weight: 300;
+    line-height: 1.2;
+    color: var(--paper);
+    margin-top: 6px;
+  }
+
+  .node-tag {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .node-q {
+    font-family: var(--display);
+    font-style: italic;
+    font-weight: 400;
+    font-size: 18px;
+    line-height: 1.25;
+    margin-top: 4px;
+    color: var(--ink);
+  }
+
+  /* connectors between left=question / right=answers */
+  .connector {
+    position: relative;
+  }
+  .connector::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 1.5px;
+    background: var(--ink);
+    transform: translateY(-50%);
+  }
+  .connector::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: 9px;
+    height: 9px;
+    border-top: 1.5px solid var(--ink);
+    border-right: 1.5px solid var(--ink);
+    transform: translate(50%, -50%) rotate(45deg);
+    background: var(--paper);
+  }
+
+  /* ---------- Probe ledger ---------- */
+  .ledger {
+    border: 1.5px solid var(--ink);
+    background: var(--paper-deep);
+    overflow: hidden;
+  }
+  .ledger-head {
+    display: grid;
+    grid-template-columns: 60px 1fr 110px 110px 110px;
+    background: var(--ink);
+    color: var(--paper);
+    padding: 12px 18px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .ledger-head span:nth-child(n+3) { text-align: right; }
+  .row {
+    display: grid;
+    grid-template-columns: 60px 1fr 110px 110px 110px;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px dotted var(--rule);
+    transition: background 0.18s ease;
+  }
+  .row:nth-child(even) { background: rgba(255,255,255,0.25); }
+  .row:hover { background: rgba(0,0,0,0.04); }
+  .row:last-of-type { border-bottom: none; }
+  .row .seq {
+    font-family: var(--display);
+    font-style: italic;
+    font-weight: 600;
+    font-size: 22px;
+    color: var(--ink-soft);
+  }
+  .row .name {
+    font-family: var(--display);
+    font-size: 16px;
+    line-height: 1.2;
+  }
+  .row .name small {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-soft);
+    margin-top: 3px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .row .num { text-align: right; font-family: var(--mono); font-size: 12px; }
+  .verdict {
+    text-align: right;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    display: inline-flex;
+    justify-self: end;
+    border-radius: 2px;
+    border: 1px solid;
+  }
+  .v-pass { color: var(--pass); background: var(--pass-bg); border-color: var(--pass); }
+  .v-fail { color: var(--fail); background: var(--fail-bg); border-color: var(--fail); }
+  .v-noted { color: var(--noted); background: var(--noted-bg); border-color: var(--noted); }
+
+  .delta-pos { color: var(--pass); font-weight: 700; }
+  .delta-neg { color: var(--fail); font-weight: 500; }
+  .delta-tiny { color: var(--ink-soft); }
+
+  .ledger-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 16px 18px;
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+  }
+  .ledger-foot .stamp {
+    font-family: var(--display);
+    font-style: italic;
+    font-size: 22px;
+    color: var(--paper);
+    font-weight: 300;
+  }
+  .ledger-foot .stamp strong {
+    font-weight: 800;
+    font-style: normal;
+    color: #d4a35e;
+  }
+
+  /* ---------- Forking paths ---------- */
+  .fork {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 22px;
+    margin-top: 30px;
+  }
+  .path {
+    border: 1px solid var(--ink);
+    padding: 24px 22px 26px;
+    position: relative;
+    background: var(--paper-deep);
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+  }
+  .path:hover {
+    transform: translate(-3px, -3px);
+    box-shadow: 6px 6px 0 var(--ink);
+  }
+  .path .letter {
+    position: absolute;
+    top: -12px;
+    left: 18px;
+    background: var(--paper);
+    padding: 0 10px;
+    font-family: var(--display);
+    font-style: italic;
+    font-weight: 800;
+    font-size: 26px;
+  }
+  .path h3 {
+    font-family: var(--display);
+    font-size: 22px;
+    line-height: 1.2;
+    margin: 4px 0 14px;
+    font-weight: 400;
+  }
+  .path h3 em { font-style: italic; }
+  .path p {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--ink-soft);
+    margin: 0 0 14px;
+  }
+  .path ul {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink);
+  }
+  .path li {
+    padding: 6px 0 6px 20px;
+    position: relative;
+    border-top: 1px dotted var(--rule);
+  }
+  .path li:first-child { border-top: 0; }
+  .path li::before {
+    content: '◇';
+    position: absolute;
+    left: 0;
+    color: var(--ink-soft);
+  }
+  .verdict-line {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1.5px solid var(--ink);
+    display: flex;
+    justify-content: space-between;
+  }
+  .verdict-line .pill { font-weight: 700; }
+  .pill-go { color: var(--pass); }
+  .pill-stay { color: var(--noted); }
+  .pill-park { color: var(--fail); }
+
+  /* ---------- Footer / footnote ---------- */
+  .footnote {
+    margin-top: 64px;
+    padding-top: 22px;
+    border-top: 1.5px solid var(--ink);
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 40px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-soft);
+    letter-spacing: 0.04em;
+  }
+  .footnote h4 {
+    font-family: var(--display);
+    font-style: italic;
+    font-size: 16px;
+    margin: 0 0 8px;
+    color: var(--ink);
+    font-weight: 400;
+  }
+  .footnote p { margin: 0 0 10px; line-height: 1.7; }
+  .footnote .stamp {
+    text-align: right;
+    align-self: end;
+    font-family: var(--display);
+    font-size: 14px;
+    font-style: italic;
+    color: var(--ink);
+  }
+  .footnote .stamp::before {
+    content: '';
+    display: block;
+    width: 80px;
+    height: 32px;
+    border: 1.5px solid var(--fail);
+    color: var(--fail);
+    transform: rotate(-3deg);
+    background:
+      linear-gradient(transparent 49%, var(--fail) 49% 51%, transparent 51%);
+    opacity: 0.18;
+    margin-left: auto;
+    margin-bottom: -28px;
+  }
+  .footnote .stamp span {
+    font-family: var(--mono);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+    font-size: 13px;
+    color: var(--fail);
+    background: rgba(139, 42, 23, 0.06);
+    padding: 6px 14px;
+    border: 1.5px solid var(--fail);
+    transform: rotate(-3deg);
+    display: inline-block;
+  }
+
+  /* entrance animation */
+  .reveal { opacity: 0; transform: translateY(8px); animation: fade 0.8s ease forwards; }
+  .reveal.d1 { animation-delay: 0.05s; }
+  .reveal.d2 { animation-delay: 0.20s; }
+  .reveal.d3 { animation-delay: 0.35s; }
+  .reveal.d4 { animation-delay: 0.50s; }
+  .reveal.d5 { animation-delay: 0.65s; }
+  .reveal.d6 { animation-delay: 0.80s; }
+
+  @keyframes fade {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @media (max-width: 820px) {
+    .frame { padding: 32px 22px 56px; }
+    .mast { grid-template-columns: 1fr; }
+    .mast .meta { text-align: left; }
+    .tree { grid-template-columns: 1fr; }
+    .connector { display: none; }
+    .fork { grid-template-columns: 1fr; }
+    .ledger-head, .row { grid-template-columns: 36px 1fr 70px; }
+    .ledger-head span:nth-child(3),
+    .ledger-head span:nth-child(4),
+    .row .num.hide-mobile { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<main class="frame">
+
+  <!-- ============= Masthead ============= -->
+  <header class="mast reveal d1">
+    <div>
+      <div class="lab">Coinbase AI Trader · Research Note 58.41</div>
+      <h1>Can XGB clear the <em>0.55</em> gate?</h1>
+    </div>
+    <div class="meta">
+      <strong>Logged</strong> 2026·05·09<br>
+      <strong>Cache</strong> 28-ch · v12<br>
+      <strong>Universe</strong> survivor top-20<br>
+      <strong>Samples</strong> 167,864
+    </div>
+  </header>
+
+  <p class="subline reveal d2">
+    A decision tree across the six single-add probes that have been run against
+    obv_slope (the most marginal channel per #146). Each candidate gets one slot,
+    one Δ AUC measurement, one verdict — pass the +0.01 promotion gate or join
+    the failures shelf.
+  </p>
+
+  <!-- ============= 1 · Root ============= -->
+  <section class="section reveal d2">
+    <div class="section-num">§ 1 — premise</div>
+    <h2>Baseline AUC <em>0.5199</em>. Production gate <em>0.55</em>. The gap is <em>0.030</em>.</h2>
+
+    <div class="tree">
+      <div class="node root">
+        <div class="node-tag">root question</div>
+        <div class="node-q">Does any single new feature, swapped into the marginal channel, lift the booster's AUC by ≥ 0.01?</div>
+      </div>
+
+      <div class="node">
+        <div class="node-tag">how it's tested</div>
+        <div class="node-q">Single-add probe — replace ch13 (obv_slope), 5-fold purged walk-forward CV, 4h embargo, 200 estimators.</div>
+      </div>
+      <div class="connector"></div>
+      <div class="node">
+        <div class="node-tag">decision rule</div>
+        <div class="node-q">
+          Δ ≥ <strong>+0.01</strong> &nbsp;→&nbsp; integrate (cache rebuild + retrain).<br>
+          Δ &lt; +0.01 &nbsp;→&nbsp; shelve. Try the next class of feature.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 2 · The ledger ============= -->
+  <section class="section reveal d3">
+    <div class="section-num">§ 2 — the ledger</div>
+    <h2>Six probes attempted. <em>One</em> passed.</h2>
+
+    <div class="ledger">
+      <div class="ledger-head">
+        <span>#</span>
+        <span>Candidate · class</span>
+        <span>Baseline</span>
+        <span>Replaced</span>
+        <span>Δ · gate</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">01</span>
+        <span class="name">RSI rank<small>cross-sectional positioning</small></span>
+        <span class="num">0.5229</span>
+        <span class="num">0.5353</span>
+        <span class="verdict v-pass">+0.0124 · pass</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">02</span>
+        <span class="name">MFI rank<small>cross-sectional positioning</small></span>
+        <span class="num">0.5124</span>
+        <span class="num">0.5155</span>
+        <span class="verdict v-fail">+0.0031 · fail</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">03</span>
+        <span class="name">log<sub>10</sub>-volume rank<small>cross-sectional positioning</small></span>
+        <span class="num">0.5134</span>
+        <span class="num">0.5124</span>
+        <span class="verdict v-fail">−0.0010 · fail</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">04</span>
+        <span class="name">BTC dominance share<small>regime · majors-basket vol share</small></span>
+        <span class="num">0.5134</span>
+        <span class="num">0.5211</span>
+        <span class="verdict v-fail">+0.0077 · fail</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">05</span>
+        <span class="name">OKX long/short ratio<small>positioning · derivative</small></span>
+        <span class="num">0.5213</span>
+        <span class="num">0.5226</span>
+        <span class="verdict v-fail">+0.0014 · fail</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">06</span>
+        <span class="name">Long-trend SMA / golden-cross<small>5 candidates · long-horizon trend</small></span>
+        <span class="num">0.5195</span>
+        <span class="num">0.5208</span>
+        <span class="verdict v-fail">+0.0007 best · fail</span>
+      </div>
+
+      <div class="row">
+        <span class="seq">07</span>
+        <span class="name">BTC lead-lag (lag, β, β-residual)<small>5 candidates · cross-asset temporal</small></span>
+        <span class="num">0.5199</span>
+        <span class="num">0.5196</span>
+        <span class="verdict v-fail">−0.0003 best · fail</span>
+      </div>
+
+      <div class="ledger-foot">
+        <span class="stamp">Six failures consecutive · <strong>one</strong> pass on record</span>
+        <span>+0.01 promotion gate · ±0.005 fold-noise</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============= 3 · Forking conclusion ============= -->
+  <section class="section reveal d4">
+    <div class="section-num">§ 3 — forking paths</div>
+    <h2>Three honest moves remain.<br>The cache is the constraint, <em>not</em> the booster.</h2>
+
+    <div class="fork">
+
+      <div class="path reveal d5">
+        <div class="letter">A</div>
+        <h3><em>Relax</em> the gate.</h3>
+        <p>
+          Drop production threshold from <strong>0.55</strong> to a level the
+          0.5199 baseline can clear after calibration. Ship XGB as the live
+          backend at 0.52–0.53 AUC, post-isotonic. Treat 0.55 as advisory.
+        </p>
+        <ul>
+          <li>Lowest cost — no retrain, no new data</li>
+          <li>Risk: ensemble overfit on marginal lift</li>
+          <li>Calibrator already monotone (Session 58.11)</li>
+        </ul>
+        <div class="verdict-line">
+          <span>cost</span>
+          <span class="pill pill-go">cheap · ship-ready</span>
+        </div>
+      </div>
+
+      <div class="path reveal d6">
+        <div class="letter">B</div>
+        <h3>Bring in <em>new input classes</em>.</h3>
+        <p>
+          Stop sourcing transforms from the same OHLC + volume cache. Add input
+          modalities the booster has never seen — full per-product OKX OI panel,
+          options term structure, on-chain flow.
+        </p>
+        <ul>
+          <li>OKX OI panel · expanding existing Ch 27</li>
+          <li>Options surface · IV/RV term structure</li>
+          <li>On-chain · Glassnode / Nansen tier</li>
+        </ul>
+        <div class="verdict-line">
+          <span>cost</span>
+          <span class="pill pill-stay">data subscription + 1–2 retrain cycles</span>
+        </div>
+      </div>
+
+      <div class="path">
+        <div class="letter">C</div>
+        <h3><em>Park</em> XGB at 0.528.</h3>
+        <p>
+          Accept that the 28-channel cache caps out near 0.53 AUC and treat the
+          XGB cutover as a plateau. Keep CNN at threshold 0.99 (sidelined) and
+          let the live shadow loop accumulate evidence before the next move.
+        </p>
+        <ul>
+          <li>Zero engineering — pure observation</li>
+          <li>Costs market exposure of the gap</li>
+          <li>Default if A &amp; B both decline</li>
+        </ul>
+        <div class="verdict-line">
+          <span>cost</span>
+          <span class="pill pill-park">opportunity · not capital</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============= Footer ============= -->
+  <footer class="footnote reveal d6">
+    <div>
+      <h4>What the six failures rule out, together.</h4>
+      <p>
+        At the 0.5199 baseline + ±0.005 fold-noise, neither <em>positioning</em>
+        (volume / dominance / L-S ratios), <em>long-horizon trend</em>
+        (SMA50/200, golden cross), nor <em>cross-asset temporal</em> (BTC lag,
+        β, β-residual) features clear the +0.01 gate on the 28-channel
+        survivorship-aware top-20 cache.
+      </p>
+      <p>
+        That makes the conclusion sharper than "XGB is hard to tune." The
+        production 0.55 gate is <strong>not reachable on price + orderflow
+        features alone</strong> at this sample regime. Tuning is exhausted;
+        further lift requires either a different gate or a different feature
+        modality.
+      </p>
+    </div>
+    <div class="stamp">
+      <span>6&times; FAIL</span>
+    </div>
+  </footer>
+
+</main>
+
+</body>
+</html>
