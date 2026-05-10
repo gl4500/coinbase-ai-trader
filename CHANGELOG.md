@@ -5,6 +5,68 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.63] — 2026-05-09 — CoinMarketCap snapshot service (free tier, A/B with CoinGecko) (#280)
+
+### Why
+
+User direction: "use both sites, free tier only" — keep CoinGecko (#260) and
+add a parallel CoinMarketCap source so the two providers can be A/B-compared
+via the marketcap probe harness. Free-tier scoping is deliberate: CMC's
+historical endpoints (`quotes/historical`, `ohlcv/historical`) require the
+Hobbyist plan ($29/mo) or higher. Snapshot endpoints are universally
+available, so the new service is snapshot-only and history falls through
+to CoinGecko.
+
+### What changed
+
+- **`backend/services/coinmarketcap_marketcap.py`** (new, ~190 lines) —
+  mirrors the public surface of `services/coingecko_marketcap.py`:
+  - `MarketcapRow` dataclass with identical fields (market_cap, fdv,
+    circ_supply, total_supply, ingest_ts, schema_version) so the probe
+    harness can swap providers without changing downstream code.
+  - `_PRODUCT_TO_CMC_ID` numeric-id mapping for 27 Coinbase pids
+    (verified via CMC `/v1/cryptocurrency/map` 2026-05-09).
+  - `fetch_marketcap_snapshot(pids)` hits
+    `/v1/cryptocurrency/quotes/latest?id=...&convert=USD` with the
+    `X-CMC_PRO_API_KEY` header sourced from `COINMARKETCAP_API_KEY`.
+    Graceful degradation on missing key, 401, 429, transport errors,
+    and malformed JSON — all return `{}` rather than raising.
+  - `fetch_marketcap_history(...)` is a deliberate free-tier no-op
+    (returns `[]`, warns once per process).
+  - `COINMARKETCAP_DISABLED=1` kill switch mirrors the CoinGecko shape.
+- **`backend/tests/test_coinmarketcap_marketcap.py`** (new, 15 tests):
+  - `TestIdMapping` — pid→numeric-id resolution, unmapped → None.
+  - `TestFetchMarketcapSnapshot` — happy path, FDV-null fallback,
+    unmapped pid omitted, kill switch, missing-key short-circuit, 401,
+    429, header injection, empty-pid-list short-circuit (saves a credit).
+  - `TestFetchMarketcapHistoryFreeTier` — no-op behavior + kill switch.
+  - `TestMarketcapRowShape` — dataclass field shape.
+
+### Verification
+
+- `backend/tests/test_coinmarketcap_marketcap.py` — 15 passed (0.3s).
+- TDD discipline: RED verified (ImportError on missing module) before
+  GREEN implementation.
+- No production code paths altered: the service is not wired into any
+  feature builder, probe, or scan path yet — that's a follow-up
+  decision once the user evaluates the snapshot data.
+
+### Risk
+
+- **Low** — pure additive change. New file, new tests; no edits to
+  existing code. The probe harness still calls `services.coingecko_marketcap`
+  directly until a follow-up rewires it.
+
+### Follow-ups (not in this commit)
+
+- Wire `services.coinmarketcap_marketcap` into a probe-harness flag so
+  the user can pick `--source cmc | coingecko | both` from
+  `tools/marketcap_probe.py`.
+- Decide whether to upgrade to CMC Hobbyist ($29/mo) for historical
+  access and re-run the probe with CMC history vs CoinGecko history.
+
+---
+
 ## [Session 52] — 2026-05-02 — CNN: SCAN-SELL is primary, risk exits demoted to fallback (#104)
 
 ### Context
