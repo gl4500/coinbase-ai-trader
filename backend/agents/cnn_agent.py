@@ -2492,36 +2492,52 @@ class CoinbaseCNNAgent:
                     await self._lgbm_retrain_if_needed()
 
                 # Auto-train after every N scans (aligned with new candle data)
-                if self.scan_count % train_every_n_scans == 0:
-                    logger.info(
-                        f"CNN auto-train triggered (scan #{self.scan_count}, "
-                        f"every {train_every_n_scans} scans)"
-                    )
-                    try:
-                        if auto_train_fn is not None:
-                            # Spawn subprocess (non-blocking) — same path as UI Train button
-                            await auto_train_fn()
-                        else:
-                            result = await self.train_on_history(epochs=50)
-                            if "error" in result:
-                                logger.warning(f"CNN auto-train skipped: {result['error']}")
-                            else:
-                                self.last_trained_at = time.time()
-                                self.train_count    += 1
-                                logger.info(
-                                    f"CNN auto-train done — {result['samples']} samples | "
-                                    f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
-                                    f"val={result['final_val_loss']:.4f} | "
-                                    f"fit={result['fit_status']}"
-                                )
-                    except Exception as te:
-                        logger.error(f"CNN auto-train error: {te}")
+                await self._maybe_auto_train(train_every_n_scans, auto_train_fn)
 
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 logger.error(f"CNN loop error: {e}")
             await asyncio.sleep(interval)
+
+    async def _maybe_auto_train(
+        self,
+        train_every_n_scans: int,
+        auto_train_fn,
+    ) -> bool:
+        # XGB mode has no online retrain path; spawning train_worker.py
+        # wastes GPU on a CNN that's never used for inference.
+        if self.scan_count % train_every_n_scans != 0:
+            return False
+        if config.model_backend != "cnn":
+            logger.debug(
+                "CNN auto-train skipped — model_backend=%s",
+                config.model_backend,
+            )
+            return False
+        logger.info(
+            f"CNN auto-train triggered (scan #{self.scan_count}, "
+            f"every {train_every_n_scans} scans)"
+        )
+        try:
+            if auto_train_fn is not None:
+                await auto_train_fn()
+            else:
+                result = await self.train_on_history(epochs=50)
+                if "error" in result:
+                    logger.warning(f"CNN auto-train skipped: {result['error']}")
+                else:
+                    self.last_trained_at = time.time()
+                    self.train_count    += 1
+                    logger.info(
+                        f"CNN auto-train done — {result['samples']} samples | "
+                        f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
+                        f"val={result['final_val_loss']:.4f} | "
+                        f"fit={result['fit_status']}"
+                    )
+        except Exception as te:
+            logger.error(f"CNN auto-train error: {te}")
+        return True
 
     async def train_on_history(self, epochs: int = 50) -> Dict:  # noqa: C901
         """

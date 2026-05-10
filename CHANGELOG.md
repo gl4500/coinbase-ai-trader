@@ -5,6 +5,53 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.67] — 2026-05-10 — Gate CNN auto-train behind MODEL_BACKEND=='cnn' (#300)
+
+### Why
+
+Backend is running `MODEL_BACKEND=xgb` (XGB-only since #267/#XGBONLY-*), yet
+the CNN scan loop was still firing `train_worker.py` every N scans — observed
+live at 14:48:25 and again at 15:11:35 today with two concurrent backends
+each spawning their own train_worker. Each retrain takes ~10 min on the
+RTX 2060, burns shared VRAM with the live inference path, and produces a
+checkpoint that XGB never consults. Two parallel train_workers also race on
+`cnn_model_*.pt` writes.
+
+Root cause: `cnn_agent.run_loop` (line ~2494) calls `auto_train_fn` whenever
+`scan_count % train_every_n_scans == 0`, with no `config.model_backend`
+guard. Symmetric companion to #232 (Hurst/regime/LGBM gates) and #250
+(Ollama gates) — every CNN-specific code path in the scan loop must be
+gated on `config.model_backend == "cnn"` per
+`feedback_cnn_safeguards_backend_gating.md`.
+
+### What changed
+
+- **`backend/agents/cnn_agent.py`** — extracted the inline auto-train block
+  into a new `_maybe_auto_train(train_every_n_scans, auto_train_fn)`
+  coroutine method. Added the early-return gate:
+
+      if config.model_backend != "cnn":
+          logger.debug("CNN auto-train skipped — model_backend=%s", ...)
+          return False
+
+  `run_loop` now calls `await self._maybe_auto_train(...)`; behavior in
+  CNN mode is unchanged.
+- **`backend/tests/test_model_backend.py`** — new `TestAutoTrainGate` class,
+  three tests: xgb-mode skips, cnn-mode triggers, misaligned scan_count
+  skips regardless of backend.
+
+### Verification
+
+Per-module pytest (.venv): `tests/test_model_backend.py::TestAutoTrainGate`
+RED→GREEN — 3/3 pass.
+
+### Follow-up
+
+- #303: kill orphan spyder backend (PID 63460) + restart .venv backend
+  (PID 74608) so the gate is live in production.
+
+---
+
 ## [Session 58.66] — 2026-05-10 — Marketcap historical bronze parquets — paths 1+2 unblocked (#293/#294/#295)
 
 ### Why
