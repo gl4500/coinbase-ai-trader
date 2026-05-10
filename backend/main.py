@@ -436,22 +436,6 @@ async def lifespan(app: FastAPI):
     app_state.outcome_task   = asyncio.create_task(get_tracker().run_loop())
     app_state.backfill_task  = asyncio.create_task(get_backfill().run_loop())
 
-    # GPU coord: publish polymarket_app's deployed capital to the shared
-    # ~/.ollama-coord/state.json so trading_app can compare exposures and
-    # cede priority to whichever app has more at stake. Runs every 30s.
-    async def _publish_exposure_loop():
-        from data.gpu_coord import ollama_coord
-        while True:
-            try:
-                pf = app_state.portfolio
-                exposure = float((pf.summary or {}).get("total_value", 0.0)) if pf else 0.0
-                ollama_coord.update_exposure(exposure)
-            except Exception as exc:
-                logger.debug(f"gpu_coord exposure publish failed: {exc}")
-            await asyncio.sleep(30.0)
-
-    asyncio.create_task(_publish_exposure_loop())
-
     # CNN loop — starts immediately
     async def _auto_train_subprocess():
         """Spawn train_worker subprocess for auto-train — mirrors the UI Train button."""

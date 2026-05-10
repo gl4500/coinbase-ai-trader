@@ -400,16 +400,13 @@ async def _llm_confirm(product_id: str, side: str, context: str) -> Optional[str
         f"In ONE sentence, confirm or challenge this signal. Be concise."
     )
     try:
-        # GPU coord: serialize Ollama calls per-app + cross-app priority.
-        from data.gpu_coord import ollama_coord
-        async with ollama_coord.acquire(expected_ms=20_000):
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(
-                    f"{OLLAMA_URL}/api/generate",
-                    json={"model": model, "prompt": prompt, "stream": False},
-                )
-                resp.raise_for_status()
-                return resp.json().get("response", "").strip()[:200]
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False},
+            )
+            resp.raise_for_status()
+            return resp.json().get("response", "").strip()[:200]
     except Exception as e:
         logger.debug(f"Ollama confirmation failed: {e}")
         return None

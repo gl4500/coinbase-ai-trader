@@ -5,6 +5,59 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.64] — 2026-05-09 — Remove gpu_coord (symmetric to trading_app cleanup) (#287/#288/#289)
+
+### Why
+
+The cross-app GPU coordinator (`backend/data/gpu_coord.py`) was deleted from the
+sibling `trading_app/` repo on 2026-05-09 because it was misfiring; the
+polymarket_app counterpart was left in place "untouched per scope." With the
+backend now in XGB-only mode (`MODEL_BACKEND=xgb`), `_ollama_prob`,
+`_llm_confirm`, lessons fetches, and CNN retrains are all gated behind
+`config.model_backend == "cnn"` — meaning the coordinator's per-app `acquire()`
+serializer and shared `~/.ollama-coord/state.json` exposure publisher were
+dead-weight in the live path. The training mutex in `train_worker.py` was the
+last reachable user, but with the peer app no longer participating it was a
+half-protocol talking to nobody. Symmetric removal restores parity between the
+two repos and incidentally fixes the only Ruff I001 lint failure in CI
+(`backend/train_worker.py:8:1` import block).
+
+### What changed
+
+- **Deleted:** `backend/data/gpu_coord.py` (285 lines) and
+  `backend/tests/test_gpu_coord.py` (15 tests).
+- **Stripped imports + `acquire(...)` wraps** in 4 ollama call sites — back to
+  plain `httpx.AsyncClient` blocks:
+  - `backend/agents/cnn_agent.py:_ollama_prob` (preserves `_t0/_elapsed` latency
+    logging)
+  - `backend/main.py` — deleted `_publish_exposure_loop` + its `create_task`
+  - `backend/agents/signal_generator.py:_llm_confirm`
+  - `backend/services/outcome_tracker.py` (preserves latency logging)
+- **Stripped training mutex** in `backend/train_worker.py` — removed
+  `acquire_training_mutex` / `release_training_mutex` calls + the early-skip
+  branch + the `finally: release_…` clause.
+
+### Verification (TDD GREEN)
+
+`.venv/Scripts/python.exe -m pytest tests/test_cnn_agent.py
+tests/test_signal_improvements.py tests/test_signal_generator_new.py
+tests/test_train_watchdog.py -q` → **295 passed, 2 xpassed, 0 failed** in
+278.92s (4:38).
+
+`grep gpu_coord|ollama_coord|acquire_training_mutex|release_training_mutex
+backend/` → no matches.
+
+### Downstream
+
+- Memory `backlog_gpu_sequencing.md` updated to reflect symmetric removal.
+- CI Ruff failure on PR #1 (`backend/train_worker.py:8:1 I001`) auto-fixes once
+  this lands on the PR's branch.
+- Three remaining CI failures on PR #1 are still unrelated (npm lockfile out of
+  sync; `ModuleNotFoundError: torch` in 5 snapshot tests; security gate
+  downstream of those).
+
+---
+
 ## [Session 58.50] — 2026-05-09 — Frontend CNN→XGB relabel + remove training UI (#267e/f)
 
 ### Why
