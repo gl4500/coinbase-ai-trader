@@ -5,6 +5,63 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.65] — 2026-05-10 — Rebuild missing XGB artifacts (live backend was returning 0.50 fallback) (#290)
+
+### Why
+
+Verification of the gpu_coord removal (Session 58.64) surfaced that live backend
+boots were logging `xgb_signal: artifacts missing (model=...xgb_model.json
+features=...xgb_features.json) — fallback to 0.50` on every cold start, and
+242 consecutive `cnn_scans` rows between 10:46–11:07 UTC all carried
+`xgb_prob=0.5`. The three artifacts (`xgb_model.json`, `xgb_features.json`,
+`xgb_calibration.pkl`) are gitignored — produced locally via
+`tools/train_xgb_prod.py` + `tools/fit_xgb_calibration.py` — and had been lost
+from disk. With XGB-only mode (`MODEL_BACKEND=xgb`, #267) every signal was
+collapsing to neutral, so no BUY/SELL strength differentiation reached the
+trader.
+
+### What changed
+
+- **No code changes.** Regenerated three local-only artifacts from the
+  fresh 28-channel `cnn_dataset_cache.pt` (388,306 samples, May 10 build):
+  - `backend/xgb_model.json` (442 KB) — booster, 280 features, fixed
+    best_params (max_depth=4, mcw=1, subsample=0.7), 5-fold purged
+    walk-forward CV, 4h embargo. `mean_auc=0.5215` (folds:
+    0.5129/0.5140/0.5193/0.5188/0.5423) — matches the May 3 baseline (0.5224)
+    within fold variance.
+  - `backend/xgb_features.json` (5 KB) — feature_names + best_params.
+  - `backend/xgb_calibration.pkl` (2 KB) — isotonic, fit on chronological
+    20% val split (81,046 (raw_prob, label) pairs, `--source cache` mode
+    from #187). Post-calibration buckets align with actual win rates
+    (0.40–0.50 → 44.6 %, 0.60–0.70 → 64.6 %, 0.80–0.90 → 86.1 %).
+- **Hot-reloaded into the live backend** via `POST /api/xgb/calibration/reload`
+  (#194 endpoint). Response: `{"status":"reloaded","load_succeeded":true,
+  "calibration_loaded":true,"feature_set":"v1","n_features":280}`.
+
+### Why no code change
+
+Root cause was disk state, not code. `xgb_signal._try_load()` correctly
+returns the 0.50 fallback when artifacts are absent (graceful degradation,
+not a bug). The fix is to keep the artifacts present after every reboot —
+which is the operator's responsibility since they're large binary outputs of
+the training pipeline.
+
+### Tasks
+- #290a — Rebuild xgb_model.json + xgb_features.json via train_xgb_prod
+- #290b — Refit isotonic calibrator on cache val split (`--source cache`)
+- #290c — Hot-reload artifacts via POST /api/xgb/calibration/reload
+
+### Verification (in progress at session end)
+- Pre-reload window 10:46–11:07 UTC: 242 cnn_scans rows, all `xgb_prob=0.5`
+  (collapsed to fallback).
+- Post-reload (11:07:30 UTC+): awaiting next 5-min scan cycle to confirm
+  `xgb_prob` distribution returns to non-trivial range (expected ~0.03–0.95
+  per the calibration grid).
+- Backend log confirms `loaded booster (280 features, set=v1)` and `loaded
+  isotonic calibrator` events at 11:07:29 UTC.
+
+---
+
 ## [Session 58.64] — 2026-05-09 — Remove gpu_coord (symmetric to trading_app cleanup) (#287/#288/#289)
 
 ### Why
