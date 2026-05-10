@@ -57,6 +57,42 @@ def _http(status, body=None):
     return resp
 
 
+# ── Demo API key header (#294) ──────────────────────────────────────────────
+
+class TestDemoApiKey:
+
+    @pytest.mark.asyncio
+    async def test_history_sends_demo_key_header_when_env_set(self):
+        with patch.dict(os.environ, {"COINGECKO_API_KEY": "demo-abc123"}):
+            with patch.object(cg.httpx, "AsyncClient") as mock_client:
+                mock_get = AsyncMock(return_value=_ok({"market_caps": []}))
+                mock_client.return_value.__aenter__.return_value.get = mock_get
+                await cg.fetch_marketcap_history("BTC-USD", 0, 10**12)
+                hdrs = mock_get.call_args.kwargs.get("headers") or {}
+                assert hdrs.get("x-cg-demo-api-key") == "demo-abc123"
+
+    @pytest.mark.asyncio
+    async def test_history_omits_header_when_env_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COINGECKO_API_KEY", None)
+            with patch.object(cg.httpx, "AsyncClient") as mock_client:
+                mock_get = AsyncMock(return_value=_ok({"market_caps": []}))
+                mock_client.return_value.__aenter__.return_value.get = mock_get
+                await cg.fetch_marketcap_history("BTC-USD", 0, 10**12)
+                hdrs = mock_get.call_args.kwargs.get("headers") or {}
+                assert "x-cg-demo-api-key" not in hdrs
+
+    @pytest.mark.asyncio
+    async def test_snapshot_sends_demo_key_header_when_env_set(self):
+        with patch.dict(os.environ, {"COINGECKO_API_KEY": "demo-xyz"}):
+            with patch.object(cg.httpx, "AsyncClient") as mock_client:
+                mock_get = AsyncMock(return_value=_ok([]))
+                mock_client.return_value.__aenter__.return_value.get = mock_get
+                await cg.fetch_marketcap_snapshot(["BTC-USD"])
+                hdrs = mock_get.call_args.kwargs.get("headers") or {}
+                assert hdrs.get("x-cg-demo-api-key") == "demo-xyz"
+
+
 # ── Coinbase pid → CoinGecko id mapping ─────────────────────────────────────
 
 class TestIdMapping:

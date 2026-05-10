@@ -5,6 +5,93 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.66] — 2026-05-10 — Marketcap historical bronze parquets — paths 1+2 unblocked (#293/#294/#295)
+
+### Why
+
+CoinGecko free `/market_chart/range` started returning 401 on 2026-05-09
+(probe #260d/e/f), blocking the marketcap probe path that was the most
+promising remaining +0.01 mean-AUC candidate after seven BTC-flavored probes
+came up short (xgb_feature_optimization_findings.md). User directive:
+"try 1 and 2, then match the parquet file to the required structure" — i.e.,
+get both a CoinGecko Demo-key path and a CoinPaprika no-key path working,
+then write bronze-schema parquets matching the `history_backfill.py` (#168)
+convention.
+
+### What changed
+
+- **Path 1 — CoinGecko Demo-tier auth (#293)**
+  `backend/services/coingecko_marketcap.py` — added `_demo_key_headers()`:
+  reads `COINGECKO_API_KEY` env, sends `x-cg-demo-api-key` (free Demo plan,
+  10k req/month, includes historical `market_chart/range`). Opt into Pro
+  with `COINGECKO_API_PRO=1` (sends `x-cg-pro-api-key` instead). Both
+  `fetch_marketcap_snapshot` and `fetch_marketcap_history` now pass the
+  header dict to httpx.
+- **Path 2 — CoinPaprika free-tier sibling (#294)**
+  New `backend/services/coinpaprika_marketcap.py`. Mirrors the CoinGecko
+  public surface so the probe harness can swap providers via `--source`.
+  Uses the FREE `tickers/{cp_id}/historical?start=YYYY-MM-DD&interval=1d`
+  endpoint (the `coins/{id}/ohlcv/historical` endpoint is paywalled —
+  initial smoke test returned HTTP 402; the tickers/historical variant is
+  the no-key path). 28-pid mapping table verified live 2026-05-10.
+  Kill switch: `COINPAPRIKA_DISABLED=1`.
+- **Bronze parquet writer (#295)**
+  New `backend/tools/build_marketcap_parquet.py`. Schema mirrors
+  `history_backfill.py:42-51` PIT convention exactly:
+  `{start:int64, market_cap:float64, fdv:float64, ingest_ts:int64, schema_version:int32}`.
+  Per-pid path: `backend/data/marketcap/<pid>.parquet`. Dedupes on
+  `start` (last-wins), stamps `ingest_ts` on save, preserves existing
+  ingest_ts across rewrites, sorts ascending. CoinPaprika has no FDV →
+  `fdv = market_cap` default. CLI: `--source {coingecko,coinpaprika}
+  --pids X,Y,Z --start YYYY-MM-DD --end YYYY-MM-DD`.
+
+### Tests (TDD red→green)
+
+- `backend/tests/test_coinpaprika_marketcap.py` — 10 tests (id mapping,
+  history fetch shape, kill switch, HTTP 429, transport error, missing
+  market_cap rows, ISO date params, FREE endpoint URL pin).
+- `backend/tests/test_build_marketcap_parquet.py` — 16 tests (schema
+  match, round-trip, sort, dedup, FDV default, PIT semantics, parent
+  dir creation, file shape, ms→bar-aligned conversion).
+- `backend/tests/test_coingecko_marketcap.py` — added `TestDemoApiKey`
+  class (3 tests: header sent when key set, omitted when unset, Pro
+  variant when `COINGECKO_API_PRO=1`).
+
+### Verification (live smoke test)
+
+```
+python -m tools.build_marketcap_parquet --source coinpaprika \
+    --pids BTC-USD,ETH-USD,SOL-USD \
+    --start 2025-05-11 --end 2026-05-10
+```
+- Wrote 3/3 pids, 365 daily rows each.
+- Schema match confirmed: `[('start','int64'), ('market_cap','double'),
+  ('fdv','double'), ('ingest_ts','int64'), ('schema_version','int32')]`.
+- BTC sample row: `{'start': 1746921600, 'market_cap': 2068610050144.0,
+  'fdv': 2068610050144.0, 'ingest_ts': 1778439162, 'schema_version': 1}`.
+- BTC marketcap traverses 2.07T → 1.62T over the year window.
+- Free-tier date constraint discovered: `start` ≥ ~12 months ago, else 402.
+
+### No backend restart needed
+
+Tools/services additions only; live signal path (`xgb_signal`) is unchanged.
+Marketcap parquets are bronze-layer artifacts that feed the future probe
+harness (#284–#286), not the running scan loop.
+
+### Tasks
+- #293 — `services/coinpaprika_marketcap.py` + tests (RED→GREEN, 10 tests)
+- #294 — Switch to FREE `tickers/{id}/historical` after 402 on paid OHLCV
+- #295 — `tools/build_marketcap_parquet.py` + tests (RED→GREEN, 16 tests)
+- #296 — Path-1 CoinGecko Demo header support + tests (3 tests)
+- #299 — Live smoke: 3 parquets generated, schema verified
+
+### Pending (handed off to next loop iteration / future session)
+- #284 — Wire CoinPaprika source into `marketcap_probe.py --source` flag
+- #285 — Backfill remaining 25 pids (only top-3 smoke-tested this session)
+- #286 — Re-run marketcap probe with the new bronze parquets
+
+---
+
 ## [Session 58.65] — 2026-05-10 — Rebuild missing XGB artifacts (live backend was returning 0.50 fallback) (#290)
 
 ### Why

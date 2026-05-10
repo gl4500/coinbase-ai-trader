@@ -97,6 +97,22 @@ def _is_disabled() -> bool:
     }
 
 
+def _demo_key_headers() -> Dict[str, str]:
+    """Demo-tier auth header dict, or {} when COINGECKO_API_KEY is unset.
+
+    The free CoinGecko Demo plan (10k req/month, includes historical
+    market_chart) authenticates with the `x-cg-demo-api-key` header. Pro plan
+    keys use a different header (`x-cg-pro-api-key`); set COINGECKO_API_PRO=1
+    to opt into that variant.
+    """
+    key = os.environ.get("COINGECKO_API_KEY", "").strip()
+    if not key:
+        return {}
+    if os.environ.get("COINGECKO_API_PRO", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return {"x-cg-pro-api-key": key}
+    return {"x-cg-demo-api-key": key}
+
+
 @dataclass
 class MarketcapRow:
     market_cap: float
@@ -135,7 +151,9 @@ async def fetch_marketcap_snapshot(pids: Iterable[str]) -> Dict[str, MarketcapRo
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(_MARKETS_URL, params=params)
+            resp = await client.get(
+                _MARKETS_URL, params=params, headers=_demo_key_headers()
+            )
     except Exception as e:
         logger.warning("coingecko_marketcap snapshot HTTP error: %r", e)
         return {}
@@ -211,7 +229,9 @@ async def fetch_marketcap_history(
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(
+                url, params=params, headers=_demo_key_headers()
+            )
     except Exception as e:
         logger.warning(
             "coingecko_marketcap history HTTP error pid=%s: %r", product_id, e
