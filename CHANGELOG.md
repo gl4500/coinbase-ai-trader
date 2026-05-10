@@ -5,6 +5,41 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.62] — 2026-05-09 — XGB-only cleanup: remove orphaned regime-gate helpers
+
+### Why
+
+Tight follow-up to #58.61. After deleting the Hurst/regime/LGBM suppression
+block, the helper `_regime_gate_enabled()` and constant `_ENTROPY_SKIP_THRESH`
+were left dangling — no remaining call sites in `cnn_agent.py` and zero
+references elsewhere in the repo (verified via grep across the entire tree;
+only CHANGELOG history mentions remain). Removing them shrinks the dead-code
+surface that confuses future readers about which gates are still live.
+
+### What changed
+
+- **`backend/agents/cnn_agent.py`** — two orphaned symbols deleted (~10 lines):
+  - `_ENTROPY_SKIP_THRESH = 0.85` constant (line 93).
+  - `_regime_gate_enabled()` helper reading `CNN_REGIME_GATE` env var (lines
+    96–103).
+
+### Verification
+
+- `backend/tests/test_cnn_agent.py` — 230 passed, 2 xpassed, 0 failed (261s).
+- `grep -rn "_ENTROPY_SKIP_THRESH\|_regime_gate_enabled\|CNN_REGIME_GATE"` —
+  all hits resolved to either the deleted lines (now gone) or historical
+  CHANGELOG entries (kept as record).
+- No production code paths altered: both symbols were already unreachable
+  after #58.61.
+
+### Risk
+
+- **Low** — pure dead-code excision. Test suite GREEN before and after.
+- The `CNN_REGIME_GATE` env var is no longer honored anywhere; if a user has
+  it set in `.env` it is silently ignored (was already a no-op after #58.61).
+
+---
+
 ## [Session 58.61] — 2026-05-09 — XGB-only cleanup: delete dormant CNN code paths in cnn_agent.py
 
 ### Why

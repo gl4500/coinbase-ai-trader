@@ -90,17 +90,6 @@ _LGBM_MODEL_PATH     = os.path.join(os.path.dirname(__file__), "..", "data", "lg
 _HURST_TREND_THRESH  = 0.55    # H > this → trending (CNN bias toward momentum signals)
 _HURST_MR_THRESH     = 0.45    # H < this → mean-reverting (suppress trending signals)
 _DI_SUPPRESS_THRESH  = 5.0     # DI > this % → price far from SMA, suppress Ollama
-_ENTROPY_SKIP_THRESH = 0.85    # entropy > this → signal is noise, skip entirely
-
-
-def _regime_gate_enabled() -> bool:
-    """CNN BUY regime gate — on by default. Set CNN_REGIME_GATE=off to disable.
-
-    Phase-1 (2026-04-23) live data: CHAOTIC BUYs won 58.5% vs 44.3% in TRENDING
-    and 45.7% in RANGING. Gate blocks BUY unless HMM regime is CHAOTIC.
-    Read at call time (not import time) so env changes take effect without reload.
-    """
-    return os.getenv("CNN_REGIME_GATE", "on").strip().lower() != "off"
 
 
 def _backend_label() -> str:
