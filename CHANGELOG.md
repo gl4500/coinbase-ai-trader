@@ -5,6 +5,51 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.61] — 2026-05-09 — XGB-only cleanup: delete dormant CNN code paths in cnn_agent.py
+
+### Why
+
+User: "please get rid of the CNN references and use XGB only." With
+`MODEL_BACKEND=xgb` the agent already short-circuited around three CNN-specific
+regions (LLM/blend, Hurst/regime/LGBM gate, `_needs_retrain` suppression), but
+the dead code remained and obscured the live decision path. This pass removes
+the dormant blocks; the helpers (`_ollama_prob`, `LGBMFilter`, `_hurst_exponent`,
+`_regime_gate_enabled`, fear-and-greed client) are now orphaned and slated for
+later sweep — kept this commit tight.
+
+### What changed
+
+- **`backend/agents/cnn_agent.py`** — three CNN-only regions removed:
+  - `_needs_retrain` suppression block (~10 lines): XGB has its own artifacts
+    (`xgb_model.json` + `xgb_calibration.pkl`); the CNN checkpoint is no longer
+    the active decider so the suppression no longer applies.
+  - LLM/blend block (~70 lines): Ollama call + lessons fetch + Fear-and-Greed
+    fetch + per-regime CNN/LLM blend. All dormant under XGB (#250). `model_prob`
+    now comes directly from the backend probability, clamped to [0.01, 0.99].
+  - Hurst/regime/LGBM suppression block (~75 lines): all three were CNN-tuned
+    (#232) and dormant under XGB. BUY now executes directly on the XGB
+    probability via `_kelly_fraction(model_prob)`.
+- **`backend/tests/test_cnn_agent.py`** — test suite simplified:
+  - Added `TestLLMNeverCalledAfterXgbOnlyCleanup` (XGBONLY-1): asserts
+    `_ollama_prob` is never awaited regardless of backend after cleanup.
+  - Added `TestNoCnnGatesAfterXgbOnlyCleanup` (XGBONLY-2): asserts BUY executes
+    despite TRENDING regime + low Hurst (gates are gone).
+  - Deleted `test_generate_signal_suppressed_when_needs_retrain` — assertion
+    inverted by removal of the `_needs_retrain` suppression.
+  - Deleted `TestInferenceRegimeGate` class (3 tests) — gate no longer exists.
+  - Deleted `TestSuppressionsGatedByBackend` class (3 tests) — redundant after
+    removal of the gates themselves.
+  - Deleted `test_ollama_prob_still_awaited_when_backend_is_cnn` — LLM path
+    no longer reachable from any backend.
+
+### Verification
+
+- `backend/tests/test_cnn_agent.py` — 230 passed, 2 xpassed, 0 failed (309s).
+- TDD discipline: each removal preceded by RED tests (XGBONLY-1, XGBONLY-2)
+  asserting post-cleanup contract.
+
+---
+
 ## [Session 58.50] — 2026-05-09 — Frontend CNN→XGB relabel + remove training UI (#267e/f)
 
 ### Why

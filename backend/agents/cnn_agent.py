@@ -1936,18 +1936,9 @@ class CoinbaseCNNAgent:
         execute: bool = False,
         order_executor=None,
     ) -> Optional[Dict]:
-        # #223 — XGB backend doesn't use the PyTorch CNN checkpoint, so an
-        # incompatible CNN model must not block XGB shadow logging or signal
-        # generation. Without this guard, the 28-channel migration left the
-        # 27-channel CNN checkpoint flagged incompatible and silently killed
-        # all save_cnn_scan writes for ~30 hours starting 2026-05-07 02:17 UTC.
-        if self._needs_retrain and config.model_backend != "xgb":
-            logger.debug(
-                "CNN signal suppressed — checkpoint incompatible with current architecture. "
-                "Run retrain.py or trigger /api/cnn/train to generate a compatible model."
-            )
-            return None
-
+        # XGB-only: CNN checkpoint is no longer the active decider, so
+        # `_needs_retrain` no longer suppresses signal generation. The XGB
+        # path uses its own artifacts (xgb_model.json + xgb_calibration.pkl).
         pid   = product["product_id"]
         price = self._live_price(pid, product.get("price") or 0)
         if not price or price <= 0:
@@ -2154,75 +2145,11 @@ class CoinbaseCNNAgent:
             + (f"\nSub-agent votes:{agent_ctx}" if agent_ctx else "")
         )
 
-        # ── Option 2: skip LLM when CNN is already decisive ───────────────────
-        # If cnn_prob is far from 0.5 (beyond llm_skip_threshold), the LLM
-        # cannot flip the direction — skip the 10–30s Ollama call entirely.
-        cnn_dist = abs(cnn_prob - 0.5)
-        # Multiplicative regime gate: skip Ollama when regime is ambiguous (random walk)
-        # AND price has deviated significantly from its SMA (DI high = unreliable features)
-        regime_ambiguous = _HURST_MR_THRESH < hurst < _HURST_TREND_THRESH
-        di_high          = di > _DI_SUPPRESS_THRESH
-        entropy_noisy    = entropy > _ENTROPY_SKIP_THRESH
-        # #250 — under MODEL_BACKEND != "cnn" the LLM is fed the active backend's
-        # probability as an anchor and almost always confirms it. Drop the call
-        # entirely (and the lessons + Fear-and-Greed fetches that only feed it).
-        backend_is_cnn   = config.model_backend == "cnn"
-        skip_llm = (
-            not backend_is_cnn
-            or cnn_dist >= (config.llm_skip_threshold - 0.5)
-            or (regime_ambiguous and di_high)
-            or entropy_noisy
-            or self.training_active
-        )
-        if skip_llm:
-            llm_prob = None
-            lessons  = []
-            fg_score: Optional[int] = None
-            if not backend_is_cnn:
-                logger.debug(
-                    f"LLM skipped for {pid}: MODEL_BACKEND={config.model_backend} "
-                    f"(LLM is anchored to backend prob — redundant)"
-                )
-            elif self.training_active:
-                logger.debug(f"LLM skipped for {pid}: training subprocess active (GPU busy)")
-            elif entropy_noisy:
-                logger.debug(
-                    f"LLM skipped for {pid}: entropy={entropy:.2f} > {_ENTROPY_SKIP_THRESH} (noise)"
-                )
-            elif regime_ambiguous and di_high:
-                logger.debug(
-                    f"LLM skipped for {pid}: regime ambiguous "
-                    f"(H={hurst:.2f} DI={di:.1f}% > {_DI_SUPPRESS_THRESH}%)"
-                )
-            else:
-                logger.debug(
-                    f"LLM skipped for {pid}: cnn_prob={cnn_prob:.3f} is decisive "
-                    f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
-                )
-        else:
-            # Fetch outcome lessons so Ollama can learn from past signals
-            lessons = await get_tracker().get_lessons(pid, limit=5)
-
-            # Fetch Fear & Greed score as soft context for Ollama (not a hard gate)
-            try:
-                fg_data  = await get_fear_greed().fetch()
-                fg_score = fg_data.get("value")
-            except Exception:
-                fg_score = None
-
-            llm_prob, _pt, _rt = await _ollama_prob(pid, context, adx_val, rsi_val,
-                                                     macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
-                                                     lessons=lessons, fg_score=fg_score)
-            self.llm_calls           += 1
-            self.llm_prompt_tokens   += _pt
-            self.llm_response_tokens += _rt
-
-        if llm_prob is not None:
-            model_prob = cnn_w * cnn_prob + llm_w * llm_prob
-        else:
-            model_prob = cnn_prob
-
-        model_prob = max(0.01, min(0.99, model_prob))
+        # XGB-only: backend probability drives the decision directly. The LLM
+        # blend, lessons fetch, and Fear-and-Greed fetch were dormant under
+        # MODEL_BACKEND=xgb (#250) and have been removed entirely.
+        llm_prob: Optional[float] = None
+        model_prob = max(0.01, min(0.99, cnn_prob))
 
         # ── Signal direction ──────────────────────────────────────────────────
         if model_prob > config.cnn_buy_threshold:
@@ -2325,80 +2252,25 @@ class CoinbaseCNNAgent:
         # ── Dry-run execution via _CNNBook (tracks positions + writes to trades table) ──
         if execute:
             if side == "BUY" and not self.book.has_position(pid):
-                # #232 — Hurst, HMM regime, and LGBMFilter were calibrated on
-                # CNN outcome data (Phase-1: CNN BUY edge is CHAOTIC-only).
-                # When MODEL_BACKEND != "cnn" they don't transfer, so skip them
-                # and let the active backend's own probability drive the BUY.
-                _cnn_only = config.model_backend == "cnn"
-                hurst_ok  = hurst >= _HURST_MR_THRESH
-
-                _suppress_reason: Optional[str] = None
-                _suppress_log:    Optional[str] = None
-                if _cnn_only and not hurst_ok:
-                    _suppress_reason = f"Hurst={hurst:.2f} random-walk regime — no edge"
-                    _suppress_log    = f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
-                elif _cnn_only and _regime_gate_enabled() and hmm_regime != "CHAOTIC":
-                    # Phase-1 finding: CNN BUY edge is CHAOTIC-only (58.5% wr) —
-                    # TRENDING/RANGING BUYs win 44-46%. Set CNN_REGIME_GATE=off to disable.
-                    _suppress_reason = f"Regime {hmm_regime} — CNN BUY edge is CHAOTIC only"
-                    _suppress_log    = f"CNN BUY {pid} suppressed: regime={hmm_regime} != CHAOTIC"
-
-                if _suppress_reason is not None:
-                    signal["execution"] = {"success": False, "reason": _suppress_reason}
-                    logger.info(_suppress_log)
+                # XGB-only: Hurst/regime/LGBM suppressions were CNN-tuned and
+                # have been removed. The XGB probability drives BUY directly.
+                frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
+                spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
+                if spent > 0:
+                    self.signals_executed += 1
+                    signal["execution"] = {"success": True, "spent": round(spent, 2)}
+                    logger.info(
+                        f"{_backend_label()} BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
+                        f"kelly_frac={frac:.2f} spent=${spent:.2f} "
+                        f"H={hurst:.2f} DI={di:.1f}% "
+                        f"balance=${self.book.balance:.2f}"
+                    )
                 else:
-                    # LightGBM entry filter — also CNN-tuned, gated on backend.
-                    _lgbm_prob: float = 0.0
-                    _lgbm_allow: bool = True
-                    if _cnn_only:
-                        from datetime import datetime as _dt
-                        _now_dt = _dt.utcnow()
-                        _lgbm_feat = {
-                            "cnn_prob":    cnn_prob,
-                            "rsi":         rsi_val,
-                            "adx":         adx_val,
-                            "strength":    strength,
-                            "macd":        macd_h,
-                            "mfi":         mfi_val,
-                            "stoch_k":     stoch_k,
-                            "hour_of_day": _now_dt.hour,
-                            "day_of_week": _now_dt.weekday(),
-                            "usd_open":    self.book.balance * min(_kelly_fraction(model_prob), _CNN_MAX_FRAC),
-                        }
-                        _lgbm_prob  = self._lgbm.predict(_lgbm_feat)
-                        _lgbm_allow = self._lgbm.allow_buy(_lgbm_feat)
-
-                    if not _lgbm_allow:
-                        signal["execution"] = {
-                            "success": False,
-                            "reason": f"LGBMFilter blocked: p(win)={_lgbm_prob:.2f}",
-                        }
-                        logger.info(
-                            f"CNN BUY {pid} blocked by LGBMFilter: "
-                            f"p(win)={_lgbm_prob:.2f}"
-                        )
-                    else:
-                        # Kelly Criterion sizing: use model_prob as win probability.
-                        # strength = (model_prob - 0.5)*2 is NOT a probability — passing
-                        # it to Kelly gave frac=0 for all signals below model_prob=0.75.
-                        frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
-                        spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
-                        if spent > 0:
-                            self.signals_executed += 1
-                            signal["execution"] = {"success": True, "spent": round(spent, 2)}
-                            _lgbm_str = f"lgbm_p={_lgbm_prob:.2f} " if _cnn_only else ""
-                            logger.info(
-                                f"{_backend_label()} BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
-                                f"kelly_frac={frac:.2f} spent=${spent:.2f} "
-                                f"H={hurst:.2f} DI={di:.1f}% "
-                                f"{_lgbm_str}balance=${self.book.balance:.2f}"
-                            )
-                        else:
-                            signal["execution"] = {"success": False, "reason": "Insufficient balance"}
-                            logger.warning(
-                                f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
-                                f"too low for kelly_frac={frac:.2f}"
-                            )
+                    signal["execution"] = {"success": False, "reason": "Insufficient balance"}
+                    logger.warning(
+                        f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
+                        f"too low for kelly_frac={frac:.2f}"
+                    )
             elif side == "SELL" and self.book.has_position(pid):
                 pnl = await self.book.sell(pid, price, trigger="SCAN")
                 self.signals_executed += 1
