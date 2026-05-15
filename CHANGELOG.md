@@ -5,6 +5,68 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.68] — 2026-05-15 — Marketcap bronze cache + probe `--source` flag (#284/#285)
+
+### Why
+
+`tools/marketcap_probe.py` re-fetches the full CoinGecko `/market_chart/range`
+history on every run — for 20 pids each rerun is ~40s and consumes free-tier
+budget. Bronze parquet files under `backend/data/marketcap/` already exist
+(#299, written via CoinPaprika), but the probe wasn't reading them. Two
+gaps:
+
+1. No cache layer between the probe and the CoinGecko service — every probe
+   re-run pays the API again.
+2. No way to A/B against CoinPaprika without editing the probe by hand.
+
+### What changed
+
+- **`backend/services/marketcap_history_cache.py`** (NEW) — async
+  `fetch_marketcap_history_cached(pid, start_ms, end_ms, parquet_dir, refresh_secs)`.
+  Reads `<parquet_dir>/<pid>.parquet` first; treats the row set as a hit when
+  newest `ingest_ts` is within `refresh_secs` (default 86400) AND newest cached
+  `start*1000` is within one bar of the requested `end_ms`. Misses / stale /
+  partial coverage call `coingecko_marketcap.fetch_marketcap_history`, merge
+  the result with cached rows, stamp `ingest_ts=int(time.time())` +
+  `schema_version=1` (per #164b PIT), and re-write the parquet. Returned rows
+  are `(ts_ms, market_cap)` tuples sorted ascending and filtered to the
+  requested window.
+- **`backend/tools/marketcap_probe.py`** — added `--source coingecko|coinpaprika|both`.
+  `coingecko` (default) routes through the new cache; `coinpaprika` calls
+  `services.coinpaprika_marketcap.fetch_marketcap_history` directly (no cache
+  yet — free 12-month rolling window, no API key required); `both` runs the
+  probe once per provider and prints side-by-side Δ-AUC reports.
+  `_fetch_marketcap_for_pids` now takes `source=` and `parquet_dir=` kwargs;
+  unknown sources raise `ValueError`. CLI built via new `_build_argparser()`
+  helper so tests can exercise it without launching the runner.
+- **`backend/tests/test_marketcap_history_cache.py`** (NEW) — 7 tests covering
+  RED-then-GREEN: public coroutine, cache miss calls underlying fetcher, miss
+  writes parquet with PIT columns, hit short-circuits API, stale `ingest_ts`
+  triggers refetch, partial coverage triggers refetch, returned rows filtered
+  to `[start_ms, end_ms]`.
+- **`backend/tests/test_marketcap_probe.py`** — added `TestSourceDispatch`
+  (4 tests): default = coingecko, coinpaprika dispatch, unknown source =
+  ValueError, argparser accepts the three documented choices.
+
+### Verification
+
+```
+backend && python -m pytest tests/test_marketcap_history_cache.py
+                              tests/test_marketcap_probe.py -v
+=> 26 passed in 2.61s
+```
+
+### How to apply
+
+Probe re-runs are now warm-cached:
+```
+cd backend && python tools/marketcap_probe.py --snapshot-ts auto
+cd backend && python tools/marketcap_probe.py --snapshot-ts auto --source coinpaprika
+cd backend && python tools/marketcap_probe.py --snapshot-ts auto --source both
+```
+
+---
+
 ## [Session 58.67] — 2026-05-10 — Gate CNN auto-train behind MODEL_BACKEND=='cnn' (#300)
 
 ### Why

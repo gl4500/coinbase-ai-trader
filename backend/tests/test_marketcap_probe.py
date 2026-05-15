@@ -216,3 +216,90 @@ class TestPerPidSignalCoverage:
         # COINGECKO_DISABLED), its signal must be all zeros so the XGB
         # feature doesn't spuriously fire on noise.
         assert (sig == 0.0).all()
+
+
+# ── --source flag dispatch (#285) ───────────────────────────────────────────
+
+class TestSourceDispatch:
+    """`--source cmc|coingecko|both` flag routes history fetches through the
+    matching provider. coingecko (default) hits the bronze cache from #284.
+    coinpaprika hits the no-key fallback service. `both` runs the probe twice
+    for A/B comparison.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_source_is_coingecko(self, monkeypatch, tmp_path):
+        """Omitting --source uses coingecko via marketcap_history_cache."""
+        from tools import marketcap_probe as mp
+
+        called = {"src": None}
+
+        async def _spy(pid, start_ms, end_ms, parquet_dir=None, refresh_secs=86400):
+            called["src"] = "coingecko"
+            return [(1_700_000_000_000, 1e9)]
+
+        # Patch the cached fetcher so we observe the routing.
+        monkeypatch.setattr(
+            "services.marketcap_history_cache.fetch_marketcap_history_cached",
+            _spy,
+        )
+
+        await mp._fetch_marketcap_for_pids(
+            ["BTC-USD"], 1_700_000_000_000, 1_700_000_500_000,
+            hour_grid_ms=[1_700_000_500_000],
+            source="coingecko",
+            parquet_dir=str(tmp_path),
+        )
+        assert called["src"] == "coingecko"
+
+    @pytest.mark.asyncio
+    async def test_coinpaprika_source_dispatches_to_paprika(
+        self, monkeypatch, tmp_path
+    ):
+        from tools import marketcap_probe as mp
+
+        called = {"src": None}
+
+        async def _spy(pid, start_ms, end_ms):
+            called["src"] = "coinpaprika"
+            return [(1_700_000_000_000, 1e9)]
+
+        # The coinpaprika branch must call services.coinpaprika_marketcap
+        # .fetch_marketcap_history directly (no cache wrapper; that one is
+        # CoinGecko-specific for now).
+        monkeypatch.setattr(
+            "services.coinpaprika_marketcap.fetch_marketcap_history", _spy
+        )
+
+        await mp._fetch_marketcap_for_pids(
+            ["BTC-USD"], 1_700_000_000_000, 1_700_000_500_000,
+            hour_grid_ms=[1_700_000_500_000],
+            source="coinpaprika",
+            parquet_dir=str(tmp_path),
+        )
+        assert called["src"] == "coinpaprika"
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_raises_value_error(self, tmp_path):
+        from tools import marketcap_probe as mp
+        with pytest.raises(ValueError):
+            await mp._fetch_marketcap_for_pids(
+                ["BTC-USD"], 1_700_000_000_000, 1_700_000_500_000,
+                hour_grid_ms=[1_700_000_500_000],
+                source="bogus",
+                parquet_dir=str(tmp_path),
+            )
+
+    def test_cli_accepts_source_flag(self):
+        """`--source` is a recognized CLI flag with the three documented
+        choices."""
+        from tools.marketcap_probe import _build_argparser
+        parser = _build_argparser()
+        ns = parser.parse_args(["--source", "coinpaprika"])
+        assert ns.source == "coinpaprika"
+        ns = parser.parse_args(["--source", "both"])
+        assert ns.source == "both"
+        ns = parser.parse_args([])
+        assert ns.source == "coingecko"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--source", "bogus"])

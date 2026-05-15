@@ -137,24 +137,55 @@ def build_marketcap_signal(
 # IO + probe runner
 # ---------------------------------------------------------------------------
 
+_DEFAULT_MARKETCAP_DIR = os.path.join(BACKEND, "data", "marketcap")
+_VALID_SOURCES = ("coingecko", "coinpaprika", "both")
+
+
 async def _fetch_marketcap_for_pids(
     pids: List[str],
     start_ms: int,
     end_ms: int,
     hour_grid_ms: List[int],
+    source: str = "coingecko",
+    parquet_dir: str = _DEFAULT_MARKETCAP_DIR,
 ) -> Dict[str, Dict[int, float]]:
-    """Fetch per-pid marketcap history sequentially (CoinGecko free tier
-    rate-limit: ~30 req/min; 20 pids takes ~40s).
+    """Fetch per-pid marketcap history sequentially with provider routing.
 
-    Returns pid -> {bar_ts_secs: log_marketcap}. Pids with no data (unmapped
-    slugs, COINGECKO_DISABLED=1, transport errors) get an empty dict, which
-    build_marketcap_signal converts to an all-zero feature block.
+    source='coingecko' (default) routes through
+    services.marketcap_history_cache.fetch_marketcap_history_cached so probe
+    re-runs hit the bronze parquet cache before the CoinGecko API.
+
+    source='coinpaprika' calls services.coinpaprika_marketcap.
+    fetch_marketcap_history directly (free, no key, rolling 12-month window).
+
+    source='both' is reserved for CLI A/B comparison and is handled at the
+    main() level by invoking this function twice and reporting side-by-side;
+    calling _fetch_marketcap_for_pids with source='both' raises ValueError
+    so the dispatch stays single-purpose.
+
+    Returns pid -> {bar_ts_secs: log_marketcap}. Pids with no data get an
+    empty dict, which build_marketcap_signal converts to all-zero output.
     """
-    from services.coingecko_marketcap import fetch_marketcap_history
+    if source == "coingecko":
+        from services import marketcap_history_cache as mhc
+
+        async def _fetch(pid: str):
+            return await mhc.fetch_marketcap_history_cached(
+                pid, start_ms, end_ms, parquet_dir=parquet_dir,
+            )
+    elif source == "coinpaprika":
+        from services import coinpaprika_marketcap as cpm
+
+        async def _fetch(pid: str):
+            return await cpm.fetch_marketcap_history(pid, start_ms, end_ms)
+    else:
+        raise ValueError(
+            f"unknown source: {source!r}; choose from {_VALID_SOURCES}"
+        )
 
     out: Dict[str, Dict[int, float]] = {}
     for pid in pids:
-        rows = await fetch_marketcap_history(pid, start_ms, end_ms)
+        rows = await _fetch(pid)
         out[pid] = marketcap_rows_to_log_grid(
             rows, hour_grid_ms=hour_grid_ms, lag_secs=_LAG_SECS,
         )
@@ -164,6 +195,8 @@ async def _fetch_marketcap_for_pids(
 def _load_pooled_with_marketcap(
     n: int = 20,
     snapshot_ts: int = None,
+    source: str = "coingecko",
+    parquet_dir: str = _DEFAULT_MARKETCAP_DIR,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     import torch
     from tools.feature_set_compare import _entry_to_arrays
@@ -190,10 +223,13 @@ def _load_pooled_with_marketcap(
     })
     grid_ms = [t * 1000 for t in grid_secs]
 
-    print("Fetching CoinGecko marketcap history per pid...", flush=True)
+    print(f"Fetching {source} marketcap history per pid...", flush=True)
     t0 = time.time()
     mc_by_pid = asyncio.run(
-        _fetch_marketcap_for_pids(top_pids, start_ms, end_ms, grid_ms)
+        _fetch_marketcap_for_pids(
+            top_pids, start_ms, end_ms, grid_ms,
+            source=source, parquet_dir=parquet_dir,
+        )
     )
     elapsed = time.time() - t0
     cov_pids = sum(1 for h in mc_by_pid.values() if h)
@@ -243,11 +279,7 @@ def _load_pooled_with_marketcap(
     )
 
 
-def main():
-    import torch
-    from tools.channel_replace import run_replace
-    from tools.pid_snapshot import recommended_snapshot_ts
-
+def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--snapshot-ts", type=str, default=None,
@@ -255,6 +287,22 @@ def main():
              "first_ts), an integer epoch seconds, or omit for legacy "
              "behavior (#163).",
     )
+    parser.add_argument(
+        "--source", choices=list(_VALID_SOURCES), default="coingecko",
+        help="Marketcap provider: 'coingecko' (default, parquet-cached via "
+             "services.marketcap_history_cache), 'coinpaprika' (no-key "
+             "fallback, free 12-month rolling window), or 'both' for A/B "
+             "comparison (runs the probe once per provider, reports each).",
+    )
+    return parser
+
+
+def main():
+    import torch
+    from tools.channel_replace import run_replace
+    from tools.pid_snapshot import recommended_snapshot_ts
+
+    parser = _build_argparser()
     args = parser.parse_args()
 
     snapshot_ts: int = None
@@ -271,33 +319,39 @@ def main():
             snapshot_ts = int(args.snapshot_ts)
             print(f"snapshot_ts={snapshot_ts}", flush=True)
 
-    X, y, ts, sig, used = _load_pooled_with_marketcap(
-        n=20, snapshot_ts=snapshot_ts,
-    )
-    print(f"\npooled samples: n={len(y):,}", flush=True)
-    print(f"products & marketcap coverage: {used}", flush=True)
-    coverage_pct = float((sig != 0).any(axis=1).mean())
-    print(f"per-sample non-zero marketcap coverage: {coverage_pct:.1%}", flush=True)
+    sources = ["coingecko", "coinpaprika"] if args.source == "both" else [args.source]
 
-    print(
-        f"\nReplacing ch{_TARGET_CHANNEL} (obv_slope) with per-pid log_marketcap "
-        f"z-score (1-day lag); running 5-fold purged CV (4h embargo)...",
-        flush=True,
-    )
-    result = run_replace(
-        X, y, ts,
-        channel_idx=_TARGET_CHANNEL,
-        replacement=sig,
-        n_folds=5, embargo_hours=4, n_estimators=200,
-    )
-    print(
-        f"\n=== single-add probe: log_marketcap -> ch{_TARGET_CHANNEL} ==="
-    )
-    print(f"  baseline mean_auc = {result['baseline_auc']:.4f}")
-    print(f"  replaced mean_auc = {result['replaced_auc']:.4f}")
-    print(f"  delta             = {result['delta']:+.4f}")
-    gate = "PASS" if result["delta"] >= 0.01 else "FAIL"
-    print(f"  +0.01 gate: {gate}")
+    for src in sources:
+        print(f"\n=== source={src} ===", flush=True)
+        X, y, ts, sig, used = _load_pooled_with_marketcap(
+            n=20, snapshot_ts=snapshot_ts, source=src,
+        )
+        print(f"pooled samples: n={len(y):,}", flush=True)
+        print(f"products & marketcap coverage: {used}", flush=True)
+        coverage_pct = float((sig != 0).any(axis=1).mean())
+        print(
+            f"per-sample non-zero marketcap coverage: {coverage_pct:.1%}",
+            flush=True,
+        )
+        print(
+            f"Replacing ch{_TARGET_CHANNEL} (obv_slope) with per-pid log_marketcap "
+            f"z-score (1-day lag); running 5-fold purged CV (4h embargo)...",
+            flush=True,
+        )
+        result = run_replace(
+            X, y, ts,
+            channel_idx=_TARGET_CHANNEL,
+            replacement=sig,
+            n_folds=5, embargo_hours=4, n_estimators=200,
+        )
+        print(
+            f"\n--- single-add probe: log_marketcap -> ch{_TARGET_CHANNEL} (source={src}) ---"
+        )
+        print(f"  baseline mean_auc = {result['baseline_auc']:.4f}")
+        print(f"  replaced mean_auc = {result['replaced_auc']:.4f}")
+        print(f"  delta             = {result['delta']:+.4f}")
+        gate = "PASS" if result["delta"] >= 0.01 else "FAIL"
+        print(f"  +0.01 gate: {gate}")
 
 
 if __name__ == "__main__":
