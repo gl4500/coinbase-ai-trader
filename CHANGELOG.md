@@ -5,6 +5,28 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69] — 2026-05-16 — Tiered history fetcher (v3 prep #311a)
+
+### Why
+XGB feature_set v3 needs per-tier hourly candle slices (60 / 168 / 336)
+without bubbling async through xgb_signal.xgb_prob.
+
+### What changed
+- **`backend/services/tiered_history.py`** (NEW) — sync `fetch_tiered(pid,
+  source, now_ts, ...)` returns `{"micro","meso","macro"}` slices. Reads
+  parquet (training) or SQLite + parquet-prefix fallback (live).
+- **`backend/tests/test_tiered_history.py`** (NEW) — 13 tests covering
+  slice contracts, short-history empty-list semantics, source dispatch,
+  now_ts leak prevention.
+
+### Verification
+```
+backend && python -m pytest tests/test_tiered_history.py -v
+=> 13 passed
+```
+
+---
+
 ## [Session 58.68] — 2026-05-15 — Marketcap bronze cache + probe `--source` flag (#284/#285)
 
 ### Why
