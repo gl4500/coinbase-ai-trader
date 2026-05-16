@@ -5,6 +5,26 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69b] — 2026-05-16 — XGB v3 tiered extractor + feature_weights (#311b)
+
+### What changed
+- **`backend/tools/xgb_features.py`** — added `feature_set='v3'` route.
+  New helpers: `_v3_feature_names()` (350 names), `feature_weights_v3()`
+  (per-tier 1/2/3/0), `_extract_v3(candles_by_tier)`, `_stats_from_candles()`.
+  Tier constants: `MESO_CHANNELS={15,24,25,26}`, `MACRO_CHANNELS={20,21,27}`,
+  `TIER_WINDOWS_V3={micro:60,meso:168,macro:336}`. m060 baseline slots on
+  meso/macro channels inherit their channel's tier weight (per spec 4.3).
+- **`backend/tests/test_xgb_features_v3.py`** (NEW) — 18 tests covering
+  shape, naming, per-tier counts, zero-fill, feature_weights, unknown set.
+
+### Verification
+```
+backend && python -m pytest tests/test_xgb_features_v3.py tests/test_xgb_features.py -v
+=> 55 passed (18 new + 37 existing v1/v2 regression)
+```
+
+---
+
 ## [Session 58.69] — 2026-05-16 — Tiered history fetcher (v3 prep #311a)
 
 ### Why

@@ -126,21 +126,150 @@ def _v2_addons(s64: np.ndarray) -> np.ndarray:
     return out
 
 
+# ── v3 tier configuration (added 2026-05-16, #311b) ────────────────────────
+MESO_CHANNELS: frozenset = frozenset({15, 24, 25, 26})
+MACRO_CHANNELS: frozenset = frozenset({20, 21, 27})
+TIER_WINDOWS_V3: dict = {"micro": 60, "meso": 168, "macro": 336}
+_TIER_WEIGHT_V3: dict = {"micro": 1.0, "meso": 2.0, "macro": 3.0, "masked": 0.0}
+
+
+def _v3_feature_names() -> List[str]:
+    """Build the 350-name list for feature_set='v3'.
+
+    Layout:
+      - micro non-masked  : chN_<stat>             (180 names)
+      - meso              : chN_m060_<stat> + chN_m168_<stat>  (80 names)
+      - macro             : chN_m060_<stat> + chN_m336_<stat>  (60 names)
+      - masked            : chN_<stat>             (30 names, value always 0)
+    """
+    names: List[str] = []
+    for c in range(N_CHANNELS):
+        if c in MESO_CHANNELS:
+            names += [f"ch{c}_m060_{s}" for s in _STAT_NAMES]
+            names += [f"ch{c}_m168_{s}" for s in _STAT_NAMES]
+        elif c in MACRO_CHANNELS:
+            names += [f"ch{c}_m060_{s}" for s in _STAT_NAMES]
+            names += [f"ch{c}_m336_{s}" for s in _STAT_NAMES]
+        else:
+            names += [f"ch{c}_{s}" for s in _STAT_NAMES]
+    return names
+
+
+def feature_weights_v3() -> np.ndarray:
+    """Return the 350-long feature_weights vector for xgb.train."""
+    names = _v3_feature_names()
+    weights = np.zeros(len(names), dtype=np.float64)
+    for i, n in enumerate(names):
+        if n.startswith(("ch17_", "ch18_", "ch19_")):
+            weights[i] = _TIER_WEIGHT_V3["masked"]
+        elif "_m336_" in n:
+            weights[i] = _TIER_WEIGHT_V3["macro"]
+        elif "_m168_" in n:
+            weights[i] = _TIER_WEIGHT_V3["meso"]
+        elif "_m060_" in n:
+            # m060 slot belongs to the channel's primary tier (meso or macro)
+            ch_idx = int(n.split("_", 1)[0][2:])
+            if ch_idx in MACRO_CHANNELS:
+                weights[i] = _TIER_WEIGHT_V3["macro"]
+            elif ch_idx in MESO_CHANNELS:
+                weights[i] = _TIER_WEIGHT_V3["meso"]
+            else:
+                weights[i] = _TIER_WEIGHT_V3["micro"]
+        else:
+            weights[i] = _TIER_WEIGHT_V3["micro"]
+    return weights
+
+
+def _stats_from_candles(candles: list, stat_offset: int, out: np.ndarray) -> None:
+    """In-place fill 10 stats starting at out[stat_offset:stat_offset+10] from
+    a candle list. Operates on the CLOSE series. If candles is empty, slots
+    stay zero (caller pre-zeroed `out`).
+
+    Stats = (last, mean, std, slope, min, max, pct_rank, delta_5, delta_10, delta_30).
+    """
+    if not candles:
+        return
+    closes = np.array([c["close"] for c in candles], dtype=np.float64)
+    if closes.size == 0:
+        return
+    out[stat_offset + 0] = closes[-1]
+    out[stat_offset + 1] = closes.mean()
+    out[stat_offset + 2] = closes.std()
+    t = closes.size
+    x = np.arange(t, dtype=np.float64)
+    x_mean = x.mean()
+    y_mean = closes.mean()
+    num = ((x - x_mean) * (closes - y_mean)).sum()
+    den = ((x - x_mean) ** 2).sum()
+    out[stat_offset + 3] = (num / den) if den != 0 else 0.0
+    out[stat_offset + 4] = closes.min()
+    out[stat_offset + 5] = closes.max()
+    last = closes[-1]
+    below = (closes < last).sum()
+    equal = (closes == last).sum()
+    out[stat_offset + 6] = (below + 0.5 * equal) / t
+    out[stat_offset + 7] = closes[-1] - closes[-6]  if t >= 6  else 0.0
+    out[stat_offset + 8] = closes[-1] - closes[-11] if t >= 11 else 0.0
+    out[stat_offset + 9] = closes[-1] - closes[-31] if t >= 31 else 0.0
+
+
+def _extract_v3(candles_by_tier: dict) -> Tuple[np.ndarray, List[str]]:
+    """Convert {"micro","meso","macro"} candle slices to (features [1,350], names [350]).
+
+    This v3 extractor uses CLOSE series only — channel-level signals
+    (RSI/MACD/etc.) are NOT recomputed here. The v3 booster is trained with
+    whatever the trainer feeds in via this function; replace with real
+    per-channel signal feeders before v3 training if you want richer surface.
+    The call-site contract (350-element output) stays the same.
+    """
+    names = _v3_feature_names()
+    out = np.zeros((1, len(names)), dtype=np.float64)
+
+    micro = candles_by_tier.get("micro") or []
+    meso  = candles_by_tier.get("meso")  or []
+    macro = candles_by_tier.get("macro") or []
+
+    offset = 0
+    for c in range(N_CHANNELS):
+        if c in (17, 18, 19):
+            offset += 10
+            continue
+        if c in MESO_CHANNELS:
+            _stats_from_candles(micro, offset, out[0])
+            offset += 10
+            _stats_from_candles(meso, offset, out[0])
+            offset += 10
+        elif c in MACRO_CHANNELS:
+            _stats_from_candles(micro, offset, out[0])
+            offset += 10
+            _stats_from_candles(macro, offset, out[0])
+            offset += 10
+        else:
+            _stats_from_candles(micro, offset, out[0])
+            offset += 10
+
+    return out, names
+
+
 def extract_features(
-    samples: np.ndarray, feature_set: str = "v1"
+    samples, feature_set: str = "v1"
 ) -> Tuple[np.ndarray, List[str]]:
     """Convert a batch of [N, 28, 60] samples to tabular features.
 
     feature_set:
         "v1" (default): 270 per-channel stats (back-compat).
         "v2": v1 + 10 cross-channel/temporal addons (_V2_NEW_FEATURES).
+        "v3": tiered mixed-lookback — 350 features, samples arg becomes
+              {"micro","meso","macro"} candle-list dict (#311b).
 
     Returns (features, feature_names) where features is float64 with no
     NaN/Inf, and feature_names matches the column order of features.
     """
+    if feature_set == "v3":
+        return _extract_v3(samples)
     if feature_set not in ("v1", "v2"):
         raise ValueError(
-            f"unknown feature_set={feature_set!r}; expected 'v1' or 'v2'"
+            f"unknown feature_set={feature_set!r}; expected 'v1', 'v2', or 'v3'"
         )
     if samples.ndim != 3 or samples.shape[1] != N_CHANNELS or samples.shape[2] != SEQ_LEN:
         raise ValueError(
