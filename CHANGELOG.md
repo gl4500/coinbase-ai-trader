@@ -5,6 +5,99 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69-cut] — 2026-05-16 — XGB v3 LIVE CUTOVER (#311-cut)
+
+### What changed
+v3 artifacts now at production filenames. v1 backed up to
+`*.bak_v1_20260516_182946` (gitignored, on host only).
+
+```
+backend/xgb_model.json         => v3 (200 trees, 350 features, JSON format)
+backend/xgb_features.json      => v3 (feature_set='v3', 350 names + feature_weights)
+backend/xgb_calibration.pkl    => unchanged (legacy v1 bare-isotonic).
+                                   xgb_signal detects feature_set mismatch
+                                   and skips calibration (raw passthrough).
+```
+
+End-to-end inference verified against the live DB:
+```
+xgb_signal: legacy bare-isotonic calibrator found but booster feature_set=v3
+            skipping calibration
+BTC-USD xgb_prob: 0.5417
+ETH-USD xgb_prob: 0.5900
+SOL-USD xgb_prob: 0.5043
+```
+
+### Operator notes
+- DRY_RUN stays true. v3 generates signals; paper trades only.
+- Backend was offline during cutover (collateral of dev-loop process
+  cleanup); next launcher start picks up v3 automatically.
+- Calibrator REFIT deferred: the `fit_xgb_calibration --source cache`
+  path uses the v1-shaped [N,28,60] dataset cache which lacks the
+  meso/macro 168/336-bar windows v3 needs. Recalibrate from live
+  cnn_scans + signal_outcomes after ~48h of post-cutover paper trades.
+- Trained on 216 parquet pids, 60,439 samples in ~5 min (perf fix
+  #311h + JSON format fix #311i required to make this work end-to-end).
+
+### Rollback (~30 sec, no code change)
+```
+cd backend
+mv xgb_model.json xgb_model.json.bak_v3_now
+mv xgb_features.json xgb_features.json.bak_v3_now
+mv xgb_model.json.bak_v1_20260516_182946 xgb_model.json
+mv xgb_features.json.bak_v1_20260516_182946 xgb_features.json
+# restart launcher (or POST /api/cnn/model/reload if backend already up)
+```
+
+### Top-10 features by gain (v3)
+```
+ch4_pct_rank        11.5   (RSI rank — micro)
+ch1_slope           11.5   (volume slope — micro)
+ch0_slope            9.8   (price slope — micro)
+ch24_m168_slope      9.3   (IV/RV20 1-week slope — meso) <- NEW: meso pulling weight
+ch24_m168_mean       9.2   (IV/RV20 1-week mean — meso)  <- NEW
+ch2_min              9.1   (HL range floor — micro)
+ch1_min              8.9   (volume floor — micro)
+ch1_last             8.6   (latest volume — micro)
+ch15_m168_mean       8.2   (ADX 1-week mean — meso)      <- NEW: trend strength
+ch1_max              7.8   (volume ceiling — micro)
+```
+v1 top-10 was 100% intra-bar single-window stats; v3 mixes in three meso
+`_m168_` slots, the macro bias is taking effect.
+
+### Tasks completed
+- Plan tasks 1-7 (#311a-#311g)
+- Cutover (Task 8): trainer, calibration decision, artifact swap, smoke
+
+---
+
+## [Session 58.69j] — 2026-05-16 — tiered_history prod-schema fix (#311j)
+
+### Why
+End-to-end cutover smoke caught `sqlite3.OperationalError: no such column:
+start`. Production `candles` table has `start_time INTEGER` (not `start`).
+My test fixtures used `start` so the unit suite missed it.
+
+### What changed
+- **`backend/services/tiered_history.py:_read_sqlite`** — `PRAGMA
+  table_info(candles)` to detect available timestamp column; SQL becomes
+  `SELECT start_time AS start, ...` for prod schema. Returned dicts still
+  use `start` key for parity with parquet.
+- **`backend/tests/test_tiered_history.py`** — new
+  `test_source_live_reads_prod_schema_with_start_time_column` builds a
+  prod-shaped table and asserts the macro slice returns 336 bars with
+  `start` key. Locks in the schema-detection invariant.
+
+### Verification
+```
+backend && python -m pytest tests/test_tiered_history.py -v
+=> 14 passed (13 existing + 1 new)
+backend && python -c "from agents import xgb_signal; ..."  # smoke
+=> BTC/ETH/SOL all returned valid xgb_prob from live DB
+```
+
+---
+
 ## [Session 58.69i] — 2026-05-16 — train_xgb_v3 atomic-write format fix (#311i)
 
 ### Why

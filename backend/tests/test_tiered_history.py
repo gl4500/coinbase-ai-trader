@@ -161,6 +161,31 @@ class TestSourceDispatch:
         with pytest.raises(ValueError, match="unknown source"):
             fetch_tiered("BTC-USD", source="bogus", parquet_dir=str(parquet_dir))
 
+    def test_source_live_reads_prod_schema_with_start_time_column(self, tmp_path):
+        """Regression: production candles table uses 'start_time', not 'start'.
+        Caught during cutover smoke when xgb_signal v3 path raised
+        'no such column: start' on the live DB."""
+        from services.tiered_history import fetch_tiered
+        prod_db = tmp_path / "prod.db"
+        c = sqlite3.connect(prod_db)
+        c.execute("""
+            CREATE TABLE candles (
+                id INTEGER PRIMARY KEY, product_id TEXT, start_time INTEGER,
+                open REAL, high REAL, low REAL, close REAL, volume REAL
+            )""")
+        for i in range(400):
+            c.execute(
+                "INSERT INTO candles (product_id, start_time, open, high, low, close, volume)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("BTC-USD", 1_700_000_000 + i * 3600,
+                 100.0, 101.0, 99.0, 100.0 + i * 0.1, 1000.0),
+            )
+        c.commit(); c.close()
+        result = fetch_tiered("BTC-USD", source="live", db_path=str(prod_db))
+        assert len(result["macro"]) == 336
+        # Aliased: returned dict still uses 'start' key for parity with parquet
+        assert "start" in result["macro"][0]
+
 
 class TestNowTsFilter:
     def test_now_ts_excludes_future_bars(self, parquet_dir):

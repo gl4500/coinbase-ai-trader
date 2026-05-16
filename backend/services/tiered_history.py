@@ -50,20 +50,26 @@ def _read_parquet(pid: str, parquet_dir: str, now_ts: Optional[float]) -> List[D
 
 def _read_sqlite(pid: str, db_path: str, now_ts: Optional[float],
                  limit: int = 400) -> List[Dict]:
+    """Read candle rows from SQLite. Production schema has 'start_time'
+    (not 'start'); we alias to 'start' on the way out so callers and the
+    parquet reader produce identical dicts. Test fixtures may use either
+    schema — we detect via PRAGMA on first connect and fall back to 'start'."""
     if not os.path.exists(db_path):
         return []
     c = sqlite3.connect(db_path)
     c.row_factory = sqlite3.Row
     try:
+        cols = {row[1] for row in c.execute("PRAGMA table_info(candles)")}
+        ts_col = "start_time" if "start_time" in cols else "start"
         sql = (
-            "SELECT start, open, high, low, close, volume FROM candles "
-            "WHERE product_id = ?"
+            f"SELECT {ts_col} AS start, open, high, low, close, volume "
+            "FROM candles WHERE product_id = ?"
         )
         args: list = [pid]
         if now_ts is not None:
-            sql += " AND start < ?"
+            sql += f" AND {ts_col} < ?"
             args.append(now_ts)
-        sql += " ORDER BY start ASC"
+        sql += f" ORDER BY {ts_col} ASC"
         rows = c.execute(sql, args).fetchall()
     finally:
         c.close()
