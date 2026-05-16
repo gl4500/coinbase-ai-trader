@@ -5,6 +5,24 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.70d] — 2026-05-16 — MC chain ACTIVATED + sync docs (#311-mc-sync)
+
+### What changed
+- **`.env`** — added `MC_FILTERS=ci` + `MC_CI_K=1.0`. Backup at
+  `.env.bak_pre_mc_<ts>` (gitignored). Activation takes effect on next
+  backend restart (env vars read once at process start).
+- **`polymarket_app/CLAUDE.md`** — invariant #14 added: MC filter chain
+  is the sole MC-math touchpoint; cnn_agent has one hook; MC_FILTERS=""
+  is bit-for-bit pre-MC; telemetry columns + JSON; filter exceptions
+  caught; filter classes self-register on import.
+- **`memory/coinbase_trader_architecture.md`** (outside repo) — Session
+  58.70 entry covering the sidecar pattern, CIFilter MVP, telemetry
+  schema, .env activation, and the queued next filters.
+
+Documentation + .env-flip commit.
+
+---
+
 ## [Session 58.70c] — 2026-05-16 — MC wire-up + telemetry schema (#311-mc-wire)
 
 ### What changed
