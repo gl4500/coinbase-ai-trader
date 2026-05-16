@@ -152,13 +152,16 @@ def train_xgb_v3(
     Returns {"n_samples", "skipped_pids", "feature_set", "model_path",
              "features_path"}.
     """
+    import logging as _log
     import pandas as pd
     import shutil
+    import time as _time
 
-    from services.tiered_history import fetch_tiered
     from tools.xgb_features import (
         extract_features, _v3_feature_names, feature_weights_v3,
     )
+
+    _trainer_log = _log.getLogger("train_xgb_v3")
 
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -167,7 +170,8 @@ def train_xgb_v3(
     X_list: list = []
     y_list: list = []
 
-    for pid in pids:
+    _t_start = _time.time()
+    for pid_idx, pid in enumerate(pids):
         path = os.path.join(parquet_dir, f"{pid}.parquet")
         if not os.path.exists(path):
             skipped.append(pid)
@@ -177,17 +181,35 @@ def train_xgb_v3(
             skipped.append(pid)
             continue
 
+        # Single parquet read per pid; slice the in-memory record list per
+        # sample. 500x faster than calling tiered_history.fetch_tiered per
+        # sample, which would re-read the same parquet from disk every time.
+        records = df.to_dict("records")
         starts = df["start"].to_numpy()
         closes = df["close"].to_numpy()
+        n_samples_this_pid = 0
         for t in range(336, len(starts) - 4, sample_step):
-            now_ts = float(starts[t])
-            tiers = fetch_tiered(pid, source="parquet",
-                                 parquet_dir=parquet_dir,
-                                 now_ts=now_ts + 1)
+            tiers = {
+                "micro": records[t - 60:t],
+                "meso":  records[t - 168:t] if t >= 168 else [],
+                "macro": records[t - 336:t] if t >= 336 else [],
+            }
             feats, _ = extract_features(tiers, feature_set="v3")
             label = 1 if closes[t + 4] > closes[t] else 0
             X_list.append(feats[0])
             y_list.append(label)
+            n_samples_this_pid += 1
+        _trainer_log.info(
+            "v3 features built: pid=%s (%d/%d) samples=%d elapsed=%.1fs",
+            pid, pid_idx + 1, len(pids), n_samples_this_pid, _time.time() - _t_start,
+        )
+        # Also print so background nohup logs see progress (logging may be
+        # silenced when called as a module under nohup with empty config).
+        print(
+            f"v3 features built: pid={pid} ({pid_idx + 1}/{len(pids)}) "
+            f"samples={n_samples_this_pid} elapsed={_time.time() - _t_start:.1f}s",
+            flush=True,
+        )
 
     if not X_list:
         raise RuntimeError("no training samples produced — all pids skipped")

@@ -105,22 +105,35 @@ class TestV3Trainer:
         assert not (out / "xgb_model.json").exists()
         assert not (out / "xgb_features.json").exists()
 
-    def test_v3_uses_tiered_history(self, tmp_path, monkeypatch):
+    def test_v3_reads_each_parquet_once_per_pid(self, tmp_path, monkeypatch):
+        """Perf invariant: train_xgb_v3 reads each pid's parquet exactly once,
+        regardless of how many rolling samples it produces. Previous impl
+        called fetch_tiered per sample, which re-read the parquet from disk
+        every time (~500x slowdown at production scale)."""
         from tools.train_xgb import train_xgb_v3
-        from services import tiered_history
+        import pandas as _pd
+
         pdir = tmp_path / "history"; pdir.mkdir()
+        # 500 bars × 2 pids = ~14 samples per pid at sample_step=24 starting at idx=336
         _write_parquet(pdir, "BTC-USD", 500)
+        _write_parquet(pdir, "ETH-USD", 500)
         out = tmp_path / "out"; out.mkdir()
 
         calls = {"count": 0}
-        orig = tiered_history.fetch_tiered
+        orig = _pd.read_parquet
 
-        def spy(pid, **kw):
+        def spy(path, *a, **kw):
             calls["count"] += 1
-            return orig(pid, **kw)
+            return orig(path, *a, **kw)
 
-        monkeypatch.setattr("services.tiered_history.fetch_tiered", spy)
+        monkeypatch.setattr("pandas.read_parquet", spy)
 
-        train_xgb_v3(["BTC-USD"], str(pdir), str(out),
+        train_xgb_v3(["BTC-USD", "ETH-USD"], str(pdir), str(out),
                      n_estimators=5, learning_rate=0.3)
-        assert calls["count"] >= 1
+        # 2 pids => exactly 2 parquet reads (one short-history check would
+        # be a separate read, but both pids have 500 bars so no extra reads).
+        # Allow up to 2 per pid for any incidental sort/inspection paths.
+        assert calls["count"] <= 4, (
+            f"read_parquet called {calls['count']} times for 2 pids — "
+            f"expected at most 4. Per-sample reads regression."
+        )

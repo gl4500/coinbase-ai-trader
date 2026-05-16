@@ -5,6 +5,38 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69h] — 2026-05-16 — train_xgb_v3 perf fix: cache parquet per pid (#311h)
+
+### Why
+First production training run with 216 parquet files hung after 27 min CPU
+without producing artifacts. Root cause: the inner sample loop called
+`services.tiered_history.fetch_tiered(source="parquet", parquet_dir=...)`
+per sample, and `fetch_tiered` does `pd.read_parquet()` on every call. At
+production scale (~500 samples per pid × 216 pids = ~108k samples) this
+re-reads the same files 500x each, blowing wall time to an estimated ~70
+minutes. Caught when the live cutover trainer failed to land artifacts.
+
+### What changed
+- **`backend/tools/train_xgb.py:train_xgb_v3`** — read each pid's parquet
+  exactly once via `pd.read_parquet(...).to_dict("records")`, then slice
+  the in-memory record list per sample. Removes the import of
+  `services.tiered_history.fetch_tiered` from the training hot path
+  (it's still used by `xgb_signal.xgb_prob` at inference — once per scan,
+  not per training sample). Added per-pid progress logging (logging +
+  flushed print so background nohup tails see progress).
+- **`backend/tests/test_train_xgb_v3.py`** — replaced
+  `test_v3_uses_tiered_history` with `test_v3_reads_each_parquet_once_per_pid`
+  that asserts `pandas.read_parquet` is called at most 2× per pid. Locks
+  in the perf invariant.
+
+### Verification
+```
+backend && python -m pytest tests/test_train_xgb_v3.py -v
+=> 5 passed
+```
+
+---
+
 ## [Session 58.69g] — 2026-05-16 — CLAUDE.md invariant for v3 + memory sync (#311g)
 
 ### What changed
