@@ -5,6 +5,33 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69i] — 2026-05-16 — train_xgb_v3 atomic-write format fix (#311i)
+
+### Why
+Second production training run (perf fix from #311h landed) wrote
+`xgb_model.json` as **UBJSON binary** instead of JSON. xgboost picks
+serialization format from the file's LAST extension; my tmp name
+`xgb_model.json.tmp` had `.tmp` last so xgboost wrote UBJSON, the
+rename to `.json` left binary content, and `load_model("...json")`
+rejected it with a JSON-parse error. Smoke test caught it after the
+trainer finished (60439 samples, 126 s, ~5 min).
+
+### What changed
+- **`backend/tools/train_xgb.py:train_xgb_v3`** — tmp filenames now keep
+  `.json` last: `xgb_model.tmp.json` / `xgb_features.tmp.json`. Atomic
+  rename to final name preserves format.
+- **`backend/tests/test_train_xgb_v3.py`** — new
+  `test_v3_saved_model_loads_back_as_json` calls `xgb.Booster.load_model`
+  on the saved artifact. Locks in the format invariant.
+
+### Verification
+```
+backend && python -m pytest tests/test_train_xgb_v3.py -v
+=> 6 passed
+```
+
+---
+
 ## [Session 58.69h] — 2026-05-16 — train_xgb_v3 perf fix: cache parquet per pid (#311h)
 
 ### Why

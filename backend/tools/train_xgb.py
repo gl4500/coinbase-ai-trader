@@ -237,8 +237,12 @@ def train_xgb_v3(
     }
     booster = xgb.train(params, dtrain, num_boost_round=n_estimators)
 
-    tmp_model = out_path / "xgb_model.json.tmp"
-    tmp_feats = out_path / "xgb_features.json.tmp"
+    # Temp filenames keep ".json" as the LAST extension because xgboost picks
+    # serialization format from the trailing extension. "xgb_model.json.tmp"
+    # writes UBJSON (binary) and then the rename to ".json" leaves a binary
+    # file that load_model parses as JSON and rejects.
+    tmp_model = out_path / "xgb_model.tmp.json"
+    tmp_feats = out_path / "xgb_features.tmp.json"
     booster.save_model(str(tmp_model))
     with open(tmp_feats, "w") as f:
         json.dump({

@@ -105,6 +105,26 @@ class TestV3Trainer:
         assert not (out / "xgb_model.json").exists()
         assert not (out / "xgb_features.json").exists()
 
+    def test_v3_saved_model_loads_back_as_json(self, tmp_path):
+        """Regression: xgboost picks serialization format from the LAST file
+        extension. A temp name of 'xgb_model.json.tmp' writes UBJSON (binary)
+        and the rename to '.json' leaves a binary file that load_model
+        rejects. Atomic-write tmp names must keep '.json' last
+        ('xgb_model.tmp.json')."""
+        import xgboost as xgb
+        from tools.train_xgb import train_xgb_v3
+
+        pdir = tmp_path / "history"; pdir.mkdir()
+        _write_parquet(pdir, "BTC-USD", 500)
+        out = tmp_path / "out"; out.mkdir()
+
+        train_xgb_v3(["BTC-USD"], str(pdir), str(out),
+                     n_estimators=3, learning_rate=0.3)
+
+        b = xgb.Booster()
+        b.load_model(str(out / "xgb_model.json"))  # must not raise
+        assert b.num_boosted_rounds() == 3
+
     def test_v3_reads_each_parquet_once_per_pid(self, tmp_path, monkeypatch):
         """Perf invariant: train_xgb_v3 reads each pid's parquet exactly once,
         regardless of how many rolling samples it produces. Previous impl
