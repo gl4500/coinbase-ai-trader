@@ -5,6 +5,29 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69f] — 2026-05-16 — Calibrator dict-shape pickle for v3 (#311f)
+
+### What changed
+- **`backend/tools/fit_xgb_calibration.py`** — new helpers
+  `_save_calibrator(calibrator, out_path, feature_set)` and
+  `_detect_calibration_target_feature_set()`. `_detect_feature_set`
+  now recognises v3 via `_mWWW_` infix. Pickled output is a dict
+  `{"calibrator", "feature_set"}` so xgb_signal can detect a v1-fit
+  calibrator on a v3 booster and skip calibration (raw passthrough)
+  instead of mapping through the wrong distribution. Legacy bare-isotonic
+  still loadable by xgb_signal (treated as v1).
+- **`backend/tests/test_fit_xgb_calibration.py`** — 2 new tests under
+  `TestV3CalibrationPickle`. Existing tests' `pickle.load` sites
+  updated to unwrap the new dict shape (`_loaded["calibrator"]`).
+
+### Verification
+```
+backend && python -m pytest tests/test_fit_xgb_calibration.py -v
+=> 9 passed (7 existing + 2 new)
+```
+
+---
+
 ## [Session 58.69e] — 2026-05-16 — XGB v3 trainer mode (#311e)
 
 ### What changed

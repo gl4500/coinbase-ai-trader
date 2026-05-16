@@ -78,10 +78,45 @@ def _load_shadow_pairs(db_path: str, shadow_start: str) -> tuple[np.ndarray, np.
 
 
 def _detect_feature_set(feature_names) -> str:
-    """v1/v2 detection by name prefix. The previous heuristic
-    (len > 270 -> v2) misfires at N_CHANNELS=28 because v1 itself is
-    280 features."""
-    return "v2" if any(str(n).startswith("xt_") for n in feature_names) else "v1"
+    """v1/v2/v3 detection by name infix/prefix. v3 introduces the _mWWW_
+    infix (m060/m168/m336); v2 introduces the xt_ prefix; v1 is the default.
+    (#311f)"""
+    names = [str(n) for n in feature_names]
+    if any(("_m060_" in n) or ("_m168_" in n) or ("_m336_" in n) for n in names):
+        return "v3"
+    if any(n.startswith("xt_") for n in names):
+        return "v2"
+    return "v1"
+
+
+def _save_calibrator(calibrator, out_path: str, feature_set: str = "v1") -> None:
+    """Pickle calibrator with feature_set metadata for v3-aware loading. (#311f)
+
+    Writes dict shape {"calibrator", "feature_set"} so xgb_signal._try_load
+    can detect mismatches between calibrator and booster feature_sets and
+    skip calibration when they don't agree (avoids v1-fit-on-v3 mapping).
+    """
+    with open(out_path, "wb") as f:
+        pickle.dump({"calibrator": calibrator, "feature_set": feature_set}, f)
+
+
+def _detect_calibration_target_feature_set() -> str:
+    """Inspect backend/xgb_features.json to decide which feature_set tag to
+    write into the calibrator pickle. Defaults to 'v1' if metadata missing
+    or unreadable. (#311f)"""
+    import json
+    try:
+        meta = json.load(open(_DEFAULT_FEATURES_PATH))
+        if isinstance(meta, dict):
+            tag = meta.get("feature_set")
+            if tag:
+                return str(tag)
+            names = meta.get("feature_names")
+            if names:
+                return _detect_feature_set(names)
+    except Exception:
+        pass
+    return "v1"
 
 
 def _load_cache_pairs(
@@ -232,9 +267,9 @@ def fit_calibration(
     for r, c in zip(grid, grid_cal):
         log.info("  %.2f -> %.4f", r, c)
 
-    with open(out_path, "wb") as f:
-        pickle.dump(iso, f)
-    log.info("saved isotonic calibrator -> %s", out_path)
+    feature_set = _detect_calibration_target_feature_set()
+    _save_calibrator(iso, out_path, feature_set=feature_set)
+    log.info("saved isotonic calibrator (feature_set=%s) -> %s", feature_set, out_path)
 
     return {
         "n_samples": n,

@@ -74,7 +74,7 @@ class TestCacheSourceCalibratorFit:
         )
 
         with open(out_path, "rb") as f:
-            iso = pickle.load(f)
+            _loaded = pickle.load(f); iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
         grid = np.linspace(0.4, 0.6, 11)
         cal = iso.transform(grid)
         n_unique = len(np.unique(np.round(cal, 4)))
@@ -103,7 +103,7 @@ class TestCacheSourceCalibratorFit:
         )
 
         with open(out_path, "rb") as f:
-            iso = pickle.load(f)
+            _loaded = pickle.load(f); iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
         grid = np.linspace(0.4, 0.6, 50)
         cal = iso.transform(grid)
         diffs = np.diff(cal)
@@ -132,7 +132,7 @@ class TestCacheSourceCalibratorFit:
         )
 
         with open(out_path, "rb") as f:
-            iso = pickle.load(f)
+            _loaded = pickle.load(f); iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
         cal = iso.transform(raw)
 
         def _auc(p, y):
@@ -186,3 +186,30 @@ class TestFeatureSetDetection:
                               "pct_rank", "delta_5", "delta_10", "delta_30")]
         v2_addons = ["xt_vol_regime_ratio", "xt_vol_of_vol", "xt_ret_full"]
         assert _detect_feature_set(v1_names + v2_addons) == "v2"
+
+
+# ── v3 calibrator dict-pickle shape (added 2026-05-16, #311f) ─────────────
+
+
+class TestV3CalibrationPickle:
+    def test_pickle_writes_dict_with_feature_set(self, tmp_path):
+        import pickle
+        from sklearn.isotonic import IsotonicRegression
+        import numpy as np
+        from tools.fit_xgb_calibration import _save_calibrator
+
+        out = tmp_path / "xgb_calibration.pkl"
+        iso = IsotonicRegression(out_of_bounds="clip").fit(
+            np.array([0.2, 0.5, 0.8]), np.array([0.1, 0.5, 0.9]),
+        )
+        _save_calibrator(iso, str(out), feature_set="v3")
+        loaded = pickle.load(open(out, "rb"))
+        assert isinstance(loaded, dict)
+        assert loaded["feature_set"] == "v3"
+        assert "calibrator" in loaded
+
+    def test_detect_feature_set_recognises_v3(self):
+        from tools.fit_xgb_calibration import _detect_feature_set
+        v3_names = ["ch0_last", "ch15_m060_mean", "ch15_m168_slope",
+                    "ch20_m336_pct_rank"]
+        assert _detect_feature_set(v3_names) == "v3"
