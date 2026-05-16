@@ -5,6 +5,31 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69e] — 2026-05-16 — XGB v3 trainer mode (#311e)
+
+### What changed
+- **`backend/tools/train_xgb.py`** — new `train_xgb_v3(pids, parquet_dir,
+  out_dir, sample_step=24, n_estimators=200, ...)`. Pulls per-tier history
+  via `tiered_history.fetch_tiered(source='parquet')`, rolls samples,
+  labels `1 if close[t+4] > close[t]`. `feature_weights` set on DMatrix
+  via `set_info` (the correct xgboost API; `xgb.train` doesn't accept it
+  as a kwarg). `colsample_bytree=0.8` so the per-feature bias actually
+  takes effect. Atomic write (tmp + rename). Skips pids with <336 parquet
+  bars.
+- **`backend/tools/train_xgb_prod.py`** — `main_v3()` CLI entry; auto-
+  discovers pids from parquet dir. Invocable via
+  `python -m tools.train_xgb_prod --feature-set v3`.
+- **`backend/tests/test_train_xgb_v3.py`** (NEW) — 5 tests (metadata,
+  feature_weights wiring, short-history skip, atomic write, tiered_history use).
+
+### Verification
+```
+backend && python -m pytest tests/test_train_xgb_v3.py -v
+=> 5 passed
+```
+
+---
+
 ## [Session 58.69d] — 2026-05-16 — cnn_agent pid plumbing for XGB v3 (#311d)
 
 ### What changed

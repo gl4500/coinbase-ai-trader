@@ -128,3 +128,110 @@ def train_xgb(
         "model_path": model_path,
         "features_path": features_path,
     }
+
+
+def train_xgb_v3(
+    pids: Sequence[str],
+    parquet_dir: str,
+    out_dir: Union[str, os.PathLike],
+    sample_step: int = 24,
+    n_estimators: int = 200,
+    learning_rate: float = 0.05,
+    seed: int = 0,
+) -> dict:
+    """Train XGBoost booster with feature_set='v3' (mixed-lookback). (#311e)
+
+    For each pid:
+      - Loads parquet via services.tiered_history.fetch_tiered(source='parquet').
+      - Skips pids with < 336 bars (macro window unsatisfiable).
+      - Rolls one sample every `sample_step` bars; each sample is now_ts-truncated
+        so future bars stay invisible.
+      - Builds per-tier slices, extracts v3 features, label = 1 if close[t+4] > close[t].
+
+    Writes xgb_model.json + xgb_features.json atomically (tmp + rename).
+    Returns {"n_samples", "skipped_pids", "feature_set", "model_path",
+             "features_path"}.
+    """
+    import pandas as pd
+    import shutil
+
+    from services.tiered_history import fetch_tiered
+    from tools.xgb_features import (
+        extract_features, _v3_feature_names, feature_weights_v3,
+    )
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    skipped: list = []
+    X_list: list = []
+    y_list: list = []
+
+    for pid in pids:
+        path = os.path.join(parquet_dir, f"{pid}.parquet")
+        if not os.path.exists(path):
+            skipped.append(pid)
+            continue
+        df = pd.read_parquet(path).sort_values("start")
+        if len(df) < 336:
+            skipped.append(pid)
+            continue
+
+        starts = df["start"].to_numpy()
+        closes = df["close"].to_numpy()
+        for t in range(336, len(starts) - 4, sample_step):
+            now_ts = float(starts[t])
+            tiers = fetch_tiered(pid, source="parquet",
+                                 parquet_dir=parquet_dir,
+                                 now_ts=now_ts + 1)
+            feats, _ = extract_features(tiers, feature_set="v3")
+            label = 1 if closes[t + 4] > closes[t] else 0
+            X_list.append(feats[0])
+            y_list.append(label)
+
+    if not X_list:
+        raise RuntimeError("no training samples produced — all pids skipped")
+
+    X = np.vstack(X_list)
+    y = np.array(y_list, dtype=np.float32)
+    names = _v3_feature_names()
+    weights = feature_weights_v3()
+
+    dtrain = xgb.DMatrix(X, label=y, feature_names=names)
+    # feature_weights bias XGBoost's column subsampling toward macro/meso tiers
+    # (set on DMatrix per xgboost API; xgb.train does NOT accept it directly).
+    dtrain.set_info(feature_weights=weights)
+
+    params = {
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "learning_rate": learning_rate,
+        "seed": seed,
+        "verbosity": 0,
+        "max_depth": 4,
+        "min_child_weight": 1,
+        "subsample": 0.7,
+        "colsample_bytree": 0.8,  # required for feature_weights to take effect
+    }
+    booster = xgb.train(params, dtrain, num_boost_round=n_estimators)
+
+    tmp_model = out_path / "xgb_model.json.tmp"
+    tmp_feats = out_path / "xgb_features.json.tmp"
+    booster.save_model(str(tmp_model))
+    with open(tmp_feats, "w") as f:
+        json.dump({
+            "feature_names": names,
+            "feature_set": "v3",
+            "best_params": {"max_depth": 4, "min_child_weight": 1, "subsample": 0.7},
+            "feature_weights": weights.tolist(),
+        }, f)
+    shutil.move(str(tmp_model), str(out_path / "xgb_model.json"))
+    shutil.move(str(tmp_feats), str(out_path / "xgb_features.json"))
+
+    return {
+        "n_samples": int(X.shape[0]),
+        "skipped_pids": skipped,
+        "feature_set": "v3",
+        "model_path": str(out_path / "xgb_model.json"),
+        "features_path": str(out_path / "xgb_features.json"),
+    }

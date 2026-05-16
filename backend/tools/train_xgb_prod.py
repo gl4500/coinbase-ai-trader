@@ -114,5 +114,47 @@ def main():
     print(f"  elapsed: {time.time() - t0:.1f}s")
 
 
+def main_v3() -> None:
+    """CLI entry for the v3 mixed-lookback trainer (#311e).
+
+    Auto-discovers pids from backend/data/history/*.parquet.
+    Delegates to tools.train_xgb.train_xgb_v3.
+    """
+    import argparse
+    import json as _json
+    from pathlib import Path as _Path
+    from tools.train_xgb import train_xgb_v3
+
+    p = argparse.ArgumentParser()
+    p.add_argument("--parquet-dir", default="backend/data/history")
+    p.add_argument("--out-dir", default="backend")
+    p.add_argument(
+        "--pids", nargs="*", default=None,
+        help="restrict to these pids; defaults to all parquet files",
+    )
+    p.add_argument("--n-estimators", type=int, default=200)
+    p.add_argument("--learning-rate", type=float, default=0.05)
+    args = p.parse_args()
+
+    if args.pids is None:
+        pids = [f.stem for f in _Path(args.parquet_dir).glob("*.parquet")
+                if not f.stem.startswith("__")]
+    else:
+        pids = args.pids
+
+    result = train_xgb_v3(
+        pids, args.parquet_dir, args.out_dir,
+        n_estimators=args.n_estimators, learning_rate=args.learning_rate,
+    )
+    print(_json.dumps(result, indent=2))
+
+
 if __name__ == "__main__":
-    main()
+    # Route to v3 trainer if `--feature-set v3` is in argv, else legacy
+    if len(sys.argv) > 1 and "--feature-set" in sys.argv and "v3" in sys.argv:
+        # consume the flag pair
+        i = sys.argv.index("--feature-set")
+        del sys.argv[i:i + 2]
+        main_v3()
+    else:
+        main()
