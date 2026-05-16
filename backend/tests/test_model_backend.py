@@ -135,7 +135,7 @@ class TestCnnProbBranching:
         if "agents.xgb_signal" in sys.modules:
             del sys.modules["agents.xgb_signal"]
         import agents.xgb_signal as xs
-        monkeypatch.setattr(xs, "xgb_prob", lambda _channels: 0.73)
+        monkeypatch.setattr(xs, "xgb_prob", lambda _channels, pid=None: 0.73)
 
         # Re-import cnn_agent AFTER patching xgb_signal so the agent's
         # `from agents.xgb_signal import xgb_prob` (if it does that) sees
@@ -235,3 +235,51 @@ class TestAutoTrainGate:
         )
         assert triggered is False
         assert called["fn"] is False
+
+
+# ── pid plumbing for XGB v3 (added 2026-05-16, #311d) ─────────────────────
+
+
+class TestPidPlumbing:
+    def test_cnn_prob_passes_pid_to_xgb_signal_under_xgb_backend(self, monkeypatch):
+        """Under MODEL_BACKEND=xgb, _cnn_prob must forward pid= to xgb_signal.xgb_prob."""
+        import config as cfg
+        monkeypatch.setattr(cfg.config, "model_backend", "xgb")
+
+        from agents import cnn_agent, xgb_signal
+        called = {}
+
+        def fake_prob(channels, pid=None):
+            called["pid"] = pid
+            return 0.7
+
+        monkeypatch.setattr(xgb_signal, "xgb_prob", fake_prob)
+
+        agent = cnn_agent.CoinbaseCNNAgent.__new__(cnn_agent.CoinbaseCNNAgent)
+        import numpy as np
+        channels = np.zeros((28, 60), dtype=np.float64).tolist()
+        result = agent._cnn_prob(channels, pid="BTC-USD")
+        assert result == 0.7
+        assert called["pid"] == "BTC-USD"
+
+    def test_cnn_prob_no_pid_kwarg_under_cnn_backend(self, monkeypatch):
+        """Under MODEL_BACKEND=cnn, xgb_signal must NOT be called."""
+        import config as cfg
+        monkeypatch.setattr(cfg.config, "model_backend", "cnn")
+
+        from agents import cnn_agent, xgb_signal
+        called = {"hit": False}
+
+        def fake_prob(channels, pid=None):
+            called["hit"] = True
+            return 0.5
+
+        monkeypatch.setattr(xgb_signal, "xgb_prob", fake_prob)
+
+        agent = cnn_agent.CoinbaseCNNAgent.__new__(cnn_agent.CoinbaseCNNAgent)
+        agent.model = None  # forces _linear fallback
+        agent.fb = None
+        import numpy as np
+        channels = np.zeros((28, 60), dtype=np.float64).tolist()
+        agent._cnn_prob(channels, pid="BTC-USD")
+        assert called["hit"] is False

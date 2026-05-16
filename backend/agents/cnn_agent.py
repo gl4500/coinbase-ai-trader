@@ -1801,13 +1801,13 @@ class CoinbaseCNNAgent:
         except Exception:
             pass
 
-    def _cnn_prob(self, channels) -> float:
+    def _cnn_prob(self, channels, pid: Optional[str] = None) -> float:
         # Align inference input with the training distribution — zero out the
         # channels that were constant-zero at training (P3b).
         channels = _mask_training_constant_channels(channels)
         if config.model_backend == "xgb":
             from agents import xgb_signal
-            return xgb_signal.xgb_prob(channels)
+            return xgb_signal.xgb_prob(channels, pid=pid)
         if _TORCH and self.model:
             return self.model.predict(self.fb.to_tensor(channels))
         return self._linear(channels)
@@ -2082,7 +2082,7 @@ class CoinbaseCNNAgent:
                 ls_sentiment=ls_sentiment,
                 closes_ext=closes,
             )
-            cnn_prob = self._cnn_prob(channels)
+            cnn_prob = self._cnn_prob(channels, pid=pid)
 
             # Shadow XGB probability — log every scan regardless of MODEL_BACKEND
             # so we can compare CNN vs XGB calibration on identical inputs (#181).
@@ -2092,7 +2092,8 @@ class CoinbaseCNNAgent:
                 try:
                     from agents import xgb_signal as _xgb
                     xgb_shadow = _xgb.xgb_prob(
-                        _mask_training_constant_channels(channels)
+                        _mask_training_constant_channels(channels),
+                        pid=pid,
                     )
                 except Exception:
                     xgb_shadow = None

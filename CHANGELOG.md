@@ -5,6 +5,26 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69d] — 2026-05-16 — cnn_agent pid plumbing for XGB v3 (#311d)
+
+### What changed
+- **`backend/agents/cnn_agent.py`** — `_cnn_prob(channels, pid=None)`
+  forwards `pid` to `xgb_signal.xgb_prob`. The `generate_signal` call site
+  and the shadow-XGB call site both pass `pid=pid` (pid already in scope
+  from line 1948). Required by v3 booster's tiered_history lookup.
+  Backward-compatible: pid is optional; v1/v2 ignore it.
+- **`backend/tests/test_model_backend.py`** — 2 new tests under
+  `TestPidPlumbing`. Existing `test_xgb_backend_calls_xgb_prob` lambda
+  signature updated to accept `pid=` kwarg.
+
+### Verification
+```
+backend && python -m pytest tests/test_model_backend.py -v
+=> 13 passed (11 existing + 2 new)
+```
+
+---
+
 ## [Session 58.69c] — 2026-05-16 — XGB v3 signal routing + calibrator metadata (#311c)
 
 ### What changed
