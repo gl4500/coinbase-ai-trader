@@ -5,6 +5,27 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.70b] — 2026-05-16 — MC CIFilter implementation (#311-mc-ci)
+
+### What changed
+- **`backend/agents/mc/ci_filter.py`** (NEW) — entry confidence-interval
+  filter. Computes per-tree cumulative trajectory stdev across the v3
+  booster (200 trees), gates BUY on `(point - K*stdev) > cnn_buy_threshold`.
+  K=1.0 default via `MC_CI_K` env. Skips gracefully (no decision change)
+  for non-v3 booster, missing pid, missing booster, or predict failure;
+  every skip records a reason in telemetry. Self-registers with
+  `agents.mc.registry._FILTER_CLASSES` on import.
+- **`backend/tests/agents/mc/test_ci_filter.py`** (NEW) — 6 tests
+  covering keep/block paths and 4 skip-reason cases.
+
+### Verification
+```
+backend && python -m pytest tests/agents/mc/ -v
+=> 14 passed (8 registry + 6 ci_filter)
+```
+
+---
+
 ## [Session 58.70a] — 2026-05-16 — MC package scaffolding + registry (#311-mc-a)
 
 ### What changed
