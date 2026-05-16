@@ -5,6 +5,25 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.70a] — 2026-05-16 — MC package scaffolding + registry (#311-mc-a)
+
+### What changed
+- **`backend/agents/mc/`** (NEW package) — `__init__.py`, `base.py` (BuyFilter
+  ABC), `registry.py` (`apply_buy_filters` chain dispatch). Reads `MC_FILTERS`
+  env var; unknown names warn + skip; filter exceptions warn + skip; default
+  empty MC_FILTERS = identity passthrough.
+- **`backend/tests/agents/mc/test_registry.py`** (NEW) — 8 tests covering
+  empty/unset env, dispatch, unknown filter, chain order, side change,
+  exception isolation, non-BUY passthrough.
+
+### Verification
+```
+backend && python -m pytest tests/agents/mc/test_registry.py -v
+=> 8 passed
+```
+
+---
+
 ## [Session 58.69-cut] — 2026-05-16 — XGB v3 LIVE CUTOVER (#311-cut)
 
 ### What changed
