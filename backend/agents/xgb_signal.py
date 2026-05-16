@@ -76,7 +76,12 @@ def _try_load() -> bool:
             booster.load_model(_MODEL_PATH)
             _booster = booster
             _feature_names = names
-            _feature_set = "v2" if any(str(n).startswith("xt_") for n in names) else "v1"
+            if any(("_m060_" in str(n)) or ("_m168_" in str(n)) or ("_m336_" in str(n)) for n in names):
+                _feature_set = "v3"
+            elif any(str(n).startswith("xt_") for n in names):
+                _feature_set = "v2"
+            else:
+                _feature_set = "v1"
             _load_succeeded = True
             logger.info(
                 "xgb_signal: loaded booster (%d features, set=%s)",
@@ -85,11 +90,36 @@ def _try_load() -> bool:
             if os.path.exists(_CALIBRATION_PATH):
                 try:
                     with open(_CALIBRATION_PATH, "rb") as f:
-                        _calibration = pickle.load(f)
-                    logger.info(
-                        "xgb_signal: loaded isotonic calibrator from %s",
-                        _CALIBRATION_PATH,
-                    )
+                        obj = pickle.load(f)
+                    if isinstance(obj, dict) and "calibrator" in obj:
+                        cal_set = obj.get("feature_set")
+                        if cal_set is not None and cal_set != _feature_set:
+                            logger.warning(
+                                "xgb_signal: calibrator feature_set=%s differs from "
+                                "booster feature_set=%s — skipping calibration",
+                                cal_set, _feature_set,
+                            )
+                            _calibration = None
+                        else:
+                            _calibration = obj["calibrator"]
+                            logger.info(
+                                "xgb_signal: loaded isotonic calibrator (feature_set=%s)",
+                                cal_set,
+                            )
+                    else:
+                        # Bare isotonic (legacy v1) — accept only if booster is v1
+                        if _feature_set == "v1":
+                            _calibration = obj
+                            logger.info(
+                                "xgb_signal: loaded legacy bare-isotonic calibrator (assumed v1)",
+                            )
+                        else:
+                            logger.warning(
+                                "xgb_signal: legacy bare-isotonic calibrator found but "
+                                "booster feature_set=%s — skipping calibration",
+                                _feature_set,
+                            )
+                            _calibration = None
                 except Exception as exc:
                     logger.exception(
                         "xgb_signal: failed to load calibrator (raw passthrough): %s",
@@ -127,15 +157,41 @@ def force_reload() -> bool:
     return _try_load()
 
 
-def xgb_prob(channels: ChannelsLike) -> float:
+def xgb_prob(channels: ChannelsLike, pid: Optional[str] = None) -> float:
     """XGBoost probability of upward target, in [0.01, 0.99].
 
     Returns 0.5 if the model artifacts are missing or fail to load — the
     caller (`_cnn_prob` branch on `config.model_backend`) should treat
     that as "no signal" rather than error.
+
+    pid: required when feature_set == "v3" so tiered_history can be fetched.
+         Ignored for v1/v2. When None under v3, returns neutral with warning.
     """
     if not _try_load():
         return _NEUTRAL
+    if _feature_set == "v3":
+        if pid is None:
+            logger.warning(
+                "xgb_signal: v3 booster requires pid, got None — returning neutral",
+            )
+            return _NEUTRAL
+        try:
+            import xgboost as xgb
+            from services.tiered_history import fetch_tiered
+            from tools.xgb_features import extract_features as _extract
+
+            tiers = fetch_tiered(pid, source="live")
+            features, _ = _extract(tiers, feature_set="v3")
+            dmat = xgb.DMatrix(features, feature_names=_feature_names)
+            raw = float(_booster.predict(dmat)[0])
+            if _calibration is not None:
+                raw = float(_calibration.transform(np.asarray([raw]))[0])
+            return float(np.clip(raw, 0.01, 0.99))
+        except Exception as exc:
+            logger.exception(
+                "xgb_signal.xgb_prob v3 path failed, returning neutral: %s", exc,
+            )
+            return _NEUTRAL
     try:
         import xgboost as xgb
         from tools.xgb_features import extract_features

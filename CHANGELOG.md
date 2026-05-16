@@ -5,6 +5,26 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69c] — 2026-05-16 — XGB v3 signal routing + calibrator metadata (#311c)
+
+### What changed
+- **`backend/agents/xgb_signal.py`** — `_try_load` auto-detects v3 via
+  `_m060_/_m168_/_m336_` infix in feature_names. `xgb_prob` accepts
+  optional `pid` kwarg; v3 path calls `services.tiered_history.fetch_tiered`
+  and `tools.xgb_features.extract_features(feature_set='v3')`. Calibrator
+  load handles both legacy bare-isotonic (v1) and new dict-shape
+  `{"calibrator","feature_set"}` (v3); mismatched feature_set skips calibration.
+- **`backend/tests/test_xgb_signal.py`** — 6 new tests under `TestV3Routing`
+  + module-level helpers `_train_tiny_v3` and `_fake_v3_tiers`.
+
+### Verification
+```
+backend && python -m pytest tests/test_xgb_signal.py -v
+=> 21 passed (15 existing + 6 new)
+```
+
+---
+
 ## [Session 58.69b] — 2026-05-16 — XGB v3 tiered extractor + feature_weights (#311b)
 
 ### What changed

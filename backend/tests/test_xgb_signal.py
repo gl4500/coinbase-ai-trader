@@ -345,3 +345,139 @@ class TestForceReload:
         ok = fresh_xgb_module.force_reload()
         assert ok is False
         assert fresh_xgb_module.xgb_prob(_synthetic_channels()) == 0.5
+
+
+# ── v3 routing tests (added 2026-05-16, #311c) ─────────────────────────────
+
+
+def _train_tiny_v3(out_dir):
+    """Train a tiny v3 booster on synthetic tier inputs."""
+    import xgboost as xgb
+    from tools.xgb_features import _v3_feature_names, _extract_v3
+
+    rng = np.random.default_rng(0)
+    n = 64
+    feats = np.zeros((n, 350), dtype=np.float64)
+    for i in range(n):
+        t = {
+            "micro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
+                       "close": float(rng.standard_normal()),
+                       "volume": 1.0} for j in range(60)],
+            "meso":  [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
+                       "close": float(rng.standard_normal()),
+                       "volume": 1.0} for j in range(168)],
+            "macro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
+                       "close": float(rng.standard_normal()),
+                       "volume": 1.0} for j in range(336)],
+        }
+        f, _ = _extract_v3(t)
+        feats[i] = f[0]
+    labels = (rng.standard_normal(n) > 0).astype(np.int64)
+    names = _v3_feature_names()
+    dtrain = xgb.DMatrix(feats, label=labels, feature_names=names)
+    booster = xgb.train(
+        {"objective": "binary:logistic", "max_depth": 2, "eta": 0.3, "verbosity": 0},
+        dtrain, num_boost_round=5,
+    )
+    model_path = os.path.join(out_dir, "xgb_model.json")
+    features_path = os.path.join(out_dir, "xgb_features.json")
+    booster.save_model(model_path)
+    with open(features_path, "w") as f:
+        json.dump({"feature_names": names, "feature_set": "v3", "best_params": {}}, f)
+    return model_path, features_path
+
+
+def _fake_v3_tiers():
+    return {
+        "micro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
+                   "close": 1.0 + j * 0.01, "volume": 1.0} for j in range(60)],
+        "meso":  [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
+                   "close": 1.0 + j * 0.01, "volume": 1.0} for j in range(168)],
+        "macro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
+                   "close": 1.0 + j * 0.01, "volume": 1.0} for j in range(336)],
+    }
+
+
+class TestV3Routing:
+    def test_v3_booster_auto_detected_from_feature_names(self, tmp_path, monkeypatch, fresh_xgb_module):
+        _train_tiny_v3(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "nope.pkl"))
+        assert fresh_xgb_module._try_load() is True
+        assert fresh_xgb_module._feature_set == "v3"
+
+    def test_v1_booster_still_detected_correctly(self, tmp_path, monkeypatch, fresh_xgb_module):
+        _train_tiny_xgb(str(tmp_path), feature_set="v1")
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "nope.pkl"))
+        assert fresh_xgb_module._try_load() is True
+        assert fresh_xgb_module._feature_set == "v1"
+
+    def test_v3_xgb_prob_calls_tiered_history_with_pid(self, tmp_path, monkeypatch, fresh_xgb_module):
+        _train_tiny_v3(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "nope.pkl"))
+
+        called = {}
+        def fake_fetch(pid, **kwargs):
+            called["pid"] = pid
+            called["kwargs"] = kwargs
+            return _fake_v3_tiers()
+        monkeypatch.setattr("services.tiered_history.fetch_tiered", fake_fetch)
+
+        p = fresh_xgb_module.xgb_prob(_synthetic_channels(), pid="BTC-USD")
+        assert 0.01 <= p <= 0.99
+        assert called["pid"] == "BTC-USD"
+        assert called["kwargs"].get("source") == "live"
+
+    def test_v3_xgb_prob_pid_none_returns_neutral(self, tmp_path, monkeypatch, fresh_xgb_module, caplog):
+        import logging
+        _train_tiny_v3(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "nope.pkl"))
+        with caplog.at_level(logging.WARNING):
+            p = fresh_xgb_module.xgb_prob(_synthetic_channels(), pid=None)
+        assert p == 0.5
+        assert any("pid" in r.message.lower() for r in caplog.records)
+
+    def test_v3_returns_neutral_on_tiered_fetch_failure(self, tmp_path, monkeypatch, fresh_xgb_module):
+        _train_tiny_v3(str(tmp_path))
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "nope.pkl"))
+
+        def boom(pid, **kwargs):
+            raise RuntimeError("simulated DB failure")
+        monkeypatch.setattr("services.tiered_history.fetch_tiered", boom)
+
+        p = fresh_xgb_module.xgb_prob(_synthetic_channels(), pid="BTC-USD")
+        assert p == 0.5
+
+    def test_v3_skips_v1_calibrator_on_metadata_mismatch(self, tmp_path, monkeypatch, fresh_xgb_module, caplog):
+        import logging
+        from sklearn.isotonic import IsotonicRegression
+        _train_tiny_v3(str(tmp_path))
+        iso = IsotonicRegression(out_of_bounds="clip").fit(
+            np.array([0.2, 0.5, 0.8]), np.array([0.1, 0.5, 0.9])
+        )
+        with open(tmp_path / "xgb_calibration.pkl", "wb") as f:
+            pickle.dump({"calibrator": iso, "feature_set": "v1"}, f)
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
+        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "xgb_calibration.pkl"))
+
+        def fake_fetch(pid, **kwargs):
+            return _fake_v3_tiers()
+        monkeypatch.setattr("services.tiered_history.fetch_tiered", fake_fetch)
+
+        with caplog.at_level(logging.WARNING):
+            fresh_xgb_module.xgb_prob(_synthetic_channels(), pid="BTC-USD")
+        assert fresh_xgb_module._calibration is None
+        assert any(
+            "feature_set" in r.message.lower() or "calibrator" in r.message.lower()
+            for r in caplog.records
+        )
