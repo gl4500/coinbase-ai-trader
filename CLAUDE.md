@@ -226,6 +226,7 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 10. **Training BCE uses smoothed labels; validation BCE uses hard labels** — changing either breaks run-to-run val_loss comparability.
 11. **Inference must mask `_TRAINING_CONSTANT_CHANNELS` before forward pass** — `_cnn_prob` calls `_mask_training_constant_channels` to prevent train/serve distribution skew. Removing this requires retraining without affected channels.
 12. **BCE uses `reduction="none"` + uniqueness-weighted mean** — never `reduction="mean"` on overlapping forward-window samples.
+13. **XGB feature_set v3** uses 3 tiers (micro 60 / meso 168 / macro 336), 350 feature_names (320 live + 30 zero-slot for masked ch17/18/19), feature_weights (micro 1.0 / meso 2.0 / macro 3.0 / masked 0.0) set on `DMatrix` via `set_info` with `colsample_bytree=0.8`. Tier assignment lives in `tools/xgb_features.py:MESO_CHANNELS={15,24,25,26}` and `MACRO_CHANNELS={20,21,27}`. Per-tier candle slices come from `services/tiered_history.py:fetch_tiered` (sync). Calibrator pickle is `{"calibrator","feature_set"}` dict; bare isotonic still treated as v1 for back-compat. `xgb_signal` auto-detects via `_m060_/_m168_/_m336_` infix in feature_names. v3 inference REQUIRES `pid` kwarg through `_cnn_prob -> xgb_signal.xgb_prob(channels, pid=pid)`.
 
 ---
 

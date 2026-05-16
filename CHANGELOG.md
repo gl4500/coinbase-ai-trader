@@ -5,6 +5,21 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.69g] — 2026-05-16 — CLAUDE.md invariant for v3 + memory sync (#311g)
+
+### What changed
+- **`polymarket_app/CLAUDE.md`** — invariant #13 added documenting v3 feature
+  shape (350 names), tier constants location, `feature_weights` mechanism
+  (`set_info` + `colsample_bytree=0.8`), pid-passthrough requirement,
+  and the dict-shape calibrator pickle.
+- **`memory/coinbase_trader_architecture.md`** (outside repo) — Session 58.69
+  entry covering #311a–#311f, the sync rationale for `tiered_history`,
+  and the operator-driven cutover note.
+
+No tests touched; documentation-only.
+
+---
+
 ## [Session 58.69f] — 2026-05-16 — Calibrator dict-shape pickle for v3 (#311f)
 
 ### What changed
