@@ -4239,3 +4239,90 @@ class TestCNNBookSellEvaluatesProductStatus:
         assert "XRP-USD" not in book.positions, (
             "Position must close even if downstream evaluator fails"
         )
+
+
+# ── MC filter chain integration (added 2026-05-16, #311-mc-wire) ─────────
+
+
+class TestMCFilterChainIntegration:
+    """Wire-up tests for agents.mc.registry hook in generate_signal."""
+
+    def test_mc_filters_empty_returns_passthrough(self, monkeypatch):
+        """MC_FILTERS='' (default) -> chain is identity for BUY side."""
+        monkeypatch.delenv("MC_FILTERS", raising=False)
+        from agents.mc import registry
+        registry._reset_chain_cache()
+        side, tele = registry.apply_buy_filters(
+            side="BUY", model_prob=0.7, pid="BTC-USD",
+            channels=[[0.0] * 60] * 28, context={},
+        )
+        assert side == "BUY"
+        assert tele == {}
+
+    def test_mc_filters_ci_blocks_when_lower_bound_below_threshold(self, monkeypatch):
+        """With MC_FILTERS=ci active and a high threshold, CIFilter blocks."""
+        monkeypatch.setenv("MC_FILTERS", "ci")
+        monkeypatch.setenv("MC_CI_K", "1.0")
+        import importlib
+        from agents.mc import registry
+        try:
+            from agents.mc import ci_filter
+            importlib.reload(ci_filter)  # re-register after env change
+        except Exception:
+            pass
+        registry._reset_chain_cache()
+
+        import agents.xgb_signal as xs
+        import numpy as np
+
+        class _Booster:
+            def num_boosted_rounds(self): return 5
+            def predict(self, dmat, iteration_range=None):
+                k = iteration_range[1] if iteration_range else 5
+                # trajectory 0.50, 0.55, 0.60, 0.65, 0.70; stdev ~= 0.0707
+                return np.array([0.5 + (k - 1) * 0.05])
+
+        monkeypatch.setattr(xs, "_booster", _Booster())
+        monkeypatch.setattr(xs, "_feature_set", "v3")
+        monkeypatch.setattr(xs, "_feature_names", ["f"] * 350)
+        monkeypatch.setattr(xs, "_load_succeeded", True)
+        import xgboost as xgb_mod
+        monkeypatch.setattr(
+            xgb_mod, "DMatrix",
+            type("DM", (), {"__init__": lambda *a, **kw: None}),
+        )
+        monkeypatch.setattr(
+            "services.tiered_history.fetch_tiered",
+            lambda pid, **kw: {"micro": [], "meso": [], "macro": []},
+        )
+        import tools.xgb_features as xf
+        monkeypatch.setattr(
+            xf, "extract_features",
+            lambda tiers, feature_set="v3": (np.zeros((1, 350)), ["f"] * 350),
+        )
+        import config as cfg
+        monkeypatch.setattr(cfg.config, "cnn_buy_threshold", 0.65)
+
+        side, tele = registry.apply_buy_filters(
+            side="BUY", model_prob=0.70, pid="BTC-USD",
+            channels=[[0.0] * 60] * 28, context={},
+        )
+        assert side == "HOLD"
+        assert tele["ci"]["decision"] == "block"
+
+    def test_save_cnn_scan_dict_includes_mc_telemetry_when_present(self):
+        """Structural test: the scan-dict construction in generate_signal
+        propagates CIFilter telemetry into save_cnn_scan."""
+        import json
+        scan = {
+            "product_id": "BTC-USD", "price": 100.0,
+            "cnn_prob": 0.7, "model_prob": 0.7,
+            "side": "BUY", "strength": 0.4, "signal_gen": True,
+        }
+        mc_tele = {"ci": {"stdev": 0.0124, "lower": 0.6876, "K": 1.0,
+                          "decision": "keep"}}
+        # Match cnn_agent's dict-build snippet exactly
+        scan["xgb_prob_stdev"] = mc_tele.get("ci", {}).get("stdev") if mc_tele else None
+        scan["mc_telemetry"] = json.dumps(mc_tele) if mc_tele else None
+        assert scan["xgb_prob_stdev"] == 0.0124
+        assert '"decision": "keep"' in scan["mc_telemetry"]

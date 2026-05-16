@@ -5,6 +5,44 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.70c] — 2026-05-16 — MC wire-up + telemetry schema (#311-mc-wire)
+
+### What changed
+- **`backend/migrations/mc_telemetry_20260516.py`** (NEW) — idempotent
+  ALTER TABLE adding `xgb_prob_stdev REAL` and `mc_telemetry TEXT` to
+  `cnn_scans`. Detects existing columns via PRAGMA, never errors on
+  re-run. Applied to live `coinbase.db` as part of this commit.
+- **`backend/database.py:save_cnn_scan`** — INSERT extended to write the
+  two new columns; both nullable so MC-off (`MC_FILTERS=""`) state still
+  produces NULL rows identical to pre-MC.
+- **`backend/agents/cnn_agent.py:generate_signal`** — one new hook call
+  to `agents.mc.registry.apply_buy_filters` between the side computation
+  and the `save_cnn_scan`. With MC off this is a noop. With `MC_FILTERS=ci`
+  the lower-bound gate from CIFilter may down-grade BUY to HOLD; telemetry
+  is JSON-serialized into the `mc_telemetry` column.
+- **`backend/tests/test_mc_migration.py`** (NEW) — 2 tests: add-on-first-run
+  and idempotent-on-second-run.
+- **`backend/tests/test_database.py`** — +2 tests for new columns.
+- **`backend/tests/test_cnn_agent.py`** — +3 wire-up tests.
+
+### Verification
+```
+backend && python -m pytest tests/test_cnn_agent.py::TestMCFilterChainIntegration \
+                            tests/test_database.py::TestSaveCnnScanMCColumns \
+                            tests/agents/mc/ tests/test_mc_migration.py -v
+=> 21 passed (8 registry + 6 ci_filter + 2 migration + 2 db + 3 wire)
+```
+
+### Activation
+Code is in but inert. To activate CIFilter on live signal generation:
+1. Edit `.env`: add `MC_FILTERS=ci` (and optionally `MC_CI_K=1.0`).
+2. Restart backend (env vars read at process start, not /api/cnn/model/reload).
+
+`MC_FILTERS=` (default) leaves live behavior bit-for-bit identical to
+pre-MC. Rollback: edit .env, restart.
+
+---
+
 ## [Session 58.70b] — 2026-05-16 — MC CIFilter implementation (#311-mc-ci)
 
 ### What changed

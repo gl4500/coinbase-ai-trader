@@ -558,3 +558,52 @@ class TestCnnScansXgbProb:
         rows = run(db.get_cnn_scans(product_id="BTC-USD", limit=1))
         assert rows[0]["cnn_prob"] == pytest.approx(0.71)
         assert rows[0]["xgb_prob"] == pytest.approx(0.33)
+
+
+# ── MC telemetry column persistence (added 2026-05-16, #311-mc-wire) ──────
+
+
+class TestSaveCnnScanMCColumns:
+    def test_save_cnn_scan_persists_xgb_prob_stdev_when_present(self, db, run):
+        from migrations.mc_telemetry_20260516 import run as mig_run
+        mig_run(db.DB_PATH)
+        run(db.upsert_product({
+            "product_id": "BTC-USD", "base_currency": "BTC",
+            "quote_currency": "USD",
+        }))
+        run(db.save_cnn_scan({
+            "product_id": "BTC-USD", "price": 100.0,
+            "cnn_prob": 0.60, "model_prob": 0.60, "side": "BUY",
+            "strength": 0.2, "signal_gen": True,
+            "xgb_prob_stdev": 0.0124,
+            "mc_telemetry": '{"ci":{"decision":"keep"}}',
+        }))
+        import sqlite3
+        c = sqlite3.connect(db.DB_PATH)
+        row = c.execute(
+            "SELECT xgb_prob_stdev, mc_telemetry FROM cnn_scans WHERE product_id='BTC-USD'"
+        ).fetchone()
+        c.close()
+        assert row[0] == 0.0124
+        assert row[1] == '{"ci":{"decision":"keep"}}'
+
+    def test_save_cnn_scan_handles_missing_mc_keys_as_null(self, db, run):
+        from migrations.mc_telemetry_20260516 import run as mig_run
+        mig_run(db.DB_PATH)
+        run(db.upsert_product({
+            "product_id": "ETH-USD", "base_currency": "ETH",
+            "quote_currency": "USD",
+        }))
+        run(db.save_cnn_scan({
+            "product_id": "ETH-USD", "price": 200.0,
+            "cnn_prob": 0.50, "model_prob": 0.50, "side": "HOLD",
+            "strength": 0.0, "signal_gen": False,
+        }))
+        import sqlite3
+        c = sqlite3.connect(db.DB_PATH)
+        row = c.execute(
+            "SELECT xgb_prob_stdev, mc_telemetry FROM cnn_scans WHERE product_id='ETH-USD'"
+        ).fetchone()
+        c.close()
+        assert row[0] is None
+        assert row[1] is None

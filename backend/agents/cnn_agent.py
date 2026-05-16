@@ -1966,6 +1966,7 @@ class CoinbaseCNNAgent:
         ob = {}
 
         xgb_shadow: Optional[float] = None
+        channels = None  # initialized to None for cache-hit path; MC chain accepts None
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob, _, _cached_ind = cached
@@ -2233,6 +2234,20 @@ class CoinbaseCNNAgent:
             side     = "HOLD"
             strength = 0.0
 
+        # MC filter chain (off by default; MC_FILTERS env-gated). Returns the
+        # side unchanged and {} telemetry when MC_FILTERS is empty.
+        from agents.mc import registry as _mc
+        try:
+            from agents.mc import ci_filter as _ci_filter  # registers ci into _FILTER_CLASSES
+        except Exception:
+            pass
+        side, mc_telemetry = _mc.apply_buy_filters(
+            side=side, model_prob=model_prob, pid=pid,
+            channels=channels, context={"strength": strength},
+        )
+        if side == "HOLD":
+            strength = 0.0  # re-zero if MC down-graded BUY to HOLD
+
         passes = side != "HOLD"
 
         # ── Save every scan result for the confidence table ───────────────────
@@ -2259,6 +2274,8 @@ class CoinbaseCNNAgent:
             "velocity":    round(vel_norm, 4),
             "vol_z":       round(vol_z_norm, 4),
             "xgb_prob":    round(xgb_shadow, 4) if xgb_shadow is not None else None,
+            "xgb_prob_stdev": mc_telemetry.get("ci", {}).get("stdev") if mc_telemetry else None,
+            "mc_telemetry":   json.dumps(mc_telemetry) if mc_telemetry else None,
         })
 
         if not passes:
