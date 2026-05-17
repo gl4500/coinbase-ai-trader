@@ -33,6 +33,21 @@ User direction: start small and clean, add channels iteratively as each demonstr
 
 v3 keeps driving decisions for the full shadow week. v4 telemetry runs every scan, failures isolated, both probs persist per scan to `cnn_scans`.
 
+## Label horizon sweep (2026-05-17 revision)
+
+Per operator direction, v4 ships infrastructure to compare **4 label horizons** before any production decision. The original draft used `forward_hours=4 / label_thresh=0.003` (v3 parity), but a 4-hour label horizon contradicts the macro-trend goal — the macro tier (336 bars = 14 days) is being asked a 4-hour question.
+
+| Horizon | forward_hours | label_thresh | Macro alignment |
+|---|---|---|---|
+| h4   | 4   | 0.003 | v3 parity (apples-to-apples shadow AUC vs v3) |
+| h24  | 24  | 0.01  | day-ahead — matches meso tier |
+| h72  | 72  | 0.02  | multi-day swing — matches macro tier partial |
+| h168 | 168 | 0.05  | week-ahead structural — full macro alignment |
+
+`train_xgb_v4.py` is parameterized by `--forward-hours` and `--label-thresh`. Each invocation writes artifacts to **horizon-suffixed paths** (`xgb_*_v4_h<HOURS>.*`). New `tools/v4_horizon_compare.py` loads each horizon's artifacts, computes held-out AUC + key metrics, outputs an HTML side-by-side report. Operator picks the winner, copies its suffixed artifacts to unsuffixed `xgb_*_v4.*` paths, restarts backend — shadow path tracks only the winner.
+
+**Shadow telemetry stays single-column** (`cnn_scans.xgb_prob_v4`). The horizon sweep happens offline; only the winner runs in production shadow.
+
 ## Components
 
 ### `backend/tools/xgb_v4_features.py` (new, ~120 LOC)
@@ -274,14 +289,52 @@ def main(argv: List[str] | None = None) -> int:
 def _parse_args(argv: List[str] | None) -> argparse.Namespace: ...
 ```
 
-Each helper is independently testable. The training-data construction (`_build_samples_for_pid`) doesn't mix with the split (`_walk_forward_split`) or train (`_train_booster`) — each can be exercised with synthetic inputs in `test_train_xgb_v4.py`. Labels use the same triple-barrier params as v3 (read from `agents/cnn_agent.py` constants `_FORWARD_HOURS`, `_LABEL_THRESH`) for parity — labels are deterministic given same params + same candles.
+Each helper is independently testable. The training-data construction (`_build_samples_for_pid`) doesn't mix with the split (`_walk_forward_split`) or train (`_train_booster`) — each can be exercised with synthetic inputs in `test_train_xgb_v4.py`. Labels are computed by `_triple_barrier_label` (new helper) parameterized by `forward_hours` and `label_thresh` from CLI args; no implicit dependency on `cnn_agent.py` constants. `_save_artifacts` derives the suffix from `forward_hours` (e.g., `forward_hours=24` → `xgb_*_v4_h24.*`).
 
-Operator runs once after the implementation commit:
-```bash
-cd backend && python -m tools.train_xgb_v4 --pids <all-tracked>
+### `backend/tools/v4_horizon_compare.py` (new, ~200 LOC)
+
+Generates the HTML comparison report. Per [[feedback_python_clean_functions]] — pure-function helpers, `main()` orchestrator only.
+
+```python
+def _load_horizon_artifacts(horizon: int, base_dir: str) -> Dict: ...
+def _evaluate_on_holdout(booster, calibrator, X: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+    """Returns {'auc': float, 'logloss': float, 'pos_frac': float, 'n_samples': int}."""
+def _build_holdout_dataset(pids: List[str], horizon: int, ...) -> Tuple[np.ndarray, np.ndarray]:
+    """Build a held-out test set at the given horizon, using the LAST 15% of each
+    pid's history (chronologically after the train window used by train_xgb_v4)."""
+def _render_html_report(metrics_by_horizon: Dict[int, Dict], out_path: str) -> None:
+    """Side-by-side table; same dark-mode style as xgb_v3_channel_options.html."""
+
+def main(argv: List[str] | None = None) -> int:
+    args = _parse_args(argv)        # --horizons 4,24,72,168 [--pids ...]
+    metrics: Dict[int, Dict] = {}
+    for h in args.horizons:
+        artifacts = _load_horizon_artifacts(h, args.base_dir)
+        X_test, y_test = _build_holdout_dataset(args.pids, h, ...)
+        metrics[h] = _evaluate_on_holdout(artifacts['booster'], artifacts['calibrator'],
+                                          X_test, y_test)
+    _render_html_report(metrics, os.path.join(args.out_dir, "xgb_v4_horizon_compare.html"))
+    return 0
 ```
 
-Expected runtime: ~5-10 min for ~50 pids on local CPU.
+Output: `backend/tools/xgb_v4_horizon_compare.html` — table with rows per horizon, columns for `auc`, `logloss`, `n_samples`, `pos_frac`, plus a recommendation banner highlighting the best AUC.
+
+Operator runs **4 trainings** after the implementation commit, then the comparison report, then copies the winner:
+```bash
+cd backend
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids <list> --forward-hours 4   --label-thresh 0.003
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids <list> --forward-hours 24  --label-thresh 0.01
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids <list> --forward-hours 72  --label-thresh 0.02
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids <list> --forward-hours 168 --label-thresh 0.05
+../.venv/Scripts/python.exe -m tools.v4_horizon_compare --horizons 4,24,72,168
+# Open backend/tools/xgb_v4_horizon_compare.html, pick winner (say h24):
+cp xgb_model_v4_h24.json   xgb_model_v4.json
+cp xgb_features_v4_h24.json xgb_features_v4.json
+cp xgb_calibration_v4_h24.pkl xgb_calibration_v4.pkl
+# Backend restart picks up xgb_*_v4.* — shadow tracks winner.
+```
+
+Expected runtime: ~5-10 min per horizon (4 horizons ≈ 30-40 min total) for ~50 pids on local CPU. Compare script: seconds.
 
 ### `backend/tests/test_xgb_v4_features.py` (new, ~150 LOC)
 
@@ -381,9 +434,12 @@ AUC itself computed in Python via `sklearn.metrics.roc_auc_score(labels, probs)`
 | Action | Path | LOC est |
 |---|---|---|
 | Create | `backend/tools/xgb_v4_features.py` | ~120 |
-| Create | `backend/tools/train_xgb_v4.py` | ~250 |
-| Create | `backend/tests/test_xgb_v4_features.py` | ~150 |
-| Create | `backend/migrations/xgb_v4_shadow_<ts>.py` | ~30 |
+| Create | `backend/tools/train_xgb_v4.py` | ~280 |
+| Create | `backend/tools/v4_horizon_compare.py` | ~200 |
+| Create | `backend/tests/test_xgb_v4_features.py` | ~200 |
+| Create | `backend/tests/test_train_xgb_v4.py` | ~150 |
+| Create | `backend/tests/test_v4_horizon_compare.py` | ~80 |
+| Create | `backend/migrations/xgb_v4_shadow_20260517.py` | ~35 |
 | Edit | `backend/tools/xgb_features.py` | +5 LOC dispatcher |
 | Edit | `backend/agents/xgb_signal.py` | +30 LOC shadow path |
 | Edit | `backend/database.py` | +3 LOC kwarg + INSERT, +1 LOC CREATE TABLE |
