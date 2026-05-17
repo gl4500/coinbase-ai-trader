@@ -1774,6 +1774,7 @@ class CoinbaseCNNAgent:
         ob = {}
 
         xgb_shadow: Optional[float] = None
+        xgb_shadow_v4: Optional[float] = None
         channels = None  # initialized to None for cache-hit path; MC chain accepts None
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
@@ -1897,15 +1898,17 @@ class CoinbaseCNNAgent:
             # so we can compare CNN vs XGB calibration on identical inputs (#181).
             if config.model_backend == "xgb":
                 xgb_shadow = cnn_prob
+                xgb_shadow_v4 = None
             else:
                 try:
                     from agents import xgb_signal as _xgb
-                    xgb_shadow = _xgb.xgb_prob(
+                    xgb_shadow, xgb_shadow_v4 = _xgb.xgb_prob_shadow(
                         _mask_training_constant_channels(channels),
                         pid=pid,
                     )
                 except Exception:
                     xgb_shadow = None
+                    xgb_shadow_v4 = None
 
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)
@@ -2009,6 +2012,7 @@ class CoinbaseCNNAgent:
             "velocity":    round(vel_norm, 4),
             "vol_z":       round(vol_z_norm, 4),
             "xgb_prob":    round(xgb_shadow, 4) if xgb_shadow is not None else None,
+            "xgb_prob_v4": round(xgb_shadow_v4, 4) if xgb_shadow_v4 is not None else None,
             "xgb_prob_stdev": mc_telemetry.get("ci", {}).get("stdev") if mc_telemetry else None,
             "mc_telemetry":   json.dumps(mc_telemetry) if mc_telemetry else None,
         })

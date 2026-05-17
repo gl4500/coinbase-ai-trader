@@ -261,15 +261,21 @@ def extract_features(
         "v2": v1 + 10 cross-channel/temporal addons (_V2_NEW_FEATURES).
         "v3": tiered mixed-lookback — 350 features, samples arg becomes
               {"micro","meso","macro"} candle-list dict (#311b).
+        "v4": OHLCV-5 channels x 3 tiers x 10 stats = 150 features,
+              samples arg is {"micro","meso","macro"} candle-list dict
+              (#xgb-v4 / Step B.1).
 
     Returns (features, feature_names) where features is float64 with no
     NaN/Inf, and feature_names matches the column order of features.
     """
+    if feature_set == "v4":
+        from tools.xgb_v4_features import extract_v4
+        return extract_v4(samples)
     if feature_set == "v3":
         return _extract_v3(samples)
     if feature_set not in ("v1", "v2"):
         raise ValueError(
-            f"unknown feature_set={feature_set!r}; expected 'v1', 'v2', or 'v3'"
+            f"unknown feature_set={feature_set!r}; expected 'v1', 'v2', 'v3', or 'v4'"
         )
     if samples.ndim != 3 or samples.shape[1] != N_CHANNELS or samples.shape[2] != SEQ_LEN:
         raise ValueError(

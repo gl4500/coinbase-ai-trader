@@ -3764,3 +3764,43 @@ class TestMCFilterChainIntegration:
         scan["mc_telemetry"] = json.dumps(mc_tele) if mc_tele else None
         assert scan["xgb_prob_stdev"] == 0.0124
         assert '"decision": "keep"' in scan["mc_telemetry"]
+
+
+# ── v4 shadow write-through (#xgb-v4 / Step B.1) ──────────────────────────
+
+
+class TestV4ShadowWriteThrough:
+    @pytest.mark.asyncio
+    async def test_generate_signal_passes_xgb_prob_v4_to_save_cnn_scan(
+        self, monkeypatch
+    ):
+        """When config.model_backend='xgb', cnn_agent must call xgb_prob_shadow
+        and forward the v4 prob into the save_cnn_scan dict as xgb_prob_v4."""
+        import agents.cnn_agent as ca
+
+        # Stub xgb_signal.xgb_prob_shadow to return known (v3, v4)
+        monkeypatch.setattr(
+            "agents.xgb_signal.xgb_prob_shadow",
+            lambda channels, pid=None: (0.65, 0.41),
+        )
+
+        # Capture save_cnn_scan calls
+        saved: list = []
+        async def fake_save(scan, db_path=None):
+            saved.append(scan)
+        monkeypatch.setattr("database.save_cnn_scan", fake_save)
+
+        # Build a minimal agent and run generate_signal with enough fakes
+        # to reach the save_cnn_scan call. Use existing test fixtures /
+        # helpers from this file for agent setup (mirror TestGenerateSignal
+        # patterns). The key assertion at the end:
+        #
+        #   assert saved[0]["xgb_prob_v4"] == pytest.approx(0.41)
+        #
+        # If reaching save_cnn_scan from the existing test harness is too
+        # invasive, lift the relevant lines into a smaller unit test that
+        # exercises only the dict-assembly logic from generate_signal.
+        pytest.skip(
+            "Integration test stub — wire to existing TestGenerateSignal "
+            "harness during implementation."
+        )

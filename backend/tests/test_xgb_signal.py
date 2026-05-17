@@ -402,3 +402,78 @@ class TestV3Routing:
             "feature_set" in r.message.lower() or "calibrator" in r.message.lower()
             for r in caplog.records
         )
+
+
+# ── v4 shadow path (#xgb-v4 / Step B.1) ───────────────────────────────────
+
+
+class TestV4ShadowLoad:
+    def test_try_load_v4_returns_false_when_artifacts_missing(self, monkeypatch):
+        import agents.xgb_signal as xs
+        # Force v4 artifacts to point at non-existent files
+        monkeypatch.setattr(xs, "_MODEL_PATH_V4", "/nonexistent/v4_model.json")
+        monkeypatch.setattr(xs, "_FEATURES_PATH_V4", "/nonexistent/v4_feat.json")
+        monkeypatch.setattr(xs, "_load_attempted_v4", False)
+        monkeypatch.setattr(xs, "_load_succeeded_v4", False)
+        assert xs._try_load_v4() is False
+
+
+class TestXgbProbV4:
+    def test_returns_neutral_when_artifacts_missing(self, monkeypatch):
+        import agents.xgb_signal as xs
+        monkeypatch.setattr(xs, "_MODEL_PATH_V4", "/nonexistent/v4.json")
+        monkeypatch.setattr(xs, "_FEATURES_PATH_V4", "/nonexistent/v4f.json")
+        monkeypatch.setattr(xs, "_load_attempted_v4", False)
+        monkeypatch.setattr(xs, "_load_succeeded_v4", False)
+        out = xs.xgb_prob_v4(channels=None, pid="BTC-USD")
+        assert out == xs._NEUTRAL
+
+    def test_returns_neutral_when_pid_none(self, monkeypatch):
+        import agents.xgb_signal as xs
+        monkeypatch.setattr(xs, "_load_attempted_v4", True)
+        monkeypatch.setattr(xs, "_load_succeeded_v4", True)
+        out = xs.xgb_prob_v4(channels=None, pid=None)
+        assert out == xs._NEUTRAL
+
+
+class TestXgbProbShadow:
+    def test_shadow_returns_tuple(self, monkeypatch):
+        import agents.xgb_signal as xs
+        # Stub both v3 and v4 to known values
+        monkeypatch.setattr(xs, "xgb_prob",
+                            lambda channels, pid=None: 0.7)
+        monkeypatch.setattr(xs, "xgb_prob_v4",
+                            lambda channels, pid=None: 0.4)
+        v3, v4 = xs.xgb_prob_shadow(channels=None, pid="BTC-USD")
+        assert v3 == 0.7
+        assert v4 == 0.4
+
+    def test_shadow_v4_failure_isolated_from_v3(self, monkeypatch, caplog):
+        """v4 raising MUST NOT affect v3 driver path."""
+        import logging
+        import agents.xgb_signal as xs
+
+        def boom(*a, **kw):
+            raise RuntimeError("v4 boom")
+
+        monkeypatch.setattr(xs, "xgb_prob",
+                            lambda channels, pid=None: 0.6)
+        monkeypatch.setattr(xs, "xgb_prob_v4", boom)
+        with caplog.at_level(logging.ERROR):
+            v3, v4 = xs.xgb_prob_shadow(channels=None, pid="BTC-USD")
+        assert v3 == 0.6     # driver still works
+        assert v4 is None    # shadow captured as None
+        assert any("v4" in r.message.lower() for r in caplog.records)
+
+    def test_shadow_v3_failure_propagates(self, monkeypatch):
+        """v3 path is NOT wrapped — exceptions propagate as before."""
+        import agents.xgb_signal as xs
+
+        def boom_v3(*a, **kw):
+            raise RuntimeError("v3 boom")
+
+        monkeypatch.setattr(xs, "xgb_prob", boom_v3)
+        monkeypatch.setattr(xs, "xgb_prob_v4",
+                            lambda channels, pid=None: 0.3)
+        with pytest.raises(RuntimeError, match="v3 boom"):
+            xs.xgb_prob_shadow(channels=None, pid="BTC-USD")

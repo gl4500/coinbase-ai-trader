@@ -5,6 +5,111 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71j] — 2026-05-17 — XGB v4 OHLCV-5 shadow model (#xgb-v4 / Step B.1)
+
+### Why
+v3's `_extract_v3` only reads `close` from candles, so all 28 channel slots
+collapse to ~30 distinct values dressed up as 350 feature names. The booster
+wastes capacity learning that `ch0_last == ch1_last == ... == ch16_last`.
+Fixing this needs a fresh model: feature distribution changes invalidate
+v3's calibration. Step B.1 of the XGB channel-buildout roadmap ships the
+smallest honest baseline (5 OHLCV channels) and runs it in shadow alongside
+live v3 for one week before any cutover decision.
+
+### What changed
+- **`backend/tools/xgb_v4_features.py`** (new) — pure-function v4 extractor.
+  5 channels (open/high/low/close/volume) x 3 tiers (micro 60 / meso 168 /
+  macro 336) x 10 stats = 150 features. `extract_v4`, `feature_names_v4`,
+  `feature_weights_v4` public; helpers `_extract_field`, `_compute_stats`,
+  `_slope`, `_pct_rank`, `_delta_at` each pure data-in/data-out, no
+  in-place buffer mutation. Constants derived (`N_CHANNELS_V4 = len(_CHANNEL_FIELDS)`).
+- **`backend/tools/train_xgb_v4.py`** (new) — trainer orchestrator. `main()`
+  delegates to 7 single-responsibility helpers: `_load_candles_for_pid`,
+  `_triple_barrier_label`, `_build_samples_for_pid`, `_walk_forward_split`,
+  `_train_booster`, `_calibrate_isotonic`, `_save_artifacts`. Reads OHLCV
+  parquets. Required CLI args `--forward-hours` and `--label-thresh` —
+  no default values, operator MUST specify per the horizon sweep workflow.
+  Writes horizon-suffixed artifacts (`backend/xgb_*_v4_h<HOURS>.*`) so all
+  4 horizons coexist on disk.
+- **`backend/tools/v4_horizon_compare.py`** (new) — horizon sweep
+  comparison report. `main()` orchestrator + 4 pure helpers: `_load_horizon_artifacts`,
+  `_evaluate_on_holdout`, `_build_holdout_dataset`, `_render_html_report`.
+  Loads each horizon's artifacts, builds held-out test set per horizon
+  (last 15% of each pid's history), computes AUC + logloss + n_samples +
+  pos_frac, renders side-by-side HTML report at
+  `backend/tools/xgb_v4_horizon_compare.html`. Highlights winner by AUC.
+- **`backend/migrations/xgb_v4_shadow_20260517.py`** (new) — idempotent
+  ALTER TABLE adding `cnn_scans.xgb_prob_v4 REAL` for shadow telemetry.
+- **`backend/tools/xgb_features.py`** — `extract_features` dispatcher gets
+  `feature_set == "v4"` branch routing to `xgb_v4_features.extract_v4`.
+- **`backend/agents/xgb_signal.py`** — new module-level v4 state (`_booster_v4`,
+  `_calibration_v4`, `_load_attempted_v4`, `_load_succeeded_v4`), new
+  `_try_load_v4()`, `xgb_prob_v4(channels, pid)`, and `xgb_prob_shadow(channels, pid)`
+  returning `(prob_v3, prob_v4_or_None)`. v4 fully isolated in try/except;
+  failures NEVER affect v3. v3 path unchanged.
+- **`backend/database.py`** — `xgb_prob_v4 REAL` added to `cnn_scans`
+  CREATE TABLE, ALTER TABLE migration list, and `save_cnn_scan` INSERT.
+- **`backend/agents/cnn_agent.py`** — single edit: replace the existing
+  `_xgb.xgb_prob(...)` call with `_xgb.xgb_prob_shadow(...)`, unpack the
+  returned tuple, add `xgb_prob_v4` to the `save_cnn_scan` dict. NO
+  decision logic touched.
+- **CLAUDE.md** — invariant #16 (shadow telemetry isolation).
+- **Tests** — `test_xgb_v4_features.py` (30+ tests), `test_train_xgb_v4.py`
+  (8 tests), extensions to `test_xgb_signal.py` (6 shadow tests),
+  `test_database.py` (2 persistence tests), `test_mc_migration.py` (2
+  idempotency tests).
+
+### Verification
+```
+cd backend && python -m pytest tests/ -q -m "not slow and not integration"
+=> 975+ passed (4+8+6+2+2+3 new tests)
+```
+
+### Operator preflight (run once after this commit) — horizon sweep
+```bash
+cd backend
+PIDS=BTC-USD,ETH-USD,SOL-USD,...   # populate with tracked pids
+# Train 4 horizons
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids $PIDS --forward-hours 4   --label-thresh 0.003
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids $PIDS --forward-hours 24  --label-thresh 0.01
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids $PIDS --forward-hours 72  --label-thresh 0.02
+../.venv/Scripts/python.exe -m tools.train_xgb_v4 --pids $PIDS --forward-hours 168 --label-thresh 0.05
+# Render comparison report
+../.venv/Scripts/python.exe -m tools.v4_horizon_compare --pids $PIDS --horizons 4,24,72,168
+# Open backend/tools/xgb_v4_horizon_compare.html; pick winner (e.g., h24):
+cp xgb_model_v4_h24.json     xgb_model_v4.json
+cp xgb_features_v4_h24.json  xgb_features_v4.json
+cp xgb_calibration_v4_h24.pkl xgb_calibration_v4.pkl
+```
+
+Expected wall time: ~5-10 min per horizon × 4 horizons ≈ 30-40 min for ~50
+pids. Compare script: seconds. After winner is copied to unsuffixed paths:
+backend restart picks up `xgb_*_v4.*`; shadow telemetry begins on next scan.
+
+### Cutover decision (post-shadow-week, separate brainstorm)
+```sql
+SELECT
+  COUNT(*) AS n_outcomes,
+  AVG(s.xgb_prob_v3) AS v3_mean_prob,
+  AVG(s.xgb_prob_v4) AS v4_mean_prob
+FROM cnn_scans s
+JOIN signal_outcomes o ON o.scan_id = s.id
+WHERE s.scanned_at >= <commit_ts + 7 days>
+  AND s.xgb_prob_v4 IS NOT NULL
+GROUP BY o.outcome_class;
+```
+
+Python-side AUC: `sklearn.metrics.roc_auc_score(labels, probs)` for v3 and v4
+on the same outcome subset. Decision criteria + cutover land in their own
+brainstorm cycle.
+
+### Step B.2 preview
+Add macro-trend channels: market_cap (ch5) + volume_24h (ch6) from bronze
+parquet (Step A schema v2 already has them). N_CHANNELS_V4 5 -> 7, retrain
+booster. Separate brainstorm cycle.
+
+---
+
 ## [Session 58.71i] — 2026-05-16 — Marketcap bronze schema v2: volume_24h (#marketcap-A)
 
 ### Why

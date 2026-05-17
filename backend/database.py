@@ -149,7 +149,8 @@ async def init_db() -> None:
                 xgb_prob    REAL,
                 scanned_at  TEXT NOT NULL,
                 xgb_prob_stdev REAL,
-                mc_telemetry TEXT
+                mc_telemetry TEXT,
+                xgb_prob_v4 REAL
             );
             CREATE INDEX IF NOT EXISTS idx_cnn_scans_time
                 ON cnn_scans(scanned_at DESC);
@@ -279,6 +280,7 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob REAL",
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_stdev REAL",
             "ALTER TABLE cnn_scans ADD COLUMN mc_telemetry TEXT",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4 REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
@@ -557,8 +559,8 @@ async def save_cnn_scan(scan: Dict) -> None:
                 cnn_weight, llm_weight, side, strength, signal_gen,
                 regime, adx, rsi, macd, mfi, stoch_k, atr, vwap_dist,
                 fast_rsi, velocity, vol_z, xgb_prob, scanned_at,
-                xgb_prob_stdev, mc_telemetry)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                xgb_prob_stdev, mc_telemetry, xgb_prob_v4)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan["product_id"], scan["price"],
                 scan.get("cnn_prob"), scan.get("llm_prob"), scan["model_prob"],
@@ -571,6 +573,7 @@ async def save_cnn_scan(scan: Dict) -> None:
                 scan.get("xgb_prob"),
                 _now(),
                 scan.get("xgb_prob_stdev"), scan.get("mc_telemetry"),
+                scan.get("xgb_prob_v4"),
             )
         )
         await db.commit()
