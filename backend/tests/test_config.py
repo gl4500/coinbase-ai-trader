@@ -13,6 +13,29 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 
+class TestNoCnnArchEnvVar:
+    def test_cnn_arch_env_var_lookup_removed_from_cnn_agent(self):
+        """Locks in #311-refactor-e: CNN_ARCH env var lookup was deleted
+        when the multi-arch registry was removed. Only glu1 survives.
+        Re-introducing the lookup requires reverting the dead-variant
+        cleanup, not just adding a config field."""
+        src = open(
+            os.path.join(BACKEND, "agents", "cnn_agent.py"),
+            encoding="utf-8",
+        ).read()
+        for needle in (
+            'os.environ.get("CNN_ARCH"',
+            "os.environ.get('CNN_ARCH'",
+            'os.getenv("CNN_ARCH"',
+            "os.getenv('CNN_ARCH'",
+        ):
+            assert needle not in src, (
+                f"cnn_agent.py contains '{needle}' — CNN_ARCH env-var "
+                f"lookup was deleted #311-refactor-e. Multi-arch registry "
+                f"committed to single-arch (glu1)."
+            )
+
+
 class TestDeadBlendFieldsStayDeleted:
     def test_no_dead_llm_blend_fields(self):
         from config import config

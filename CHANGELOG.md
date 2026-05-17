@@ -5,6 +5,67 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71f] — 2026-05-16 — Refactor sweep module 4a: CNN_ARCH dead variants (#311-refactor-e)
+
+### Why
+`cnn_agent.py` defined three CNN arch classes (`SignalCNN`=glu2 ~280k params,
+`SignalCNNGlu1` ~12k, `SignalCNNGluM` ~50k) with `_ARCH_REGISTRY` +
+`_active_arch()` env-var lookup. Active arch was glu1 (per .env); glu2 and
+glum were unreachable. Under `MODEL_BACKEND=xgb` (live) the entire CNN path
+is bypassed anyway. First sub-module of cnn_agent.py cleanup — tightest
+cluster.
+
+### What changed
+- **`backend/agents/cnn_agent.py`** —
+  - DELETED `class SignalCNN` (glu2, ~44 lines).
+  - DELETED `class SignalCNNGluM` (~34 lines).
+  - DELETED `_ARCH_REGISTRY` dict.
+  - DELETED `_active_arch()` function.
+  - SIMPLIFIED `_build_cnn()` — no arg, hardcoded to `SignalCNNGlu1()`.
+  - SIMPLIFIED `_model_path_for()` / `_best_loss_path_for()` — no arg,
+    return the glu1-suffixed paths directly.
+  - `CoinbaseCNNAgent.__init__` — removed `self._arch` field;
+    `_model_path_for(self._arch)` → `_model_path_for()` at 5 call sites
+    (sed-applied for consistency).
+- **`backend/tests/test_cnn_agent.py`** —
+  - DELETED `TestSignalCNNGluM` (entire class, ~50 LOC).
+  - DELETED `TestArchFactoryAndPaths` (multi-arch routing, ~75 LOC).
+  - DELETED `TestCnnAgentArchWiring` (CNN_ARCH env wiring, ~30 LOC).
+  - DELETED `TestSignalCNNGlu1::test_fewer_params_than_glu2` (compared
+    against deleted class).
+- **`backend/tests/test_config.py`** — added `TestNoCnnArchEnvVar` policy
+  test (1 test, 4 assertions). If anyone re-introduces
+  `os.environ.get("CNN_ARCH"` (or equivalent) in cnn_agent.py, pre-commit
+  fails.
+- **`.env`** — removed `CNN_ARCH=glu1` line + its preceding comment block.
+- **Host-side (operator):** moved `backend/cnn_model.pt` + `cnn_best_loss.txt`
+  to `backend/retired/cnn_model_glu2.pt` + `cnn_best_loss_glu2.txt`. Glu1
+  active artifacts (`cnn_model_glu1.pt`, `cnn_best_loss_glu1.txt`)
+  unchanged. `backend/retired/` is gitignored.
+
+### Verification
+```
+backend && python -m pytest tests/test_config.py tests/test_cnn_agent.py::TestSignalCNNGlu1 -v
+=> 2 passed + 3 skipped (skipif _TORCH_AVAILABLE — unchanged from before)
+backend && python -c "import agents.cnn_agent; print(agents.cnn_agent.SignalCNNGlu1.__name__)"
+=> SignalCNNGlu1
+```
+
+Net: ~120 LOC code deleted, ~150 LOC tests deleted, +25 LOC policy test.
+File total: 3073 → ~2925 lines.
+
+Zero live-behavior change — under MODEL_BACKEND=xgb the CNN path is dead
+anyway; under MODEL_BACKEND=cnn, glu1 is the only arch and was already
+the active one.
+
+### Rollback
+1. `git revert <commit>` — restores classes + registry + helpers + tests.
+2. `mv backend/retired/cnn_model_glu2.pt backend/cnn_model.pt` (host-side).
+3. Re-add `CNN_ARCH=glu2` (or `glum`) to `.env` if you want a different
+   arch active.
+
+---
+
 ## [Session 58.71e] — 2026-05-16 — Refactor sweep module 3 Phase B: TechAgent removal — frontend (#311-refactor-d)
 
 ### What changed

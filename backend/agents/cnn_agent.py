@@ -1093,25 +1093,15 @@ _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.t
 _CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
 
 
-def _model_path_for(arch: str) -> str:
-    """Resolve the on-disk checkpoint for a given arch.
-
-    glu2 keeps the legacy `cnn_model.pt` path so its working baseline
-    (val_loss=0.5828) stays addressable. Other archs get an `_<arch>` suffix
-    so a worse retrain on one arch can never overwrite the other's checkpoint.
-    """
-    if arch == "glu2":
-        return MODEL_PATH
-    root, ext = os.path.splitext(MODEL_PATH)
-    return f"{root}_{arch}{ext}"
+def _model_path_for() -> str:
+    """Path to the active CNN checkpoint. Multi-arch registry deleted
+    #311-refactor-e; glu1 is the only surviving arch."""
+    return os.path.join(os.path.dirname(__file__), "..", "cnn_model_glu1.pt")
 
 
-def _best_loss_path_for(arch: str) -> str:
-    """Per-arch save-if-better sentinel — paired with `_model_path_for`."""
-    if arch == "glu2":
-        return _BEST_LOSS_PATH
-    root, ext = os.path.splitext(_BEST_LOSS_PATH)
-    return f"{root}_{arch}{ext}"
+def _best_loss_path_for() -> str:
+    """Path to the active best-loss baseline (glu1)."""
+    return os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss_glu1.txt")
 _CKPT_EVERY     = 10   # save resume checkpoint every N epochs
 _HEARTBEAT_EVERY = 1   # #106: every epoch — under GPU contention 5+ min epochs caused
                        # check (1800s) doesn't kill healthy training on slow archs
@@ -1138,49 +1128,9 @@ if _TORCH:
             out = self.conv_main(x) * torch.sigmoid(self.conv_gate(x))
             return self.bn(out)
 
-    class SignalCNN(nn.Module):
-        """
-        GLU-gated CNN-LSTM hybrid:
-          1. 4× GatedConv1d blocks with BatchNorm — gate learns per-channel suppression
-          2. 2-layer LSTM captures long-range dependencies
-          3. FC head → sigmoid probability
-        arch tag "glu2" distinguishes from pre-BatchNorm checkpoints.
-        """
-        arch = "glu2"
-
-        def __init__(self, n_ch: int = N_CHANNELS):
-            super().__init__()
-            self.c1  = GatedConv1d(n_ch, 32)
-            self.c2  = GatedConv1d(32,   64)
-            self.p2  = nn.MaxPool1d(2)           # 60 → 30
-            self.c3  = GatedConv1d(64,  128)
-            self.p3  = nn.MaxPool1d(2)           # 30 → 15
-            self.c4  = GatedConv1d(128, 128)
-            self.lstm = nn.LSTM(128, 64, num_layers=2,
-                                batch_first=True, dropout=0.2)
-            self.drop = nn.Dropout(0.3)
-            self.fc   = nn.Linear(64, 1)
-
-        def forward(self, x):
-            x = self.c1(x)
-            x = self.c2(x); x = self.p2(x)
-            x = self.c3(x); x = self.p3(x)
-            x = self.c4(x)
-            x = x.permute(0, 2, 1)          # (B, seq, 128)
-            # flatten_parameters() fixes cuDNN LSTM inplace weight aliasing on CUDA
-            # without it the cuDNN kernel modifies weight_ih in-place during forward,
-            # incrementing the version counter and crashing backward()
-            self.lstm.flatten_parameters()
-            x, _ = self.lstm(x)
-            x = x[:, -1, :]                 # last timestep
-            x = self.drop(x)
-            return self.fc(x)   # raw logits — sigmoid applied at loss/predict time
-
-        def predict(self, tensor: "torch.Tensor") -> float:
-            self.eval()
-            with torch.no_grad():
-                device = next(self.parameters()).device
-                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+    # SignalCNN (arch="glu2", ~280k params) DELETED #311-refactor-e —
+    # multi-arch registry collapsed to glu1 only. Glu2 checkpoint preserved
+    # at backend/retired/cnn_model_glu2.pt (host-side, gitignored).
 
     class SignalCNNGlu1(nn.Module):
         """Capacity-reduced sibling of SignalCNN — half-depth, half-width.
@@ -1215,57 +1165,14 @@ if _TORCH:
                 device = next(self.parameters()).device
                 return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
 
-    class SignalCNNGluM(nn.Module):
-        """Mid-size arch between glu1 (UNDERFITs at val 0.69-0.70) and
-        glu2 (OVERFITs train→0.40 / val 0.58-0.69). ~50k params: enough capacity
-        to fit signal without memorizing noise.
-        """
-        arch = "glum"
-
-        def __init__(self, n_ch: int = N_CHANNELS):
-            super().__init__()
-            self.c1   = GatedConv1d(n_ch, 24)
-            self.c2   = GatedConv1d(24,   48)
-            self.p2   = nn.MaxPool1d(2)        # 60 → 30
-            self.c3   = GatedConv1d(48,   96)
-            self.lstm = nn.LSTM(96, 32, num_layers=1, batch_first=True)
-            self.drop = nn.Dropout(0.4)
-            self.fc   = nn.Linear(32, 1)
-
-        def forward(self, x):
-            x = self.c1(x)
-            x = self.c2(x); x = self.p2(x)
-            x = self.c3(x)
-            x = x.permute(0, 2, 1)
-            self.lstm.flatten_parameters()
-            x, _ = self.lstm(x)
-            x = x[:, -1, :]
-            x = self.drop(x)
-            return self.fc(x)
-
-        def predict(self, tensor: "torch.Tensor") -> float:
-            self.eval()
-            with torch.no_grad():
-                device = next(self.parameters()).device
-                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+    # SignalCNNGluM (arch="glum", ~50k params) DELETED #311-refactor-e —
+    # never trained to production checkpoint; was a mid-size experiment.
 
 
-_ARCH_REGISTRY = {}
-if _TORCH:
-    _ARCH_REGISTRY = {"glu2": SignalCNN, "glu1": SignalCNNGlu1, "glum": SignalCNNGluM}
-
-
-def _active_arch() -> str:
-    """Read CNN_ARCH env at call-time so flips take effect without reimport."""
-    return os.environ.get("CNN_ARCH", "glu2").strip().lower() or "glu2"
-
-
-def _build_cnn(arch: str):
-    """Factory: arch tag → instance. Raises ValueError on unknown arch."""
-    cls = _ARCH_REGISTRY.get(arch)
-    if cls is None:
-        raise ValueError(f"Unknown CNN_ARCH '{arch}' — known: {sorted(_ARCH_REGISTRY)}")
-    return cls()
+def _build_cnn():
+    """Construct the active CNN arch (glu1). Multi-arch registry deleted
+    #311-refactor-e; glu1 is the only surviving arch."""
+    return SignalCNNGlu1()
 
 
 # ── Feature Builder ───────────────────────────────────────────────────────────
@@ -1690,18 +1597,16 @@ class CoinbaseCNNAgent:
         # Set by main.py when a training subprocess is running — causes scans
         # to skip Ollama (GPU is saturated by training, LLM calls hang).
         self.training_active: bool = False
-        # Active arch is read at construction time so flipping CNN_ARCH only
-        # takes effect on the next agent boot, not mid-run.
-        self._arch = _active_arch()
+        # Multi-arch registry deleted #311-refactor-e — glu1 is the only arch.
         if _TORCH:
-            self.model = _build_cnn(self._arch).to(_DEVICE)
+            self.model = _build_cnn().to(_DEVICE)
             self._load()
         _status = "incompatible — signals suppressed until retrained" if self._needs_retrain else \
                   ("loaded" if self._exists() else "random (untrained)")
         _device_str = str(_DEVICE) if _TORCH else "n/a"
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
-            f"device={_device_str} | model={_status} | arch={self._arch} | "
+            f"device={_device_str} | model={_status} | arch=glu1 | "
             f"channels={N_CHANNELS} | lgbm={'ready' if self._lgbm.is_ready() else 'accumulating'}"
         )
 
@@ -1729,13 +1634,13 @@ class CoinbaseCNNAgent:
             logger.warning(f"LGBMFilter retrain failed: {e}")
 
     def _exists(self) -> bool:
-        return os.path.exists(_model_path_for(self._arch))
+        return os.path.exists(_model_path_for())
 
     def _load(self):
         if not _TORCH or not self.model or not self._exists():
             return
         try:
-            ckpt = torch.load(_model_path_for(self._arch), map_location="cpu", weights_only=False)
+            ckpt = torch.load(_model_path_for(), map_location="cpu", weights_only=False)
             if isinstance(ckpt, dict) and "state_dict" in ckpt:
                 arch          = ckpt.get("arch", "legacy")
                 ckpt_channels = ckpt.get("n_channels", N_CHANNELS)
@@ -1774,7 +1679,7 @@ class CoinbaseCNNAgent:
     def save_model(self, backup: bool = False):
         if not (_TORCH and self.model):
             return
-        path = _model_path_for(self._arch)
+        path = _model_path_for()
         if backup and os.path.exists(path):
             shutil.copy2(path, path + ".bak")
         torch.save(
@@ -1788,7 +1693,7 @@ class CoinbaseCNNAgent:
 
     def _read_best_loss(self) -> float:
         try:
-            v = float(open(_best_loss_path_for(self._arch)).read().strip())
+            v = float(open(_best_loss_path_for()).read().strip())
             # BCE at chance ≈ 0.693; anything below 0.1 is a stale/corrupted
             # sentinel (historic bug: content=1e-06 rejected every trained model).
             return v if v >= 0.1 else float("inf")
@@ -1797,7 +1702,7 @@ class CoinbaseCNNAgent:
 
     def _write_best_loss(self, loss: float) -> None:
         try:
-            with open(_best_loss_path_for(self._arch), "w") as f:
+            with open(_best_loss_path_for(), "w") as f:
                 f.write(str(loss))
         except Exception:
             pass
@@ -3036,7 +2941,7 @@ class CoinbaseCNNAgent:
             logger.warning(f"HMM fit during training failed: {_he}")
 
         # True if the model file was written during this training run
-        _active_model_path = _model_path_for(self._arch)
+        _active_model_path = _model_path_for()
         _model_saved = os.path.exists(_active_model_path) and os.path.getmtime(_active_model_path) > _train_start
 
         result = {

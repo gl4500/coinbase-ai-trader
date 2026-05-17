@@ -897,158 +897,11 @@ class TestSignalCNNGlu1:
         prob  = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
         assert 0.0 <= prob <= 1.0
 
-    def test_fewer_params_than_glu2(self):
-        """glu1 must be substantially smaller than glu2 — that is the whole point."""
-        cls   = self._import()
-        n_glu1 = sum(p.numel() for p in cls(n_ch=N_CHANNELS).parameters())
-        n_glu2 = sum(p.numel() for p in SignalCNN(n_ch=N_CHANNELS).parameters())
-        assert n_glu1 * 3 < n_glu2, (
-            f"glu1 has {n_glu1} params vs glu2 {n_glu2} — expected glu1 ≤ ~1/3."
-        )
+    # test_fewer_params_than_glu2 DELETED #311-refactor-e — SignalCNN (glu2) gone.
 
-
-@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
-class TestSignalCNNGluM:
-    """Mid-size arch sitting between glu1 (~9k, UNDERFITs at val 0.69-0.70) and
-    glu2 (~249k, OVERFITs train→0.40 / val 0.58-0.69). Target ~50k params for
-    enough capacity to fit signal without memorizing noise."""
-
-    def _import(self):
-        from agents.cnn_agent import SignalCNNGluM
-        return SignalCNNGluM
-
-    def test_class_exists_with_arch_tag(self):
-        cls = self._import()
-        assert cls.arch == "glum"
-
-    def test_forward_shape(self):
-        cls   = self._import()
-        model = cls(n_ch=N_CHANNELS)
-        x     = torch.randn(4, N_CHANNELS, SEQ_LEN)
-        assert model(x).shape == (4, 1)
-
-    def test_predict_returns_probability(self):
-        cls   = self._import()
-        model = cls(n_ch=N_CHANNELS)
-        prob  = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
-        assert 0.0 <= prob <= 1.0
-
-    def test_param_count_between_glu1_and_glu2(self):
-        """glum must have strictly more params than glu1 and strictly fewer
-        than glu2 — the whole point of a mid-size arch."""
-        from agents.cnn_agent import SignalCNNGlu1
-        cls    = self._import()
-        n_glum = sum(p.numel() for p in cls(n_ch=N_CHANNELS).parameters())
-        n_glu1 = sum(p.numel() for p in SignalCNNGlu1(n_ch=N_CHANNELS).parameters())
-        n_glu2 = sum(p.numel() for p in SignalCNN(n_ch=N_CHANNELS).parameters())
-        assert n_glu1 < n_glum < n_glu2, (
-            f"glum {n_glum} must lie between glu1 {n_glu1} and glu2 {n_glu2}."
-        )
-        # Sanity: glum should be at least 3× glu1 (capacity bump matters) and
-        # at most glu2/3 (otherwise indistinguishable from glu2).
-        assert n_glum >= 3 * n_glu1, (
-            f"glum {n_glum} too close to glu1 {n_glu1} — expected ≥3× capacity bump."
-        )
-        assert n_glum * 3 <= n_glu2, (
-            f"glum {n_glum} too close to glu2 {n_glu2} — expected ≤glu2/3."
-        )
-
-
-@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
-class TestArchFactoryAndPaths:
-    """CNN_ARCH env var routes between glu2 (default) and glu1, with separate
-    on-disk checkpoint files so flipping the env var does not destroy the other
-    arch's saved baseline."""
-
-    def test_active_arch_default_is_glu2(self, monkeypatch):
-        monkeypatch.delenv("CNN_ARCH", raising=False)
-        from agents.cnn_agent import _active_arch
-        assert _active_arch() == "glu2"
-
-    def test_active_arch_reads_env(self, monkeypatch):
-        monkeypatch.setenv("CNN_ARCH", "glu1")
-        from agents.cnn_agent import _active_arch
-        assert _active_arch() == "glu1"
-
-    def test_build_cnn_glu2_returns_signal_cnn(self):
-        from agents.cnn_agent import _build_cnn, SignalCNN
-        assert isinstance(_build_cnn("glu2"), SignalCNN)
-
-    def test_build_cnn_glu1_returns_glu1_class(self):
-        from agents.cnn_agent import _build_cnn, SignalCNNGlu1
-        assert isinstance(_build_cnn("glu1"), SignalCNNGlu1)
-
-    def test_build_cnn_glum_returns_glum_class(self):
-        from agents.cnn_agent import _build_cnn, SignalCNNGluM
-        assert isinstance(_build_cnn("glum"), SignalCNNGluM)
-
-    def test_build_cnn_unknown_arch_raises(self):
-        from agents.cnn_agent import _build_cnn
-        with pytest.raises(ValueError):
-            _build_cnn("does_not_exist")
-
-    def test_model_path_glu2_is_legacy_path(self):
-        """glu2 must keep the existing cnn_model.pt path so the working
-        baseline (val_loss=0.5828) is not invalidated by this change."""
-        from agents.cnn_agent import _model_path_for, MODEL_PATH
-        assert os.path.abspath(_model_path_for("glu2")) == os.path.abspath(MODEL_PATH)
-
-    def test_model_path_glu1_has_arch_suffix(self):
-        from agents.cnn_agent import _model_path_for
-        path = _model_path_for("glu1")
-        assert path.endswith("cnn_model_glu1.pt"), path
-
-    def test_model_path_glum_has_arch_suffix(self):
-        from agents.cnn_agent import _model_path_for
-        path = _model_path_for("glum")
-        assert path.endswith("cnn_model_glum.pt"), path
-
-    def test_best_loss_path_glu2_is_legacy_path(self):
-        from agents.cnn_agent import _best_loss_path_for, _BEST_LOSS_PATH
-        assert os.path.abspath(_best_loss_path_for("glu2")) == os.path.abspath(_BEST_LOSS_PATH)
-
-    def test_best_loss_path_glu1_has_arch_suffix(self):
-        from agents.cnn_agent import _best_loss_path_for
-        path = _best_loss_path_for("glu1")
-        assert path.endswith("cnn_best_loss_glu1.txt"), path
-
-    def test_best_loss_path_glum_has_arch_suffix(self):
-        from agents.cnn_agent import _best_loss_path_for
-        path = _best_loss_path_for("glum")
-        assert path.endswith("cnn_best_loss_glum.txt"), path
-
-
-@pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
-class TestCnnAgentArchWiring:
-    """CoinbaseCNNAgent must honour CNN_ARCH and route checkpoint I/O through
-    per-arch path helpers — flipping CNN_ARCH from glu2→glu1 must not be able
-    to overwrite the glu2 baseline checkpoint."""
-
-    def test_default_arch_is_glu2(self, monkeypatch):
-        monkeypatch.delenv("CNN_ARCH", raising=False)
-        agent = CoinbaseCNNAgent(ws_subscriber=None)
-        from agents.cnn_agent import SignalCNN
-        assert agent._arch == "glu2"
-        assert isinstance(agent.model, SignalCNN)
-
-    def test_glu1_env_selects_glu1_model(self, monkeypatch):
-        monkeypatch.setenv("CNN_ARCH", "glu1")
-        agent = CoinbaseCNNAgent(ws_subscriber=None)
-        from agents.cnn_agent import SignalCNNGlu1
-        assert agent._arch == "glu1"
-        assert isinstance(agent.model, SignalCNNGlu1)
-
-    def test_save_uses_arch_specific_path(self, monkeypatch, tmp_path):
-        """save_model under CNN_ARCH=glu1 must NOT touch the glu2 cnn_model.pt path."""
-        monkeypatch.setenv("CNN_ARCH", "glu1")
-        glu2_path = str(tmp_path / "cnn_model.pt")
-        glu1_path = str(tmp_path / "cnn_model_glu1.pt")
-        monkeypatch.setattr(_cnn_mod, "MODEL_PATH",      glu2_path)
-        monkeypatch.setattr(_cnn_mod, "_MODEL_BAK_PATH", glu2_path + ".bak")
-        agent = CoinbaseCNNAgent(ws_subscriber=None)
-        agent.save_model(backup=False)
-        assert not os.path.exists(glu2_path), "glu1 save must not write glu2 checkpoint"
-        assert os.path.exists(glu1_path),     "glu1 save must write cnn_model_glu1.pt"
+# TestSignalCNNGluM, TestArchFactoryAndPaths (multi-arch lookup),
+# TestCnnAgentArchWiring (CNN_ARCH env routing) all DELETED #311-refactor-e —
+# multi-arch registry collapsed to glu1 only.
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
 class TestTrainOnHistoryNonBlocking:
@@ -1428,21 +1281,20 @@ class TestTrainingFramework:
         time because best_val_loss >= 1e-06 always.
         """
         import agents.cnn_agent as ca
-        monkeypatch.setenv("CNN_ARCH", "glu2")
-        orig = ca._BEST_LOSS_PATH
-        ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
-        try:
-            agent = CoinbaseCNNAgent()
-            with open(ca._BEST_LOSS_PATH, "w") as f:
-                f.write("1e-06")
-            assert agent._read_best_loss() == float("inf"), \
-                "Stale sub-0.1 value must be treated as unset so real models can save"
-            with open(ca._BEST_LOSS_PATH, "w") as f:
-                f.write("0.5")
-            assert abs(agent._read_best_loss() - 0.5) < 1e-6, \
-                "Realistic values >= 0.1 must be preserved"
-        finally:
-            ca._BEST_LOSS_PATH = orig
+        # Multi-arch registry deleted #311-refactor-e; _best_loss_path_for is
+        # now a no-arg helper returning the hardcoded glu1 path. Monkeypatch
+        # the helper directly to redirect _read_best_loss at the tmp file.
+        tmp_loss = str(tmp_path / "best_loss.txt")
+        monkeypatch.setattr(ca, "_best_loss_path_for", lambda: tmp_loss)
+        agent = CoinbaseCNNAgent()
+        with open(tmp_loss, "w") as f:
+            f.write("1e-06")
+        assert agent._read_best_loss() == float("inf"), \
+            "Stale sub-0.1 value must be treated as unset so real models can save"
+        with open(tmp_loss, "w") as f:
+            f.write("0.5")
+        assert abs(agent._read_best_loss() - 0.5) < 1e-6, \
+            "Realistic values >= 0.1 must be preserved"
 
 
 class TestHMMStability:
