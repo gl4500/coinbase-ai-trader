@@ -5,6 +5,34 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71e] — 2026-05-16 — Refactor sweep module 3 Phase B: TechAgent removal — frontend (#311-refactor-d)
+
+### What changed
+- **`frontend/src/components/AgentsDashboard.tsx`** — removed live TECH
+  rendering: deleted the per-agent loop's `tech` branch, the combined
+  stat-card "Tech + XGB" sub-labels, and the entire Tech signal feed
+  section. The page now shows XGB-only live metrics. `tech` field kept
+  in the API-response state shape for back-compat (backend returns
+  `tech: {}` after #311-refactor-c).
+- **`frontend/src/components/FiringCounter.tsx`** — removed the TECH
+  scan/signal counter strip at the top header. Counters' type fields
+  (`tech_scans`, `tech_signals`) kept to avoid TypeScript cascades;
+  populated from `agents.tech` (now `{}`) so values are always 0.
+
+### Kept intact (operator chose "keep history")
+- **`frontend/src/components/PerformanceDashboard.tsx`** — TECH filter
+  option stays. Operator can browse the 569 historical TECH trades there.
+- **`frontend/src/utils/agentByProduct.ts`** + test — utility maps
+  trades by agent; works correctly for historical TECH rows without
+  changes.
+
+### Verification
+- Frontend type-checks pass (no `tech` reference removed without its
+  populator removed).
+- AgentsDashboard renders CNN-only.
+
+---
+
 ## [Session 58.71d] — 2026-05-16 — Refactor sweep module 3 Phase A: TechAgent removal — backend (#311-refactor-c)
 
 ### Why

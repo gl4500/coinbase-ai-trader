@@ -95,14 +95,7 @@ export default function FiringCounter() {
           <Stat label="Total tok" value={counts.llm_total_tok.toLocaleString()} color="text-amber-400" />
         </div>
 
-        <div className="w-px bg-gray-700 self-stretch mx-1" />
-
-        {/* Tech */}
-        <div className="flex gap-2 items-center">
-          <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-widest w-8">TECH</span>
-          <Stat label="Scans" value={counts.tech_scans} color="text-blue-300" />
-          <Stat label="Signals" value={counts.tech_signals} />
-        </div>
+        {/* TechAgent retired #311-refactor-c — TECH scan/signal counters removed */}
 
       </div>
     </div>
