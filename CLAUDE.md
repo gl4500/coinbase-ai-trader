@@ -126,18 +126,25 @@ python -m pytest backend/tests/ -v            # full suite (run once before comm
 
 Running tests repeatedly causes background python processes to stack up. After any test run:
 
-```bash
-# Kill leftover python processes (bash)
-ps aux | grep python | grep -v grep | awk '{print $1}' | xargs kill -9 2>/dev/null
+```powershell
+# PowerShell — SKIPS the live backend (port 8001) and the launcher exe
+$backendPid = (Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue).OwningProcess
+Get-Process python -ErrorAction SilentlyContinue |
+    Where-Object { $_.Id -ne $backendPid -and $_.ProcessName -ne 'Coinbase AI Trader' } |
+    Stop-Process -Force
+```
 
-# PowerShell equivalent
-Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+```bash
+# Bash — same intent: only kill processes that are NOT the backend (port 8001)
+BACKEND_PID=$(ss -ltnp 2>/dev/null | awk '/:8001 /{match($0,/pid=[0-9]+/); if (RSTART) print substr($0,RSTART+4,RLENGTH-4)}' | head -1)
+ps aux | grep -E 'python|pytest' | grep -v grep | awk -v skip="$BACKEND_PID" '$2 != skip {print $2}' | xargs -r kill -9 2>/dev/null
 ```
 
 Rules:
 - **Prefer per-module tests** over full suite during development — faster, stays foreground, no stacking
 - **Only run full suite once** before committing, not repeatedly
 - **Always clean up** after a test run completes or is interrupted
+- **Never** issue a blanket `Stop-Process python -Force` / `pkill -9 python` — it kills the live backend, breaking the scan loop and stopping MC telemetry accumulation. The port-8001-aware snippets above are the only sanctioned cleanup commands.
 
 ---
 

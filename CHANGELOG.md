@@ -5,6 +5,24 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71b] — 2026-05-16 — Backend-aware shell cleanup rule (#311-refactor-cleanup)
+
+### Why
+During refactor Module 1 work I mechanically ran `Get-Process python |
+Stop-Process -Force` as the standing shell-cleanup rule prescribes —
+which killed the live backend (port 8001) along with stray pytest
+processes. ~30 min of MC telemetry not collected. The cleanup rule
+needs a backend carve-out so future agent work doesn't repeat this.
+
+### What changed
+- **`polymarket_app/CLAUDE.md`** — Shell cleanup section rewritten with
+  port-8001-aware snippets (PowerShell + bash). Blanket
+  `Stop-Process python -Force` / `pkill -9 python` is explicitly forbidden.
+
+Docs-only commit.
+
+---
+
 ## [Session 58.71a] — 2026-05-16 — Refactor sweep module 1: dead env-var cleanup (#311-refactor-a)
 
 ### Why
