@@ -5,6 +5,61 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71c] — 2026-05-16 — Refactor sweep module 2: bare-isotonic calibrator removal (#311-refactor-b)
+
+### Why
+Second module of the refactor sweep. `xgb_signal._try_load` had a dual-path
+calibrator loader: dict-shape `{"calibrator","feature_set"}` (canonical
+since #311f) and bare-isotonic (legacy v1). The bare-isotonic branch was
+~20 lines of conditional logic plus a back-compat warning path. Its only
+real-world consumer is a hypothetical rollback to the v1 booster + v1
+calibrator backup — a one-time event that can be handled with a 3-line
+host script (documented below).
+
+### What changed
+- **`backend/agents/xgb_signal.py:_try_load`** — collapsed the
+  dict-vs-bare branch into a single dict-shape check. Bare-isotonic
+  pickles now log a warning and skip calibration (raw passthrough). Net:
+  ~20 lines deleted, ~5 added. Same observable behavior under the
+  current bare-isotonic-on-disk state (still raw passthrough); different
+  warning message.
+- **`backend/tests/test_xgb_signal.py`** — deleted 3 tests that exercised
+  the bare-isotonic load path:
+  - `test_calibration_pkl_remaps_raw_to_calibrated`
+  - `test_calibration_clipped_to_safe_range`
+  - `test_force_reload_picks_up_swapped_calibrator`
+  Added 1 new test `test_bare_isotonic_pkl_skipped_with_warning` locking
+  in the new behavior. Net: -2 tests (19 total in file, was 21).
+
+### Verification
+```
+backend && python -m pytest tests/test_xgb_signal.py -v
+=> 19 passed
+backend && python -c "from agents import xgb_signal; xgb_signal._try_load(); print(xgb_signal._calibration)"
+=> None  (with 'Legacy bare-isotonic format dropped' warning in log)
+```
+
+Zero live-behavior change — current `backend/xgb_calibration.pkl` is bare
+isotonic (v3 refit deferred per #311-cut) so both before and after this
+change produce `_calibration = None` → raw passthrough.
+
+### Rollback to v1 booster (operator runbook)
+If rolling back to the v1 booster + the v1 calibrator backup, the bare
+pickle must be rewrapped into dict shape first:
+
+```python
+import pickle
+from sklearn.isotonic import IsotonicRegression
+iso = pickle.load(open("backend/xgb_calibration.pkl.bak_v1_20260516_182946", "rb"))
+with open("backend/xgb_calibration.pkl", "wb") as f:
+    pickle.dump({"calibrator": iso, "feature_set": "v1"}, f)
+```
+
+Then rename the v1 booster files back to production names (per the
+#311-cut rollback procedure) and hot-reload.
+
+---
+
 ## [Session 58.71b] — 2026-05-16 — Backend-aware shell cleanup rule (#311-refactor-cleanup)
 
 ### Why

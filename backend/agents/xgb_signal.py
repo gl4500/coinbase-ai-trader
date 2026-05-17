@@ -91,7 +91,15 @@ def _try_load() -> bool:
                 try:
                     with open(_CALIBRATION_PATH, "rb") as f:
                         obj = pickle.load(f)
-                    if isinstance(obj, dict) and "calibrator" in obj:
+                    if not (isinstance(obj, dict) and "calibrator" in obj):
+                        logger.warning(
+                            "xgb_signal: calibrator pkl is not the canonical "
+                            '{"calibrator","feature_set"} dict shape — '
+                            "skipping calibration. Legacy bare-isotonic "
+                            "format dropped #311-refactor-b."
+                        )
+                        _calibration = None
+                    else:
                         cal_set = obj.get("feature_set")
                         if cal_set is not None and cal_set != _feature_set:
                             logger.warning(
@@ -106,20 +114,6 @@ def _try_load() -> bool:
                                 "xgb_signal: loaded isotonic calibrator (feature_set=%s)",
                                 cal_set,
                             )
-                    else:
-                        # Bare isotonic (legacy v1) — accept only if booster is v1
-                        if _feature_set == "v1":
-                            _calibration = obj
-                            logger.info(
-                                "xgb_signal: loaded legacy bare-isotonic calibrator (assumed v1)",
-                            )
-                        else:
-                            logger.warning(
-                                "xgb_signal: legacy bare-isotonic calibrator found but "
-                                "booster feature_set=%s — skipping calibration",
-                                _feature_set,
-                            )
-                            _calibration = None
                 except Exception as exc:
                     logger.exception(
                         "xgb_signal: failed to load calibrator (raw passthrough): %s",

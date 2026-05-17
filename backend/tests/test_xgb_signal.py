@@ -179,50 +179,6 @@ class TestModuleAttributes:
 
 class TestCalibration:
 
-    def test_calibration_pkl_remaps_raw_to_calibrated(
-        self, tmp_path, fresh_xgb_module, monkeypatch
-    ):
-        """When xgb_calibration.pkl exists, xgb_prob applies it to raw output.
-
-        Strategy: train a tiny booster that gives some raw output R, fit an
-        IsotonicRegression that maps R → 0.42 (intentionally far from any
-        natural booster output so the test cannot pass by coincidence), and
-        assert xgb_prob returns 0.42 (within float tolerance). Calibrator must
-        be applied BEFORE the [0.01, 0.99] clip.
-        """
-        from sklearn.isotonic import IsotonicRegression
-
-        model_path, features_path = _train_tiny_xgb(str(tmp_path))
-        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
-        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
-
-        x = _synthetic_channels(seed=7)
-        # Get the raw (uncalibrated) output by calling xgb_prob with no calibration
-        cal_path = str(tmp_path / "xgb_calibration.pkl")
-        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", cal_path)
-        raw = fresh_xgb_module.xgb_prob(x)  # no .pkl yet → raw passthrough
-
-        # Fit a calibrator that maps the observed raw value to exactly 0.42.
-        # IsotonicRegression needs at least 2 distinct x values; provide a
-        # spread so the fit is well-defined and 0.42 wins at x=raw.
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        xs = np.array([0.0, raw, 1.0], dtype=np.float64)
-        ys = np.array([0.0, 0.42, 1.0], dtype=np.float64)
-        iso.fit(xs, ys)
-        with open(cal_path, "wb") as f:
-            pickle.dump(iso, f)
-
-        # Reset lazy-load state so the next call picks up the new .pkl
-        fresh_xgb_module._load_attempted = False
-        fresh_xgb_module._load_succeeded = False
-        fresh_xgb_module._booster = None
-        fresh_xgb_module._calibration = None
-
-        cal = fresh_xgb_module.xgb_prob(x)
-        assert cal == pytest.approx(0.42, abs=1e-6), (
-            f"calibration not applied: raw={raw}, expected 0.42, got {cal}"
-        )
-
     def test_no_calibration_pkl_falls_back_to_raw(
         self, tmp_path, fresh_xgb_module, monkeypatch
     ):
@@ -239,31 +195,43 @@ class TestCalibration:
         assert isinstance(prob, float)
         assert 0.01 <= prob <= 0.99
 
-    def test_calibration_clipped_to_safe_range(
-        self, tmp_path, fresh_xgb_module, monkeypatch
+    def test_bare_isotonic_pkl_skipped_with_warning(
+        self, tmp_path, monkeypatch, fresh_xgb_module, caplog
     ):
-        """Even if isotonic outputs 0.0 or 1.0, xgb_prob still clips to [0.01, 0.99].
-
-        Without this, downstream signal-blend math could divide by zero or
-        treat 1.0 as a hard certainty.
-        """
+        """Locks in #311-refactor-b: bare-isotonic pickle format is no longer
+        supported. A bare pickle on disk is treated as 'unknown shape' —
+        skipped with a warning. Raw passthrough remains the failure mode."""
+        import logging
         from sklearn.isotonic import IsotonicRegression
+        import numpy as np
 
-        model_path, features_path = _train_tiny_xgb(str(tmp_path))
-        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
-        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
+        _train_tiny_xgb(str(tmp_path), feature_set="v1")
+        iso = IsotonicRegression(out_of_bounds="clip").fit(
+            np.array([0.2, 0.5, 0.8]), np.array([0.1, 0.5, 0.9])
+        )
+        with open(tmp_path / "xgb_calibration.pkl", "wb") as f:
+            pickle.dump(iso, f)  # bare isotonic — no longer supported
 
-        cal_path = str(tmp_path / "xgb_calibration.pkl")
-        # Calibrator that maps every raw input to exactly 0.0
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        iso.fit(np.array([0.0, 0.5, 1.0]), np.array([0.0, 0.0, 0.0]))
-        with open(cal_path, "wb") as f:
-            pickle.dump(iso, f)
-        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", cal_path)
+        monkeypatch.setattr(
+            fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json")
+        )
+        monkeypatch.setattr(
+            fresh_xgb_module, "_FEATURES_PATH",
+            str(tmp_path / "xgb_features.json"),
+        )
+        monkeypatch.setattr(
+            fresh_xgb_module, "_CALIBRATION_PATH",
+            str(tmp_path / "xgb_calibration.pkl"),
+        )
 
-        x = _synthetic_channels(seed=9)
-        prob = fresh_xgb_module.xgb_prob(x)
-        assert prob == 0.01, f"expected post-calibration clip to 0.01, got {prob}"
+        with caplog.at_level(logging.WARNING):
+            fresh_xgb_module._try_load()
+        assert fresh_xgb_module._calibration is None
+        assert any(
+            "bare-isotonic" in r.message.lower()
+            or "not the canonical" in r.message.lower()
+            for r in caplog.records
+        )
 
 
 # ── #192: hot-reload after on-disk artifacts change ───────────────────────────
@@ -285,53 +253,6 @@ class TestForceReload:
             "after on-disk calibrator refit (#187)"
         )
         assert callable(fresh_xgb_module.force_reload)
-
-    def test_force_reload_picks_up_swapped_calibrator(
-        self, tmp_path, fresh_xgb_module, monkeypatch
-    ):
-        """Swap the on-disk pickle, call force_reload(), assert the next
-        xgb_prob() uses the *new* calibrator without restarting the module."""
-        from sklearn.isotonic import IsotonicRegression
-
-        model_path, features_path = _train_tiny_xgb(str(tmp_path))
-        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
-        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
-
-        cal_path = str(tmp_path / "xgb_calibration.pkl")
-        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", cal_path)
-
-        x = _synthetic_channels(seed=42)
-
-        # First calibrator: every raw input -> 0.30
-        iso_a = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        iso_a.fit(np.array([0.0, 0.5, 1.0]), np.array([0.30, 0.30, 0.30]))
-        with open(cal_path, "wb") as f:
-            pickle.dump(iso_a, f)
-
-        first = fresh_xgb_module.xgb_prob(x)
-        assert first == pytest.approx(0.30, abs=1e-6)
-
-        # Swap to a different calibrator on disk. Without force_reload the
-        # module still serves 0.30 from cache.
-        iso_b = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        iso_b.fit(np.array([0.0, 0.5, 1.0]), np.array([0.70, 0.70, 0.70]))
-        with open(cal_path, "wb") as f:
-            pickle.dump(iso_b, f)
-
-        # Sanity: cache still serves the old value.
-        cached = fresh_xgb_module.xgb_prob(x)
-        assert cached == pytest.approx(0.30, abs=1e-6), (
-            "module not actually caching — test setup invalid"
-        )
-
-        ok = fresh_xgb_module.force_reload()
-        assert ok is True, "force_reload should return True when artifacts present"
-
-        after = fresh_xgb_module.xgb_prob(x)
-        assert after == pytest.approx(0.70, abs=1e-6), (
-            f"force_reload did not pick up new calibrator: got {after}, "
-            f"expected 0.70"
-        )
 
     def test_force_reload_returns_false_when_artifacts_missing(
         self, tmp_path, fresh_xgb_module, monkeypatch
