@@ -198,6 +198,10 @@ def get_detector() -> HMMRegimeDetector:
 def regime_blend(regime: str, confidence: float) -> Tuple[float, float]:
     """
     Returns (cnn_weight, llm_weight) blend based on HMM regime.
+
+    Weights are HARDCODED below; they are NOT config-driven despite the
+    historical CNN_*_CNN_W / CNN_*_LLM_W env vars (deleted #311-refactor-a).
+
     TRENDING:  CNN 75% / LLM 25%  (momentum signal reliable)
     RANGING:   CNN 55% / LLM 45%  (LLM context useful but CNN keeps majority)
     CHAOTIC:   CNN 40% / LLM 60%  (model less reliable in chaos)

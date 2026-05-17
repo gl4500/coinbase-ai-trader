@@ -1,6 +1,9 @@
 """
 Central configuration loaded from .env.
 All modules import the `config` singleton — never read os.environ directly.
+
+Policy: every env var defined here MUST trace to a live consumer in backend/.
+Dead entries are deleted on sight per refactor sweep policy (#311-refactor).
 """
 import os
 from dataclasses import dataclass, field
@@ -56,12 +59,10 @@ class Config:
     # model_prob must exceed cnn_buy_threshold to fire a BUY (symmetric: < 1 - threshold for SELL)
     cnn_buy_threshold:      float = field(default_factory=lambda: float(os.getenv("CNN_BUY_THRESHOLD",      "0.60")))
     cnn_sell_threshold:     float = field(default_factory=lambda: float(os.getenv("CNN_SELL_THRESHOLD",     "0.40")))
-    # CNN/LLM blend weights per regime (must sum to 1.0 each pair)
-    cnn_trending_cnn_w:     float = field(default_factory=lambda: float(os.getenv("CNN_TRENDING_CNN_W",     "0.75")))
-    cnn_trending_llm_w:     float = field(default_factory=lambda: float(os.getenv("CNN_TRENDING_LLM_W",     "0.25")))
-    cnn_ranging_cnn_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_CNN_W",      "0.40")))
-    cnn_ranging_llm_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_LLM_W",      "0.60")))
-    # How often to auto-train (in number of scans; default 4 = ~1 hour at 15-min scan interval)
+    # Auto-train cadence in scans. Active only under MODEL_BACKEND=cnn;
+    # auto-train is gated off under MODEL_BACKEND=xgb per #300, so flipping
+    # this knob has no effect while the xgb backend is live.
+    # Default 4 = ~1 hour at the 15-min scan interval.
     cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "8")))
     # Scan-loop cadence in seconds (default 900 = 15 min). Lower to expedite
     # XGB shadow accumulation; raise to ease Coinbase REST pressure.

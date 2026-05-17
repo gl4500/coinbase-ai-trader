@@ -18,6 +18,13 @@ os.environ.setdefault("APP_API_KEY",              "test-api-key-fixture")
 os.environ.setdefault("DRY_RUN",                  "true")
 os.environ.setdefault("LOG_LEVEL",                "WARNING")
 
+# ── MC filter chain — default OFF for tests ───────────────────────────────────
+# The live .env may set MC_FILTERS=ci, but tests that mock _cnn_prob and
+# expect a BUY signal must not have the MC chain running (it tries to call the
+# real v3 booster + tiered_history). Tests that explicitly want CIFilter set
+# MC_FILTERS in their own monkeypatch + reset the registry cache.
+os.environ["MC_FILTERS"] = ""
+
 
 @pytest.fixture(autouse=True)
 def _redirect_cnn_dataset_cache(tmp_path_factory, monkeypatch):

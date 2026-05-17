@@ -5,6 +5,46 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71a] — 2026-05-16 — Refactor sweep module 1: dead env-var cleanup (#311-refactor-a)
+
+### Why
+First module of the refactor sweep. Investigation (grep across backend/)
+revealed the 4 CNN_*_CNN_W / CNN_*_LLM_W env vars defined in config.py:60-63
+are dead-on-arrival: nothing in backend/ ever reads them. `regime_blend()`
+in services/hmm_regime.py uses hardcoded weights (0.75/0.25 for trending,
+etc.) and was scaffolded with no config plumbing. The env vars + config
+fields polluted `.env` and misled operators about what's tunable.
+
+### What changed
+- **`backend/config.py`** — deleted 4 fields (`cnn_trending_cnn_w`,
+  `cnn_trending_llm_w`, `cnn_ranging_cnn_w`, `cnn_ranging_llm_w`) and
+  their wrapping comment. Replaced the auto-train comment with a
+  backend-gating tag. Added a policy line to the module docstring
+  ("every env var MUST trace to a live consumer").
+- **`backend/services/hmm_regime.py`** — `regime_blend()` docstring now
+  explicitly notes weights are hardcoded (was misleading — implied
+  config-driven).
+- **`.env`** — deleted 4 env keys and 2 wrapping comments. Replaced the
+  auto-train comment with the backend-gating tag. Added a 2-line policy
+  comment block at the top of the file.
+- **`backend/tests/test_config.py`** (NEW) — 1 policy test
+  (`test_no_dead_llm_blend_fields`) with 4 assertions. Locks in: if
+  anyone re-adds these fields without a live consumer, pre-commit fails.
+- **`polymarket_app/CLAUDE.md`** — new invariant #15 documenting the
+  policy.
+
+### Verification
+```
+backend && python -m pytest tests/test_config.py -v
+=> 1 passed
+backend && grep -rE "config\.cnn_trending|config\.cnn_ranging" .
+=> (empty — no live consumers)
+```
+
+Zero live-behavior change. The 4 deleted fields were never consumed anywhere.
+
+---
+
 ## [Session 58.70d] — 2026-05-16 — MC chain ACTIVATED + sync docs (#311-mc-sync)
 
 ### What changed
