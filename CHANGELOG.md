@@ -5,6 +5,84 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71i] — 2026-05-16 — Marketcap bronze schema v2: volume_24h (#marketcap-A)
+
+### Why
+The XGB v3 feature extractor currently has no marketcap-related channels.
+Step A of a 3-step buildout (A: bronze schema; B: channel wiring in
+`tools/xgb_features.py`; C: v3 retrain on N_CHANNELS bump) extends the
+existing parquet-backed marketcap cache to include 24h trading volume —
+which CoinGecko `/coins/{id}/market_chart/range` and CoinPaprika
+`/v1/tickers/{id}/historical` already return in the same responses the
+current parsers ignored. Zero extra API calls.
+
+### What changed
+- **`backend/tools/build_marketcap_parquet.py`** — bumped `_SCHEMA_VERSION`
+  1→2, added `volume_24h` (`pa.float64`) field to `_SCHEMA`. Extended
+  `_save_marketcap_history` / `_load_marketcap_history` / `rows_from_history`
+  to carry the new column. v1 parquets without the column still load
+  (key omitted). `rows_from_history` accepts both legacy 2-tuple and new
+  3-tuple history inputs.
+- **`backend/services/coingecko_marketcap.py:fetch_marketcap_history`** —
+  parses `total_volumes` parallel array alongside `market_caps`. Volume is
+  indexed by timestamp (defensive against array length mismatch). Returns
+  `List[Tuple[int, float, float]]` (ts_ms, market_cap, volume_24h). Missing
+  or empty `total_volumes` -> logs warning + fills 0.0.
+- **`backend/services/coinpaprika_marketcap.py:fetch_marketcap_history`** —
+  reads `volume_24h` field per historical row. Same return shape. Missing
+  or unparseable -> 0.0 fill.
+- **`backend/services/marketcap_history_cache.py`** — new `_schema_is_stale()`
+  check forces full refetch when on-disk parquet has `schema_version < 2`
+  (auto-upgrades v1 parquets lazily on next access). Merge logic carries
+  `volume_24h` on both cached + fresh paths. Return tuple shape extended
+  to `(ts_ms, mc, volume_24h)`.
+- **`backend/tools/marketcap_probe.py`** — `marketcap_rows_to_log_grid`
+  now accepts both 2-tuple (legacy callers/tests) and 3-tuple (current
+  fetchers) row shapes via positional access.
+- **Tests** — +4 new: `test_coingecko_parses_volume_24h`,
+  `test_coingecko_handles_missing_total_volumes` (in
+  `test_coingecko_marketcap.py`); `test_coinpaprika_parses_volume_24h` (in
+  `test_coinpaprika_marketcap.py`);
+  `test_cache_v1_parquet_triggers_full_refetch` (in
+  `test_marketcap_history_cache.py`). Updated 8 existing assertions across
+  the same three test files + `test_build_marketcap_parquet.py` for the
+  new schema shape and v2 default. Net: +4 tests, 0 deleted.
+
+### Verification
+```
+cd backend && python -m pytest tests/test_coingecko_marketcap.py \
+  tests/test_coinpaprika_marketcap.py \
+  tests/test_marketcap_history_cache.py \
+  tests/test_build_marketcap_parquet.py \
+  tests/test_marketcap_probe.py -v
+=> 77 passed
+```
+
+Zero extra API calls per pid — volume was already in the response payload.
+Bronze parquets upgrade lazily on next cache hit per pid; the operator
+preflight below forces a one-shot full upgrade across all tracked products.
+
+### Operator preflight (run once after this commit)
+
+```bash
+cd backend
+../.venv/Scripts/python.exe -m tools.build_marketcap_parquet \
+  --source coingecko --pids <comma-list-of-49-tracked-pids> \
+  --start 2025-05-16 --end 2026-05-16
+```
+
+CoinGecko free tier rate-limits ~30 req/min; 49 calls ≈ 100 sec wall time.
+After completion: all 49 tracked pids have parquet at schema_version=2 with
+`volume_24h` populated. (The existing `--source` / `--pids` flags suffice;
+a bulk `--all-tracked` convenience flag is Step B's problem.)
+
+### Step B preview
+Wire `volume_24h` into `tools/xgb_features.py` v3 extractor as new
+channel(s). Bump `N_CHANNELS = 28 → 30+`. Retrain booster (Step C).
+Each is its own brainstorm cycle.
+
+---
+
 ## [Session 58.71h] — 2026-05-16 — Refactor sweep module 6: probe scripts audit (#311-refactor-g)
 
 ### Why

@@ -246,8 +246,9 @@ class TestFetchMarketcapHistory:
                 "BTC-USD", start_ms=1700000000000, end_ms=1700086400000
             )
         assert len(rows) == 2
-        assert rows[0] == (1700000000000, 1.3e12)
-        assert rows[1] == (1700086400000, 1.31e12)
+        # Step A: shape extended to (ts_ms, market_cap, volume_24h).
+        assert rows[0] == (1700000000000, 1.3e12, 5e10)
+        assert rows[1] == (1700086400000, 1.31e12, 5.1e10)
 
     @pytest.mark.asyncio
     async def test_rows_sorted_ascending_even_if_response_is_not(self):
@@ -350,3 +351,59 @@ class TestMarketcapRowShape:
         assert row.total_supply == 1.0
         assert row.ingest_ts == 1700000000
         assert row.schema_version == 1
+
+
+# ── volume_24h extraction (Step A: marketcap bronze v2) ──────────────────────
+
+
+class TestVolume24hExtraction:
+
+    @pytest.mark.asyncio
+    async def test_coingecko_parses_volume_24h(self):
+        """Fetcher must extract total_volumes alongside market_caps.
+
+        CoinGecko /coins/{id}/market_chart/range returns prices, market_caps,
+        and total_volumes as parallel arrays. The old parser ignored
+        total_volumes; the new contract returns (ts_ms, market_cap, volume_24h)
+        tuples.
+        """
+        body = {
+            "prices":        [[1746921600000, 100.0],  [1747008000000, 101.0]],
+            "market_caps":   [[1746921600000, 1.0e9],  [1747008000000, 1.01e9]],
+            "total_volumes": [[1746921600000, 5.0e7],  [1747008000000, 6.0e7]],
+        }
+        with patch.object(cg.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=_ok(body)
+            )
+            rows = await cg.fetch_marketcap_history(
+                "BTC-USD", 1746921600000, 1747008000000
+            )
+        assert len(rows) == 2
+        ts0, mc0, vol0 = rows[0]
+        assert mc0 == 1.0e9
+        assert vol0 == 5.0e7
+        ts1, mc1, vol1 = rows[1]
+        assert vol1 == 6.0e7
+
+    @pytest.mark.asyncio
+    async def test_coingecko_handles_missing_total_volumes(self, caplog):
+        """Missing/empty total_volumes → all rows get volume_24h=0.0 + warning."""
+        import logging
+        body = {
+            "market_caps":   [[1746921600000, 1.0e9]],
+            "total_volumes": [],
+        }
+        with patch.object(cg.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=_ok(body)
+            )
+            with caplog.at_level(logging.WARNING):
+                rows = await cg.fetch_marketcap_history(
+                    "BTC-USD", 0, 9999999999999
+                )
+        assert rows == [(1746921600000, 1.0e9, 0.0)]
+        assert any(
+            "total_volumes" in r.message.lower() or "volume_24h" in r.message.lower()
+            for r in caplog.records
+        )

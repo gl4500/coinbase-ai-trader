@@ -37,7 +37,7 @@ class TestParquetSchema:
     def test_schema_columns_match_bronze_convention(self):
         names = [f.name for f in bmp._SCHEMA]
         assert names == [
-            "start", "market_cap", "fdv", "ingest_ts", "schema_version"
+            "start", "market_cap", "fdv", "volume_24h", "ingest_ts", "schema_version"
         ]
 
     def test_schema_dtypes_match_bronze_convention(self):
@@ -45,11 +45,13 @@ class TestParquetSchema:
         assert types["start"] == "int64"
         assert types["market_cap"] == "double"
         assert types["fdv"] == "double"
+        assert types["volume_24h"] == "double"
         assert types["ingest_ts"] == "int64"
         assert types["schema_version"] == "int32"
 
-    def test_schema_version_is_one(self):
-        assert bmp._SCHEMA_VERSION == 1
+    def test_schema_version_is_two(self):
+        # Bumped 1 → 2 in Step A (2026-05-16); see #marketcap-A.
+        assert bmp._SCHEMA_VERSION == 2
 
 
 # ── Round-trip + ordering ───────────────────────────────────────────────────
@@ -115,7 +117,7 @@ class TestPITSemantics:
             bmp._save_marketcap_history(path, rows, now_ts=1778500000)
             loaded = bmp._load_marketcap_history(path)
             assert loaded[0]["ingest_ts"] == 1778500000
-            assert loaded[0]["schema_version"] == 1
+            assert loaded[0]["schema_version"] == 2
 
     def test_save_preserves_existing_ingest_ts(self):
         with tempfile.TemporaryDirectory() as tmp:

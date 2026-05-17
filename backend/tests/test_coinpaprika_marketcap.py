@@ -182,3 +182,33 @@ class TestFetchMarketcapHistory:
             url = mock_get.call_args.args[0]
             assert "/tickers/btc-bitcoin/historical" in url
             assert "/ohlcv/" not in url
+
+
+# ── volume_24h extraction (Step A: marketcap bronze v2) ──────────────────────
+
+
+class TestVolume24hExtraction:
+
+    @pytest.mark.asyncio
+    async def test_coinpaprika_parses_volume_24h(self):
+        """Fetcher must map the `volume_24h` field from each historical row
+        to a volume_24h value in the returned tuple. CoinPaprika
+        /v1/tickers/{id}/historical returns rows with keys:
+        timestamp, price, volume_24h, market_cap."""
+        body = [
+            {"timestamp": "2025-01-01T00:00:00Z", "market_cap": 1.0e9,  "volume_24h": 5.0e7, "price": 100.0},
+            {"timestamp": "2025-01-02T00:00:00Z", "market_cap": 1.01e9, "volume_24h": 6.0e7, "price": 101.0},
+        ]
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=_ok(body)
+            )
+            rows = await cp.fetch_marketcap_history(
+                "BTC-USD", start_ms=1735689600000, end_ms=1735862400000
+            )
+        assert len(rows) == 2
+        # Returned shape: (ts_ms, market_cap, volume_24h)
+        assert all(len(r) == 3 for r in rows)
+        assert rows[0][1] == 1.0e9
+        assert rows[0][2] == 5.0e7
+        assert rows[1][2] == 6.0e7

@@ -43,11 +43,12 @@ logger = logging.getLogger(__name__)
 _BAR_SECS = 3600
 _MARKETCAP_DIR = os.path.join(BACKEND, "data", "marketcap")
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2  # was 1; v2 adds volume_24h (Step A, 2026-05-16)
 _SCHEMA = pa.schema([
     pa.field("start",          pa.int64()),
     pa.field("market_cap",     pa.float64()),
     pa.field("fdv",            pa.float64()),
+    pa.field("volume_24h",     pa.float64()),
     pa.field("ingest_ts",      pa.int64()),
     pa.field("schema_version", pa.int32()),
 ])
@@ -74,6 +75,9 @@ def _load_marketcap_history(path: str) -> List[Dict]:
             "market_cap": float(rows["market_cap"][i]),
             "fdv":        float(rows["fdv"][i]),
         }
+        # volume_24h is v2-only — old v1 parquets lack the column entirely.
+        if "volume_24h" in rows and rows["volume_24h"][i] is not None:
+            r["volume_24h"] = float(rows["volume_24h"][i])
         if has_ingest and rows["ingest_ts"][i] is not None:
             r["ingest_ts"] = int(rows["ingest_ts"][i])
         if has_sv and rows["schema_version"][i] is not None:
@@ -109,6 +113,7 @@ def _save_marketcap_history(
             "start":      start,
             "market_cap": mc,
             "fdv":        fdv,
+            "volume_24h": float(r.get("volume_24h", 0.0)),
         }
         if "ingest_ts" in r:
             merged["ingest_ts"] = int(r["ingest_ts"])
@@ -121,6 +126,7 @@ def _save_marketcap_history(
             "start":          [r["start"]      for r in ordered],
             "market_cap":     [r["market_cap"] for r in ordered],
             "fdv":            [r["fdv"]        for r in ordered],
+            "volume_24h":     [float(r.get("volume_24h", 0.0)) for r in ordered],
             "ingest_ts":      [int(r.get("ingest_ts", now_ts)) for r in ordered],
             "schema_version": [int(r.get("schema_version", _SCHEMA_VERSION)) for r in ordered],
         },
@@ -130,14 +136,15 @@ def _save_marketcap_history(
 
 
 def rows_from_history(
-    history: Iterable[Tuple[int, float]],
+    history: Iterable[Tuple[int, float, float]],
     fdv_history: Optional[Iterable[Tuple[int, float]]] = None,
 ) -> List[Dict]:
-    """Convert raw `(ts_ms, market_cap)` rows to bar-aligned save dicts.
+    """Convert raw `(ts_ms, market_cap, volume_24h)` rows to bar-aligned save dicts.
 
-    `history` is the output of services/<provider>.fetch_marketcap_history().
-    Each ts_ms is floored to the hour bar (epoch_secs // 3600 * 3600).
-    Optional `fdv_history` aligns by ts_ms; when not provided, fdv == market_cap.
+    `history` is the output of services/<provider>.fetch_marketcap_history()
+    which now returns 3-tuples (Step A, 2026-05-16). Each ts_ms is floored to
+    the hour bar (epoch_secs // 3600 * 3600). Optional `fdv_history` aligns
+    by ts_ms; when not provided, fdv == market_cap.
     """
     fdv_lookup: Dict[int, float] = {}
     if fdv_history is not None:
@@ -145,13 +152,20 @@ def rows_from_history(
             fdv_lookup[int(ts_ms)] = float(fdv)
 
     out: List[Dict] = []
-    for ts_ms, mc in history:
+    for entry in history:
+        # Accept (ts_ms, mc) for back-compat AND (ts_ms, mc, vol) for v2 fetchers.
+        if len(entry) >= 3:
+            ts_ms, mc, vol = entry[0], entry[1], entry[2]
+        else:
+            ts_ms, mc = entry[0], entry[1]
+            vol = 0.0
         start = (int(ts_ms) // 1000 // _BAR_SECS) * _BAR_SECS
         fdv = fdv_lookup.get(int(ts_ms), float(mc))
         out.append({
             "start":      start,
             "market_cap": float(mc),
             "fdv":        fdv,
+            "volume_24h": float(vol),
         })
     return out
 

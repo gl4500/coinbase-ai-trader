@@ -70,9 +70,11 @@ def marketcap_rows_to_log_grid(
     """
     from services.coingecko_marketcap import align_to_hourly
 
+    # Step A (2026-05-16): fetchers now return 3-tuples (ts, mc, volume_24h).
+    # Accept both shapes for back-compat with legacy callers/tests.
     valid_rows = [
-        (int(ts), float(mc)) for ts, mc in rows
-        if mc is not None and float(mc) > 0.0
+        (int(r[0]), float(r[1])) for r in rows
+        if r[1] is not None and float(r[1]) > 0.0
     ]
     if not valid_rows:
         return {}

@@ -111,15 +111,18 @@ def _iso_to_ms(iso: str) -> Optional[int]:
 
 async def fetch_marketcap_history(
     product_id: str, start_ms: int, end_ms: int
-) -> List[Tuple[int, float]]:
+) -> List[Tuple[int, float, float]]:
     """Daily marketcap timeseries for one Coinbase pid.
 
-    Returns list of (ts_ms, market_cap) sorted ascending. Skips rows with a
-    missing or non-positive market_cap. Empty list when:
+    Returns list of (ts_ms, market_cap, volume_24h) sorted ascending. Skips
+    rows with a missing or non-positive market_cap. Empty list when:
       - pid is unmapped
       - COINPAPRIKA_DISABLED=1
       - HTTP non-200 or transport error
       - response shape unexpected
+
+    Step A (2026-05-16): return tuple shape extended to carry volume_24h
+    parsed from the response's `volume_24h` field. Missing -> 0.0 fill.
     """
     if _is_disabled():
         return []
@@ -158,7 +161,7 @@ async def fetch_marketcap_history(
     if not isinstance(body, list):
         return []
 
-    rows: List[Tuple[int, float]] = []
+    rows: List[Tuple[int, float, float]] = []
     for entry in body:
         if not isinstance(entry, dict):
             continue
@@ -174,6 +177,10 @@ async def fetch_marketcap_history(
         ts_ms = _iso_to_ms(entry.get("timestamp"))
         if ts_ms is None:
             continue
-        rows.append((ts_ms, mc_f))
+        try:
+            vol_f = float(entry.get("volume_24h") or 0.0)
+        except (TypeError, ValueError):
+            vol_f = 0.0
+        rows.append((ts_ms, mc_f, vol_f))
     rows.sort(key=lambda r: r[0])
     return rows

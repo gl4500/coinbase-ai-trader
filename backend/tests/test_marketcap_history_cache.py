@@ -45,7 +45,7 @@ class TestCacheMiss:
 
         async def _stub(pid, start_ms, end_ms):
             called["n"] += 1
-            return [(1735689600000, 1.0e12), (1735776000000, 1.01e12)]
+            return [(1735689600000, 1.0e12, 0.0), (1735776000000, 1.01e12, 0.0)]
 
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
 
@@ -68,7 +68,7 @@ class TestCacheMiss:
         import pyarrow.parquet as pq
 
         async def _stub(pid, start_ms, end_ms):
-            return [(1735689600000, 1.0e12)]
+            return [(1735689600000, 1.0e12, 0.0)]
 
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: 1778500000.0)
@@ -84,11 +84,11 @@ class TestCacheMiss:
         tbl = pq.read_table(path)
         names = [f.name for f in tbl.schema]
         assert names == [
-            "start", "market_cap", "fdv", "ingest_ts", "schema_version"
+            "start", "market_cap", "fdv", "volume_24h", "ingest_ts", "schema_version"
         ]
         d = tbl.to_pydict()
         assert d["ingest_ts"][0] == 1778500000
-        assert d["schema_version"][0] == 1
+        assert d["schema_version"][0] == 2
 
 
 # ── Cache hit short-circuits API ───────────────────────────────────────────
@@ -107,9 +107,9 @@ class TestCacheHit:
             path,
             [
                 {"start": 1735689600, "market_cap": 1.0e12, "fdv": 1.0e12,
-                 "ingest_ts": now_ts, "schema_version": 1},
+                 "ingest_ts": now_ts, "schema_version": 2},
                 {"start": 1735776000, "market_cap": 1.01e12, "fdv": 1.01e12,
-                 "ingest_ts": now_ts, "schema_version": 1},
+                 "ingest_ts": now_ts, "schema_version": 2},
             ],
             now_ts=now_ts,
         )
@@ -157,7 +157,7 @@ class TestRefreshWindow:
         called = {"n": 0}
         async def _stub(pid, start_ms, end_ms):
             called["n"] += 1
-            return [(1735689600000, 1.0e12)]
+            return [(1735689600000, 1.0e12, 0.0)]
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: 1778500000.0)
 
@@ -196,7 +196,7 @@ class TestRangeCoverage:
         called = {"n": 0}
         async def _stub(pid, start_ms, end_ms):
             called["n"] += 1
-            return [(1735776000000, 1.01e12)]
+            return [(1735776000000, 1.01e12, 0.0)]
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: float(now_ts + 60))
 
@@ -208,7 +208,7 @@ class TestRangeCoverage:
         )
         assert called["n"] == 1, "missing range must trigger refetch"
         # merged rows should include both cached + freshly fetched
-        starts = sorted(ts for ts, _ in rows)
+        starts = sorted(r[0] for r in rows)
         assert 1735689600000 in starts
         assert 1735776000000 in starts
 
@@ -253,3 +253,66 @@ class TestRangeFilter:
         # only one row inside [start_ms, end_ms]
         assert len(rows) == 1
         assert rows[0][0] == 1735689600000
+
+
+# ── schema v1 → v2 auto-upgrade (Step A: marketcap bronze v2) ────────────────
+
+
+class TestSchemaV1AutoUpgrade:
+
+    @pytest.mark.asyncio
+    async def test_cache_v1_parquet_triggers_full_refetch(
+        self, tmp_path, monkeypatch
+    ):
+        """A parquet on disk with schema_version=1 must trigger a full refetch
+        even if its ingest_ts is fresh — because v1 lacks the new volume_24h
+        column required by downstream consumers."""
+        from tools.build_marketcap_parquet import (
+            _save_marketcap_history,
+            _load_marketcap_history,
+            _SCHEMA_VERSION,
+        )
+        from services import marketcap_history_cache as mhc
+
+        assert _SCHEMA_VERSION >= 2, (
+            "Plan requires _SCHEMA_VERSION bumped to 2 before this test passes"
+        )
+
+        path = os.path.join(str(tmp_path), "BTC-USD.parquet")
+        now_ts = int(time.time())
+        # Pre-seed parquet with explicit schema_version=1 to simulate stale state
+        _save_marketcap_history(
+            path,
+            [{
+                "start": 1746921600,
+                "market_cap": 1.0e9,
+                "fdv": 1.0e9,
+                "ingest_ts": now_ts,     # fresh — would normally hit cache
+                "schema_version": 1,     # but v1 → must refetch
+            }],
+            now_ts=now_ts,
+        )
+
+        # Spy on the underlying fetcher; return new (ts, mc, vol) tuples
+        calls = {"n": 0}
+
+        async def fake_fetch(pid, start_ms, end_ms):
+            calls["n"] += 1
+            return [(1746921600000, 1.0e9, 5.0e7)]
+
+        monkeypatch.setattr(mhc, "fetch_marketcap_history", fake_fetch)
+
+        out = await mhc.fetch_marketcap_history_cached(
+            "BTC-USD",
+            start_ms=1746921600000,
+            end_ms=1747008000000,
+            parquet_dir=str(tmp_path),
+        )
+        assert calls["n"] == 1, "v1 parquet should trigger full refetch"
+
+        # Verify parquet was rewritten at v2 with volume_24h
+        rewritten = _load_marketcap_history(path)
+        assert len(rewritten) >= 1
+        assert rewritten[0]["schema_version"] == 2
+        assert "volume_24h" in rewritten[0]
+        assert rewritten[0]["volume_24h"] == 5.0e7

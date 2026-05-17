@@ -204,14 +204,19 @@ async def fetch_marketcap_snapshot(pids: Iterable[str]) -> Dict[str, MarketcapRo
 
 async def fetch_marketcap_history(
     product_id: str, start_ms: int, end_ms: int
-) -> List[Tuple[int, float]]:
+) -> List[Tuple[int, float, float]]:
     """Historical marketcap timeseries for a single Coinbase pid.
 
-    Returns list of (ts_ms, market_cap) sorted ascending. Empty list when:
+    Returns list of (ts_ms, market_cap, volume_24h) sorted ascending. Empty
+    list when:
       - pid is unmapped
       - COINGECKO_DISABLED=1
       - HTTP non-200 or transport error
       - response shape unexpected
+
+    Step A (2026-05-16): return tuple shape extended to carry volume_24h
+    parsed from the response's `total_volumes` parallel array. Missing or
+    empty total_volumes -> warning + 0.0 fill.
     """
     if _is_disabled():
         return []
@@ -250,12 +255,33 @@ async def fetch_marketcap_history(
     except Exception:
         return []
 
-    raw = body.get("market_caps") if isinstance(body, dict) else None
-    if not isinstance(raw, list):
+    if not isinstance(body, dict):
+        return []
+    mc_raw  = body.get("market_caps")
+    vol_raw = body.get("total_volumes")
+    if not isinstance(mc_raw, list) or not mc_raw:
         return []
 
-    rows: List[Tuple[int, float]] = []
-    for entry in raw:
+    if not isinstance(vol_raw, list) or not vol_raw:
+        logger.warning(
+            "coingecko_marketcap: total_volumes missing/empty pid=%s — volume_24h=0.0",
+            product_id,
+        )
+        vol_raw = []
+
+    # Index volume by timestamp for safe lookup (CG arrays usually align but
+    # we don't depend on equal lengths).
+    vol_by_ts: Dict[int, float] = {}
+    for entry in vol_raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        try:
+            vol_by_ts[int(entry[0])] = float(entry[1])
+        except (TypeError, ValueError):
+            continue
+
+    rows: List[Tuple[int, float, float]] = []
+    for entry in mc_raw:
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
         try:
@@ -263,7 +289,8 @@ async def fetch_marketcap_history(
             mc = float(entry[1])
         except (TypeError, ValueError):
             continue
-        rows.append((ts, mc))
+        vol = vol_by_ts.get(ts, 0.0)
+        rows.append((ts, mc, vol))
     rows.sort(key=lambda r: r[0])
     return rows
 
