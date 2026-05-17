@@ -14,25 +14,14 @@ Never touch `radioconda\`, `.spyder-py3\`, or any other directory in the user's 
 
 ## Find-List-Fix Workflow — Required whenever issues are identified
 
-Whenever bugs, test failures, stale assertions, or needed refactors are found during any task:
+When bugs, test failures, stale assertions, or needed refactors are found:
 
-```
-1. STOP — do not fix inline without listing first
-2. Write a numbered task list of every issue found (all of them, not just the current one)
-3. Fix each item in order, marking it complete as you go
-4. Do not move to the next task until the current one is green and committed
-```
+1. **STOP** — don't fix inline. Use `TaskCreate` for every distinct issue; each task names the file, the problem, the intended fix.
+2. **Fix in order.** Mark `in_progress` when starting, `completed` immediately when done. No batching.
+3. **Run tests after each fix**, not just at the end. If a test fails, resolve before moving on.
+4. **No fix without a task.** Discover a new problem mid-fix? Create the task first.
 
-**Rule:** No fix is made silently. Every issue gets listed before it gets fixed.
-
-Example — found 3 issues while working on a feature:
-```
-Found issues:
-1. [ ] test_cache assertion uses stale tuple size (2-tuple, now 3-tuple)
-2. [ ] _CNN_MAX_HOLD_SECS constant not matching test assertion
-3. [ ] outcome_tracker.py hardcodes model name instead of reading env var
-→ Fix 1, commit. Fix 2, commit. Fix 3, commit.
-```
+No fix is made silently.
 
 ---
 
@@ -47,29 +36,6 @@ Found issues:
 ```
 
 No code change is committed without a corresponding test. No exceptions for "small" fixes.
-
----
-
-## Fix Workflow (REQUIRED)
-
-When you find bugs, inconsistencies, or issues — during an audit, code review,
-or in response to a user report — follow this sequence every time:
-
-1. **Create a task list before touching code.**
-   Use `TaskCreate` for each distinct fix. Each task must identify:
-   - The file
-   - The problem
-   - The intended fix
-
-2. **Fix in order. Mark tasks as you go.**
-   Set `in_progress` when starting a task, `completed` immediately when done.
-   Do not batch completions.
-
-3. **Run tests after each fix**, not just at the end.
-   If a test fails, resolve it before moving to the next task.
-
-4. **No fix without a task.**
-   If you discover a new problem mid-fix, create a task for it first.
 
 ---
 
@@ -148,6 +114,25 @@ Rules:
 
 ---
 
+## Session hygiene — compact periodically
+
+Long Claude Code sessions burn context fast — especially subagent-driven implementation runs, multi-file refactors, and brainstorm → spec → plan → execute cycles. The assistant should **suggest `/compact`** at natural breakpoints rather than let context grow unbounded.
+
+Triggers to suggest `/compact`:
+- After 5+ subagent dispatches within one feature
+- When estimated conversation exceeds ~100k tokens
+- Before starting a NEW feature in a session that already shipped one
+- At natural milestones — after a commit lands, after a sweep module finishes, after a brainstorm/plan cycle completes
+- When the user mentions cost, slowness, or long-context concerns
+
+How to apply:
+- Surface as a single-line suggestion at the breakpoint: *"Context is getting long — want to `/compact` before we continue?"*
+- Don't compact silently or force it; the user decides
+- `/compact` preserves project state (memory files, recent commits, working tree) — safe at any natural breakpoint
+- After `/compact` fires, the same rule applies to the next chunk of work
+
+---
+
 ## Memory
 
 - Update relevant memory files immediately after every code change.
@@ -169,16 +154,19 @@ Rules:
 4. Rule added or modified → update the matching memory file AND this `CLAUDE.md` in the same response.
 5. Never commit code without committing any corresponding `CLAUDE.md` update in the same or immediately following commit.
 
-Relevant memory files for this repo:
+Relevant memory files for this repo (`coinbase-ai-trader` / polymarket_app):
 | Memory file | Mirrors |
 |---|---|
 | `feedback_tdd_workflow.md` | TDD Workflow section |
 | `feedback_scope_restriction.md` | Scope section |
 | `feedback_shell_cleanup.md` | Shell cleanup section |
 | `feedback_sync_rule.md` | Memory sync rule |
-| `coinbase_trader_architecture.md` | Architecture Quick Reference |
-| `trading_app_bugs_fixed.md` | Bug history (Sessions 9+) |
-| `trading_app_thresholds.md` | Agent decision thresholds |
+| `feedback_python_clean_functions.md` | Code Style + new-code authoring rules |
+| `feedback_xgb_focus_not_cnn.md` | XGB-only scope; CNN frozen for new feature work |
+| `coinbase_trader_architecture.md` | This file's Architecture Quick Reference + per-session change log |
+| `coinbase_trader_schema.md` | DB column lists + code landmarks |
+
+Note: `trading_app_*.md` memory files belong to a different project (not polymarket_app) and should be ignored when working in this repo.
 
 ---
 
@@ -209,14 +197,11 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 
 ## Architecture Quick Reference
 
-- **Backend:** FastAPI + asyncio, port 8000
-- **Frontend:** React + Vite + Tailwind, port 3000
+- **Backend:** FastAPI + asyncio, port **8001**
+- **Frontend:** React + Vite + Tailwind, port **5174**
 - **DB:** SQLite via aiosqlite (`backend/coinbase.db`)
 - **Market data:** Coinbase Advanced Trade API (REST + WebSocket)
-- **AI agents:** CNN agent (PyTorch / XGBoost via MODEL_BACKEND). Historical: TechAgent retired #311-refactor-c (2026-05-16); historical TECH rows remain in DB.
-- **Local inference:** Ollama at `http://localhost:11434`; model set via `OLLAMA_MODEL` in `.env`
-- **Current Ollama model:** `llama3.1:8b` (~4.7 GB Q4) — fits RTX 2060 with headroom
-- **GPU constraint:** RTX 2060 = 6 GB VRAM — only one Q4 model loaded at a time
+- **AI agents:** CoinbaseCNNAgent only (XGBoost driver via `MODEL_BACKEND=xgb`; CNN model path still exists but xgb has been the live backend for months — see `agents/xgb_signal.py`). Historical: TechAgent retired #311-refactor-c (2026-05-16); Ollama LLM blend deleted #311-refactor-f; rows remain in DB.
 - **Config:** `.env` → environment variables read directly in modules
 - **Training:** `train_worker.py` spawned as subprocess to avoid blocking scan loop
 
@@ -245,9 +230,17 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 |---|---|---|
 | `agents/cnn_agent.py` | `test_cnn_agent.py` | ✅ covered |
 | `agents/cnn_agent.py` (risk exits) | `test_cnn_risk_exits.py` | ✅ covered |
-| `agents/tech_agent_cb.py` | `test_tech_agent_cb.py` | ✅ covered |
+| `agents/xgb_signal.py` | `test_xgb_signal.py` | ✅ covered |
+| `agents/mc/*` | `tests/agents/mc/*` | ✅ covered |
 | `agents/signal_generator.py` | `test_signal_improvements.py` | ✅ covered |
 | `data/cnn_model.py` | `test_cnn_model.py` | ✅ covered |
 | `data/history_backfill.py` | `test_history_backfill.py` | ✅ covered |
 | `data/macro_history.py` | `test_macro_history.py` | ✅ covered |
-| `database.py` | (integration via agent tests) | partial |
+| `database.py` | `test_database.py` + integration via agent tests | ✅ covered |
+| `services/marketcap_history_cache.py` | `test_marketcap_history_cache.py` | ✅ covered |
+| `services/coingecko_marketcap.py` | `test_coingecko_marketcap.py` | ✅ covered |
+| `services/coinpaprika_marketcap.py` | `test_coinpaprika_marketcap.py` | ✅ covered |
+| `services/tiered_history.py` | `test_tiered_history.py` | ✅ covered |
+| `tools/xgb_features.py` (v1/v2/v3) | `test_xgb_features.py`, `test_xgb_features_v3.py` | ✅ covered |
+
+(Test count: ~970 passing as of Session 58.71i.) Modules retired: `tech_agent_cb.py` (#311-refactor-c, 2026-05-16).
