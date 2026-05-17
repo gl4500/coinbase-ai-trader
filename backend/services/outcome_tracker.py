@@ -41,7 +41,7 @@ class OutcomeTracker:
 
     async def record(
         self,
-        source:     str,    # TECH | MOMENTUM | CNN
+        source:     str,    # CNN (TECH/MOMENTUM retired; historical rows remain)
         product_id: str,
         side:       str,    # BUY | SELL
         confidence: float,
@@ -232,14 +232,9 @@ class OutcomeTracker:
 # ── Indicator summary helpers ─────────────────────────────────────────────────
 
 def _format_indicators(source: str, ind: Dict) -> str:
-    if source == "TECH":
-        parts = []
-        if "rsi"    in ind: parts.append(f"RSI={ind['rsi']:.0f}")
-        if "bb_pos" in ind: parts.append(f"BB={ind['bb_pos']:.2f}")
-        if "macd_h" in ind: parts.append(f"MACD={'bull' if ind['macd_h'] > 0 else 'bear'}")
-        if "stoch_k" in ind: parts.append(f"Stoch={ind['stoch_k']:.0f}")
-        return " ".join(parts)
-    elif source == "MOMENTUM":
+    # TECH branch removed #311-refactor-c (TechAgent retired). Historical
+    # source='TECH' rows remain in signal_outcomes but are never re-formatted.
+    if source == "MOMENTUM":
         parts = []
         if "mom_s"       in ind: parts.append(f"mom5d={ind['mom_s']*100:+.1f}%")
         if "mom_m"       in ind: parts.append(f"mom10d={ind['mom_m']*100:+.1f}%")

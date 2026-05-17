@@ -116,9 +116,10 @@ def _backend_label() -> str:
 
 class _CNNBook:
     """Lightweight dry-run portfolio book for the CNN agent.
-    Mirrors the _Book class in tech_agent_cb so that
-    CNN trades appear in the `trades` table and per-product positions are tracked
-    (prevents buying the same asset repeatedly).
+    Previously mirrored the _Book class in the retired tech_agent_cb
+    (#311-refactor-c); now the only paper book in the system. Ensures CNN
+    trades appear in the `trades` table and per-product positions are
+    tracked (prevents buying the same asset repeatedly).
     """
     def __init__(self):
         self._agent      = "CNN"
@@ -2130,8 +2131,9 @@ class CoinbaseCNNAgent:
             trending = hmm_regime == "TRENDING"
         cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
 
-        # Fetch most-recent Tech decisions for this product so the Ollama
-        # model can incorporate their votes into its reasoning.
+        # Fetch most-recent agent decisions for this product so the Ollama
+        # model can incorporate their votes into its reasoning. (TechAgent
+        # retired #311-refactor-c — only historical CNN decisions appear here.)
         agent_votes = await database.get_agent_decisions(pid, limit=2)
         agent_ctx = ""
         for av in agent_votes:

@@ -213,7 +213,7 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 - **Frontend:** React + Vite + Tailwind, port 3000
 - **DB:** SQLite via aiosqlite (`backend/coinbase.db`)
 - **Market data:** Coinbase Advanced Trade API (REST + WebSocket)
-- **AI agents:** CNN agent (PyTorch), Tech agent
+- **AI agents:** CNN agent (PyTorch / XGBoost via MODEL_BACKEND). Historical: TechAgent retired #311-refactor-c (2026-05-16); historical TECH rows remain in DB.
 - **Local inference:** Ollama at `http://localhost:11434`; model set via `OLLAMA_MODEL` in `.env`
 - **Current Ollama model:** `llama3.1:8b` (~4.7 GB Q4) — fits RTX 2060 with headroom
 - **GPU constraint:** RTX 2060 = 6 GB VRAM — only one Q4 model loaded at a time

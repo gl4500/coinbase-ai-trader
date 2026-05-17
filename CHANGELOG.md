@@ -5,6 +5,81 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71d] — 2026-05-16 — Refactor sweep module 3 Phase A: TechAgent removal — backend (#311-refactor-c)
+
+### Why
+Third module of the refactor sweep. TechAgent (`agents/tech_agent_cb.py`,
+654 LOC + 497 LOC test) was one of two live trading agents. Operator chose
+"delete entirely" after the trade-off was flagged (5-day TICK_TRAIL was
+the most profitable single trigger in the system: 51 trades, 98% WR,
++$46). Rationale: simplify to a single XGB-driven decision path.
+
+### Preflight (operator-driven, ran 2026-05-16 before this commit)
+```
+cd backend && python -m tools.close_tech_positions
+=> Closed 39 TECH paper positions at live market price.
+=> Final TECH balance $933.77, realized PnL -$66.23 (was -$61.41 +
+   $4.82 from closing during minor downward moves).
+=> agent_state.positions_json zeroed out for TECH.
+=> 39 new trades rows written with trigger_close='MANUAL_TECH_RETIREMENT'.
+```
+DB backup: `backend/coinbase.db.bak_pre_tech_retirement_20260516_213801`
+(host-side, gitignored).
+
+### What changed
+- **DELETED** `backend/agents/tech_agent_cb.py` (-654 LOC).
+- **DELETED** `backend/tests/test_tech_agent_cb.py` (-497 LOC).
+- **`backend/main.py`** — removed import + AppState fields (`tech_agent`,
+  `tech_task`) + instantiation + `_delayed_tech` startup task + cleanup
+  loop entry + `_TECH_START_DELAY` constant. `/api/agents/status`
+  endpoint returns `tech_status = {}` for frontend back-compat during
+  Phase A → Phase B window.
+- **`backend/agents/cnn_agent.py`** — 1-line comment update on the
+  `get_agent_decisions` Ollama context (only historical CNN decisions
+  now appear; no new TECH writes).
+- **`backend/services/outcome_tracker.py`** — deleted dead `if source
+  == "TECH":` branch in `_format_indicators` (historical TECH outcomes
+  remain in DB but are never re-formatted; comment updated on `source`
+  param docstring).
+- **`backend/tools/close_tech_positions.py`** (NEW, +136 LOC) — preflight
+  script (run once before this commit; idempotent, re-running is a no-op).
+- **`backend/tests/test_close_tech_positions.py`** (NEW, 3 tests) —
+  covers no-op + happy path.
+- **`backend/tests/test_main_no_tech_import.py`** (NEW, 1 test, 2
+  assertions) — regression test: `main.py` does not import
+  `agents.tech_agent_cb` and AppState has no `tech_agent` field.
+
+### Historical data — UNCHANGED (operator: "keep everything")
+All TECH rows in `trades` (530+39=569), `agent_decisions` (279,451),
+`agent_state` (1 row, balance=$933.77, positions_json={}),
+`signal_outcomes` (563), `signals` remain. No VACUUM, no purge.
+
+### Verification
+```
+backend && python -m pytest tests/test_close_tech_positions.py \
+                            tests/test_main_no_tech_import.py -v
+=> 5 passed
+```
+
+Net: ~-1150 LOC code deleted, +160 LOC added (preflight script + 2 test
+files). Net -990 LOC across Phase A.
+
+### Phase B follows
+Frontend deletion comes in the next commit (`#311-refactor-d`):
+AgentsDashboard.tsx loses live TECH section, gets collapsed "Retired
+Agents (history)" panel; CNNDashboard.tsx confidence table loses **Tech**
+column.
+
+### Rollback (full restoration of TechAgent)
+1. `git revert <this commit> <Phase B commit>`
+2. Restore `agent_state` snapshot from
+   `backend/coinbase.db.bak_pre_tech_retirement_20260516_213801`
+3. Restart backend
+
+Time: ~5 min total.
+
+---
+
 ## [Session 58.71c] — 2026-05-16 — Refactor sweep module 2: bare-isotonic calibrator removal (#311-refactor-b)
 
 ### Why

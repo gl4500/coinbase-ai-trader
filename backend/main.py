@@ -48,7 +48,6 @@ from agents.market_scanner import MarketScanner
 from agents.signal_generator import SignalGenerator
 from agents.order_executor import OrderExecutor
 from agents.cnn_agent import CoinbaseCNNAgent
-from agents.tech_agent_cb import TechAgentCB
 from services.ws_subscriber import CoinbaseWSSubscriber
 from services.portfolio_tracker import PortfolioTracker
 from services.outcome_tracker import get_tracker
@@ -194,13 +193,12 @@ class AppState:
     signal_gen:      SignalGenerator       = None
     order_executor:  OrderExecutor         = None
     cnn_agent:       CoinbaseCNNAgent      = None
-    tech_agent:      TechAgentCB           = None
     ws_subscriber:   CoinbaseWSSubscriber  = None
     portfolio:       PortfolioTracker      = None
     scanner_task:    asyncio.Task          = None
     portfolio_task:  asyncio.Task          = None
     cnn_task:        asyncio.Task          = None
-    tech_task:       asyncio.Task          = None
+    # tech_task removed #311-refactor-c (TechAgent retired)
     outcome_task:    asyncio.Task          = None
     backfill_task:   asyncio.Task          = None
     ws_connections:  List[WebSocket]       = []
@@ -388,7 +386,7 @@ async def _train_progress_watcher() -> None:
 
 
 # ── Agent startup stagger delays (seconds) ────────────────────────────────────
-_TECH_START_DELAY     =  5   # CNN starts at 0; Tech after 5s
+# _TECH_START_DELAY removed #311-refactor-c (TechAgent retired)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -408,7 +406,7 @@ async def lifespan(app: FastAPI):
     app_state.order_executor  = OrderExecutor(dry_run=app_state.dry_run)
     app_state.cnn_agent       = CoinbaseCNNAgent(ws_subscriber=app_state.ws_subscriber)
     _is_trading = lambda: app_state.is_trading
-    app_state.tech_agent      = TechAgentCB(ws_subscriber=app_state.ws_subscriber)
+    # TechAgent retired #311-refactor-c
     app_state.portfolio       = PortfolioTracker(ws_subscriber=app_state.ws_subscriber)
 
     # Seed WS subscriber from DB-cached tracked products immediately —
@@ -468,12 +466,7 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # Sub-agents: short stagger so they don't all hammer the DB simultaneously
-    async def _delayed_tech():
-        await asyncio.sleep(_TECH_START_DELAY)
-        await app_state.tech_agent.run_loop(is_trading_fn=_is_trading)
-
-    app_state.tech_task     = asyncio.create_task(_delayed_tech())
+    # TechAgent retired #311-refactor-c — only CNN agent runs as a sub-agent
     app_state.train_watcher_task  = asyncio.create_task(_train_progress_watcher())
 
     logger.info("Coinbase Trader ready — http://localhost:8001")
@@ -485,7 +478,7 @@ async def lifespan(app: FastAPI):
 
     for task in [
         app_state.scanner_task, app_state.portfolio_task,
-        app_state.cnn_task, app_state.tech_task,
+        app_state.cnn_task,
         app_state.outcome_task, app_state.backfill_task,
         app_state.train_watcher_task,
     ]:
@@ -1135,7 +1128,9 @@ async def clear_logs(_: None = Depends(verify_api_key)):
 
 @app.get("/api/agents/status")
 async def get_agent_status():
-    tech_status = app_state.tech_agent.status     if app_state.tech_agent     else {}
+    # TechAgent retired #311-refactor-c — tech_status kept as empty dict for
+    # frontend back-compat during the Phase A → Phase B window.
+    tech_status: Dict = {}
 
     # CNN book status
     cnn_book = app_state.cnn_agent.book if app_state.cnn_agent else None
