@@ -47,7 +47,6 @@ import json
 import logging
 import math
 import os
-import re
 import shutil
 import time
 from typing import Dict, List, Optional, Tuple
@@ -56,16 +55,13 @@ import httpx
 
 import database
 from clients import coinbase_client
-from data.lgbm_filter import LGBMFilter
 from agents.signal_generator import (
     _rsi, _ema, _macd, _bollinger, _ema_cross,
     _atr, _adx, _mfi, _obv_slope, _stoch_rsi, _vwap,
-    _hurst_exponent, _dissimilarity_index, _kelly_fraction,
-    _realized_vol, _shannon_entropy,
+    _kelly_fraction, _realized_vol,
 )
 from config import config
 from services.outcome_tracker import get_tracker
-from services.fear_greed import get_fear_greed
 from services.history_backfill import load_history, load_5m_history
 from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
@@ -85,22 +81,12 @@ _CNN_MAX_HOLD_SECS    = 7 * 24 * 3600  # 7-day max-hold — last resort for flat
 # as if they were opened _CNN_LEGACY_HOLD_SECS ago — triggers max-hold exit promptly.
 _CNN_LEGACY_HOLD_SECS = _CNN_MAX_HOLD_SECS + 1  # exceeds max-hold, forces exit on next check
 MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unprofitable spreads)
-_LGBM_RETRAIN_EVERY  = 50      # retrain LightGBM after every N new closed trades
-_LGBM_MODEL_PATH     = os.path.join(os.path.dirname(__file__), "..", "data", "lgbm_filter.pkl")
-_HURST_TREND_THRESH  = 0.55    # H > this → trending (CNN bias toward momentum signals)
-_HURST_MR_THRESH     = 0.45    # H < this → mean-reverting (suppress trending signals)
-_DI_SUPPRESS_THRESH  = 5.0     # DI > this % → price far from SMA, suppress Ollama
-_ENTROPY_SKIP_THRESH = 0.85    # entropy > this → signal is noise, skip entirely
 
 
-def _regime_gate_enabled() -> bool:
-    """CNN BUY regime gate — on by default. Set CNN_REGIME_GATE=off to disable.
-
-    Phase-1 (2026-04-23) live data: CHAOTIC BUYs won 58.5% vs 44.3% in TRENDING
-    and 45.7% in RANGING. Gate blocks BUY unless HMM regime is CHAOTIC.
-    Read at call time (not import time) so env changes take effect without reload.
-    """
-    return os.getenv("CNN_REGIME_GATE", "on").strip().lower() != "off"
+# LightGBM filter / Hurst / DI / entropy / regime-gate constants + helper
+# deleted #311-refactor-f. They only ever fired under MODEL_BACKEND=cnn
+# (Phase-1 CNN-tuned suppressions); under the live xgb backend they were
+# already skipped via the backend-only guards. The whole block was dead.
 
 
 def _backend_label() -> str:
@@ -1105,7 +1091,8 @@ def _best_loss_path_for() -> str:
 _CKPT_EVERY     = 10   # save resume checkpoint every N epochs
 _HEARTBEAT_EVERY = 1   # #106: every epoch — under GPU contention 5+ min epochs caused
                        # check (1800s) doesn't kill healthy training on slow archs
-OLLAMA_URL      = "http://localhost:11434"
+# OLLAMA_URL deleted #311-refactor-f — Ollama LLM blend was CNN-backend-only
+# and is now removed; cnn_agent makes no HTTP calls to Ollama.
 _CACHE_TTL      = 300
 _EARLY_STOP_PATIENCE = 15   # stop if val_loss doesn't improve for this many epochs
 
@@ -1489,77 +1476,12 @@ class FeatureBuilder:
             return None
 
 
-# ── Ollama ────────────────────────────────────────────────────────────────────
-
-async def _ollama_prob(product_id: str, context: str,
-                       adx_val: float, rsi_val: float,
-                       macd_h: float, bb_pos: float,
-                       mfi_val: float, stoch_k: float,
-                       cnn_prob: float,
-                       lessons: Optional[List[str]] = None,
-                       fg_score: Optional[int] = None
-                       ) -> tuple[Optional[float], int, int]:
-    model  = config.ollama_model
-    regime = "TRENDING" if adx_val >= config.adx_trend_threshold else "RANGING"
-    lesson_block = ""
-    if lessons:
-        lesson_block = (
-            "\n\nPast 4-hour outcomes for this asset:\n"
-            + "\n".join(f"  • {l}" for l in lessons)
-            + "\n"
-        )
-    if fg_score is not None:
-        if fg_score < 25:
-            fg_label = "Extreme Fear"
-        elif fg_score < 50:
-            fg_label = "Fear"
-        elif fg_score < 75:
-            fg_label = "Greed"
-        else:
-            fg_label = "Extreme Greed"
-        fg_line = f"Market sentiment (Fear & Greed): {fg_score}/100 — {fg_label}\n"
-    else:
-        fg_line = ""
-    prompt = (
-        f"You are a quantitative crypto trading analyst. "
-        f"Estimate the probability (0.00-1.00) that {product_id} closes HIGHER in 4 hours.\n\n"
-        f"{fg_line}"
-        f"Market regime: {regime} (ADX={adx_val:.1f})\n"
-        f"RSI(14): {rsi_val:.1f} | MACD: {'bullish' if macd_h > 0 else 'bearish'} ({macd_h:+.5f})\n"
-        f"Bollinger: {bb_pos:.0%} of band | MFI(14): {mfi_val:.1f} | StochRSI-K: {stoch_k:.1f}\n"
-        f"CNN model probability: {cnn_prob:.3f}"
-        f"{lesson_block}\n"
-        f'Respond with ONLY valid JSON: {{"probability": <0.00-1.00>}}'
-    )
-    try:
-        _t0 = time.perf_counter()
-        async with httpx.AsyncClient(timeout=25) as client:
-            resp = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": model, "prompt": prompt,
-                      "stream": False, "format": "json"},
-            )
-            resp.raise_for_status()
-            raw      = resp.json()
-            text     = raw.get("response", "")
-            prompt_t = raw.get("prompt_eval_count", 0)
-            resp_t   = raw.get("eval_count", 0)
-        _elapsed = time.perf_counter() - _t0
-        if _elapsed > 15:
-            logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s (SLOW)")
-        else:
-            logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s tokens=in:{prompt_t}/out:{resp_t}")
-        prob = float(json.loads(text).get("probability", -1))
-        if 0 <= prob <= 1:
-            return prob, prompt_t, resp_t
-    except Exception:
-        try:
-            m = re.search(r"\b0\.\d{2,4}\b", text)
-            if m:
-                return float(m.group()), 0, 0
-        except Exception:
-            pass
-    return None, 0, 0
+# ── Ollama LLM blend deleted #311-refactor-f ─────────────────────────────────
+# The Ollama probability call and the associated decisive-skip decision tree
+# were CNN-backend-only (per #250 the LLM was already skipped wholesale under
+# MODEL_BACKEND=xgb). Removed alongside Hurst / LightGBM / regime gates as
+# part of the dead CNN-only branch cleanup. Re-introducing an LLM blend would
+# need its own brainstorm + spec.
 
 
 # ── CNN-LSTM Agent ─────────────────────────────────────────────────────────────
@@ -1582,20 +1504,19 @@ class CoinbaseCNNAgent:
         self.last_trained_at:  Optional[float] = None
         self.train_count:      int = 0
         # ── LLM token tracking ─────────────────────────────────────────────
+        # Kept for main.py /api/cnn/status payload back-compat; always zero
+        # after #311-refactor-f removed the Ollama blend.
         self.llm_calls:          int = 0
         self.llm_prompt_tokens:  int = 0
         self.llm_response_tokens: int = 0
-        # ── LightGBM entry filter ───────────────────────────────────────────
-        self._lgbm             = LGBMFilter()
-        self._lgbm.load(_LGBM_MODEL_PATH)
-        self._lgbm_trades_seen: int = 0   # closed-trade count at last retrain
         # ── Model health flags ──────────────────────────────────────────────
         # True when the on-disk checkpoint is incompatible with the current
         # architecture (channel count changed).  Signals are suppressed until
         # a fresh train run completes and saves a compatible checkpoint.
         self._needs_retrain: bool = False
-        # Set by main.py when a training subprocess is running — causes scans
-        # to skip Ollama (GPU is saturated by training, LLM calls hang).
+        # Set by main.py when a training subprocess is running.  Read by
+        # /api/cnn/status; no longer consulted inside generate_signal after
+        # #311-refactor-f deleted the Ollama-skip tree.
         self.training_active: bool = False
         # Multi-arch registry deleted #311-refactor-e — glu1 is the only arch.
         if _TORCH:
@@ -1607,31 +1528,12 @@ class CoinbaseCNNAgent:
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
             f"device={_device_str} | model={_status} | arch=glu1 | "
-            f"channels={N_CHANNELS} | lgbm={'ready' if self._lgbm.is_ready() else 'accumulating'}"
+            f"channels={N_CHANNELS}"
         )
 
     async def start(self) -> None:
         """Load persisted book state before first scan."""
         await self.book.load()
-        await self._lgbm_retrain_if_needed()
-
-    async def _lgbm_retrain_if_needed(self) -> None:
-        """Retrain LightGBM filter from cnn_scans + trades if enough new data exists."""
-        try:
-            rows = await database.get_lgbm_training_rows()
-            n = len(rows)
-            if n == self._lgbm_trades_seen:
-                return
-            metrics = self._lgbm.train(rows)
-            if metrics:
-                self._lgbm.save(_LGBM_MODEL_PATH)
-                self._lgbm_trades_seen = n
-                logger.info(
-                    f"LGBMFilter retrained: n={metrics['n_samples']} "
-                    f"win={metrics['win_rate']}% auc={metrics['auc']}"
-                )
-        except Exception as e:
-            logger.warning(f"LGBMFilter retrain failed: {e}")
 
     def _exists(self) -> bool:
         return os.path.exists(_model_path_for())
@@ -2013,9 +1915,9 @@ class CoinbaseCNNAgent:
             stoch_k, _         = _stoch_rsi(closes)
             atr_val            = _atr(highs, lows, closes)
             vwap_price, vwap_d = _vwap(highs, lows, closes, volumes)
-            hurst              = _hurst_exponent(closes)
-            di                 = _dissimilarity_index(closes)
-            entropy            = _shannon_entropy(closes)
+            # Hurst / DI / entropy computations dropped #311-refactor-f —
+            # their only consumers were the CNN-backend-only suppression gates
+            # and the Ollama-skip decision tree, both now removed.
 
             self._cache[pid] = (cnn_prob, time.time(), {
                 "adx_val": adx_val, "rsi_val": rsi_val, "macd_h": macd_h,
@@ -2025,7 +1927,11 @@ class CoinbaseCNNAgent:
                 "xgb_shadow": xgb_shadow,
             })
 
-        # ── HMM regime detection → dynamic CNN/LLM blend ─────────────────────
+        # ── HMM regime detection ─────────────────────────────────────────────
+        # Regime label is still persisted to cnn_scans for downstream analysis;
+        # the historical CNN/LLM blend weights are kept here for DB column
+        # back-compat even though the Ollama blend was deleted #311-refactor-f
+        # and llm_prob is now always None.
         hmm_regime, hmm_conf, _hmm_state = get_detector().predict(closes)
         if hmm_regime == "UNKNOWN":
             # Fallback to binary ADX gate when HMM not fitted yet
@@ -2036,18 +1942,6 @@ class CoinbaseCNNAgent:
             trending = hmm_regime == "TRENDING"
         cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
 
-        # Fetch most-recent agent decisions for this product so the Ollama
-        # model can incorporate their votes into its reasoning. (TechAgent
-        # retired #311-refactor-c — only historical CNN decisions appear here.)
-        agent_votes = await database.get_agent_decisions(pid, limit=2)
-        agent_ctx = ""
-        for av in agent_votes:
-            agent_ctx += (
-                f"\n  {av['agent']:8s}: {av['side']:4s} "
-                f"conf={av['confidence']:.2f} score={av.get('score', 0):.2f} "
-                f"— {(av.get('reasoning') or '')[:70]}"
-            )
-
         vwap_pct_delta = ((price - vwap_price) / vwap_price * 100) if vwap_price else 0.0
         vwap_side = "above" if vwap_pct_delta > 0 else "below"
         context = (
@@ -2056,79 +1950,13 @@ class CoinbaseCNNAgent:
             f"MACD hist: {macd_h:+.6f} | Bollinger: {bb_pos:.2f} | StochRSI K: {stoch_k:.1f}\n"
             f"VWAP(20): ${vwap_price:,.4f} | Price {vwap_side} VWAP by {abs(vwap_pct_delta):.2f}%\n"
             f"OB imbalance: {ob.get('imbalance', 0):+.2f} | ATR(14): {atr_val:.4f}\n"
-            f"CNN raw: {cnn_prob:.4f} | weights CNN={cnn_w} LLM={llm_w}"
-            + (f"\nSub-agent votes:{agent_ctx}" if agent_ctx else "")
+            f"CNN raw: {cnn_prob:.4f}"
         )
 
-        # ── Option 2: skip LLM when CNN is already decisive ───────────────────
-        # If cnn_prob is far from 0.5 (beyond llm_skip_threshold), the LLM
-        # cannot flip the direction — skip the 10–30s Ollama call entirely.
-        cnn_dist = abs(cnn_prob - 0.5)
-        # Multiplicative regime gate: skip Ollama when regime is ambiguous (random walk)
-        # AND price has deviated significantly from its SMA (DI high = unreliable features)
-        regime_ambiguous = _HURST_MR_THRESH < hurst < _HURST_TREND_THRESH
-        di_high          = di > _DI_SUPPRESS_THRESH
-        entropy_noisy    = entropy > _ENTROPY_SKIP_THRESH
-        # #250 — under MODEL_BACKEND != "cnn" the LLM is fed the active backend's
-        # probability as an anchor and almost always confirms it. Drop the call
-        # entirely (and the lessons + Fear-and-Greed fetches that only feed it).
-        backend_is_cnn   = config.model_backend == "cnn"
-        skip_llm = (
-            not backend_is_cnn
-            or cnn_dist >= (config.llm_skip_threshold - 0.5)
-            or (regime_ambiguous and di_high)
-            or entropy_noisy
-            or self.training_active
-        )
-        if skip_llm:
-            llm_prob = None
-            lessons  = []
-            fg_score: Optional[int] = None
-            if not backend_is_cnn:
-                logger.debug(
-                    f"LLM skipped for {pid}: MODEL_BACKEND={config.model_backend} "
-                    f"(LLM is anchored to backend prob — redundant)"
-                )
-            elif self.training_active:
-                logger.debug(f"LLM skipped for {pid}: training subprocess active (GPU busy)")
-            elif entropy_noisy:
-                logger.debug(
-                    f"LLM skipped for {pid}: entropy={entropy:.2f} > {_ENTROPY_SKIP_THRESH} (noise)"
-                )
-            elif regime_ambiguous and di_high:
-                logger.debug(
-                    f"LLM skipped for {pid}: regime ambiguous "
-                    f"(H={hurst:.2f} DI={di:.1f}% > {_DI_SUPPRESS_THRESH}%)"
-                )
-            else:
-                logger.debug(
-                    f"LLM skipped for {pid}: cnn_prob={cnn_prob:.3f} is decisive "
-                    f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
-                )
-        else:
-            # Fetch outcome lessons so Ollama can learn from past signals
-            lessons = await get_tracker().get_lessons(pid, limit=5)
-
-            # Fetch Fear & Greed score as soft context for Ollama (not a hard gate)
-            try:
-                fg_data  = await get_fear_greed().fetch()
-                fg_score = fg_data.get("value")
-            except Exception:
-                fg_score = None
-
-            llm_prob, _pt, _rt = await _ollama_prob(pid, context, adx_val, rsi_val,
-                                                     macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
-                                                     lessons=lessons, fg_score=fg_score)
-            self.llm_calls           += 1
-            self.llm_prompt_tokens   += _pt
-            self.llm_response_tokens += _rt
-
-        if llm_prob is not None:
-            model_prob = cnn_w * cnn_prob + llm_w * llm_prob
-        else:
-            model_prob = cnn_prob
-
-        model_prob = max(0.01, min(0.99, model_prob))
+        # Ollama LLM blend deleted #311-refactor-f — llm_prob is permanently
+        # None, so model_prob equals the backend's own probability.
+        llm_prob: Optional[float] = None
+        model_prob = max(0.01, min(0.99, cnn_prob))
 
         # ── Signal direction ──────────────────────────────────────────────────
         if model_prob > config.cnn_buy_threshold:
@@ -2202,14 +2030,8 @@ class CoinbaseCNNAgent:
 
         quote_size = min(strength * config.max_position_usd, config.max_position_usd)
 
-        prob_line = (
-            f"\ncnn_prob={cnn_prob:.4f} "
-            f"llm_prob={llm_prob:.4f} "
-            f"model_prob={model_prob:.4f} "
-            f"cnn_w={cnn_w} llm_w={llm_w}"
-            if llm_prob is not None
-            else f"\ncnn_prob={cnn_prob:.4f} llm_prob=None model_prob={model_prob:.4f}"
-        )
+        # Ollama blend deleted #311-refactor-f — llm_prob is always None.
+        prob_line = f"\ncnn_prob={cnn_prob:.4f} llm_prob=None model_prob={model_prob:.4f}"
 
         signal = {
             "product_id":  pid,
@@ -2236,91 +2058,39 @@ class CoinbaseCNNAgent:
         else:
             self.signals_sell += 1
 
-        llm_str = f"{llm_prob:.2%}" if llm_prob is not None else "n/a"
         _lbl = _backend_label()
         logger.info(
-            f"{_lbl} [{side}] {pid} | {_lbl.lower()}={cnn_prob:.2%} llm={llm_str} "
-            f"blend={model_prob:.2%} adx={adx_val:.1f}({'trend' if trending else 'range'}) "
+            f"{_lbl} [{side}] {pid} | {_lbl.lower()}={cnn_prob:.2%} "
+            f"model={model_prob:.2%} adx={adx_val:.1f}({'trend' if trending else 'range'}) "
             f"strength={strength:.2f} size=${quote_size:.2f}"
         )
 
         # ── Dry-run execution via _CNNBook (tracks positions + writes to trades table) ──
+        # Hurst / regime / LGBMFilter suppression gates deleted #311-refactor-f
+        # — all three were CNN-backend-only (Phase-1 CNN-tuned), already
+        # bypassed under the live xgb backend. BUYs now go straight to Kelly
+        # sizing + book.buy.
         if execute:
             if side == "BUY" and not self.book.has_position(pid):
-                # #232 — Hurst, HMM regime, and LGBMFilter were calibrated on
-                # CNN outcome data (Phase-1: CNN BUY edge is CHAOTIC-only).
-                # When MODEL_BACKEND != "cnn" they don't transfer, so skip them
-                # and let the active backend's own probability drive the BUY.
-                _cnn_only = config.model_backend == "cnn"
-                hurst_ok  = hurst >= _HURST_MR_THRESH
-
-                _suppress_reason: Optional[str] = None
-                _suppress_log:    Optional[str] = None
-                if _cnn_only and not hurst_ok:
-                    _suppress_reason = f"Hurst={hurst:.2f} random-walk regime — no edge"
-                    _suppress_log    = f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
-                elif _cnn_only and _regime_gate_enabled() and hmm_regime != "CHAOTIC":
-                    # Phase-1 finding: CNN BUY edge is CHAOTIC-only (58.5% wr) —
-                    # TRENDING/RANGING BUYs win 44-46%. Set CNN_REGIME_GATE=off to disable.
-                    _suppress_reason = f"Regime {hmm_regime} — CNN BUY edge is CHAOTIC only"
-                    _suppress_log    = f"CNN BUY {pid} suppressed: regime={hmm_regime} != CHAOTIC"
-
-                if _suppress_reason is not None:
-                    signal["execution"] = {"success": False, "reason": _suppress_reason}
-                    logger.info(_suppress_log)
+                # Kelly Criterion sizing: use model_prob as win probability.
+                # strength = (model_prob - 0.5)*2 is NOT a probability — passing
+                # it to Kelly gave frac=0 for all signals below model_prob=0.75.
+                frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
+                spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
+                if spent > 0:
+                    self.signals_executed += 1
+                    signal["execution"] = {"success": True, "spent": round(spent, 2)}
+                    logger.info(
+                        f"{_backend_label()} BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
+                        f"kelly_frac={frac:.2f} spent=${spent:.2f} "
+                        f"balance=${self.book.balance:.2f}"
+                    )
                 else:
-                    # LightGBM entry filter — also CNN-tuned, gated on backend.
-                    _lgbm_prob: float = 0.0
-                    _lgbm_allow: bool = True
-                    if _cnn_only:
-                        from datetime import datetime as _dt
-                        _now_dt = _dt.utcnow()
-                        _lgbm_feat = {
-                            "cnn_prob":    cnn_prob,
-                            "rsi":         rsi_val,
-                            "adx":         adx_val,
-                            "strength":    strength,
-                            "macd":        macd_h,
-                            "mfi":         mfi_val,
-                            "stoch_k":     stoch_k,
-                            "hour_of_day": _now_dt.hour,
-                            "day_of_week": _now_dt.weekday(),
-                            "usd_open":    self.book.balance * min(_kelly_fraction(model_prob), _CNN_MAX_FRAC),
-                        }
-                        _lgbm_prob  = self._lgbm.predict(_lgbm_feat)
-                        _lgbm_allow = self._lgbm.allow_buy(_lgbm_feat)
-
-                    if not _lgbm_allow:
-                        signal["execution"] = {
-                            "success": False,
-                            "reason": f"LGBMFilter blocked: p(win)={_lgbm_prob:.2f}",
-                        }
-                        logger.info(
-                            f"CNN BUY {pid} blocked by LGBMFilter: "
-                            f"p(win)={_lgbm_prob:.2f}"
-                        )
-                    else:
-                        # Kelly Criterion sizing: use model_prob as win probability.
-                        # strength = (model_prob - 0.5)*2 is NOT a probability — passing
-                        # it to Kelly gave frac=0 for all signals below model_prob=0.75.
-                        frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
-                        spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
-                        if spent > 0:
-                            self.signals_executed += 1
-                            signal["execution"] = {"success": True, "spent": round(spent, 2)}
-                            _lgbm_str = f"lgbm_p={_lgbm_prob:.2f} " if _cnn_only else ""
-                            logger.info(
-                                f"{_backend_label()} BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
-                                f"kelly_frac={frac:.2f} spent=${spent:.2f} "
-                                f"H={hurst:.2f} DI={di:.1f}% "
-                                f"{_lgbm_str}balance=${self.book.balance:.2f}"
-                            )
-                        else:
-                            signal["execution"] = {"success": False, "reason": "Insufficient balance"}
-                            logger.warning(
-                                f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
-                                f"too low for kelly_frac={frac:.2f}"
-                            )
+                    signal["execution"] = {"success": False, "reason": "Insufficient balance"}
+                    logger.warning(
+                        f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
+                        f"too low for kelly_frac={frac:.2f}"
+                    )
             elif side == "SELL" and self.book.has_position(pid):
                 pnl = await self.book.sell(pid, price, trigger="SCAN")
                 self.signals_executed += 1
@@ -2412,57 +2182,19 @@ class CoinbaseCNNAgent:
                     except Exception:
                         pass
 
-                # LightGBM retrain check — runs fast, only retrains when new closed trades exist
-                if self.scan_count % _LGBM_RETRAIN_EVERY == 0:
-                    await self._lgbm_retrain_if_needed()
-
-                # Auto-train after every N scans (aligned with new candle data)
-                await self._maybe_auto_train(train_every_n_scans, auto_train_fn)
+                # LightGBM-retrain hook + auto-train scheduler hook deleted
+                # #311-refactor-f. The lgbm filter was CNN-tuned; auto-train
+                # was a no-op under MODEL_BACKEND=xgb (#300 gated it off).
+                # The train_every_n_scans and auto_train_fn parameters on
+                # run_loop are kept for caller compat (main.py still passes
+                # them); they are now ignored here. Auto-train infrastructure
+                # cleanup (subprocess wiring, train_worker.py) is module 4c.
 
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 logger.error(f"CNN loop error: {e}")
             await asyncio.sleep(interval)
-
-    async def _maybe_auto_train(
-        self,
-        train_every_n_scans: int,
-        auto_train_fn,
-    ) -> bool:
-        # XGB mode has no online retrain path; spawning train_worker.py
-        # wastes GPU on a CNN that's never used for inference.
-        if self.scan_count % train_every_n_scans != 0:
-            return False
-        if config.model_backend != "cnn":
-            logger.debug(
-                "CNN auto-train skipped — model_backend=%s",
-                config.model_backend,
-            )
-            return False
-        logger.info(
-            f"CNN auto-train triggered (scan #{self.scan_count}, "
-            f"every {train_every_n_scans} scans)"
-        )
-        try:
-            if auto_train_fn is not None:
-                await auto_train_fn()
-            else:
-                result = await self.train_on_history(epochs=50)
-                if "error" in result:
-                    logger.warning(f"CNN auto-train skipped: {result['error']}")
-                else:
-                    self.last_trained_at = time.time()
-                    self.train_count    += 1
-                    logger.info(
-                        f"CNN auto-train done — {result['samples']} samples | "
-                        f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
-                        f"val={result['final_val_loss']:.4f} | "
-                        f"fit={result['fit_status']}"
-                    )
-        except Exception as te:
-            logger.error(f"CNN auto-train error: {te}")
-        return True
 
     async def train_on_history(self, epochs: int = 50) -> Dict:  # noqa: C901
         """

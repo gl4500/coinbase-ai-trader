@@ -5,6 +5,190 @@ Format: reverse-chronological by session date.
 
 ---
 
+## [Session 58.71h] — 2026-05-16 — Refactor sweep module 6: probe scripts audit (#311-refactor-g)
+
+### Why
+Per Task 19 refactor backlog: `backend/tools/*_probe.py` accumulated 15
+research-probe scripts over Sessions 58.13-58.68. Most ran once, posted a
++0.01 mean-AUC verdict (mostly FAIL), and were never re-executed. Their
+findings are pinned in CHANGELOG.md + `xgb_feature_optimization_findings.md`
+memory, but the scripts themselves clutter `backend/tools/` and confuse
+which probes are still worth re-running. This sweep tidies the directory by
+moving historical probes to `backend/tools/retired/` while preserving them
+as a referenceable record. Only probes with active downstream imports or
+recent (last 3 sessions) re-runs stay in place.
+
+### What changed
+Inventory of 15 probe scripts under `backend/tools/`, decision per script:
+
+| Probe | LOC | Decision | Reason |
+|---|---|---|---|
+| `marketcap_probe.py` | 358 | **KEEP** | Active in Sessions 58.47/58.66/58.68; `--source coingecko\|coinpaprika\|both` flag; bronze-cache wiring under MC roadmap; memory still cites it |
+| `calibration_probe.py` | 181 | **KEEP** | Live `from tools.calibration_probe import calibration_probe` in `feature_set_compare.py` and `xgb_importance_probe.py`; Phase-4 gate logic |
+| `btc_dominance_probe.py` | 265 | MOVE | #156 ran once, FAILED +0.01 gate (Δ=+0.0077); docstring referenced as semantics mirror by `long_trend_probe` + `okx_ls_probe` |
+| `btc_leadlag_probe.py` | 423 | MOVE | #246-#248 single-add probe, no gate pass; imported by `btc_residual_ch9_probe` only (moved chain peer) |
+| `btc_residual_ch9_probe.py` | 251 | MOVE | #253c FAILED gate; its `from tools.btc_leadlag_probe import ...` updated to `tools.retired.btc_leadlag_probe` |
+| `cnn_xgb_delta_probe.py` | 282 | MOVE | Exploratory oneoff per `xgb_feature_optimization_findings.md` line 58; cited in `fit_xgb_calibration.py` docstring only |
+| `hour_of_day_probe.py` | 136 | MOVE | #153 FAILED gate; `timescale_sweep.py` docstring reference only |
+| `long_trend_probe.py` | 397 | MOVE | #243-#245 all 5 candidates FAILED post-leak-fix |
+| `oi_coverage_audit.py` | 168 | MOVE | #210 one-shot audit; finding documented (17/20 pids all-zero OI); no longer running |
+| `oi_single_add_probe.py` | 189 | MOVE | #143-#145 FAILED gate; `channel_replace.py` `__main__` print example reference (stale path harmless) |
+| `okx_ls_probe.py` | 252 | MOVE | #235 INCONCLUSIVE (0/20 coverage), abandoned |
+| `probe_okx_swap_listings.py` | — | MOVE | #211 diagnostic; finding cited in `services/okx_oi_history.py:82` comment (2026-05-08); script not re-run |
+| `rsi_rank_probe.py` | 297 | MOVE | #162 PASSED gate but result long since integrated into channels; harness archived |
+| `stationarity_audit.py` | 166 | MOVE | #164 one-shot heuristic audit; finding documented |
+| `xgb_importance_probe.py` | 152 | MOVE | Zero CHANGELOG/code refs; only memory cite (line 53 of `xgb_feature_optimization_findings.md`) which calls it an "exploratory oneoff" |
+
+Tests deleted (tightly coupled to moved probes; not worth rewriting import paths):
+- `test_btc_dominance_probe.py`
+- `test_btc_leadlag_probe.py`
+- `test_btc_residual_ch9_probe.py`
+- `test_hour_of_day_probe_snapshot.py`
+- `test_long_trend_probe.py`
+- `test_oi_coverage_audit.py`
+- `test_okx_ls_probe.py`
+- `test_rsi_rank_probe.py`
+- `test_stationarity_audit.py`
+
+Tests kept (active probes):
+- `test_marketcap_probe.py`
+- `test_calibration_probe.py`
+
+New: `backend/tools/retired/__init__.py` — package marker + docstring
+explaining the retired-probe convention and restoration procedure.
+
+### Verification
+```
+cd backend && ../.venv/Scripts/python.exe -m pytest tests/ -q --co
+=> 975 tests collected in 4.75s (no import errors from deleted probes)
+```
+
+All inter-probe imports either point to tools that stayed in `tools/`
+(`channel_replace`, `feature_set_compare`, `pid_snapshot`, `btc_residualize`,
+`xgb_features`, `calibration_probe`) or were updated to the
+`tools.retired.` namespace (1 instance: `btc_residual_ch9_probe.py` →
+`tools.retired.btc_leadlag_probe`). The 3 incidental references in tests
+that survived are docstring/comment mentions only (no `import`).
+
+### Net
+- Files moved (probes): 13
+- Files deleted (tests): 9
+- Files added: 1 (`__init__.py`)
+- LOC removed from `backend/tools/` top-level: ~3,236
+- LOC added under `retired/`: same probes preserved verbatim (one import path edit)
+- Active `backend/tools/*_probe.py`: 15 → 2
+
+---
+
+## [Session 58.71g] — 2026-05-16 — Refactor sweep module 4b: cnn_agent dead xgb-gated branches (#311-refactor-f)
+
+### Why
+`cnn_agent.py` carried five CNN-backend-only branches that were dead under
+the live `MODEL_BACKEND=xgb`: the Hurst random-walk suppression gate, the
+HMM regime CHAOTIC-only gate, the LightGBM entry-filter gate, the entire
+Ollama LLM-blend decision tree (skip_llm / `_ollama_prob` / fear-greed
+fetch), and `_maybe_auto_train` (already a no-op under xgb per #300). They
+still imported their inputs (`_hurst_exponent`, `_dissimilarity_index`,
+`_shannon_entropy`, `LGBMFilter`) and computed values nothing consumed.
+Second sub-module of `cnn_agent.py` cleanup (the largest one — 268 LOC
+deleted in production code, 414 LOC deleted in tests).
+
+### What changed
+- **`backend/agents/cnn_agent.py`** —
+  - DELETED `from data.lgbm_filter import LGBMFilter`.
+  - DELETED `from services.fear_greed import get_fear_greed`.
+  - DELETED `_hurst_exponent`, `_dissimilarity_index`, `_shannon_entropy`
+    from the `agents.signal_generator` import (kept `_kelly_fraction`,
+    `_realized_vol`).
+  - DELETED `import re` (only used by `_ollama_prob`).
+  - DELETED module-level constants `_LGBM_RETRAIN_EVERY`,
+    `_LGBM_MODEL_PATH`, `_HURST_TREND_THRESH`, `_HURST_MR_THRESH`,
+    `_DI_SUPPRESS_THRESH`, `_ENTROPY_SKIP_THRESH`, `_regime_gate_enabled`,
+    `OLLAMA_URL`.
+  - DELETED `_ollama_prob(...)` async function (~70 LOC) — Ollama LLM
+    probability blend, called only when `MODEL_BACKEND=cnn`.
+  - DELETED `CoinbaseCNNAgent._lgbm` field + `_lgbm_trades_seen` field +
+    `_lgbm_retrain_if_needed` method.
+  - DELETED `_maybe_auto_train` method + the corresponding `await
+    self._maybe_auto_train(...)` call site in `run_loop`. `run_loop` still
+    accepts the `train_every_n_scans` and `auto_train_fn` kwargs for
+    caller compat (main.py still passes them); they are now ignored
+    (auto-train infrastructure cleanup is module 4c).
+  - `generate_signal` —
+    - DELETED the `hurst`/`di`/`entropy` computations.
+    - DELETED the `agent_votes`/`agent_ctx` fetch + injection into the
+      reasoning context.
+    - DELETED the entire `skip_llm` decision tree + `_ollama_prob` call +
+      `lessons` fetch + Fear-and-Greed fetch. `llm_prob` is now
+      permanently `None`; `model_prob` always equals `cnn_prob`.
+    - DELETED the Hurst / regime / LGBMFilter suppression block in the
+      execute=True BUY path. BUYs now go straight to Kelly sizing +
+      `book.buy`.
+    - Kept the HMM regime detection (still stored on `cnn_scans.regime`
+      for downstream analysis) and the `cnn_w`/`llm_w` blend weights (for
+      `cnn_scans` schema back-compat — values are recorded but no longer
+      drive the blend).
+  - `CoinbaseCNNAgent.__init__` —
+    - `self.llm_calls`, `self.llm_prompt_tokens`, `self.llm_response_tokens`,
+      `self.training_active` retained (read by `main.py` `/api/cnn/status`
+      payload); they are now always zero / False.
+  - Net: ~268 LOC removed from `cnn_agent.py` (2980 → 2712).
+- **`backend/tests/test_cnn_agent.py`** —
+  - DELETED `TestInferenceRegimeGate` (3 tests — regime suppression gate
+    removed).
+  - DELETED `TestSuppressionsGatedByBackend` (3 tests — moot, the gates
+    are gone for all backends now).
+  - DELETED `TestLLMSkippedUnderXgb` (2 tests — moot, no Ollama blend
+    exists).
+  - Removed all `patch("agents.cnn_agent._ollama_prob", ...)` /
+    `patch("agents.cnn_agent._hurst_exponent", ...)` / `patch.object(agent._lgbm, ...)`
+    occurrences from surviving tests (8 sites across 5 test methods).
+  - Net: ~414 LOC removed.
+- **`backend/tests/test_model_backend.py`** —
+  - DELETED `TestAutoTrainGate` (3 tests — `_maybe_auto_train` is gone).
+- **`backend/tests/test_config.py`** —
+  - ADDED `TestNoCnnBackendOnlyBranches` (5 assertions, 1 class):
+    - `test_no_cnn_only_gate` — locks out `_cnn_only` markers.
+    - `test_no_lgbm_filter_machinery` — locks out `_lgbm.allow_buy`,
+      `_lgbm.predict`, `from data.lgbm_filter import LGBMFilter`,
+      `LGBMFilter()`, `_lgbm_retrain_if_needed`.
+    - `test_no_ollama_blend` — locks out `_ollama_prob`, `skip_llm`,
+      `from services.fear_greed import get_fear_greed`.
+    - `test_no_hurst_di_entropy_gates` — locks out the four threshold
+      constants + the three signal-generator helper names + the regime-
+      gate env reader.
+    - `test_no_maybe_auto_train` — locks out the deleted scheduler hook.
+
+### Verification
+```
+cd backend && ../.venv/Scripts/python.exe -c "import agents.cnn_agent; print('import OK')"
+=> import OK
+
+cd backend && ../.venv/Scripts/python.exe -m pytest tests/ --tb=line -q
+=> 902 passed, 64 skipped, 1 xfailed, 2 xpassed in 279s
+```
+
+Same total-passed count as pre-edit baseline accounting for net test
+deletions: pre-edit (after Module 4a) full suite ≈ 903 passed; after
+deleting 8 dead-branch tests + 3 auto-train tests and adding 5 new
+policy tests, expected ≈ 902 passed (matches).
+
+### Net LOC
+- `backend/agents/cnn_agent.py`: -268 LOC (2980 → 2712).
+- `backend/tests/test_cnn_agent.py`: -414 LOC (4180 → 3766).
+- `backend/tests/test_model_backend.py`: -77 LOC.
+- `backend/tests/test_config.py`: +85 LOC.
+- Test count: -8 dead-branch tests, -3 auto-train tests, +5 policy
+  tests (net -6 tests).
+
+### Rollback
+Pure code deletion. `git revert <commit>` restores the dead branches +
+deleted tests verbatim. No on-disk artifacts touched; no DB schema
+change; no .env change. Under `MODEL_BACKEND=xgb` (live) the deleted
+code never fired, so live behavior is byte-for-byte unchanged.
+
+---
+
 ## [Session 58.71f] — 2026-05-16 — Refactor sweep module 4a: CNN_ARCH dead variants (#311-refactor-e)
 
 ### Why

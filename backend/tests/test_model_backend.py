@@ -150,91 +150,13 @@ class TestCnnProbBranching:
         assert prob == 0.73, f"expected xgb_prob's 0.73, got {prob}"
 
 
-# ── Auto-train gate (#300) ────────────────────────────────────────────────────
-
-class TestAutoTrainGate:
-    """When MODEL_BACKEND=xgb the run_loop auto-train tick must NOT spawn
-    train_worker.py — XGB mode has no online retrain path; the CNN trained
-    on tick is never used for inference and wastes GPU.
-
-    Companion to #232 (Hurst/regime gates) and #250 (Ollama gates): every
-    CNN-specific code path in the scan loop must be gated on
-    `config.model_backend == 'cnn'`. See feedback_cnn_safeguards_backend_gating.md.
-    """
-
-    def _make_agent(self, scan_count=4):
-        from agents.cnn_agent import CoinbaseCNNAgent
-        agent = CoinbaseCNNAgent.__new__(CoinbaseCNNAgent)
-        agent.scan_count = scan_count
-        agent.last_trained_at = 0.0
-        agent.train_count = 0
-        return agent
-
-    @pytest.mark.asyncio
-    async def test_xgb_backend_skips_auto_train(self, monkeypatch):
-        """MODEL_BACKEND=xgb + scan_count aligned → auto_train_fn NOT invoked."""
-        monkeypatch.setenv("MODEL_BACKEND", "xgb")
-        import config as cfg_mod
-        importlib.reload(cfg_mod)
-        if "agents.cnn_agent" in sys.modules:
-            importlib.reload(sys.modules["agents.cnn_agent"])
-
-        called = {"fn": False}
-
-        async def _spy():
-            called["fn"] = True
-
-        agent = self._make_agent(scan_count=4)
-        triggered = await agent._maybe_auto_train(
-            train_every_n_scans=4, auto_train_fn=_spy
-        )
-        assert triggered is False
-        assert called["fn"] is False, \
-            "auto_train_fn must not run when MODEL_BACKEND=xgb"
-
-    @pytest.mark.asyncio
-    async def test_cnn_backend_triggers_auto_train(self, monkeypatch):
-        """MODEL_BACKEND=cnn + scan_count aligned → auto_train_fn invoked."""
-        monkeypatch.setenv("MODEL_BACKEND", "cnn")
-        import config as cfg_mod
-        importlib.reload(cfg_mod)
-        if "agents.cnn_agent" in sys.modules:
-            importlib.reload(sys.modules["agents.cnn_agent"])
-
-        called = {"fn": False}
-
-        async def _spy():
-            called["fn"] = True
-
-        agent = self._make_agent(scan_count=4)
-        triggered = await agent._maybe_auto_train(
-            train_every_n_scans=4, auto_train_fn=_spy
-        )
-        assert triggered is True
-        assert called["fn"] is True
-
-    @pytest.mark.asyncio
-    async def test_scan_count_not_aligned_skips_regardless_of_backend(
-        self, monkeypatch
-    ):
-        """scan_count % N != 0 → never triggers, in either backend."""
-        monkeypatch.setenv("MODEL_BACKEND", "cnn")
-        import config as cfg_mod
-        importlib.reload(cfg_mod)
-        if "agents.cnn_agent" in sys.modules:
-            importlib.reload(sys.modules["agents.cnn_agent"])
-
-        called = {"fn": False}
-
-        async def _spy():
-            called["fn"] = True
-
-        agent = self._make_agent(scan_count=3)
-        triggered = await agent._maybe_auto_train(
-            train_every_n_scans=4, auto_train_fn=_spy
-        )
-        assert triggered is False
-        assert called["fn"] is False
+# ── Auto-train gate tests REMOVED #311-refactor-f ───────────────────────────
+# `_maybe_auto_train` was deleted alongside the rest of the dead CNN-backend-
+# only branches; the auto-train scheduler hook in `run_loop` was already
+# gated off under MODEL_BACKEND=xgb (#300) and a no-op under xgb. Policy
+# lock in test_config.py::TestNoCnnBackendOnlyBranches::test_no_maybe_auto_train.
+# Auto-train infrastructure cleanup (subprocess wiring, train_worker.py) is
+# scoped to module 4c.
 
 
 # ── pid plumbing for XGB v3 (added 2026-05-16, #311d) ─────────────────────
