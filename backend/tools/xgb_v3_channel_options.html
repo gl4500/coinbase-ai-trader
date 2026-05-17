@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>XGB v3 — Step B.1 channel signal options</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#0d1117; color:#c9d1d9; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin:0; padding:32px; max-width:1280px; margin:auto; line-height:1.55; }
+  h1 { color:#fff; margin:0 0 4px 0; }
+  h2 { color:#58a6ff; margin-top:48px; padding-top:16px; border-top:1px solid #21262d; }
+  h3 { color:#79c0ff; margin-top:24px; }
+  .sub { color:#8b949e; margin-top:0; }
+  .banner { background:#3b1f00; border:1px solid #9e6700; border-radius:6px; padding:14px 20px; margin:20px 0 32px; color:#e3b341; font-size:.95em; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:16px 0; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:16px; }
+  .card .label { color:#8b949e; font-size:.85em; text-transform:uppercase; letter-spacing:.05em; }
+  .card .value { color:#fff; font-size:1.8em; font-family:ui-monospace,Consolas,monospace; margin-top:4px; }
+  .card .note  { color:#8b949e; font-size:.85em; margin-top:6px; }
+  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:.95em; }
+  th { text-align:left; color:#8b949e; font-weight:500; font-size:.85em; text-transform:uppercase; letter-spacing:.05em; padding:8px 12px; border-bottom:1px solid #30363d; }
+  td { padding:6px 12px; border-bottom:1px solid #21262d; font-family:ui-monospace,Consolas,monospace; font-size:.92em; }
+  tr:hover td { background:#161b22; }
+  .num { text-align:right; }
+  .mono { font-family:ui-monospace,Consolas,monospace; }
+  .dim { color:#8b949e; }
+  .good { color:#56d364; }
+  .warn { color:#e3b341; }
+  .bad  { color:#f85149; }
+  .rec  { display:inline-block; background:#1f3a1f; color:#56d364; padding:2px 8px; border-radius:3px; font-size:.75em; font-weight:600; margin-left:8px; vertical-align:middle; letter-spacing:.05em; }
+  pre  { background:#161b22; border:1px solid #30363d; border-radius:6px; padding:14px; overflow-x:auto; font-size:.88em; line-height:1.5; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  @media (max-width:900px) { .grid-2 { grid-template-columns:1fr; } }
+  .opt { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:24px 28px; margin:24px 0; }
+  .opt.rec-bg { border-color:#1f6b33; background:#0d1c11; }
+  .opt-head { display:flex; justify-content:space-between; align-items:baseline; }
+  .opt-title { color:#fff; font-size:1.4em; margin:0; }
+  .pillrow { margin:10px 0; }
+  .pill { display:inline-block; background:#21262d; border:1px solid #30363d; padding:3px 10px; border-radius:12px; font-size:.8em; margin-right:6px; color:#c9d1d9; }
+  .pill.good { background:#0d2818; border-color:#1f6b33; color:#56d364; }
+  .pill.warn { background:#2c2200; border-color:#6b5800; color:#e3b341; }
+  .pill.bad  { background:#2d1212; border-color:#6b1f1f; color:#f85149; }
+  ul.pc { list-style:none; padding:0; margin:8px 0; }
+  ul.pc li { padding:4px 0 4px 22px; position:relative; }
+  ul.pc li.p::before { content:"+"; color:#56d364; position:absolute; left:0; font-weight:bold; }
+  ul.pc li.c::before { content:"−"; color:#f85149; position:absolute; left:0; font-weight:bold; }
+</style>
+</head>
+<body>
+
+<h1>XGB v3 — Step B.1 channel signal options</h1>
+<p class="sub">Brainstorming doc · branch <span class="mono">feat/gpu-coord-mirror</span> · 2026-05-17</p>
+
+<div class="banner">
+  <strong>Status:</strong> Pre-design brainstorm. No code changes proposed yet.
+  Goal of Step B.1 = give the XGB v3 extractor distinct per-channel signal data
+  (it currently sees the same <span class="mono">close</span> stats across all
+  28 channel slots). XGB-side only — CNN is frozen.
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>Current state of v3</h2>
+
+<p>The v3 extractor in <span class="mono">backend/tools/xgb_features.py:216</span>
+takes a tier dict and produces 350 feature names. What it actually does:</p>
+
+<pre>candles_by_tier = {
+    "micro": [last 60 hourly candles],   # each candle = OHLCV dict
+    "meso":  [last 168 hourly candles],
+    "macro": [last 336 hourly candles],
+}
+
+# For EVERY channel c in 0..27:
+#   _stats_from_candles(candles, ...) uses candles[i]["close"] only
+#   → produces 10 stats: last, mean, std, slope, min, max, pct_rank, dlt5, dlt10, dlt30
+#
+# Result: 28 "channels" × identical close-derived stats
+#         dressed up with chN_ name prefixes.</pre>
+
+<p>So out of 350 named features, only ~30 carry distinct information
+(10 stats × 3 tiers). The other 320 names are <strong>duplicates</strong> the
+booster splits on independently but which carry the same underlying signal.
+The booster wastes capacity learning that ch0_last == ch1_last == … == ch16_last.</p>
+
+<h3>Worked example — BTC-USD last 5 hourly bars</h3>
+<table>
+  <tr><th>start (epoch)</th><th>open</th><th>high</th><th>low</th><th>close</th><th>volume</th></tr>
+  <tr><td class="dim">1779019200</td><td class="num">78,382.00</td><td class="num">78,392.72</td><td class="num">78,381.56</td><td class="num good">78,388.60</td><td class="num">0.6788</td></tr>
+  <tr><td class="dim">1779015600</td><td class="num">78,431.35</td><td class="num">78,439.68</td><td class="num">78,329.93</td><td class="num bad">78,353.64</td><td class="num">3.9114</td></tr>
+  <tr><td class="dim">1779012000</td><td class="num">78,217.31</td><td class="num">78,260.48</td><td class="num">78,214.03</td><td class="num good">78,232.02</td><td class="num">0.7620</td></tr>
+  <tr><td class="dim">1779008400</td><td class="num">78,058.18</td><td class="num">78,071.62</td><td class="num">78,053.24</td><td class="num good">78,068.46</td><td class="num">0.4708</td></tr>
+  <tr><td class="dim">1779004800</td><td class="num">78,151.91</td><td class="num">78,169.67</td><td class="num">78,108.00</td><td class="num bad">78,130.60</td><td class="num">4.8168</td></tr>
+</table>
+<p class="dim" style="margin-top:6px">Source: <span class="mono">backend/coinbase.db</span> candles table, top 5 BTC bars at 2026-05-17 query time.</p>
+
+<p>Under current v3 — for the micro tier slice above — channels 0, 1, 2, …, 27
+(except masked 17/18/19) all see the same close series:
+<span class="mono good">[78130.60, 78068.46, 78232.02, 78353.64, 78388.60]</span>.
+Their feature values are identical.</p>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>Option A — OHLCV per-channel <span class="rec">RECOMMENDED</span></h2>
+
+<div class="opt rec-bg">
+  <div class="opt-head">
+    <h3 class="opt-title">5 channels: open, high, low, close, volume</h3>
+    <span class="pill good">surgical</span>
+  </div>
+
+  <p>Each channel carries one of the five raw OHLCV streams. XGB's gradient
+  boosting handles its own feature engineering via tree splits — we just give
+  it diverse raw input.</p>
+
+  <table>
+    <tr><th>channel idx</th><th>signal</th><th>BTC micro tail (5 bars)</th></tr>
+    <tr><td>0</td><td>open</td><td class="num">78151.91, 78058.18, 78217.31, 78431.35, 78382.00</td></tr>
+    <tr><td>1</td><td>high</td><td class="num">78169.67, 78071.62, 78260.48, 78439.68, 78392.72</td></tr>
+    <tr><td>2</td><td>low</td><td class="num">78108.00, 78053.24, 78214.03, 78329.93, 78381.56</td></tr>
+    <tr><td>3</td><td>close</td><td class="num">78130.60, 78068.46, 78232.02, 78353.64, 78388.60</td></tr>
+    <tr><td>4</td><td>volume</td><td class="num">4.8168, 0.4708, 0.7620, 3.9114, 0.6788</td></tr>
+  </table>
+
+  <h3>Feature names produced</h3>
+  <pre>per channel × per tier: ch{0..4}_{last,mean,std,slope,min,max,pct_rank,dlt5,dlt10,dlt30}
+
+micro:  ch0_last, ch0_mean, …, ch4_dlt30                                          → 50
+meso:   ch0_m060_*, ch0_m168_*  (… for ch1..ch4)                                  → 100
+macro:  ch0_m060_*, ch0_m336_*  (… for ch1..ch4)                                  → 100
+
+Total: 250 names (vs current 350)</pre>
+
+  <h3>Concrete value: <span class="mono">ch3_last</span> at micro tier</h3>
+  <p>= last close = <span class="mono good">78388.60</span>
+  &nbsp;(vs current v3 where ch0_last == ch1_last == … == ch3_last == 78388.60).</p>
+
+  <h3>Concrete value: <span class="mono">ch4_last</span> at micro tier</h3>
+  <p>= last volume = <span class="mono good">0.6788</span>
+  &nbsp;(new signal — XGB has never seen this before).</p>
+
+  <div class="pillrow">
+    <span class="pill">N_CHANNELS = 5</span>
+    <span class="pill">~250 features</span>
+    <span class="pill">retrain required</span>
+    <span class="pill">~1-2 days impl</span>
+  </div>
+
+  <ul class="pc">
+    <li class="p">Smallest, cleanest contract. No "what indicator should we use" debate.</li>
+    <li class="p">XGB splits handle non-linear combinations (it's a tree learner — it doesn't need pre-computed RSI to find RSI-like patterns).</li>
+    <li class="p">Volume is the cheapest new signal we're not using and is in every candle row already.</li>
+    <li class="p">Step B.2 (marketcap) slots in cleanly as channels 5 and 6.</li>
+    <li class="c">Fewer features means less booster capacity to work with — may underfit if 250 isn't enough for the 200-tree budget.</li>
+    <li class="c">Drops the channel-naming back-compat with CNN's 28 (cosmetic break only — XGB has its own checkpoint anyway).</li>
+  </ul>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>Option B — Per-channel technical indicators</h2>
+
+<div class="opt">
+  <div class="opt-head">
+    <h3 class="opt-title">12 channels: hand-picked TA indicators</h3>
+    <span class="pill warn">moderate</span>
+  </div>
+
+  <p>Each channel computes one specific normalized signal from OHLCV. Designed
+  for XGB strengths (split-friendly, bounded values).</p>
+
+  <table>
+    <tr><th>idx</th><th>signal</th><th>BTC last value (illustrative)</th></tr>
+    <tr><td>0</td><td>rsi_14</td><td class="num">62.4 / 100</td></tr>
+    <tr><td>1</td><td>macd_histogram_norm</td><td class="num">+0.018</td></tr>
+    <tr><td>2</td><td>bb_position (close − sma) / (2σ)</td><td class="num">+0.31</td></tr>
+    <tr><td>3</td><td>atr_14 / close</td><td class="num">0.0042</td></tr>
+    <tr><td>4</td><td>log_volume_z_20</td><td class="num">−0.71</td></tr>
+    <tr><td>5</td><td>price_pct_rank_60</td><td class="num">0.68</td></tr>
+    <tr><td>6</td><td>ema_cross_norm (ema9 − ema21) / close</td><td class="num">+0.0021</td></tr>
+    <tr><td>7</td><td>obv_slope_norm</td><td class="num">+0.0008</td></tr>
+    <tr><td>8</td><td>stoch_rsi_k</td><td class="num">0.74</td></tr>
+    <tr><td>9</td><td>vwap_dev (close − vwap) / vwap</td><td class="num">+0.0006</td></tr>
+    <tr><td>10</td><td>hl_range_pct (high−low)/close</td><td class="num">0.00014</td></tr>
+    <tr><td>11</td><td>close_log_return_1</td><td class="num">+0.00045</td></tr>
+  </table>
+
+  <h3>Feature names produced</h3>
+  <pre>per channel × per tier: ch{0..11}_{10 stats}
+
+micro:  120
+meso:   240 (60 × 4 meso channels for the m060+m168 doubling — need to pick which)
+macro:  180 (similar — pick MACRO_CHANNELS subset)
+
+Total: 540 names (vs current 350)</pre>
+
+  <div class="pillrow">
+    <span class="pill">N_CHANNELS = 12</span>
+    <span class="pill">~540 features</span>
+    <span class="pill">retrain required</span>
+    <span class="pill">~3-5 days impl</span>
+    <span class="pill warn">requires signal-design research</span>
+  </div>
+
+  <ul class="pc">
+    <li class="p">Each channel is interpretable — easy to ablate, easy to explain a decision.</li>
+    <li class="p">Bounded normalized values play well with tree split thresholds.</li>
+    <li class="p">Closer to how a discretionary trader thinks (RSI overbought, MACD divergence).</li>
+    <li class="c">"Which 12 indicators" is its own multi-iteration decision — needs research/probes to validate the set.</li>
+    <li class="c">Each indicator is a new piece of compute to write + test. ~12 small functions, each with edge cases.</li>
+    <li class="c">XGB can derive most of these from OHLCV via splits — pre-computing them is partial double-work.</li>
+    <li class="c">Step B.2 marketcap wiring needs its own channel-idx allocation (12 → 14).</li>
+  </ul>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>Option C — Keep N_CHANNELS=28, expand to distinct signals</h2>
+
+<div class="opt">
+  <div class="opt-head">
+    <h3 class="opt-title">28 distinct signals reusing current channel slot indices</h3>
+    <span class="pill bad">heavy</span>
+  </div>
+
+  <p>Preserve the channel layout (28 slots, MESO_CHANNELS={15,24,25,26},
+  MACRO_CHANNELS={20,21,27}, masked {17,18,19}) and feature-name count (350),
+  but compute distinct signals for each slot independently — XGB-side. This
+  is the option most aligned with the original CHANGELOG description of
+  Step B.1, but it's the largest scope.</p>
+
+  <table>
+    <tr><th>idx</th><th>proposed XGB-side signal</th><th>notes</th></tr>
+    <tr><td>0</td><td>close</td><td>price baseline</td></tr>
+    <tr><td>1</td><td>volume</td><td>raw OHLCV</td></tr>
+    <tr><td>2</td><td>log_return_1</td><td>momentum</td></tr>
+    <tr><td>3</td><td>rsi_14</td><td>oscillator</td></tr>
+    <tr><td>4</td><td>macd_histogram</td><td>trend</td></tr>
+    <tr><td>…</td><td class="dim">22 more to define</td><td class="dim">~1 day of signal design</td></tr>
+    <tr><td>17, 18, 19</td><td class="dim">stay masked (zero)</td><td>30 zero slots preserved</td></tr>
+    <tr><td>20, 21</td><td>btc_corr_20, vwap_dev</td><td>MACRO tier</td></tr>
+    <tr><td>15, 24, 25, 26</td><td>various</td><td>MESO tier</td></tr>
+    <tr><td>27</td><td>?</td><td>MACRO tier</td></tr>
+  </table>
+
+  <div class="pillrow">
+    <span class="pill">N_CHANNELS = 28</span>
+    <span class="pill">350 features (unchanged count)</span>
+    <span class="pill">retrain required</span>
+    <span class="pill">~5-10 days impl</span>
+    <span class="pill bad">28 signals to design</span>
+  </div>
+
+  <ul class="pc">
+    <li class="p">Zero-change to N_CHANNELS, feature_set name, tier-set constants — calibrator pickle metadata stays compatible (shape-wise).</li>
+    <li class="p">Preserves the operator's mental model from existing Module 4a/4b memory.</li>
+    <li class="p">If we later cap channels at &lt;28 for performance, infrastructure already handles that via masked slots.</li>
+    <li class="c">28 signal definitions to design AND defend — most expensive scope.</li>
+    <li class="c">Half the slots end up being trivial variations (open/high/low ≈ close + small offset) — diminishing returns.</li>
+    <li class="c">Step B.2 marketcap needs to either expand to N=30 (breaks the "preserve 28" promise) OR replace an existing channel (which one?).</li>
+  </ul>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>Side-by-side comparison</h2>
+
+<table>
+  <tr>
+    <th></th>
+    <th>A · OHLCV</th>
+    <th>B · TA indicators</th>
+    <th>C · 28 distinct signals</th>
+  </tr>
+  <tr>
+    <td class="dim">N_CHANNELS</td>
+    <td>5</td>
+    <td>12</td>
+    <td>28</td>
+  </tr>
+  <tr>
+    <td class="dim">feature_names</td>
+    <td>~250</td>
+    <td>~540</td>
+    <td>350 (unchanged)</td>
+  </tr>
+  <tr>
+    <td class="dim">signals to design</td>
+    <td>0 (raw OHLCV)</td>
+    <td>12</td>
+    <td>28</td>
+  </tr>
+  <tr>
+    <td class="dim">impl effort</td>
+    <td class="good">1-2 days</td>
+    <td class="warn">3-5 days</td>
+    <td class="bad">5-10 days</td>
+  </tr>
+  <tr>
+    <td class="dim">retrain required</td>
+    <td>yes</td>
+    <td>yes</td>
+    <td>yes</td>
+  </tr>
+  <tr>
+    <td class="dim">B.2 marketcap fit</td>
+    <td class="good">channels 5, 6 — clean slot</td>
+    <td>channels 12, 13 — clean slot</td>
+    <td class="warn">N=30 OR slot replacement debate</td>
+  </tr>
+  <tr>
+    <td class="dim">interpretability</td>
+    <td class="warn">low (raw values, booster does the work)</td>
+    <td class="good">high (named indicators)</td>
+    <td class="good">high (named indicators)</td>
+  </tr>
+  <tr>
+    <td class="dim">tree-learner alignment</td>
+    <td class="good">native — XGB splits over raw OHLCV</td>
+    <td class="warn">partial double-work — XGB can find these via splits</td>
+    <td class="warn">partial double-work</td>
+  </tr>
+</table>
+
+<!-- ─────────────────────────────────────────────────────────────────────── -->
+<h2>Decision rubric</h2>
+
+<p>Three lenses to pick by:</p>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="label">If you want to ship fast & test the hypothesis</div>
+    <p style="margin:6px 0">Pick <strong class="good">Option A</strong>. Tiny scope, low risk, retrains cheaply.
+    If "give XGB more diverse channel data" lifts AUC, A will show it. If A
+    doesn't help, B and C probably won't either.</p>
+  </div>
+  <div class="card">
+    <div class="label">If interpretability matters for trade triage</div>
+    <p style="margin:6px 0">Pick <strong class="warn">Option B</strong>. Each channel name maps to a
+    well-known trader concept. When XGB flips a decision, you can explain it
+    by which indicator changed.</p>
+  </div>
+  <div class="card">
+    <div class="label">If the operator wants to preserve N_CHANNELS=28 cosmetics</div>
+    <p style="margin:6px 0">Pick <strong class="bad">Option C</strong>. Most expensive. Only worth it if
+    there's an external reason to keep the 28-slot shape (e.g., shared
+    schema with another consumer).</p>
+  </div>
+</div>
+
+<p style="margin-top:32px"><strong>My recommendation:</strong> Option A.
+Smallest commit, fastest retrain feedback, cleanest Step B.2 slot. If A's
+booster AUC underperforms current v3, escalate to B.</p>
+
+<p class="dim" style="margin-top:48px; font-size:.9em">
+File: <span class="mono">backend/tools/xgb_v3_channel_options.html</span> ·
+Generated by <span class="mono">Claude</span> as a brainstorming artifact ·
+Open with <span class="mono">start backend\tools\xgb_v3_channel_options.html</span>
+(Windows) or any browser.
+</p>
+
+</body></html>
