@@ -37,23 +37,98 @@ v3 keeps driving decisions for the full shadow week. v4 telemetry runs every sca
 
 ### `backend/tools/xgb_v4_features.py` (new, ~120 LOC)
 
-Pure functions. No state. No `xgb_features.py` imports. Owns its own constants:
+Pure functions. No state. No `xgb_features.py` imports. Per [[feedback_python_clean_functions]] — type hints on every signature, single responsibility per helper, derived constants over hardcoded, no in-place buffer mutation, explicit input-contract docstrings.
 
 ```python
-N_CHANNELS_V4 = 5
-TIER_WINDOWS_V4 = {"micro": 60, "meso": 168, "macro": 336}
-TIER_WEIGHTS_V4 = {"micro": 1.0, "meso": 2.0, "macro": 3.0}
-_STAT_NAMES_V4 = ("last", "mean", "std", "slope", "min", "max",
-                  "pct_rank", "dlt5", "dlt10", "dlt30")
-_CHANNEL_FIELDS = ("open", "high", "low", "close", "volume")  # idx 0..4
+"""XGB v4 OHLCV-5 feature extractor.
+
+5 channels (open/high/low/close/volume) x 3 tiers (micro/meso/macro)
+x 10 stats = 150 features. Pure functions, no mutable module state.
+"""
+from __future__ import annotations
+from typing import Dict, List, Sequence, Tuple
+import numpy as np
+
+# ── Configuration constants ────────────────────────────────────────────────
+_CHANNEL_FIELDS: Tuple[str, ...] = ("open", "high", "low", "close", "volume")
+N_CHANNELS_V4: int = len(_CHANNEL_FIELDS)                # = 5 (derived)
+
+TIER_WINDOWS_V4: Dict[str, int] = {"micro": 60, "meso": 168, "macro": 336}
+TIER_WEIGHTS_V4: Dict[str, float] = {"micro": 1.0, "meso": 2.0, "macro": 3.0}
+
+_STAT_NAMES_V4: Tuple[str, ...] = (
+    "last", "mean", "std", "slope",
+    "min", "max", "pct_rank",
+    "dlt5", "dlt10", "dlt30",
+)
+N_STATS_V4: int = len(_STAT_NAMES_V4)                    # = 10 (derived)
+N_TIERS_V4: int = len(TIER_WINDOWS_V4)                   # = 3 (derived)
+N_FEATURES_V4: int = N_CHANNELS_V4 * N_TIERS_V4 * N_STATS_V4  # = 150 (derived)
+
+
+# ── Public API ─────────────────────────────────────────────────────────────
+
+def feature_names_v4() -> List[str]:
+    """Return 150 feature names in stable column order.
+
+    Layout: ch{0..4}_{micro|meso|macro}_{stat}, ordered
+    channel-major -> tier-major -> stat-major.
+    """
+
+def feature_weights_v4() -> np.ndarray:
+    """Return 150-long float64 weight vector aligned with feature_names_v4().
+
+    Per-tier weights: micro 1.0, meso 2.0, macro 3.0. Same weight for all
+    10 stats within one (channel, tier) group.
+    """
+
+def extract_v4(
+    candles_by_tier: Dict[str, Sequence[Dict[str, float]]],
+) -> Tuple[np.ndarray, List[str]]:
+    """Extract 150 features from tier-keyed OHLCV candle lists.
+
+    Args:
+        candles_by_tier: {"micro": [...], "meso": [...], "macro": [...]}
+            where each entry is a candle dict with at minimum the keys
+            ("open","high","low","close","volume").
+
+    Returns:
+        (features, names) where features is shape (1, 150) float64 and
+        names is len-150 list matching feature_names_v4().
+
+    Missing/empty tier -> the 50 slots for that tier are zero.
+    Missing OHLCV field in a candle -> raises KeyError (input contract).
+    """
+
+
+# ── Internal helpers (pure functions, one responsibility each) ─────────────
+
+def _extract_field(
+    candles: Sequence[Dict[str, float]],
+    field: str,
+) -> np.ndarray:
+    """Extract one OHLCV column as float64 ndarray.
+
+    Empty input -> empty ndarray (caller assembles into the zero slot).
+    """
+
+def _compute_stats(values: np.ndarray) -> np.ndarray:
+    """Return shape-(10,) stats in fixed _STAT_NAMES_V4 order.
+
+    Empty input -> all zeros. No in-place mutation of any caller buffer.
+    """
+
+def _slope(values: np.ndarray) -> float:
+    """OLS slope of values vs index 0..len-1. 0.0 for n<2 or zero variance."""
+
+def _pct_rank(values: np.ndarray) -> float:
+    """Percentile rank of last value within the series. 0.0 if empty/single."""
+
+def _delta_at(values: np.ndarray, lookback: int) -> float:
+    """values[-1] - values[-1-lookback], or 0.0 if series too short."""
 ```
 
-Public:
-- `_v4_feature_names() -> List[str]`  → 150 names, layout `ch{c}_{tier}_{stat}`
-- `feature_weights_v4() -> np.ndarray` → 150-long weight vector
-- `_extract_v4(candles_by_tier: dict) -> Tuple[np.ndarray, List[str]]` → `(features[1, 150], names[150])`
-
-Behavior: for each channel c in 0..4, for each tier in (micro, meso, macro), pull the corresponding OHLCV field from the tier's candle list, compute 10 stats, write into the output slot. Channel 4 (volume) just reads `candle["volume"]` instead of `candle["close"]`. Missing/empty tier → 10 zero slots (same convention as v3's `_stats_from_candles`).
+**Decomposition rationale** — each helper is independently testable in isolation. `_compute_stats` is pure data-in / data-out (contrast v3's `_stats_from_candles(candles, stat_offset, out)` which mutates a caller-owned buffer at a magic offset). `_slope`, `_pct_rank`, `_delta_at` are each ~5 lines, ~3 test cases each. Constants are derived: adding a 6th channel by appending to `_CHANNEL_FIELDS` automatically updates `N_CHANNELS_V4`, `N_FEATURES_V4`, the weight vector, and the names — no drift.
 
 ### `backend/tools/xgb_features.py` (edit, ~5 LOC dispatcher addition)
 
@@ -95,18 +170,111 @@ Same idempotent pattern as `mc_telemetry_20260516.py`: try-except on duplicate c
 
 ### `backend/tools/train_xgb_v4.py` (new, ~250 LOC)
 
-Mirrors structure of `train_xgb_v3.py`:
-- For each tracked pid, read OHLCV from `backend/data/history/<pid>.parquet`
-- Build training samples: at every bar `i` (starting from `i >= 336` for macro coverage), produce the 3-tier candle slices ending at `i`, extract 150 features via `_extract_v4`
-- Build labels using the **same triple-barrier params as v3** (read from `agents/cnn_agent.py` constants `_FORWARD_HOURS`, `_LABEL_THRESH` etc. for parity — labels are deterministic given the same params + candles)
-- Walk-forward split (matches v3's split logic), embargo = `forward_hours`
-- xgb.train with `binary:logistic`, 200 trees, depth 4, lr 0.1, colsample_bytree 0.8, `feature_weights = feature_weights_v4()`, `colsample_bytree=0.8`
-- Calibrate isotonic on a held-out fold
-- Write artifacts:
-  - `backend/xgb_model_v4.json` (booster, tmp file then atomic rename — note `.json` last per prior fix)
-  - `backend/xgb_features_v4.json` (the 150 feature names)
-  - `backend/xgb_calibration_v4.pkl` (dict `{"calibrator": IsotonicRegression, "feature_set": "v4"}`)
-- Print AUC on calibration fold
+Per [[feedback_python_clean_functions]] — no god-`main()`. Orchestrator delegates to small, single-responsibility helpers, each pure data-in / data-out:
+
+```python
+"""XGB v4 trainer. Reads OHLCV from data/history parquets, builds
+triple-barrier labels, walk-forward splits, trains the v4 booster,
+calibrates isotonic, writes artifacts."""
+from __future__ import annotations
+from typing import Dict, List, Tuple
+import argparse
+import numpy as np
+import xgboost as xgb
+from sklearn.isotonic import IsotonicRegression
+
+
+# ── Pure helpers ──────────────────────────────────────────────────────────
+
+def _load_candles_for_pid(pid: str, parquet_dir: str) -> List[Dict]:
+    """Read OHLCV candles for one pid; ascending by timestamp. [] if missing."""
+
+def _build_samples_for_pid(
+    candles: List[Dict],
+    *,
+    label_thresh: float,
+    forward_hours: int,
+    micro: int,
+    meso: int,
+    macro: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """For each valid bar i (i >= macro AND i + forward_hours < n), produce
+    one sample's features via extract_v4 + one triple-barrier label.
+
+    Returns:
+        features: (N, 150) float64
+        labels:   (N,) int8  (0/1, triple-barrier UP)
+        timestamps: (N,) int64 (epoch seconds at sample bar)
+    """
+
+def _walk_forward_split(
+    features: np.ndarray,
+    labels: np.ndarray,
+    timestamps: np.ndarray,
+    *,
+    embargo_bars: int,
+    val_frac: float = 0.15,
+    cal_frac: float = 0.15,
+) -> Tuple[
+    Tuple[np.ndarray, np.ndarray],
+    Tuple[np.ndarray, np.ndarray],
+    Tuple[np.ndarray, np.ndarray],
+]:
+    """Chronological split into (train, val, cal). Embargo gap between
+    train end and val start; same between val and cal."""
+
+def _train_booster(
+    X_train: np.ndarray, y_train: np.ndarray,
+    X_val: np.ndarray, y_val: np.ndarray,
+    feature_names: List[str], feature_weights: np.ndarray,
+) -> xgb.Booster:
+    """Single xgb.train call. Hyperparams hard-coded inside (200 trees,
+    depth 4, lr 0.1, colsample_bytree 0.8, binary:logistic). No side
+    effects beyond returning the booster."""
+
+def _calibrate_isotonic(
+    booster: xgb.Booster, X_cal: np.ndarray, y_cal: np.ndarray,
+) -> IsotonicRegression:
+    """Fit IsotonicRegression on the booster's raw probs vs calibration
+    labels. Returns the fitted calibrator (no side effects)."""
+
+def _save_artifacts(
+    booster: xgb.Booster,
+    calibrator: IsotonicRegression,
+    feature_names: List[str],
+    out_dir: str,
+) -> None:
+    """Atomic write: tmp file -> rename for each of model.json, features.json,
+    calibration.pkl. Calibrator pickled as dict {'calibrator', 'feature_set'}.
+    Note `.json` must be the LAST extension on booster tmp name (xgboost
+    serialization format auto-detection — see prior session bug fix)."""
+
+
+# ── Orchestrator ──────────────────────────────────────────────────────────
+
+def main(argv: List[str] | None = None) -> int:
+    """Parse args, run pipeline, print AUC summary. Returns exit code."""
+    args = _parse_args(argv)
+    all_features: List[np.ndarray] = []
+    all_labels:   List[np.ndarray] = []
+    all_ts:       List[np.ndarray] = []
+    for pid in args.pids:
+        candles = _load_candles_for_pid(pid, args.parquet_dir)
+        if not candles:
+            continue
+        feats, lbls, ts = _build_samples_for_pid(candles, ...)
+        all_features.append(feats); all_labels.append(lbls); all_ts.append(ts)
+    X = np.vstack(all_features); y = np.concatenate(all_labels); t = np.concatenate(all_ts)
+    (X_tr, y_tr), (X_va, y_va), (X_ca, y_ca) = _walk_forward_split(X, y, t, ...)
+    booster = _train_booster(X_tr, y_tr, X_va, y_va, feature_names_v4(), feature_weights_v4())
+    calibrator = _calibrate_isotonic(booster, X_ca, y_ca)
+    _save_artifacts(booster, calibrator, feature_names_v4(), args.out_dir)
+    return 0
+
+def _parse_args(argv: List[str] | None) -> argparse.Namespace: ...
+```
+
+Each helper is independently testable. The training-data construction (`_build_samples_for_pid`) doesn't mix with the split (`_walk_forward_split`) or train (`_train_booster`) — each can be exercised with synthetic inputs in `test_train_xgb_v4.py`. Labels use the same triple-barrier params as v3 (read from `agents/cnn_agent.py` constants `_FORWARD_HOURS`, `_LABEL_THRESH`) for parity — labels are deterministic given same params + same candles.
 
 Operator runs once after the implementation commit:
 ```bash
