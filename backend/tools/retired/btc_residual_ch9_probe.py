@@ -39,7 +39,7 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-from tools.btc_leadlag_probe import (  # noqa: E402
+from tools.retired.btc_leadlag_probe import (  # noqa: E402
     _BAR_SECS,
     _CACHE_PATH,
     _HISTORY_DIR,
