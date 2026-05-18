@@ -1406,8 +1406,13 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    _free_port(8001)
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False,
+    # Honor PORT env so a second backend instance (e.g. Spyder dev kernel)
+    # can run on a different port without conflicting with the launcher's
+    # default 8001 instance. Frontend hits 8001 unchanged.
+    _port = int(os.getenv("PORT", "8001"))
+    _free_port(_port)
+    uvicorn.run("main:app", host="0.0.0.0", port=_port, reload=False,
                 log_level=config.log_level.lower(),
                 ws_ping_interval=20, ws_ping_timeout=20)
