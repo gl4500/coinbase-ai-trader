@@ -114,6 +114,30 @@ Rules:
 
 ---
 
+## Backend port discipline — dev on 8002+, promote to 8001
+
+**Port 8001 is reserved for the live trading backend.** Active paper/live trading runs there. Frontend (port 5174) is hardcoded to hit 8001. Never start a new/experimental/shadow backend on 8001 while the production backend is running — the `_free_port(8001)` helper will kill the production process, stopping live trading.
+
+Rule:
+- **Production / live trading** → port 8001 (default, set via `PORT` env or default in `main.py`)
+- **Dev / shadow / new-model validation** → port 8002 (or any other unused port). Start with `PORT=8002 python main.py`.
+- **Promotion to 8001 is gated on the new model showing promise** — wait for validation evidence (held-out AUC, shadow telemetry, post-week live trade outcomes) before swapping artifacts to the unsuffixed paths (`xgb_*_v4.*` etc.) and restarting the 8001 backend.
+
+Why this matters: SQLite (`coinbase.db`) is a shared file. Multiple backends can run simultaneously, all writing to the same `cnn_scans` / `trades` / `signal_outcomes` tables. A backend on 8002 with new code will populate v4 (or other) telemetry columns in those shared tables — you don't need 8001 to validate the new path's output. Only push to 8001 when you're ready to swap the *driver*.
+
+How to apply when shipping a new XGB model / inference path:
+1. Land code + migration (creates new telemetry column nullable).
+2. Operator-train the new model → unsuffixed artifacts (or horizon-suffixed during sweep).
+3. Operator-start the new backend on **port 8002**: `PORT=8002 python main.py` from `backend/` cwd.
+4. Verify new telemetry column populates in `cnn_scans` (rows from PID 8002 backend will have non-NULL).
+5. Compare new vs old metrics over a shadow week (or however long the cutover plan specifies).
+6. **If new model shows promise** → copy new-model artifacts to the unsuffixed paths the 8001 backend loads, then restart the 8001 backend (which will pick up the new artifacts). The promotion is just a file-copy + restart.
+7. If new model doesn't show promise → kill the 8002 backend, leave 8001 untouched, iterate on the model.
+
+Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met.
+
+---
+
 ## Session hygiene — compact periodically
 
 Long Claude Code sessions burn context fast — especially subagent-driven implementation runs, multi-file refactors, and brainstorm → spec → plan → execute cycles. The assistant should **suggest `/compact`** at natural breakpoints rather than let context grow unbounded.
