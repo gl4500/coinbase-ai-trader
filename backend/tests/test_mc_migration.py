@@ -116,3 +116,54 @@ class TestXgbV4ShadowMigration:
         r2 = run(db)
         assert r2["added"] == []
         assert "xgb_prob_v4" in r2["already_present"]
+
+
+# ── xgb_v4_5_shadow_20260517 ──────────────────────────────────────────────
+
+
+class TestXgbV4_5ShadowMigration:
+    def test_migration_adds_three_columns(self, tmp_path):
+        import sqlite3
+        from migrations.xgb_v4_5_shadow_20260517 import run
+
+        db = str(tmp_path / "test.db")
+        c = sqlite3.connect(db)
+        c.execute(
+            "CREATE TABLE cnn_scans ("
+            " id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER"
+            ")"
+        )
+        c.commit()
+        c.close()
+
+        result = run(db)
+        for col in ("xgb_prob_v4_5_down", "xgb_prob_v4_5_neutral", "xgb_prob_v4_5_up"):
+            assert col in result["added"]
+        assert result["already_present"] == []
+
+        c = sqlite3.connect(db)
+        cols = {row[1] for row in c.execute("PRAGMA table_info(cnn_scans)")}
+        for col in ("xgb_prob_v4_5_down", "xgb_prob_v4_5_neutral", "xgb_prob_v4_5_up"):
+            assert col in cols
+        c.close()
+
+    def test_migration_idempotent(self, tmp_path):
+        import sqlite3
+        from migrations.xgb_v4_5_shadow_20260517 import run
+
+        db = str(tmp_path / "test.db")
+        c = sqlite3.connect(db)
+        c.execute(
+            "CREATE TABLE cnn_scans ("
+            " id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER"
+            ")"
+        )
+        c.commit()
+        c.close()
+
+        r1 = run(db)
+        assert len(r1["added"]) == 3
+        r2 = run(db)
+        assert r2["added"] == []
+        for col in ("xgb_prob_v4_5_down", "xgb_prob_v4_5_neutral", "xgb_prob_v4_5_up"):
+            assert col in r2["already_present"]

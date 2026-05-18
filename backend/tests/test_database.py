@@ -657,3 +657,69 @@ class TestSaveCnnScanXgbProbV4:
         ).fetchone()
         c.close()
         assert row[0] is None
+
+
+# ── xgb_prob_v4_5_{down,neutral,up} persistence (#xgb-v4.5 / Step B.1.5) ──
+
+
+class TestSaveCnnScanV4_5Cols:
+    @pytest.mark.asyncio
+    async def test_save_cnn_scan_persists_three_v45_probs(self, db, run):
+        from migrations.xgb_v4_5_shadow_20260517 import run as mig_run
+        import sqlite3
+
+        mig_run(db.DB_PATH)
+        await db.save_cnn_scan({
+            "product_id": "BTC-USD",
+            "price": 100.0,
+            "model_prob": 0.6, "cnn_prob": 0.6, "llm_prob": None,
+            "regime": "TRENDING", "side": "BUY",
+            "cnn_weight": 1.0, "llm_weight": 0.0,
+            "rsi": 50.0, "macd": 0.0, "mfi": 50.0, "adx": 20.0, "atr": 1.0,
+            "stoch_k": 50.0,
+            "vwap_dist": 0.0, "fast_rsi": 0.5, "velocity": 0.5, "vol_z": 0.5,
+            "xgb_prob": 0.55, "strength": 0.5, "signal_gen": True,
+            "xgb_prob_v4_5_down":    0.21,
+            "xgb_prob_v4_5_neutral": 0.34,
+            "xgb_prob_v4_5_up":      0.45,
+        })
+        # Note: connect via the same path
+        c = sqlite3.connect(db.DB_PATH)
+        row = c.execute(
+            "SELECT xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up "
+            "FROM cnn_scans WHERE product_id=?",
+            ("BTC-USD",),
+        ).fetchone()
+        c.close()
+        assert row is not None
+        assert row[0] == pytest.approx(0.21)
+        assert row[1] == pytest.approx(0.34)
+        assert row[2] == pytest.approx(0.45)
+
+    @pytest.mark.asyncio
+    async def test_save_cnn_scan_v45_default_null(self, db, run):
+        from migrations.xgb_v4_5_shadow_20260517 import run as mig_run
+        import sqlite3
+
+        mig_run(db.DB_PATH)
+        await db.save_cnn_scan({
+            "product_id": "BTC-USD",
+            "price": 100.0,
+            "model_prob": 0.6, "cnn_prob": 0.6, "llm_prob": None,
+            "regime": "TRENDING", "side": "BUY",
+            "cnn_weight": 1.0, "llm_weight": 0.0,
+            "rsi": 50.0, "macd": 0.0, "mfi": 50.0, "adx": 20.0, "atr": 1.0,
+            "stoch_k": 50.0,
+            "vwap_dist": 0.0, "fast_rsi": 0.5, "velocity": 0.5, "vol_z": 0.5,
+            "xgb_prob": 0.55, "strength": 0.5, "signal_gen": True,
+        })
+        c = sqlite3.connect(db.DB_PATH)
+        row = c.execute(
+            "SELECT xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up "
+            "FROM cnn_scans WHERE product_id=?",
+            ("BTC-USD",),
+        ).fetchone()
+        c.close()
+        assert row[0] is None
+        assert row[1] is None
+        assert row[2] is None

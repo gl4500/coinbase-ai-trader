@@ -1774,7 +1774,7 @@ class CoinbaseCNNAgent:
         ob = {}
 
         xgb_shadow: Optional[float] = None
-        xgb_shadow_v4: Optional[float] = None
+        xgb_shadow_v45: Optional[Tuple[float, float, float]] = None
         channels = None  # initialized to None for cache-hit path; MC chain accepts None
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
@@ -1898,17 +1898,17 @@ class CoinbaseCNNAgent:
             # so we can compare CNN vs XGB calibration on identical inputs (#181).
             if config.model_backend == "xgb":
                 xgb_shadow = cnn_prob
-                xgb_shadow_v4 = None
+                xgb_shadow_v45 = None
             else:
                 try:
                     from agents import xgb_signal as _xgb
-                    xgb_shadow, xgb_shadow_v4 = _xgb.xgb_prob_shadow(
+                    xgb_shadow, xgb_shadow_v45 = _xgb.xgb_prob_shadow_v4_5(
                         _mask_training_constant_channels(channels),
                         pid=pid,
                     )
                 except Exception:
                     xgb_shadow = None
-                    xgb_shadow_v4 = None
+                    xgb_shadow_v45 = None
 
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)
@@ -2012,7 +2012,9 @@ class CoinbaseCNNAgent:
             "velocity":    round(vel_norm, 4),
             "vol_z":       round(vol_z_norm, 4),
             "xgb_prob":    round(xgb_shadow, 4) if xgb_shadow is not None else None,
-            "xgb_prob_v4": round(xgb_shadow_v4, 4) if xgb_shadow_v4 is not None else None,
+            "xgb_prob_v4_5_down":    round(xgb_shadow_v45[0], 4) if xgb_shadow_v45 is not None else None,
+            "xgb_prob_v4_5_neutral": round(xgb_shadow_v45[1], 4) if xgb_shadow_v45 is not None else None,
+            "xgb_prob_v4_5_up":      round(xgb_shadow_v45[2], 4) if xgb_shadow_v45 is not None else None,
             "xgb_prob_stdev": mc_telemetry.get("ci", {}).get("stdev") if mc_telemetry else None,
             "mc_telemetry":   json.dumps(mc_telemetry) if mc_telemetry else None,
         })

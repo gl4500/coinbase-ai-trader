@@ -5,6 +5,42 @@ Format: reverse-chronological by session date.
 
 ---
 
+## Session 58.71k — XGB v4.5 3-class shadow infrastructure (2026-05-18)
+
+**Spec:** `docs/superpowers/specs/2026-05-17-xgb-v4-5-three-class-design.md`
+**Plan:** `docs/superpowers/plans/2026-05-17-xgb-v4-5-three-class.md`
+
+Builds on B.1 binary v4 shadow infrastructure. Adds a fully-isolated 3-class (DOWN/NEUTRAL/UP) shadow path alongside v3 driver and v4 binary shadow, with 7 channels (5 OHLCV + 2 Bollinger Band) and horizon-suffixed artifacts ready for the operator's 3-horizon sweep (h24/h72/h168).
+
+### New files (7)
+- `backend/tools/xgb_v4_5_features.py` — pure-function 7-channel × 3-tier × 10-stat extractor (210 features)
+- `backend/tools/train_xgb_v4_5.py` — 3-class trainer (multi:softprob, num_class=3, horizon-suffixed artifacts, NO calibrator)
+- `backend/tools/v4_5_horizon_compare.py` — per-class AUC + macro AUC + 3-rule decision sweep + HTML report
+- `backend/tests/test_xgb_v4_5_features.py`
+- `backend/tests/test_train_xgb_v4_5.py`
+- `backend/tests/test_v4_5_horizon_compare.py`
+- `backend/migrations/xgb_v4_5_shadow_20260517.py` — idempotent ALTER TABLE adds 3 REAL nullable columns to cnn_scans
+
+### Edited files (6)
+- `backend/tools/xgb_features.py` — dispatcher branch for `model_version='v4_5'`
+- `backend/agents/xgb_signal.py` — `_try_load_v4_5`, `xgb_prob_v4_5` (clip + renormalize), `xgb_prob_shadow_v4_5` (3-class shadow path, v4.5 failure isolated)
+- `backend/agents/cnn_agent.py` — ~10-LOC write-through: unpack 3-tuple shadow, persist 3 new columns; no decision logic changes
+- `backend/database.py` — CREATE TABLE + ALTER + save_cnn_scan INSERT for 3 v4.5 columns
+- `backend/tests/test_xgb_signal.py` — v4.5 shadow tests including failure-isolation
+- `backend/tests/test_database.py` — v4.5 column persistence tests
+- `backend/tests/test_mc_migration.py` — v4.5 migration idempotency
+
+### Invariants
+- **#17 (NEW):** v4.5 3-class telemetry contract — all 3 probs written together or all NULL; sum ~1.0 after clip+renormalize; v4.5 failures never affect v3 driver or v4 shadow.
+
+### Operator preflight (post-commit)
+1. Train 3 horizons (h24/0.015, h72/0.03, h168/0.06) via `python -m tools.train_xgb_v4_5 --forward-hours <H> --label-thresh <T>`
+2. Run `python -m tools.v4_5_horizon_compare --holdout <PATH> --out backend/tools/xgb_v4_5_horizon_compare.html`
+3. Launch dev backend with `PORT=8002` for shadow week
+4. Promote (horizon, rule) combo to 8001 if shadow telemetry shows promise
+
+---
+
 ## [Session 58.71j] — 2026-05-17 — XGB v4 OHLCV-5 shadow model (#xgb-v4 / Step B.1)
 
 ### Why

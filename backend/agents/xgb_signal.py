@@ -58,6 +58,16 @@ _calibration_v4: Optional[object] = None
 _load_attempted_v4: bool = False
 _load_succeeded_v4: bool = False
 
+# ── v4.5 shadow state (Step B.1.5) ────────────────────────────────────────
+_MODEL_PATH_V45    = os.path.join(_BACKEND_DIR, "xgb_model_v4_5.json")
+_FEATURES_PATH_V45 = os.path.join(_BACKEND_DIR, "xgb_features_v4_5.json")
+# No calibration path — v4.5 uses raw softmax (see spec)
+
+_booster_v45 = None
+_feature_names_v45: List[str] = []
+_load_attempted_v45: bool = False
+_load_succeeded_v45: bool = False
+
 
 ChannelsLike = Union[np.ndarray, Sequence[Sequence[float]]]
 
@@ -206,6 +216,44 @@ def _try_load_v4() -> bool:
             return False
 
 
+def _try_load_v4_5() -> bool:
+    """Load v4.5 booster + feature_names from disk once. Idempotent.
+
+    Returns True iff load succeeded. Failures log + return False; never raise.
+    No calibrator in v4.5 (raw softmax used directly).
+    """
+    global _booster_v45, _feature_names_v45
+    global _load_attempted_v45, _load_succeeded_v45
+    with _lock:
+        if _load_attempted_v45:
+            return _load_succeeded_v45
+        _load_attempted_v45 = True
+        if not (os.path.exists(_MODEL_PATH_V45) and os.path.exists(_FEATURES_PATH_V45)):
+            logger.info(
+                "xgb_signal: v4.5 artifacts missing (model=%s features=%s) — shadow disabled",
+                _MODEL_PATH_V45, _FEATURES_PATH_V45,
+            )
+            return False
+        try:
+            import xgboost as xgb
+            with open(_FEATURES_PATH_V45, "r") as f:
+                meta = json.load(f)
+            names = list(meta.get("feature_names", []))
+            if not names:
+                logger.warning("xgb_signal: v4.5 features.json has empty feature_names")
+                return False
+            booster = xgb.Booster()
+            booster.load_model(_MODEL_PATH_V45)
+            _booster_v45 = booster
+            _feature_names_v45 = names
+            _load_succeeded_v45 = True
+            logger.info("xgb_signal: loaded v4.5 booster (%d features)", len(names))
+            return True
+        except Exception as exc:
+            logger.exception("xgb_signal: v4.5 load failed: %s", exc)
+            return False
+
+
 def xgb_prob_v4(channels, pid: Optional[str] = None) -> float:
     """v4 booster probability in [0.01, 0.99]. Neutral 0.5 if artifacts missing or pid None.
 
@@ -233,6 +281,73 @@ def xgb_prob_v4(channels, pid: Optional[str] = None) -> float:
     except Exception as exc:
         logger.exception("xgb_signal.xgb_prob_v4 failed, returning neutral: %s", exc)
         return _NEUTRAL
+
+
+def xgb_prob_v4_5(
+    channels, pid: Optional[str] = None,
+) -> Tuple[float, float, float]:
+    """v4.5 3-class probabilities (p_down, p_neutral, p_up).
+
+    Each clipped to [0.01, 0.99] then renormalized to sum to 1.0. Returns
+    neutral fallback (0.33, 0.34, 0.33) if artifacts missing, pid is None,
+    or any error during inference.
+    """
+    _NEUTRAL_3 = (0.33, 0.34, 0.33)
+    if not _try_load_v4_5():
+        return _NEUTRAL_3
+    if pid is None:
+        logger.warning(
+            "xgb_signal: v4.5 requires pid, got None — returning neutral 3-tuple",
+        )
+        return _NEUTRAL_3
+    try:
+        import xgboost as xgb
+        from services.tiered_history import fetch_tiered
+        from tools.xgb_v4_5_features import extract_v4_5
+
+        tiers = fetch_tiered(pid, source="live")
+        features, _ = extract_v4_5(tiers)
+        dmat = xgb.DMatrix(features, feature_names=_feature_names_v45)
+        raw = _booster_v45.predict(dmat)
+        # multi:softprob returns shape (1, 3)
+        if raw.ndim != 2 or raw.shape != (1, 3):
+            logger.warning(
+                "xgb_signal: v4.5 booster output shape %s, expected (1, 3) — neutral",
+                raw.shape,
+            )
+            return _NEUTRAL_3
+        p_down    = float(np.clip(raw[0, 0], 0.01, 0.99))
+        p_neutral = float(np.clip(raw[0, 1], 0.01, 0.99))
+        p_up      = float(np.clip(raw[0, 2], 0.01, 0.99))
+        total = p_down + p_neutral + p_up
+        if total <= 0.0:
+            return _NEUTRAL_3
+        # Renormalize after clip so probs still sum to 1.0
+        return (p_down / total, p_neutral / total, p_up / total)
+    except Exception as exc:
+        logger.exception("xgb_signal.xgb_prob_v4_5 failed, returning neutral: %s", exc)
+        return _NEUTRAL_3
+
+
+def xgb_prob_shadow_v4_5(
+    channels, pid: Optional[str] = None,
+) -> Tuple[float, Optional[Tuple[float, float, float]]]:
+    """Return (v3_prob, v4_5_3prob_tuple_or_None).
+
+    v3 path runs normally (its own exception handling returns neutral 0.5 on
+    failure — no try/except wrapper here). v4.5 wrapped in try/except: any
+    failure -> v4_5=None + log, NEVER affects v3. This is the function
+    cnn_agent should call during the v4.5 shadow week.
+    """
+    prob_v3 = xgb_prob(channels, pid=pid)
+    try:
+        prob_v45 = xgb_prob_v4_5(channels, pid=pid)
+    except Exception as exc:
+        logger.exception(
+            "xgb_signal.xgb_prob_shadow_v4_5: v4.5 path raised (isolated): %s", exc,
+        )
+        prob_v45 = None
+    return prob_v3, prob_v45
 
 
 def xgb_prob_shadow(

@@ -477,3 +477,79 @@ class TestXgbProbShadow:
                             lambda channels, pid=None: 0.3)
         with pytest.raises(RuntimeError, match="v3 boom"):
             xs.xgb_prob_shadow(channels=None, pid="BTC-USD")
+
+
+# ── v4.5 shadow path (#xgb-v4.5 / Step B.1.5) ─────────────────────────────
+
+
+class TestV4_5ShadowLoad:
+    def test_try_load_v4_5_false_when_artifacts_missing(self, monkeypatch):
+        import agents.xgb_signal as xs
+        monkeypatch.setattr(xs, "_MODEL_PATH_V45", "/nonexistent/v45.json")
+        monkeypatch.setattr(xs, "_FEATURES_PATH_V45", "/nonexistent/v45f.json")
+        monkeypatch.setattr(xs, "_load_attempted_v45", False)
+        monkeypatch.setattr(xs, "_load_succeeded_v45", False)
+        assert xs._try_load_v4_5() is False
+
+
+class TestXgbProbV4_5:
+    def test_neutral_fallback_when_missing(self, monkeypatch):
+        import agents.xgb_signal as xs
+        monkeypatch.setattr(xs, "_MODEL_PATH_V45", "/nope/v45.json")
+        monkeypatch.setattr(xs, "_FEATURES_PATH_V45", "/nope/v45f.json")
+        monkeypatch.setattr(xs, "_load_attempted_v45", False)
+        monkeypatch.setattr(xs, "_load_succeeded_v45", False)
+        out = xs.xgb_prob_v4_5(channels=None, pid="BTC-USD")
+        assert isinstance(out, tuple)
+        assert len(out) == 3
+        # Neutral fallback: (0.33, 0.34, 0.33) — sums to 1.0
+        assert out == pytest.approx((0.33, 0.34, 0.33))
+
+    def test_returns_tuple_when_pid_none(self, monkeypatch):
+        import agents.xgb_signal as xs
+        monkeypatch.setattr(xs, "_load_attempted_v45", True)
+        monkeypatch.setattr(xs, "_load_succeeded_v45", True)
+        out = xs.xgb_prob_v4_5(channels=None, pid=None)
+        # pid=None for v4.5 (tiered fetch needed) -> neutral fallback
+        assert out == pytest.approx((0.33, 0.34, 0.33))
+
+
+class TestXgbProbShadowV4_5:
+    def test_returns_tuple_shape(self, monkeypatch):
+        import agents.xgb_signal as xs
+        monkeypatch.setattr(xs, "xgb_prob",
+                            lambda channels, pid=None: 0.7)
+        monkeypatch.setattr(xs, "xgb_prob_v4_5",
+                            lambda channels, pid=None: (0.2, 0.3, 0.5))
+        v3, v45 = xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")
+        assert v3 == 0.7
+        assert v45 == (0.2, 0.3, 0.5)
+
+    def test_v45_failure_isolated_from_v3(self, monkeypatch, caplog):
+        import logging
+        import agents.xgb_signal as xs
+
+        def boom(*a, **kw):
+            raise RuntimeError("v4.5 boom")
+
+        monkeypatch.setattr(xs, "xgb_prob",
+                            lambda channels, pid=None: 0.6)
+        monkeypatch.setattr(xs, "xgb_prob_v4_5", boom)
+        with caplog.at_level(logging.ERROR):
+            v3, v45 = xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")
+        assert v3 == 0.6
+        assert v45 is None
+        assert any("v4.5" in r.message.lower() or "v4_5" in r.message.lower()
+                   for r in caplog.records)
+
+    def test_v3_failure_propagates(self, monkeypatch):
+        import agents.xgb_signal as xs
+
+        def boom_v3(*a, **kw):
+            raise RuntimeError("v3 boom")
+
+        monkeypatch.setattr(xs, "xgb_prob", boom_v3)
+        monkeypatch.setattr(xs, "xgb_prob_v4_5",
+                            lambda channels, pid=None: (0.3, 0.3, 0.4))
+        with pytest.raises(RuntimeError, match="v3 boom"):
+            xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")

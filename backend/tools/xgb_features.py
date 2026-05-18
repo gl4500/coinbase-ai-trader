@@ -254,20 +254,21 @@ def _extract_v3(candles_by_tier: dict) -> Tuple[np.ndarray, List[str]]:
 def extract_features(
     samples, feature_set: str = "v1"
 ) -> Tuple[np.ndarray, List[str]]:
-    """Convert a batch of [N, 28, 60] samples to tabular features.
+    """Convert a batch of samples to tabular features.
 
     feature_set:
-        "v1" (default): 270 per-channel stats (back-compat).
-        "v2": v1 + 10 cross-channel/temporal addons (_V2_NEW_FEATURES).
-        "v3": tiered mixed-lookback — 350 features, samples arg becomes
-              {"micro","meso","macro"} candle-list dict (#311b).
-        "v4": OHLCV-5 channels x 3 tiers x 10 stats = 150 features,
-              samples arg is {"micro","meso","macro"} candle-list dict
-              (#xgb-v4 / Step B.1).
+        "v1": 270 per-channel stats (back-compat).
+        "v2": v1 + 10 cross-channel/temporal addons.
+        "v3": tiered mixed-lookback — 350 features, dict input.
+        "v4": OHLCV-5 channels × 3 tiers × 10 stats = 150 features, dict input.
+        "v4_5": v4 + 2 BB channels = 7 channels × 3 tiers × 10 = 210 features
+                (#xgb-v4.5 / Step B.1.5).
 
-    Returns (features, feature_names) where features is float64 with no
-    NaN/Inf, and feature_names matches the column order of features.
+    Returns (features, feature_names) where features is float64.
     """
+    if feature_set == "v4_5":
+        from tools.xgb_v4_5_features import extract_v4_5
+        return extract_v4_5(samples)
     if feature_set == "v4":
         from tools.xgb_v4_features import extract_v4
         return extract_v4(samples)
@@ -275,7 +276,7 @@ def extract_features(
         return _extract_v3(samples)
     if feature_set not in ("v1", "v2"):
         raise ValueError(
-            f"unknown feature_set={feature_set!r}; expected 'v1', 'v2', 'v3', or 'v4'"
+            f"unknown feature_set={feature_set!r}; expected 'v1', 'v2', 'v3', 'v4', or 'v4_5'"
         )
     if samples.ndim != 3 or samples.shape[1] != N_CHANNELS or samples.shape[2] != SEQ_LEN:
         raise ValueError(
