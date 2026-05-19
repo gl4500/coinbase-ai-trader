@@ -5,6 +5,26 @@ Format: reverse-chronological by session date.
 
 ---
 
+## Session 58.71l — XGB deployment-aligned scorecard kickoff (2026-05-18)
+
+**Spec:** `docs/superpowers/specs/2026-05-18-xgb-deployment-scorecard-design.md` (commits `c18481d`, `9accdbe`)
+**Plan:** `docs/superpowers/plans/2026-05-18-xgb-deployment-scorecard.md` (commit `d179966`)
+
+Motivation: 7+ exogenous-input probes have failed to lift XGB AUC above 0.5284 against the 0.55 production gate (see `xgb_feature_optimization_findings.md`). Literature survey (Salinas 2025, AFML Ch. 14, FinTSB 2025, Hudson & Thames) confirms AUC is the wrong target — serious crypto-XGB practitioners optimize precision-at-gate, expected return per signal, paper-Sharpe, and ECE. This kicks off a deployment-aligned multi-metric scorecard for v3 driver + v4 shadow + v4.5 shadow (9-cell expanded) across retail/mid/pro fee tiers.
+
+### New files (Task 1 of 9)
+- `backend/tools/_returns.py` — `realized_log_returns_per_sample(entry_closes, forward_closes)` pure helper; raises on shape mismatch or non-positive prices
+- `backend/tests/test_returns_helper.py` — 4 unit tests (basic, zero-when-equal, non-positive raise, shape-mismatch raise)
+
+### Planning artifacts
+- Design spec resolves 5 open questions (O1 fee tiers side-by-side, O2 v4.5 9-cell expanded, O3 per-fold Sharpe annualization, O4 decile ECE, O5 SELL-side deferred to v2)
+- 9-task TDD implementation plan, subagent-driven execution
+
+### Remaining (Tasks 2-9)
+Precision-at-gate metric, expected-return metric, paper-Sharpe metric, ECE metric, ScorecardReport + orchestrator, CLI runner, smoke test on real cache, persist baseline results.
+
+---
+
 ## Session 58.71k — XGB v4.5 3-class shadow infrastructure (2026-05-18)
 
 **Spec:** `docs/superpowers/specs/2026-05-17-xgb-v4-5-three-class-design.md`
