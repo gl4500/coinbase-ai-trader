@@ -21,12 +21,16 @@ Motivation: 7+ exogenous-input probes have failed to lift XGB AUC above 0.5284 a
 - `backend/tools/_scorecard/_precision.py` — `precision_at_tau(scores, labels, tau)` pure helper; returns `(precision, n_fired)` with NaN when no signals fire; strict `>` threshold; raises on shape mismatch or non-binary labels
 - `backend/tests/test_scorecard_precision.py` — 6 unit tests (basic, no-fires-NaN, all-fire, strict-gt, non-binary raise, shape-mismatch raise)
 
+### New files (Task 3 of 9)
+- `backend/tools/_scorecard/_expected_return.py` — `expected_return_at_tau(scores, returns, tau, fee)` pure helper; returns `(expected_return, n_fired)` = mean realized log-return on fired samples minus `2*fee` round-trip cost, NaN when no signals fire; raises on shape mismatch or negative fee. Single-tier function — multi-tier reporting (retail 0.006 / mid 0.0025 / pro 0.0005) is the orchestrator's job (Task 6/7).
+- `backend/tests/test_scorecard_expected_return.py` — 5 unit tests (basic-with-fee, no-fires-NaN, fee-zero, negative-fee raise, shape-mismatch raise)
+
 ### Planning artifacts
 - Design spec resolves 5 open questions (O1 fee tiers side-by-side, O2 v4.5 9-cell expanded, O3 per-fold Sharpe annualization, O4 decile ECE, O5 SELL-side deferred to v2)
 - 9-task TDD implementation plan, subagent-driven execution
 
-### Remaining (Tasks 2-9)
-Precision-at-gate metric, expected-return metric, paper-Sharpe metric, ECE metric, ScorecardReport + orchestrator, CLI runner, smoke test on real cache, persist baseline results.
+### Remaining (Tasks 4-9)
+Paper-Sharpe metric, ECE metric, ScorecardReport + orchestrator, CLI runner, smoke test on real cache, persist baseline results.
 
 ---
 
