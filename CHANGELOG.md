@@ -16,6 +16,11 @@ Motivation: 7+ exogenous-input probes have failed to lift XGB AUC above 0.5284 a
 - `backend/tools/_returns.py` — `realized_log_returns_per_sample(entry_closes, forward_closes)` pure helper; raises on shape mismatch or non-positive prices
 - `backend/tests/test_returns_helper.py` — 4 unit tests (basic, zero-when-equal, non-positive raise, shape-mismatch raise)
 
+### New files (Task 2 of 9)
+- `backend/tools/_scorecard/__init__.py` — package marker for per-metric scorecard computers
+- `backend/tools/_scorecard/_precision.py` — `precision_at_tau(scores, labels, tau)` pure helper; returns `(precision, n_fired)` with NaN when no signals fire; strict `>` threshold; raises on shape mismatch or non-binary labels
+- `backend/tests/test_scorecard_precision.py` — 6 unit tests (basic, no-fires-NaN, all-fire, strict-gt, non-binary raise, shape-mismatch raise)
+
 ### Planning artifacts
 - Design spec resolves 5 open questions (O1 fee tiers side-by-side, O2 v4.5 9-cell expanded, O3 per-fold Sharpe annualization, O4 decile ECE, O5 SELL-side deferred to v2)
 - 9-task TDD implementation plan, subagent-driven execution
