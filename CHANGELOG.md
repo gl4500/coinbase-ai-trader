@@ -25,12 +25,32 @@ Motivation: 7+ exogenous-input probes have failed to lift XGB AUC above 0.5284 a
 - `backend/tools/_scorecard/_expected_return.py` — `expected_return_at_tau(scores, returns, tau, fee)` pure helper; returns `(expected_return, n_fired)` = mean realized log-return on fired samples minus `2*fee` round-trip cost, NaN when no signals fire; raises on shape mismatch or negative fee. Single-tier function — multi-tier reporting (retail 0.006 / mid 0.0025 / pro 0.0005) is the orchestrator's job (Task 6/7).
 - `backend/tests/test_scorecard_expected_return.py` — 5 unit tests (basic-with-fee, no-fires-NaN, fee-zero, negative-fee raise, shape-mismatch raise)
 
-### Planning artifacts
-- Design spec resolves 5 open questions (O1 fee tiers side-by-side, O2 v4.5 9-cell expanded, O3 per-fold Sharpe annualization, O4 decile ECE, O5 SELL-side deferred to v2)
-- 9-task TDD implementation plan, subagent-driven execution
+### New files (Task 4 of 9)
+- `backend/tools/_scorecard/_paper_sharpe.py` — `paper_sharpe_per_fold(scores, returns, fold_ids, fold_spans_days, tau, fee)` pure helper implementing O3 resolution: per-fold per-signal Sharpe with `sqrt(N_f)` annualization where `N_f = n_fires * 365 / span_days`, aggregated as `(mean, std)` across folds for honest variance. Returns `(mean_annual_sharpe, std_annual_sharpe, total_n_fired)`; NaN when no fold has >=2 fires or all degenerate (sigma=0). Raises `ValueError` on shape mismatch; `KeyError` if a data fold_id is missing from spans dict.
+- `backend/tests/test_scorecard_paper_sharpe.py` — 5 unit tests (constant-returns NaN guard, positive-mean-with-noise sanity bound, fold-with-no-fires excluded, shape-mismatch raise, missing-fold-span KeyError)
 
-### Remaining (Tasks 4-9)
-Paper-Sharpe metric, ECE metric, ScorecardReport + orchestrator, CLI runner, smoke test on real cache, persist baseline results.
+### New files (Task 5 of 9)
+- `backend/tools/_scorecard/_ece.py` — `expected_calibration_error(scores, labels, n_bins=10)` pure helper; weighted mean of `|empirical_acc - mean_score|` over equal-width bins on `[0, 1]`. Per O4 resolution decile binning is safe at 167k+ samples. Empty bins skipped. Raises on shape mismatch, non-binary labels, or `n_bins <= 0`.
+- `backend/tests/test_scorecard_ece.py` — 6 unit tests (perfectly-calibrated near zero, completely-miscalibrated 0.9 vs 0.1, empty-bins skipped, shape-mismatch, non-binary labels, invalid n_bins)
+
+### New files (Task 6 of 9)
+- `backend/tools/_scorecard/_report.py` — `ScorecardReport` dataclass holding per-tau rows (precision, n_fired, e_return/sharpe_mean/sharpe_std per fee tier), scalar `ece`, `recommended_operating_tau`, `gates_passed` dict, `pos_rate`, `gate_tier`.
+- `backend/tools/scorecard.py` — `compute_scorecard(scores, labels, returns, fold_ids, fold_spans_days, *, fee_tiers=FEE_TIERS, gate_tier='retail', tau_grid=DEFAULT_TAU_GRID, n_ece_bins=10)` orchestrator. Sweeps tau ∈ {0.50, 0.55, ..., 0.95} × tiers {retail 0.006, mid 0.0025, pro 0.0005}, composes four per-metric computers, picks recommended operating tau as the precision-max row with `n_fired >= 100` and positive E[r] at `gate_tier`, evaluates four hard gates (precision ≥ pos_rate + 0.03, E[r] > 0, paper_sharpe > 0, ece < 0.05). Raises `ValueError` if `gate_tier` not in `fee_tiers`. CLI runner appended in Task 7.
+- `backend/tests/test_scorecard_orchestrator.py` — 3 unit tests (full-report shape on synthetic 500-sample dataset, invalid gate_tier raises, recommended-tau respects N_FIRED_FLOOR=100)
+
+### New files (Task 7 of 9 — v3 driver CLI, corrected 2026-05-19)
+- `backend/tools/_scorecard/_cv_harness.py` — v3 scorecard harness. `top_n_pids_from_cache` (cache read only for the survivorship-aware top-20 ranking); `build_v3_samples(pids, parquet_dir, sample_step)` mirrors `train_xgb.train_xgb_v3` — reads per-pid OHLCV parquets, builds tiered slices (micro 60 / meso 168 / macro 336), extracts v3 features, labels `close[t+4] > close[t]`, records entry/exit close; `train_fold_v3` fresh per-fold booster (params mirror `train_xgb_v3`: `subsample=0.7`, `feature_weights_v3` per invariant #13); `oof_predict_v3` 5-fold purged-WF OOF predictions + fold spans.
+- `backend/tests/test_scorecard_cli.py` — 3 fast tests (help, missing-track, v4-not-implemented) + 1 slow v3 smoke test.
+- `backend/tools/scorecard.py` — appended `--track v3` CLI (`--cache`/`--parquet-dir`/`--sample-step`/`--gate-tier`); `--track v4`/`v4.5` raise `NotImplementedError`. Report includes an OOF-mean-AUC sanity-anchor line. Realized return per v3 signal is the plain 4-bar forward log-return `ln(close[t+4]/close[t])`.
+
+### Scope correction (2026-05-19)
+The original plan Task 7 was written against false premises, caught when the first smoke run crashed: **the v3 booster is not trained on `cnn_dataset_cache.pt`.** `train_xgb.train_xgb_v3` reads per-pid OHLCV parquets, builds tiered candle slices, and labels `close[t+4] > close[t]` — a naive 4-bar direction, NOT the ±1% triple-barrier (that belongs to the CNN cache). Consequences: the v3 scorecard rebuilds samples from parquets (cache used only for pid ranking); realized return is the 4-bar forward log-return with no barriers (a `_barrier_replay.py` written against the wrong premise was deleted); `purged_walk_forward_splits` is imported from the standalone `tools/walk_forward.py`. Task 7 v1 is **v3-only**; v4/v4.5 deferred to Tasks 7b/7c. Plan Tasks 7/8/9 rewritten; old sections marked SUPERSEDED. The design spec's "Val fold convention" (~167k cache samples) is wrong for v3 and should be amended.
+
+### First v3 baseline (smoke run, sample_step=24, top-20 pids, 7386 samples)
+OOF mean AUC 0.512; ECE 0.047 (**PASS** <0.05); precision/expected-return/paper-Sharpe all **FAIL** — every E[r] is negative at the retail fee tier (1.2% round-trip swamps the edge), positive only at the `pro` tier at τ 0.65/0.75. No τ qualifies as a recommended operating point. **v3 passes 1 of 4 hard gates.** Full results in `docs/superpowers/specs/2026-05-18-xgb-scorecard-baseline-results.md` (Task 9).
+
+### Remaining (Tasks 7b/7c)
+v4 / v4.5 scorecard tracks — backlog, each needs its own OHLCV-parquet harness and a spec.
 
 ---
 

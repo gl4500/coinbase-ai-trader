@@ -1037,7 +1037,68 @@ git push
 
 ---
 
-## Task 7: CLI runner with cache loading and OOF prediction
+## Task 7 — CORRECTED 2026-05-19: v3 driver scorecard CLI
+
+> The original Task 7/8/9 below this corrected section are **SUPERSEDED**. They
+> were written against false premises discovered during execution. The decisive
+> one (found when the first smoke run crashed): **the v3 booster is not trained
+> on `cnn_dataset_cache.pt` at all.** `tools.train_xgb.train_xgb_v3` reads
+> per-pid OHLCV parquets, builds tiered candle slices (micro 60 / meso 168 /
+> macro 336), extracts features via `extract_features(feature_set='v3')`, and
+> labels each sample **`close[t+4] > close[t]`** — a naive 4-bar-ahead direction.
+> The ±1% triple-barrier belongs to the CNN cache, NOT to v3 XGB. Consequences:
+>
+> 1. The v3 scorecard must rebuild samples from parquets (mirror `train_xgb_v3`),
+>    not load the cache. The cache is read only for the survivorship-aware
+>    top-20 pid ranking.
+> 2. Realized return per v3 signal is the plain 4-bar forward log-return
+>    `ln(close[t+4]/close[t])` — there are no barriers to replay. (A
+>    `_barrier_replay.py` written against the wrong premise was deleted.)
+> 3. `purged_walk_forward_splits` already lives standalone in
+>    `tools/walk_forward.py` — import it; there is no reusable `_train_fold_xgb`.
+> 4. One harness cannot cover v3/v4/v4.5: v4/v4.5 use different extractors
+>    (`extract_v4` / `extract_v4_5`) and labels — deferred to Tasks 7b/7c.
+>
+> Task 7 v1 implements **`--track v3` only**. `--track v4` / `v4.5` raise
+> `NotImplementedError`.
+>
+> **Spec note:** the design spec's "Val fold convention" (~167k cache samples)
+> is wrong for v3 — that count is the CNN cache. v3 sample count depends on
+> `sample_step` over the top-20 pids' parquets. The spec should be amended.
+
+**Files:**
+- Create: `backend/tools/_scorecard/_cv_harness.py` — v3 sample building from parquets + per-fold OOF prediction
+- Modify: `backend/tools/scorecard.py` — append the `--track v3` CLI
+- Test: `backend/tests/test_scorecard_cli.py`
+
+**v3 facts (from `tools/train_xgb.py:train_xgb_v3`):** per pid, read parquet, require ≥336 bars, roll one sample every `sample_step` bars from bar 336; tiers `{micro: records[t-60:t], meso: records[t-168:t], macro: records[t-336:t]}`; `extract_features(tiers, 'v3')` → 350 features; label `1 if close[t+4] > close[t] else 0`. Booster: `binary:logistic`, `max_depth=4/min_child_weight=1/subsample=0.7/colsample_bytree=0.8/lr=0.05`, 200 rounds, `feature_weights_v3` on the DMatrix (invariant #13). Realized return = `ln(close[t+4]/close[t])`.
+
+- [ ] **Step 1: `_cv_harness.py`** — `V3Dataset` dataclass `(X[N,350], y, entry_ts, entry_close, exit_close, pid)`; `top_n_pids_from_cache(cache_path)` (cache read only for survivorship-aware top-20 ranking); `build_v3_samples(pids, parquet_dir, sample_step)` mirrors `train_xgb_v3` and records entry/exit close; `train_fold_v3(X_tr, y_tr, X_va)` trains a **fresh** booster per fold on the pre-extracted features (params above, `feature_weights_v3`); `oof_predict_v3(ds)` runs the 5-fold purged-WF loop → `(scores, fold_ids, fold_spans_days)`.
+
+- [ ] **Step 2: CLI in `scorecard.py`** — `_load_v3_track(cache, parquet_dir, sample_step)` composes harness + `realized_log_returns_per_sample(entry_close, exit_close)`; `main()` argparse `--track/--cache/--parquet-dir/--sample-step/--gate-tier`, raises `NotImplementedError` for v4/v4.5, prints `_format_report` with an OOF-mean-AUC sanity line.
+
+- [ ] **Step 3: Verify (requires a training/backend pause — see `feedback_no_pytest_during_trading`)**
+  - `pytest tests/test_scorecard_cli.py -v -m "not slow"` → 3 passed (help, missing-track, v4-not-implemented)
+  - `python -m tools.scorecard --track v3` → exit 0, full report
+  - **AUC sanity anchor:** the report's "OOF mean AUC" — compare against the documented v3 ceiling in `xgb_feature_optimization_findings.md`. A materially different number means the per-fold booster config has diverged from `train_xgb_v3`.
+
+- [ ] **Step 4: Commit** — `_cv_harness.py`, `scorecard.py`, `test_scorecard_cli.py`, `CHANGELOG.md`, in one commit; push.
+
+## Task 8 — CORRECTED 2026-05-19: v3 smoke run
+
+Verification only, **v3 track only**. During a training/backend pause: run `python -m tools.scorecard --track v3 --gate-tier retail` from `backend/`, capture the report. Acceptance: exit 0; 10-row per-tau table with no unexpected all-NaN columns; ECE in `[0,1]`; recommended tau is a grid value or NaN; 4 gate booleans; OOF AUC consistent with the documented v3 ceiling. Then `pytest tests/test_scorecard_cli.py -v -m slow`. v4/v4.5 smoke deferred to 7b/7c. No commit.
+
+## Task 9 — CORRECTED 2026-05-19: persist v3 baseline
+
+Create `docs/superpowers/specs/2026-05-18-xgb-scorecard-baseline-results.md` with the v3 report, the four hard-gate outcomes, the AUC-vs-deployment-metric interpretation, and the gate-retirement recommendation (keep 0.55 AUC / retire / run alongside). v4 and v4.5 sections are placeholders marked "pending Tasks 7b/7c". Commit + push.
+
+## Follow-up — Tasks 7b / 7c (v4 and v4.5 tracks)
+
+Backlog. Each needs its own harness: load OHLCV from `data/history/<pid>.parquet`, rebuild samples via `extract_v4` / `extract_v4_5`, per-fold purged-WF retrain. 7c (v4.5) additionally sweeps 3 horizons × 3 decision rules and scores on `p_up`. Spec these before implementing — they are not mechanical extensions of the v3 CLI.
+
+---
+
+## Task 7 (SUPERSEDED 2026-05-19 — see corrected section above): CLI runner with cache loading and OOF prediction
 
 **Files:**
 - Modify: `backend/tools/scorecard.py` (append `__main__` block + loader)
@@ -1277,7 +1338,7 @@ git push
 
 ---
 
-## Task 8: Run smoke test on real cache
+## Task 8 (SUPERSEDED 2026-05-19 — see "Task 8 — CORRECTED" above): Run smoke test on real cache
 
 **Files:** none modified — verification only.
 
@@ -1316,7 +1377,7 @@ No commit required for Task 8. Move to Task 9.
 
 ---
 
-## Task 9: Persist baseline results to spec-sibling doc
+## Task 9 (SUPERSEDED 2026-05-19 — see "Task 9 — CORRECTED" above): Persist baseline results to spec-sibling doc
 
 **Files:**
 - Create: `docs/superpowers/specs/2026-05-18-xgb-scorecard-baseline-results.md`
