@@ -162,3 +162,38 @@ def build_product_samples(
         "exit_close": np.array(xc, dtype=np.float64),
         "entry_ts": np.array(ts, dtype=np.int64),
     }
+
+
+def pool_samples(
+    substrate: str,
+    label_variant: str,
+    k: int,
+    pids: list[str],
+    sample_step: int,
+) -> dict:
+    """Build and pool samples across products, sorted by entry timestamp.
+
+    Returns the same dict shape as build_product_samples, concatenated over
+    all products that yielded at least one sample.
+
+    Raises:
+        RuntimeError: if no product yields any sample.
+    """
+    import numpy as np
+
+    parts = []
+    for pid in pids:
+        bars = load_bars(substrate, pid)
+        s = build_product_samples(bars, label_variant, k, sample_step)
+        if len(s["y"]) > 0:
+            parts.append(s)
+
+    if not parts:
+        raise RuntimeError(
+            f"no samples for substrate={substrate!r} label_variant="
+            f"{label_variant!r} k={k} — check data/history/ inputs exist"
+        )
+
+    pooled = {key: np.concatenate([p[key] for p in parts]) for key in parts[0]}
+    order = np.argsort(pooled["entry_ts"], kind="stable")
+    return {key: val[order] for key, val in pooled.items()}

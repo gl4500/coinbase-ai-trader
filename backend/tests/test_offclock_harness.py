@@ -150,3 +150,43 @@ def test_build_product_samples_rejects_unknown_variant():
     bars = _rising_bars(400)
     with pytest.raises(ValueError, match="label_variant"):
         build_product_samples(bars, "regression", k=4, sample_step=24)
+
+
+from tools._scorecard._offclock_harness import pool_samples
+
+
+def test_pool_samples_concatenates_and_sorts(monkeypatch):
+    import numpy as np
+    from tools._scorecard import _offclock_harness as h
+
+    # two products: pid B's samples are chronologically before pid A's
+    samples = {
+        "A": {"X": np.ones((2, 150)), "y": np.array([1, 0]),
+              "entry_close": np.array([10.0, 11.0]),
+              "exit_close": np.array([10.5, 11.5]),
+              "entry_ts": np.array([300, 400], dtype=np.int64)},
+        "B": {"X": np.zeros((1, 150)), "y": np.array([1]),
+              "entry_close": np.array([20.0]), "exit_close": np.array([21.0]),
+              "entry_ts": np.array([100], dtype=np.int64)},
+    }
+    monkeypatch.setattr(h, "load_bars", lambda substrate, pid: ["bars-of", pid])
+    monkeypatch.setattr(h, "build_product_samples",
+                        lambda bars, lv, k, step: samples[bars[1]])
+    pooled = pool_samples("dollar", "direction", k=4,
+                          pids=["A", "B"], sample_step=24)
+    # sorted by entry_ts ascending: 100 (B), 300 (A), 400 (A)
+    assert list(pooled["entry_ts"]) == [100, 300, 400]
+    assert pooled["X"].shape == (3, 150)
+
+
+def test_pool_samples_raises_when_no_samples(monkeypatch):
+    from tools._scorecard import _offclock_harness as h
+    import numpy as np
+    monkeypatch.setattr(h, "load_bars", lambda substrate, pid: [])
+    monkeypatch.setattr(h, "build_product_samples",
+                        lambda bars, lv, k, step: {
+                            "X": np.zeros((0, 150)), "y": np.zeros(0),
+                            "entry_close": np.zeros(0), "exit_close": np.zeros(0),
+                            "entry_ts": np.zeros(0, dtype=np.int64)})
+    with pytest.raises(RuntimeError, match="no samples"):
+        pool_samples("dollar", "direction", k=4, pids=["A"], sample_step=24)
