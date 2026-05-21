@@ -5,6 +5,17 @@ Format: reverse-chronological by session date.
 
 ---
 
+## Session 58.71n — Dollar-bar data pipeline (SP1) — 2026-05-20
+
+**Spec:** `docs/superpowers/specs/2026-05-20-dollar-bar-data-pipeline-design.md`
+**Plan:** `docs/superpowers/plans/2026-05-20-dollar-bar-data-pipeline.md`
+
+Sub-project 1 of the off-the-clock XGB exploration: 1-minute backfill + per-product dollar bars for the scorecard's top-20 products.
+
+- `services/history_backfill.py` — 1-minute backfill support (`backfill_product_1m`, `load_1m_history`, `_parquet_path_1m`), mirroring the 5m functions.
+
+---
+
 ## Session 58.71l — XGB deployment-aligned scorecard kickoff (2026-05-18)
 
 **Spec:** `docs/superpowers/specs/2026-05-18-xgb-deployment-scorecard-design.md` (commits `c18481d`, `9accdbe`)

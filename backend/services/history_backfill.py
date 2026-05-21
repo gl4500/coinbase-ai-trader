@@ -35,6 +35,8 @@ _GRANULARITY  = "ONE_HOUR"
 _BAR_SECS     = 3600          # seconds per hourly bar
 _FIVE_MINUTE_GRANULARITY = "FIVE_MINUTE"
 _FIVE_MINUTE_BAR_SECS    = 300          # seconds per 5-minute bar
+_ONE_MINUTE_GRANULARITY = "ONE_MINUTE"
+_ONE_MINUTE_BAR_SECS    = 60           # seconds per 1-minute bar
 _MAX_PER_REQ  = 300           # Coinbase max bars per request
 _REQ_DELAY    = 0.35          # seconds between requests (rate-limit friendly)
 
@@ -60,6 +62,12 @@ def _parquet_path_5m(product_id: str) -> str:
     """5-minute candle parquet path — separate namespace under history/5m/."""
     safe = product_id.replace("/", "_")
     return os.path.join(_HISTORY_DIR, "5m", f"{safe}.parquet")
+
+
+def _parquet_path_1m(product_id: str) -> str:
+    """1-minute candle parquet path — separate namespace under history/1m/."""
+    safe = product_id.replace("/", "_")
+    return os.path.join(_HISTORY_DIR, "1m", f"{safe}.parquet")
 
 
 def _load_from_path(path: str) -> List[Dict]:
@@ -156,6 +164,11 @@ def load_history(product_id: str) -> List[Dict]:
 def load_5m_history(product_id: str) -> List[Dict]:
     """Load all stored 5-minute candles for product_id. [] if no file (#55)."""
     return _load_from_path(_parquet_path_5m(product_id))
+
+
+def load_1m_history(product_id: str) -> List[Dict]:
+    """Load all stored 1-minute candles for product_id. [] if no file."""
+    return _load_from_path(_parquet_path_1m(product_id))
 
 
 def _save_history(product_id: str, candles: List[Dict]) -> None:
@@ -279,6 +292,21 @@ async def backfill_product_5m(
     return await _backfill_to_path(
         product_id, days, _FIVE_MINUTE_GRANULARITY, _FIVE_MINUTE_BAR_SECS,
         _parquet_path_5m(product_id),
+    )
+
+
+async def backfill_product_1m(
+    product_id: str,
+    days: int = 7,
+) -> Dict:
+    """Backfill one product's 1-minute history. Same shape as hourly/5m.
+
+    1m bars are 60s; at 300 bars/request that is 5h per request, so a long
+    history is many paged requests — callers pass `days` explicitly.
+    """
+    return await _backfill_to_path(
+        product_id, days, _ONE_MINUTE_GRANULARITY, _ONE_MINUTE_BAR_SECS,
+        _parquet_path_1m(product_id),
     )
 
 

@@ -165,3 +165,31 @@ class TestFetchRangeGranularityParam:
         )
         # network failure returns [] from the existing except block; that's fine
         assert isinstance(result, list)
+
+
+# ── 1-minute candle support (dollar-bar data pipeline SP1) ────────────────────
+
+def test_parquet_path_1m_uses_1m_subdir():
+    p = hb._parquet_path_1m("BTC-USD")
+    assert p.endswith(os.path.join("1m", "BTC-USD.parquet"))
+
+
+def test_load_1m_history_missing_file_returns_empty():
+    assert hb.load_1m_history("ZZZ-NONEXISTENT-USD") == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_product_1m_delegates_with_one_minute_params(monkeypatch):
+    captured = {}
+
+    async def fake_backfill_to_path(pid, days, granularity, bar_secs, path):
+        captured.update(pid=pid, days=days, granularity=granularity,
+                        bar_secs=bar_secs, path=path)
+        return {"product_id": pid, "new_bars": 0, "total_bars": 0, "oldest_ts": None}
+
+    monkeypatch.setattr(hb, "_backfill_to_path", fake_backfill_to_path)
+    await hb.backfill_product_1m("BTC-USD", days=3)
+    assert captured["granularity"] == "ONE_MINUTE"
+    assert captured["bar_secs"] == 60
+    assert captured["days"] == 3
+    assert captured["path"].endswith(os.path.join("1m", "BTC-USD.parquet"))
