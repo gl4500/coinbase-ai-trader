@@ -13,6 +13,8 @@ from services.history_backfill import load_history
 
 _HISTORY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "history")
 
+_TB_BARRIER = 0.01  # +/-1% triple-barrier
+
 
 def load_dollar_bars(pid: str) -> list[dict]:
     """Load a product's dollar bars from data/history/dollar/<pid>.parquet.
@@ -59,4 +61,32 @@ def direction_label(closes, t: int, k: int) -> tuple[int, float]:
     """
     entry = closes[t]
     exit_close = float(closes[t + k])
+    return (1 if exit_close > entry else 0), exit_close
+
+
+def triple_barrier_label(bars: list[dict], t: int, k: int) -> tuple[int, float]:
+    """Triple-barrier label for entry bar t with a k-bar vertical timeout.
+
+    Upper barrier = close[t] * 1.01, lower = close[t] * 0.99. Scans bars
+    t+1 .. t+k. Returns (label, exit_close):
+      - upper hit first   -> (1, upper)
+      - lower hit first   -> (0, lower)
+      - both in one bar   -> close-direction breaks the tie (close >= entry -> UP)
+      - neither (timeout) -> (1 if close[t+k] > close[t] else 0, close[t+k])
+    The caller guarantees t + k < len(bars).
+    """
+    entry = bars[t]["close"]
+    upper = entry * (1.0 + _TB_BARRIER)
+    lower = entry * (1.0 - _TB_BARRIER)
+    for i in range(t + 1, t + k + 1):
+        b = bars[i]
+        hit_up = b["high"] >= upper
+        hit_dn = b["low"] <= lower
+        if hit_up and hit_dn:
+            return (1, upper) if b["close"] >= entry else (0, lower)
+        if hit_up:
+            return 1, upper
+        if hit_dn:
+            return 0, lower
+    exit_close = float(bars[t + k]["close"])
     return (1 if exit_close > entry else 0), exit_close
