@@ -86,3 +86,25 @@ def dollar_bars_from_candles(candles: list[dict], threshold: float) -> list[dict
             n = 0
 
     return bars
+
+
+def build_dollar_bars_for_candles(
+    one_min_candles: list[dict],
+    one_h_candles: list[dict],
+) -> list[dict]:
+    """Clip 1m candles to the 1h window, calibrate the threshold, build bars.
+
+    `one_h_candles` and `one_min_candles` must be time-sorted (the
+    history_backfill loaders return sorted lists). Returns [] when there is no
+    1h history or no 1m candle falls inside its span.
+    """
+    if not one_h_candles:
+        return []
+    first_ts = int(one_h_candles[0]["start"])
+    last_ts = int(one_h_candles[-1]["start"])
+    clipped = [c for c in one_min_candles
+               if first_ts <= int(c["start"]) <= last_ts]
+    if not clipped:
+        return []
+    threshold = calibrate_threshold(clipped, len(one_h_candles))
+    return dollar_bars_from_candles(clipped, threshold)

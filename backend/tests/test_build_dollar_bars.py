@@ -74,3 +74,33 @@ def test_dollar_bars_ohlc_aggregation():
 
 def test_dollar_bars_empty_input():
     assert dollar_bars_from_candles([], threshold=100.0) == []
+
+
+from tools.build_dollar_bars import build_dollar_bars_for_candles
+
+
+def test_build_assembly_clips_to_1h_window():
+    # 1h window covers starts 100..400; 1m candles include out-of-window ones
+    # on both sides (50 before, 500 after) that must be clipped out.
+    one_h = [{"start": 100}, {"start": 400}]  # n_1h_bars = 2
+    one_min = (
+        [_flat_candle(50, 100.0, 3.0)]                               # before window
+        + [_flat_candle(s, 100.0, 3.0) for s in range(100, 460, 60)]  # 100..400, in window
+        + [_flat_candle(500, 100.0, 3.0)]                            # after window
+    )
+    bars = build_dollar_bars_for_candles(one_min, one_h)
+    # Only the 6 candles with 100 <= start <= 400 count: dollar value 6*300=1800;
+    # threshold = 1800 / 2 = 900 => 2 bars.
+    assert len(bars) == 2
+    assert all(100 <= b["start"] <= 400 for b in bars)
+    assert all(100 <= b["end"] <= 400 for b in bars)
+
+
+def test_build_assembly_empty_1h_returns_empty():
+    assert build_dollar_bars_for_candles([_flat_candle(0, 100.0, 3.0)], []) == []
+
+
+def test_build_assembly_no_1m_in_window_returns_empty():
+    one_h = [{"start": 1000}, {"start": 2000}]
+    one_min = [_flat_candle(0, 100.0, 3.0), _flat_candle(60, 100.0, 3.0)]
+    assert build_dollar_bars_for_candles(one_min, one_h) == []
