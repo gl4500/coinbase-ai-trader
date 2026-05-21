@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from tools.build_dollar_bars import candle_dollar_value, calibrate_threshold
 
@@ -104,3 +106,52 @@ def test_build_assembly_no_1m_in_window_returns_empty():
     one_h = [{"start": 1000}, {"start": 2000}]
     one_min = [_flat_candle(0, 100.0, 3.0), _flat_candle(60, 100.0, 3.0)]
     assert build_dollar_bars_for_candles(one_min, one_h) == []
+
+
+from tools import build_dollar_bars as bdb
+
+
+def test_dollar_parquet_path_uses_dollar_subdir():
+    p = bdb._dollar_parquet_path("BTC-USD")
+    assert p.endswith(os.path.join("dollar", "BTC-USD.parquet"))
+
+
+def test_save_and_reload_dollar_bars_parquet_roundtrip(tmp_path):
+    bars = [
+        {"start": 0, "end": 120, "open": 100.0, "high": 110.0, "low": 90.0,
+         "close": 105.0, "volume": 9.0, "dollar_value": 900.0, "n_candles": 3},
+    ]
+    path = str(tmp_path / "BTC-USD.parquet")
+    bdb._save_dollar_bars(path, bars)
+    import pyarrow.parquet as pq
+    rows = pq.read_table(path).to_pydict()
+    assert rows["start"] == [0]
+    assert rows["n_candles"] == [3]
+    assert rows["dollar_value"][0] == pytest.approx(900.0)
+
+
+def test_build_for_pid_writes_parquet(tmp_path, monkeypatch):
+    one_h = [{"start": 0}, {"start": 600}]  # n_1h_bars = 2
+    one_min = [
+        {"start": s, "open": 100.0, "high": 100.0, "low": 100.0,
+         "close": 100.0, "volume": 3.0}
+        for s in range(0, 660, 60)  # 11 candles in [0, 600]
+    ]
+    monkeypatch.setattr(bdb, "load_1m_history", lambda pid: one_min)
+    monkeypatch.setattr(bdb, "load_history", lambda pid: one_h)
+    monkeypatch.setattr(bdb, "_dollar_parquet_path",
+                        lambda pid: str(tmp_path / f"{pid}.parquet"))
+    result = bdb.build_for_pid("BTC-USD")
+    assert result["pid"] == "BTC-USD"
+    assert result["n_bars"] > 0
+    assert (tmp_path / "BTC-USD.parquet").exists()
+
+
+def test_build_for_pid_no_data_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(bdb, "load_1m_history", lambda pid: [])
+    monkeypatch.setattr(bdb, "load_history", lambda pid: [])
+    monkeypatch.setattr(bdb, "_dollar_parquet_path",
+                        lambda pid: str(tmp_path / f"{pid}.parquet"))
+    result = bdb.build_for_pid("BTC-USD")
+    assert result["n_bars"] == 0
+    assert not (tmp_path / "BTC-USD.parquet").exists()

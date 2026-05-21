@@ -17,6 +17,7 @@ Sub-project 1 of the off-the-clock XGB exploration: 1-minute backfill + per-prod
 - `tools/build_dollar_bars.py` — `candle_dollar_value` + `calibrate_threshold` helpers.
 - `tools/build_dollar_bars.py` — `dollar_bars_from_candles` construction core (threshold-crossing boundaries, trailing partial dropped).
 - `tools/build_dollar_bars.py` — `build_dollar_bars_for_candles` pure assembly (clip to 1h window + calibrate + construct).
+- `tools/build_dollar_bars.py` — `_save_dollar_bars` (parquet) + `build_for_pid` + `main` CLI; writes `data/history/dollar/<pid>.parquet`.
 
 ---
 
