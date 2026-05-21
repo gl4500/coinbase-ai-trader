@@ -15,6 +15,7 @@ Sub-project 1 of the off-the-clock XGB exploration: 1-minute backfill + per-prod
 - `services/history_backfill.py` — 1-minute backfill support (`backfill_product_1m`, `load_1m_history`, `_parquet_path_1m`), mirroring the 5m functions.
 - `tools/backfill_1m_candles.py` — operator CLI driving the 1m backfill for the top-20 (depth per product from its 1h span).
 - `tools/build_dollar_bars.py` — `candle_dollar_value` + `calibrate_threshold` helpers.
+- `tools/build_dollar_bars.py` — `dollar_bars_from_candles` construction core (threshold-crossing boundaries, trailing partial dropped).
 
 ---
 
