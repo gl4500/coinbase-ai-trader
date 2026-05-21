@@ -49,3 +49,14 @@ def load_bars(substrate: str, pid: str) -> list[dict]:
     if substrate == "time":
         return load_history(pid)
     raise ValueError(f"unknown substrate {substrate!r}; expected 'dollar' or 'time'")
+
+
+def direction_label(closes, t: int, k: int) -> tuple[int, float]:
+    """k-bars-ahead direction label for entry bar t.
+
+    Returns (label, exit_close): label is 1 if close[t+k] > close[t] else 0;
+    exit_close is close[t+k]. The caller guarantees t + k < len(closes).
+    """
+    entry = closes[t]
+    exit_close = float(closes[t + k])
+    return (1 if exit_close > entry else 0), exit_close

@@ -34,3 +34,27 @@ def test_load_dollar_bars_roundtrip(tmp_path, monkeypatch):
     bars = och.load_dollar_bars("BTC-USD")
     assert [b["start"] for b in bars] == [0, 60]   # sorted ascending
     assert bars[0]["close"] == 1.0
+
+
+from tools._scorecard._offclock_harness import direction_label
+
+
+def test_direction_label_up():
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0]
+    label, exit_close = direction_label(closes, t=0, k=4)
+    assert label == 1
+    assert exit_close == 104.0
+
+
+def test_direction_label_down():
+    closes = [100.0, 99.0, 98.0, 97.0, 96.0]
+    label, exit_close = direction_label(closes, t=0, k=4)
+    assert label == 0
+    assert exit_close == 96.0
+
+
+def test_direction_label_flat_is_zero():
+    closes = [100.0, 100.0, 100.0]
+    label, exit_close = direction_label(closes, t=0, k=2)
+    assert label == 0          # not strictly greater
+    assert exit_close == 100.0

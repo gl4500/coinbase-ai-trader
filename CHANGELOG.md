@@ -13,6 +13,7 @@ Format: reverse-chronological by session date.
 Sub-project 2 of the off-the-clock XGB exploration: train + scorecard 16 configs (2 substrates × 2 label variants × 4 horizons).
 
 - `tools/_scorecard/_offclock_harness.py` — bar loaders (`load_dollar_bars`, `load_bars`).
+- `tools/_scorecard/_offclock_harness.py` — `direction_label` (k-bars-ahead direction).
 
 ## Session 58.71n — Dollar-bar data pipeline (SP1) — 2026-05-20
 
