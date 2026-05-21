@@ -197,3 +197,85 @@ def pool_samples(
     pooled = {key: np.concatenate([p[key] for p in parts]) for key in parts[0]}
     order = np.argsort(pooled["entry_ts"], kind="stable")
     return {key: val[order] for key, val in pooled.items()}
+
+
+def oof_predict_offclock(X, y, entry_ts, n_folds: int = 5, embargo_hours: int = 4):
+    """Out-of-fold predictions via 5-fold purged walk-forward CV.
+
+    Trains a fresh booster per fold with the v4 production config
+    (feature_weights_v4 on the DMatrix, subsample 0.7, colsample 0.8). A fold
+    whose training rows are single-class falls back to a constant 0.5 score.
+
+    Returns (scores, fold_ids, fold_spans_days).
+    """
+    import numpy as np
+    import xgboost as xgb
+
+    from tools.walk_forward import purged_walk_forward_splits
+    from tools.xgb_v4_features import feature_names_v4, feature_weights_v4
+
+    names = feature_names_v4()
+    weights = feature_weights_v4()
+    params = {
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "max_depth": 4,
+        "min_child_weight": 1,
+        "subsample": 0.7,
+        "colsample_bytree": 0.8,
+        "learning_rate": 0.05,
+        "seed": 0,
+        "verbosity": 0,
+    }
+
+    n = len(y)
+    scores = np.full(n, np.nan)
+    fold_ids = np.full(n, -1, dtype=int)
+    fold_spans_days: dict[int, float] = {}
+
+    splits = list(purged_walk_forward_splits(entry_ts, n_folds, embargo_hours))
+    for f_idx, (train_idx, val_idx) in enumerate(splits):
+        if len(np.unique(y[train_idx])) < 2:
+            scores[val_idx] = 0.5
+        else:
+            d_tr = xgb.DMatrix(X[train_idx], label=y[train_idx], feature_names=names)
+            d_tr.set_info(feature_weights=weights)
+            d_va = xgb.DMatrix(X[val_idx], feature_names=names)
+            booster = xgb.train(params, d_tr, num_boost_round=200)
+            scores[val_idx] = np.asarray(booster.predict(d_va), dtype=np.float64)
+        fold_ids[val_idx] = f_idx
+        span = (int(entry_ts[val_idx].max()) - int(entry_ts[val_idx].min())) / 86400.0
+        fold_spans_days[f_idx] = float(span) if span > 0 else 1.0
+
+    return scores, fold_ids, fold_spans_days
+
+
+def run_config(
+    substrate: str,
+    label_variant: str,
+    k: int,
+    pids: list[str],
+    sample_step: int,
+) -> dict:
+    """Build pooled samples, OOF-predict, compute realized returns.
+
+    Returns the dict compute_scorecard consumes: scores, labels, returns,
+    fold_ids, fold_spans_days, n.
+    """
+    from tools._returns import realized_log_returns_per_sample
+
+    pooled = pool_samples(substrate, label_variant, k, pids, sample_step)
+    scores, fold_ids, fold_spans_days = oof_predict_offclock(
+        pooled["X"], pooled["y"], pooled["entry_ts"]
+    )
+    returns = realized_log_returns_per_sample(
+        pooled["entry_close"], pooled["exit_close"]
+    )
+    return {
+        "scores": scores,
+        "labels": pooled["y"].astype(int),
+        "returns": returns,
+        "fold_ids": fold_ids,
+        "fold_spans_days": fold_spans_days,
+        "n": int(len(pooled["y"])),
+    }

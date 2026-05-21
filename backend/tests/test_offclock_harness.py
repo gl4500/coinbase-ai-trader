@@ -190,3 +190,45 @@ def test_pool_samples_raises_when_no_samples(monkeypatch):
                             "entry_ts": np.zeros(0, dtype=np.int64)})
     with pytest.raises(RuntimeError, match="no samples"):
         pool_samples("dollar", "direction", k=4, pids=["A"], sample_step=24)
+
+
+from tools._scorecard._offclock_harness import oof_predict_offclock, run_config
+
+
+def test_oof_predict_offclock_shapes():
+    import numpy as np
+    rng = np.random.default_rng(0)
+    n = 500
+    X = rng.normal(size=(n, 150))
+    y = rng.integers(0, 2, size=n)
+    entry_ts = np.arange(n, dtype=np.int64) * 3600
+    scores, fold_ids, spans = oof_predict_offclock(X, y, entry_ts)
+    assert scores.shape == (n,)
+    assert not np.isnan(scores).any()           # every sample gets an OOF score
+    assert set(fold_ids.tolist()) == {0, 1, 2, 3, 4}
+    assert set(spans.keys()) == {0, 1, 2, 3, 4}
+
+
+def test_run_config_composes_pool_oof_returns(monkeypatch):
+    import numpy as np
+    from tools._scorecard import _offclock_harness as h
+
+    pooled = {
+        "X": np.ones((4, 150)), "y": np.array([1, 0, 1, 0]),
+        "entry_close": np.array([10.0, 10.0, 10.0, 10.0]),
+        "exit_close": np.array([11.0, 9.0, 11.0, 9.0]),
+        "entry_ts": np.array([1, 2, 3, 4], dtype=np.int64),
+    }
+    monkeypatch.setattr(h, "pool_samples",
+                        lambda sub, lv, k, pids, step: pooled)
+    monkeypatch.setattr(h, "oof_predict_offclock",
+                        lambda X, y, ts: (np.array([0.6, 0.4, 0.7, 0.3]),
+                                          np.array([0, 0, 1, 1]),
+                                          {0: 30.0, 1: 30.0}))
+    out = run_config("dollar", "direction", k=4, pids=["A"], sample_step=24)
+    assert out["scores"].shape == (4,)
+    assert list(out["labels"]) == [1, 0, 1, 0]
+    # returns = ln(exit/entry): ln(1.1), ln(0.9), ln(1.1), ln(0.9)
+    assert out["returns"][0] == pytest.approx(np.log(1.1))
+    assert out["fold_spans_days"] == {0: 30.0, 1: 30.0}
+    assert out["n"] == 4
