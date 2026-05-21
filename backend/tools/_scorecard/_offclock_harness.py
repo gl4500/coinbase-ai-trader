@@ -90,3 +90,75 @@ def triple_barrier_label(bars: list[dict], t: int, k: int) -> tuple[int, float]:
             return 0, lower
     exit_close = float(bars[t + k]["close"])
     return (1 if exit_close > entry else 0), exit_close
+
+
+_MACRO_WINDOW = 336  # macro tier lookback (= TIER_WINDOWS_V4["macro"])
+
+
+def build_product_samples(
+    bars: list[dict],
+    label_variant: str,
+    k: int,
+    sample_step: int,
+) -> dict:
+    """Build samples for one product's bar list.
+
+    Rolls one sample every `sample_step` bars from index 336 (macro lookback)
+    up to len(bars) - k. Each sample: extract_v4 features over the micro/meso/
+    macro tiers, a label, and entry/exit close prices.
+
+    Returns a dict of numpy arrays: X (N,150), y (N,), entry_close (N,),
+    exit_close (N,), entry_ts (N,). Empty arrays if the product is too short.
+
+    Raises:
+        ValueError: if label_variant is not 'direction' or 'triple_barrier'.
+    """
+    import numpy as np
+    from tools.xgb_v4_features import N_FEATURES_V4, extract_v4
+
+    if label_variant not in ("direction", "triple_barrier"):
+        raise ValueError(
+            f"unknown label_variant {label_variant!r}; "
+            "expected 'direction' or 'triple_barrier'"
+        )
+
+    empty = {
+        "X": np.zeros((0, N_FEATURES_V4), dtype=np.float64),
+        "y": np.zeros(0, dtype=np.int64),
+        "entry_close": np.zeros(0, dtype=np.float64),
+        "exit_close": np.zeros(0, dtype=np.float64),
+        "entry_ts": np.zeros(0, dtype=np.int64),
+    }
+    n = len(bars)
+    last_t = n - k
+    if last_t <= _MACRO_WINDOW:
+        return empty
+
+    closes = [b["close"] for b in bars]
+    feats, ys, ec, xc, ts = [], [], [], [], []
+    for t in range(_MACRO_WINDOW, last_t, sample_step):
+        tier_slices = {
+            "micro": bars[t - 60:t],
+            "meso": bars[t - 168:t],
+            "macro": bars[t - 336:t],
+        }
+        f, _ = extract_v4(tier_slices)
+        if label_variant == "direction":
+            label, exit_close = direction_label(closes, t, k)
+        else:
+            label, exit_close = triple_barrier_label(bars, t, k)
+        feats.append(f[0])
+        ys.append(label)
+        ec.append(float(closes[t]))
+        xc.append(exit_close)
+        ts.append(int(bars[t]["start"]))
+
+    if not feats:
+        return empty
+    return {
+        "X": np.stack(feats, axis=0),
+        "y": np.array(ys, dtype=np.int64),
+        "entry_close": np.array(ec, dtype=np.float64),
+        "exit_close": np.array(xc, dtype=np.float64),
+        "entry_ts": np.array(ts, dtype=np.int64),
+    }

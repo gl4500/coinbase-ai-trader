@@ -115,3 +115,38 @@ def test_triple_barrier_both_hit_close_breaks_tie():
     label, exit_close = triple_barrier_label(bars, t=0, k=4)
     assert label == 1
     assert exit_close == pytest.approx(101.0)
+
+
+from tools._scorecard._offclock_harness import build_product_samples
+
+
+def _rising_bars(n):
+    """n bars with strictly rising close so direction labels are all 1."""
+    return [
+        {"start": i * 60, "open": 100.0 + 0.01 * i, "high": 100.0 + 0.01 * i,
+         "low": 100.0 + 0.01 * i, "close": 100.0 + 0.01 * i, "volume": 1.0}
+        for i in range(n)
+    ]
+
+
+def test_build_product_samples_shape_and_count():
+    bars = _rising_bars(400)
+    s = build_product_samples(bars, "direction", k=4, sample_step=24)
+    # samples roll at t in range(336, 396, 24) -> 336, 360, 384 => 3 samples
+    assert s["X"].shape == (3, 150)
+    assert len(s["y"]) == 3
+    assert list(s["y"]) == [1, 1, 1]            # rising closes
+    assert s["entry_ts"][0] == 336 * 60
+
+
+def test_build_product_samples_too_short_returns_empty():
+    bars = _rising_bars(338)                    # < 336 + k + 1 for k=4
+    s = build_product_samples(bars, "direction", k=4, sample_step=24)
+    assert s["X"].shape == (0, 150)
+    assert len(s["y"]) == 0
+
+
+def test_build_product_samples_rejects_unknown_variant():
+    bars = _rising_bars(400)
+    with pytest.raises(ValueError, match="label_variant"):
+        build_product_samples(bars, "regression", k=4, sample_step=24)

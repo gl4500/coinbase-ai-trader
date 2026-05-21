@@ -15,6 +15,7 @@ Sub-project 2 of the off-the-clock XGB exploration: train + scorecard 16 configs
 - `tools/_scorecard/_offclock_harness.py` — bar loaders (`load_dollar_bars`, `load_bars`).
 - `tools/_scorecard/_offclock_harness.py` — `direction_label` (k-bars-ahead direction).
 - `tools/_scorecard/_offclock_harness.py` — `triple_barrier_label` (±1% barriers, k-bar timeout, barrier-aware exit).
+- `tools/_scorecard/_offclock_harness.py` — `build_product_samples` (extract_v4 over tiers + label per sample).
 
 ## Session 58.71n — Dollar-bar data pipeline (SP1) — 2026-05-20
 
