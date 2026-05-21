@@ -18,6 +18,7 @@ Sub-project 2 of the off-the-clock XGB exploration: train + scorecard 16 configs
 - `tools/_scorecard/_offclock_harness.py` — `build_product_samples` (extract_v4 over tiers + label per sample).
 - `tools/_scorecard/_offclock_harness.py` — `pool_samples` (concat top-20, sort by entry timestamp).
 - `tools/_scorecard/_offclock_harness.py` — `oof_predict_offclock` (5-fold purged-WF) + `run_config` (per-config scorecard input).
+- `tools/offclock_sweep.py` — CLI sweeping the 16 configs through `compute_scorecard`; writes the results doc.
 
 ## Session 58.71n — Dollar-bar data pipeline (SP1) — 2026-05-20
 
