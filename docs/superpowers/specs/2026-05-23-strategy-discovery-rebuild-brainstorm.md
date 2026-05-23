@@ -102,28 +102,51 @@ Crypto-native horizon buckets:
 - **Mining must be multi-horizon:** each candidate (entry-bar, token) gets outcomes labeled at multiple horizons (e.g. {1h, 4h, 24h, 72h, 168h, 336h}); each candidate rule is evaluated against the win-rate × magnitude properties of its outcomes at each horizon; the winning horizon is whatever produces the best properties for the rule.
 - **Parallel action:** expand CoinPaprika tokenomic coverage before mining work begins. See "Parallel actions" section below.
 
-### Q2 — Tokenomic state as filter vs continuous input
+### Q2 — Tokenomic state: filter, continuous, or data-mined boundaries?
 
-When the strategy fires, is the tokenomic state used as a **hard filter** ("only consider tokens with MC > X AND volume > Y"), or as a **continuous input gradient** (the model uses the actual numeric values, not bucket inclusion)?
+How does tokenomic state enter the strategy?
 
-- *Filter*: shrinks the universe to a cohort, then a simpler trigger acts inside the cohort.
-- *Continuous input*: tokenomic values feed a model that scores tokens on a gradient.
+- *(a) Pre-defined filters* — we hand-write cohort definitions.
+- *(b) Continuous numeric input to a model* — actual values feed a scoring model.
+- *(c) Data-mined cohort boundaries* — a tree / rule-mining algorithm learns the cohort splits from the data; each leaf is one profile.
 
-Affects model class — filters favor rule mining / decision trees; continuous inputs favor gradient boosting / regression.
+**Status: RESOLVED 2026-05-23 — (c) data-mined cohort boundaries.** Operator: "I think C is the best start." Natural fit for the discovery + produce-profiles + maximize-profit framing — each leaf of the mined tree is one profile, with its own (win rate, avg win, avg loss, frequency, cumulative profit, Sortino, max DD). Q0 gates are applied at leaf-evaluation time; leaves that don't qualify are pruned.
 
-**Status: OPEN**
+### Q2a — Mining algorithm
 
-### Q3 — Trend signal as trigger vs gate
+Which rule-mining algorithm produces the cohort boundaries?
 
-What does the price-trend signal *do* in the strategy?
+**Status: RESOLVED 2026-05-23 — (i) single decision tree with custom profit-based split criterion.** Operator: "i is a good start, we can explore ii and iii as required." Each split is chosen to maximize the cumulative-profit-after-retail-fees of the resulting subgroups under the Q0-locked sizing rule (concurrency-capped fixed-fraction, max 5). Each leaf is one candidate profile, evaluated independently against the Q0 hard gates. (ii) gradient-boosted trees and (iii) custom greedy rule search are on the backlog as upgrades if (i)'s mining-result quality proves too noisy.
 
-- *Trigger*: the entry event — strategy fires the moment a defined price-action pattern hits (breakout from consolidation, EMA cross, retest of support).
-- *Gate*: only opens trades in a permissive trend regime — strategy may have other entry rules but won't fire against the trend.
-- *Both*: trend gates *whether* to look, then a specific trigger fires *when*.
+### Q3 — Trend feature set (reframed by Q2+Q2a)
 
-Affects how often the strategy can fire and how the entry condition is defined.
+Under Q2 (c data-mined cohort boundaries) + Q2a (i single decision tree), the original trigger-vs-gate framing collapses: every feature is just an input the tree may split on. The real question is **which trend / price-action features feed into the tree alongside tokenomics**.
 
-**Status: OPEN**
+**Status: RESOLVED 2026-05-23 — lean-to-standard candidate set (~11 features), same-tree mixing of tokenomic + trend.** Operator: "go with your recommendation."
+
+Candidate feature set:
+
+| # | Feature | Family | Source |
+|---|---|---|---|
+| 1 | market_cap | Tokenomic | CoinPaprika daily |
+| 2 | FDV | Tokenomic | CoinPaprika daily |
+| 3 | FDV / MC ratio | Tokenomic (dilution overhang) | Derived |
+| 4 | circulating / total supply ratio | Tokenomic (float share) | Derived from current supply snapshot |
+| 5 | 24h_volume | Activity | CoinPaprika daily |
+| 6 | volume / MC ratio (turnover) | Activity (velocity) | Derived |
+| 7 | price / EMA20 ratio | Trend | OHLCV-derived |
+| 8 | 1h return sign | Trend (short momentum) | OHLCV-derived |
+| 9 | 24h return sign | Trend (daily momentum) | OHLCV-derived |
+| 10 | 7d return sign | Trend (weekly momentum) | OHLCV-derived |
+| 11 | ATR-recent (volatility regime) | Trend (vol regime) | OHLCV-derived |
+
+The tree learns whether tokenomic splits, trend splits, or combinations produce the most-profit cohorts. Same-tree mixing — no pre-imposed hierarchy.
+
+### Q4 — Single strategy or family of strategies
+
+Are we mining for *one* winning strategy or a *family* of strategies?
+
+**Status: RESOLVED 2026-05-23 — family, naturally produced by Q2+Q2a.** Each leaf of the mined decision tree is a candidate profile (with its own rule path + Q0-evaluation metrics). With min-samples-per-leaf constraints we expect 5–20 leaves per tree; typically 1–5 will pass all Q0 hard gates and become "winning profiles." The family emerges from the mining; we do not pre-impose the cohort count. (Future upgrade path: ensemble of trees on different seeds/subsamples for more robust profile boundaries — backlog with Q2a's (ii)/(iii) upgrades.)
 
 ### Q4 — Single strategy or family of strategies
 
@@ -168,6 +191,10 @@ Affects data availability — CoinPaprika's free tier and the marketcap parquet 
 - 2026-05-23: **No min-trade-frequency gate.** Operator: "I don't want to have a trade limit, more of what meets the model standards." Trade count is reported per profile; statistical validity for low-frequency profiles is enforced via the long-shot caveat (extra OOS / bootstrap-CI rigor at validation time), not via a hard floor.
 - 2026-05-23: **Risk-adjusted return = Sortino as SECONDARY ranking, no hard gate.** Primary ranking = cumulative profit. Sortino is surfaced alongside as a risk-quality tiebreaker. Sortino over Sharpe because the asymmetric profile band (Asym Momentum / Cohort Rotation / Long-Shot) shouldn't be penalized for upside volatility. Max DD gate (≤30%) already handles catastrophic-risk protection.
 - **2026-05-23: Q0 COMPLETE — target spec finalized.** Hard gates: avg_win ≥ +5%, avg_loss ≤ -10% magnitude, max DD ≤ 30%, profile inside band {Asym Momentum / Cohort Rotation / Long-Shot}, at retail fees. Primary ranking: cumulative profit. Secondary ranking: Sortino. Informational: win rate (higher better), trade count. Sizing: concurrency-capped fixed-fraction, max 3-5 concurrent.
+- 2026-05-23: **Q2 RESOLVED — tokenomic state enters via (c) data-mined cohort boundaries.** Each leaf of the mined tree is one profile, evaluated independently against the Q0 gates. Operator: "I think C is the best start."
+- 2026-05-23: **Q2a RESOLVED — mining algorithm = (i) single decision tree with custom profit-based split criterion.** Each split chosen to maximize cumulative-profit-after-retail-fees of resulting subgroups, under the Q0 sizing rule. Backlog: upgrade to (ii) gradient-boosted trees or (iii) custom greedy rule search if (i) proves too noisy.
+- 2026-05-23: **Q3 RESOLVED — 11-feature candidate set, same-tree mixing.** 6 tokenomic (MC, FDV, FDV/MC, circ/total, vol, vol/MC) + 5 trend (price/EMA20, 1h/24h/7d return signs, ATR-recent). Operator: "go with your recommendation."
+- 2026-05-23: **Q4 RESOLVED — family of strategies, naturally produced by the tree.** Each leaf is a candidate profile; min-samples-per-leaf forces 5-20 leaves per tree; 1-5 typically pass Q0 hard gates and become winning profiles. No pre-imposed cohort count.
 
 ## What this rebuild is NOT
 
