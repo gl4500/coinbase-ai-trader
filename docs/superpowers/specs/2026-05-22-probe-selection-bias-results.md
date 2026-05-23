@@ -221,6 +221,56 @@ operator-run verdict to tell you if dollar bars beat time bars — or accept
 that v3 is "slightly better than coin-flip" and ship/decommission it on
 that framing.
 
+## Glossary
+
+Alphabetical. Where a term is explained in depth in the main sections above, the glossary entry is the one-line summary.
+
+**AFML** — Marcos López de Prado, *Advances in Financial Machine Learning* (2018). The methodological source for purged CV, the triple-barrier label, and the Deflated Sharpe Ratio used in this analysis.
+
+**AUC** — Area Under the (Receiver Operating Characteristic) Curve. Single-number ranking-quality metric for a binary classifier; 0.5 = random, 1.0 = perfect; the probability that a random positive scores higher than a random negative. See the "What AUC is" section above.
+
+**Bailey & López de Prado** — Authors of the Deflated Sharpe Ratio (2014) and the expected-max-of-N-normals approximation `(1−γ)·Φ⁻¹(1−1/N) + γ·Φ⁻¹(1−1/(N·e))` used here, where γ ≈ 0.5772 is the Euler-Mascheroni constant.
+
+**Deflated probability** — `Φ((observed − expected_max_under_null) / SE)`. The probability the observed edge exceeds the best-of-N selection-noise floor. ≥ 0.95 = real edge; ~ 0.5 = on the floor; < 0.5 = below the floor (probably noise).
+
+**Embargo** — A small gap (4h here) added after each validation region in purged-WF CV. Drops training samples whose temporal proximity to the validation period would let serial correlation leak the answer. AFML technique.
+
+**Expected max under null** — `center + SE · E[max of N standard normals]`. The result a true-null search of N trials would produce on average for its *best* trial — i.e. the "noise floor" the observed result must beat to count as real.
+
+**Fold-level SE** — Empirical standard deviation of an AUC across the 5 purged-WF CV folds: `[0.516, 0.507, 0.527, 0.523, 0.529]` → SE 0.00899. The honest noise scale for overlapping financial labels. See "The two noise scales" section.
+
+**H0 (null hypothesis)** — In this doc, "the model has no real predictive signal." Track A null = AUC 0.5; Track B null = Δ 0.
+
+**iid** — Independent and identically distributed. Standard statistics assumption that data points carry no information about each other. Violated heavily here by overlapping triple-barrier labels — see "The two noise scales" section.
+
+**Mann-Whitney null SE** — Textbook closed-form AUC variance under H0: `sqrt((n_pos+n_neg+1)/(12·n_pos·n_neg))`. Treats samples as iid; here = 0.00141, which under-counts the real noise by ~6× because cache samples aren't iid.
+
+**N (trial count)** — How many configurations were tried before the best one was selected. Higher N = harder for any single result to beat the noise floor. Tiered here as **17** (channel candidates only), **100** (full search incl. 81-config hyperparameter grid + 5 horizons), **200** (conservative).
+
+**OOF (out-of-fold)** — For each sample, the prediction from a CV model that did NOT see that sample during training. Aggregating all OOF predictions gives one "honest" prediction per sample.
+
+**Purged** — AFML CV modification: drop training samples whose forward-label window overlaps the validation fold. Prevents the model from peeking at validation-period information through its training labels.
+
+**Purged-WF OOF AUC** — AUC computed on out-of-fold predictions from a 5-fold purged walk-forward CV with embargo. The most rigorous AUC available on this data — time-ordered, purged, OOF. v3's purged-WF OOF AUC = 0.5120.
+
+**RSI-rank** — A candidate channel from the probe history: each product's percentile rank, among the top-20, of its RSI(14) at time t. The single "confirmed PASS" probe (+0.0124 survivorship-aware) — which this diagnostic shows is plausibly selection noise.
+
+**Scorecard** — The deployment-aligned XGB evaluation built in Session 58.71l (precision-at-gate, expected return after fees, paper-Sharpe, ECE; 4 hard gates). Companion to this diagnostic — the scorecard answers "is v3 deployable economically?" (no, 1/4 gates); this doc answers "is v3's underlying signal even real?" (marginal).
+
+**Selection bias** — The inflation of "best" results when many configurations are tried. Even a true-null search will produce a best result that beats the per-trial null by `SE · E[max of N normals]`. This entire diagnostic exists to correct for it.
+
+**Survivorship-aware top-20** — The 20-product universe used in v3's training pool. Selected per `tools/pid_snapshot.survivorship_aware_top_n` to avoid the bias of recently-listed winners crowding out historically-tracked products.
+
+**Track A** — Deflation of v3's base AUC edge against AUC = 0.5. Two observed values: v3 best documented (0.5284, cherry-picked best of the hyperparameter search) and v3 scorecard OOF (0.5120, the honest deployable).
+
+**Track B** — Deflation of the best channel-add lift against Δ = 0. Observed: RSI-rank +0.0124.
+
+**Triple-barrier** — Label scheme from AFML: starting at sample bar t, the label is set by whichever happens first within the forward window — upper price barrier (UP, +X%), lower barrier (DOWN, −X%), or vertical timeout (sign of `close[t+k] − close[t]`). v3 uses ±1% barriers with a 4-bar timeout.
+
+**v3** — The XGB model currently deployed as live driver (`MODEL_BACKEND=xgb`). 350 features (top-40-by-gain at deployment), ±1% triple-barrier label at 4h horizon on 1h candles, fit on the survivorship-aware top-20 product pool.
+
+**Walk-forward (WF) CV** — Cross-validation that respects time order: each fold trains on earlier data, validates on later data. The base scheme that "purged-WF" modifies with the purge + embargo steps.
+
 ## See also
 
 - `2026-05-22-probe-selection-bias-design.md` — design spec for this analysis
