@@ -46,15 +46,45 @@ Three findings stack to motivate a step away from v3:
 
 These are **not** equity fundamentals (no earnings, P/E, dividends). They are crypto-native state variables — tokenomics + activity. Distinction matters because it rules out equity-style factor-rotation strategies as a blueprint.
 
+## Methodology (decided 2026-05-23)
+
+**Target-spec-first approach.** Borrowed in spirit from gradient-based learning ("back-propagation"): define what a "winning strategy" *looks like* as a measurable target FIRST; then choose / build the optimizer that hunts for strategies meeting it. Loss-function-first design rather than model-first.
+
+This integrates cleanly with the existing deployment scorecard pattern (Session 58.71l). The scorecard already defines pass/fail gates + a ranking for v3 at the *deployment* stage. The same shape applies one level up — at the *discovery* stage:
+
+- **Gates** = hard constraints a strategy must meet to *qualify* as winning.
+- **Ranking** = metric to compare qualifying strategies against each other.
+- Mining produces candidates → gates filter → ranking picks among survivors.
+
+The walking questions below are re-ordered: target specification (Q0) leads; the optimizer-shaped questions (Q1–Q5) follow once the target is concrete.
+
 ## Walking questions — step by step
 
 Each question gets answered in order. Once answered, the row in the table above gets updated and the decision logged at the bottom.
+
+### Q0 — Winning-strategy target specification
+
+What concretely makes a strategy "winning"? Pass/fail gates + a ranking metric.
+
+| Component | What it asks | Status |
+|---|---|---|
+| Min win rate | What precision must a strategy achieve to qualify? | OPEN |
+| Min avg win magnitude | What's the smallest meaningful winning trade size (after fees)? | OPEN |
+| Max avg loss magnitude | Cap on losing-trade size? | OPEN |
+| Min net expectancy | Avg P&L per trade floor (after fees)? | OPEN |
+| Min trade frequency | Min trades/year to qualify (does it fire meaningfully)? | OPEN |
+| Max drawdown | Worst cumulative loss tolerated? | OPEN |
+| Risk-adjusted return | Sharpe / Sortino / Calmar floor for ranking? | OPEN |
+
+These don't all have to be hard gates — some can be ranking metrics, some can be informational-only (reported but not enforced). The point is to pin down which dimensions matter to the operator BEFORE building any mining infrastructure, so the mining knows what it's optimizing toward.
+
+**Status: OPEN — walked through one component at a time.**
 
 ### Q1 — Trade horizon
 
 What timescale does a "winning trade" live on? Drives label horizon, validation fold structure, feature-window choice, and which input variables matter (tokenomic state evolves slowly; price-trend evolves fast).
 
-Crypto-native horizon buckets to choose between:
+Crypto-native horizon buckets:
 
 | Horizon | Hold | Tokenomic state relevance | Trend-signal relevance |
 |---|---|---|---|
@@ -63,7 +93,11 @@ Crypto-native horizon buckets to choose between:
 | Cohort rotation | days to ~weeks | actively changing (unlocks, supply events) | meaningful but slower |
 | Positional | weeks to months | dominant (thesis trades) | secondary |
 
-**Status: OPEN**
+**Status: RESOLVED 2026-05-23 — horizon is a SEARCH DIMENSION inside the data-feasible band (hours to ~weeks), not a pre-fixed pick.** The operator's framing is: optimize for win rate × meaningful magnitude, and let the winning horizon emerge from the search. Concrete implications:
+
+- **Outer envelope set by data:** microstructure (<1h) is out (no L2, no 1m OHLCV backfilled); positional (>weeks) is out (12-month CoinPaprika free-tier history yields too few non-overlapping trades for honest validation). The feasible band is **roughly hours to ~weeks.**
+- **Mining must be multi-horizon:** each candidate (entry-bar, token) gets outcomes labeled at multiple horizons (e.g. {1h, 4h, 24h, 72h, 168h, 336h}); each candidate rule is evaluated against the win-rate × magnitude properties of its outcomes at each horizon; the winning horizon is whatever produces the best properties for the rule.
+- **Parallel action:** expand CoinPaprika tokenomic coverage before mining work begins. See "Parallel actions" section below.
 
 ### Q2 — Tokenomic state as filter vs continuous input
 
@@ -115,6 +149,9 @@ Affects data availability — CoinPaprika's free tier and the marketcap parquet 
 - 2026-05-23: **Optimization target = realized PnL**, not AUC. (The scorecard infrastructure already operates on realized PnL.)
 - 2026-05-23: **3-class direction labels (up / neutral / down) acceptable** as one labeling option. v4.5 infrastructure reusable.
 - 2026-05-23: **SP1/SP2 not load-bearing for this rebuild.** They probe substrate while inheriting v3's other framing — their verdict feeds in as one data point if/when the operator runs the sweep, but the rebuild does not gate on it.
+- 2026-05-23: **Methodology = target-spec-first ("backprop"-style).** Define the winning-strategy target (gates + ranking) BEFORE building the optimizer. Mining hunts for strategies that pass the target.
+- 2026-05-23: **Trade horizon = SEARCH DIMENSION** within the data-feasible band (hours to ~weeks), not pre-fixed. Optimization criterion is high win rate × meaningful magnitude; horizon emerges from the search.
+- 2026-05-23: **Optimization criterion: high win rate × meaningful win magnitude** (specific thresholds TBD via Q0). Operator stated framing: "high win rates, timescale is based on the win rate and percentage of the win."
 
 ## What this rebuild is NOT
 
