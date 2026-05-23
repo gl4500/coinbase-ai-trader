@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>XGB v4 horizon comparison</title>
+<style>
+  body { background:#0d1117; color:#c9d1d9; font-family:-apple-system,sans-serif;
+          padding:32px; max-width:900px; margin:auto; }
+  h1 { color:#fff; }
+  .banner { background:#1f3a1f; border:1px solid #1f6b33; color:#56d364;
+             padding:14px 20px; border-radius:6px; margin:20px 0; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; color:#8b949e; padding:8px; border-bottom:1px solid #30363d; }
+  td { padding:8px; border-bottom:1px solid #21262d; font-family:ui-monospace,monospace; }
+  tr.winner td { background:#0d1c11; color:#56d364; font-weight:600; }
+  .num { text-align:right; }
+</style></head><body>
+<h1>XGB v4 horizon comparison</h1>
+<div class='banner'>Winner: <strong>h4</strong> (AUC 0.5514)</div>
+<table>
+  <tr><th>horizon</th><th>auc</th><th>logloss</th><th>pos_frac</th><th>n_samples</th></tr>
+  <tr class='winner'><td>h4</td><td class='num'>0.5514</td><td class='num'>0.6651</td><td class='num'>0.4383</td><td class='num'>40,729</td></tr><tr class=''><td>h24</td><td class='num'>0.5385</td><td class='num'>0.6696</td><td class='num'>0.4678</td><td class='num'>40,627</td></tr><tr class=''><td>h72</td><td class='num'>0.5389</td><td class='num'>0.6687</td><td class='num'>0.4954</td><td class='num'>40,382</td></tr><tr class=''><td>h168</td><td class='num'>0.5468</td><td class='num'>0.6690</td><td class='num'>0.4861</td><td class='num'>39,900</td></tr>
+</table>
+</body></html>

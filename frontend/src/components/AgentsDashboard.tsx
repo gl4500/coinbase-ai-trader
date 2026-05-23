@@ -100,6 +100,7 @@ function ConfBar({ value, max = 1, color }: { value: number | null; max?: number
 // ── Main Component ─────────────────────────────────────────────────────────────
 
 export default function AgentsDashboard() {
+  // TechAgent retired #311-refactor-c — tech field kept in shape for API back-compat but ignored
   const [agentStatus, setAgentStatus] = useState<{ tech: SubAgentStatus | null; cnn: SubAgentStatus | null }>({ tech: null, cnn: null })
   const [signals,     setSignals]     = useState<AgentDecision[]>([])
 
@@ -131,15 +132,17 @@ export default function AgentsDashboard() {
     return () => clearInterval(id)
   }, [fetchStatus, fetchSignals])
 
-  const techSignals = useMemo(() => signals.filter(d => d.agent === 'TECH'), [signals])
+  // TechAgent retired #311-refactor-c — TECH signals (if any historical rows
+  // leak into the API response) are filtered out here so the live UI only
+  // shows CNN. PerformanceDashboard's TECH filter still surfaces TECH history.
+  const cnnSignals  = useMemo(() => signals.filter(d => d.agent === 'CNN'),  [signals])
 
   // ── Aggregate stats ─────────────────────────────────────────────────────────
-  const techAg  = agentStatus.tech
   const cnnAg   = agentStatus.cnn
 
-  const totalBuy  = (techAg?.signals_buy  ?? 0)
-  const totalSell = (techAg?.signals_sell ?? 0)
-  const totalPnl  = (techAg?.realized_pnl ?? 0) + (cnnAg?.realized_pnl ?? 0)
+  const totalBuy  = (cnnAg?.signals_buy  ?? 0)
+  const totalSell = (cnnAg?.signals_sell ?? 0)
+  const totalPnl  = (cnnAg?.realized_pnl ?? 0)
 
   return (
     <div className="space-y-6">
@@ -147,49 +150,47 @@ export default function AgentsDashboard() {
       {/* ── Combined stat row ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard
-          label="Combined Signals"
+          label="Signals"
           value={totalBuy + totalSell}
           sub={`${totalBuy} buy · ${totalSell} sell`}
         />
         <StatCard
-          label="Combined PnL"
+          label="Realized PnL"
           value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`}
-          sub="Tech + CNN"
+          sub="XGB (live)"
           color={totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}
         />
         <StatCard
           label="Open Positions"
-          value={(techAg?.open_positions ?? 0) + (cnnAg?.open_positions ?? 0)}
-          sub="across all agents"
+          value={cnnAg?.open_positions ?? 0}
+          sub="XGB"
         />
         <StatCard
           label="Total Signals"
-          value={signals.length}
-          sub={`${techSignals.length} tech`}
+          value={cnnSignals.length}
+          sub="XGB only"
         />
       </div>
 
-      {/* ── Per-agent stat cards ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
-        {(['tech', 'cnn'] as const).map(key => {
+      {/* ── Per-agent columns: XGB only (TechAgent retired #311-refactor-c) ── */}
+      <div className="grid grid-cols-1 gap-6 items-start">
+        {(['cnn'] as const).map(key => {
           const ag    = agentStatus[key]
-          const label = key === 'tech' ? 'TechAgent' : 'CNN Agent'
-          const color = key === 'tech' ? 'text-purple-400' : 'text-yellow-400'
-          const borderClass = key === 'tech'
-            ? 'border border-purple-900/50'
-            : 'border border-yellow-900/50'
+          const label = 'XGB Agent'
+          const color = 'text-yellow-400'
+          const borderClass = 'border border-yellow-900/50'
           const pnlColor = !ag ? 'text-gray-500' : ag.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'
 
           return (
-            <div key={key} className={`card p-4 ${borderClass}`}>
-              <div className="flex items-center justify-between mb-3">
-                <span className={`text-sm font-semibold ${color}`}>{label}</span>
+            <div key={key} className={`card p-5 ${borderClass}`}>
+              <div className="flex items-center justify-between mb-4">
+                <span className={`text-base font-semibold ${color}`}>{label}</span>
                 <span className="text-xs text-gray-600">
                   {ag?.last_scan_at ? timeAgo(ag.last_scan_at) : 'not scanned yet'}
                 </span>
               </div>
               {/* Summary row */}
-              <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+              <div className="grid grid-cols-5 gap-4 text-xs mb-4">
                 <div>
                   <div className="text-gray-500 mb-0.5">Balance</div>
                   <div className="font-mono text-white text-sm">${ag?.balance?.toFixed(2) ?? '1000.00'}</div>
@@ -282,90 +283,9 @@ export default function AgentsDashboard() {
         })}
       </div>
 
-      {/* ── Tech signal feed ── */}
-      <div className="max-w-3xl">
-
-        {/* Tech signals */}
-        <div>
-          <h2 className="text-base font-bold text-white mb-3">
-            <span className="text-purple-400">Tech</span> Signals
-            <span className="text-sm text-gray-500 font-normal ml-2">({techSignals.length})</span>
-          </h2>
-          {techSignals.length === 0 ? (
-            <div className="card text-center py-10">
-              <p className="text-gray-500 text-sm">No Tech signals yet — agents start ~30s after backend</p>
-            </div>
-          ) : (
-            <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
-              {techSignals.map(d => {
-                const isBuy  = d.side === 'BUY'
-                const ind    = parseIndicators(d.reasoning)
-                return (
-                  <div key={d.id} className="card p-3 border border-purple-900/30">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                          isBuy
-                            ? 'bg-green-900/50 text-green-400 border border-green-800'
-                            : 'bg-red-900/50 text-red-400 border border-red-800'
-                        }`}>{d.side}</span>
-                        <span className="font-bold text-white text-sm">{d.product_id.replace('-USD', '')}</span>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-mono text-white text-sm">
-                          ${d.price >= 1000
-                            ? d.price.toLocaleString('en-US', { maximumFractionDigits: 2 })
-                            : d.price.toFixed(4)}
-                        </div>
-                        <div className="text-xs text-gray-600">
-                          {new Date(d.created_at).toLocaleTimeString()}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Confidence bar */}
-                    <div className="mb-2">
-                      <div className="text-xs text-gray-500 mb-0.5">Confidence</div>
-                      <ConfBar value={d.confidence} color={isBuy ? 'bg-purple-500' : 'bg-orange-500'} />
-                    </div>
-
-                    {/* Indicator pills */}
-                    <div className="flex flex-wrap gap-1.5 text-xs">
-                      {Object.entries(ind).map(([k, v]) => {
-                        const fv = parseFloat(v)
-                        let cls = 'text-gray-400 border-gray-700 bg-gray-800'
-                        if (k === 'RSI') cls = fv < 30 ? 'text-green-300 border-green-800 bg-green-900/30' : fv > 70 ? 'text-red-300 border-red-800 bg-red-900/30' : cls
-                        if (k === 'ADX') cls = fv >= 25 ? 'text-amber-300 border-amber-800 bg-amber-900/20' : cls
-                        if (k === 'MFI') cls = fv < 20 ? 'text-green-300 border-green-800 bg-green-900/30' : fv > 80 ? 'text-red-300 border-red-800 bg-red-900/30' : cls
-                        return (
-                          <span key={k} className={`px-2 py-0.5 rounded border ${cls}`}>
-                            {k} {v}
-                          </span>
-                        )
-                      })}
-                      {d.score != null && (
-                        <span className="px-2 py-0.5 rounded border text-purple-300 border-purple-800 bg-purple-900/20">
-                          score {d.score.toFixed(2)}
-                        </span>
-                      )}
-                      {d.pnl != null && (
-                        <span className={`px-2 py-0.5 rounded border ${d.pnl >= 0 ? 'text-green-300 border-green-800 bg-green-900/20' : 'text-red-300 border-red-800 bg-red-900/20'}`}>
-                          PnL {d.pnl >= 0 ? '+' : ''}${d.pnl.toFixed(2)}
-                        </span>
-                      )}
-                    </div>
-
-                    {d.reasoning && (
-                      <div className="mt-2 text-xs text-gray-600 truncate" title={d.reasoning}>{d.reasoning}</div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
-      </div>
+      {/* TechAgent retired #311-refactor-c (2026-05-16).
+          Historical TECH signals remain queryable via PerformanceDashboard's
+          TECH filter. */}
 
     </div>
   )

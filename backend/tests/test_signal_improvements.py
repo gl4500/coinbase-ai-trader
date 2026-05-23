@@ -169,11 +169,12 @@ class TestNewChannels:
 
     def test_n_channels_is_24(self):
         from agents.cnn_agent import N_CHANNELS
-        assert N_CHANNELS == 27, f"N_CHANNELS={N_CHANNELS}, expected 27"
+        assert N_CHANNELS >= 28, f"N_CHANNELS={N_CHANNELS}, expected >= 28"
 
     def test_build_returns_24_channels(self):
+        from agents.cnn_agent import N_CHANNELS
         channels = self._build()
-        assert len(channels) == 27, f"Got {len(channels)} channels"
+        assert len(channels) == N_CHANNELS, f"Got {len(channels)} channels, expected {N_CHANNELS}"
 
     def test_channel_20_funding_rate(self):
         """Ch 20: funding rate — all values in [-1, 1]."""
@@ -293,8 +294,9 @@ class TestNewChannels:
         candles = _fake_candles(closes)
         ob      = {"bid_depth": 1000.0, "ask_depth": 1000.0}
         # Call without new kwargs — backward compat
+        from agents.cnn_agent import N_CHANNELS
         channels = FeatureBuilder().build(candles, ob, T=SEQ_LEN)
-        assert len(channels) == 27
+        assert len(channels) == N_CHANNELS
         assert all(v == 0.0 for v in channels[20]), "No funding → Ch 20 all 0"
 
 

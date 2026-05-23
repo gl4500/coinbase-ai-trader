@@ -81,6 +81,7 @@ if __name__ == "__main__":
     })
 
     logger.info(f"CNN training worker started — PID={os.getpid()} epochs={args.epochs}")
+
     try:
         asyncio.run(_run(args.epochs, started_at))
     except Exception as exc:

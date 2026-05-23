@@ -146,7 +146,14 @@ async def init_db() -> None:
                 fast_rsi    REAL,
                 velocity    REAL,
                 vol_z       REAL,
-                scanned_at  TEXT NOT NULL
+                xgb_prob    REAL,
+                scanned_at  TEXT NOT NULL,
+                xgb_prob_stdev REAL,
+                mc_telemetry TEXT,
+                xgb_prob_v4 REAL,
+                xgb_prob_v4_5_down REAL,
+                xgb_prob_v4_5_neutral REAL,
+                xgb_prob_v4_5_up REAL
             );
             CREATE INDEX IF NOT EXISTS idx_cnn_scans_time
                 ON cnn_scans(scanned_at DESC);
@@ -230,6 +237,17 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_trades_closed_at
                 ON trades(closed_at DESC);
 
+            CREATE TABLE IF NOT EXISTS product_status (
+                product_id        TEXT PRIMARY KEY,
+                status            TEXT NOT NULL,
+                reason            TEXT,
+                last_evaluated_at TEXT NOT NULL,
+                demoted_at        TEXT,
+                FOREIGN KEY (product_id) REFERENCES products(product_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_product_status_status
+                ON product_status(status);
+
             CREATE TABLE IF NOT EXISTS cnn_training_sessions (
                 id                       INTEGER PRIMARY KEY AUTOINCREMENT,
                 trained_at               TEXT NOT NULL,
@@ -262,6 +280,13 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN fast_rsi REAL",
             "ALTER TABLE cnn_scans ADD COLUMN velocity REAL",
             "ALTER TABLE cnn_scans ADD COLUMN vol_z REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_stdev REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN mc_telemetry TEXT",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4 REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_down REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_neutral REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_up REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
@@ -310,12 +335,30 @@ async def upsert_product(p: Dict) -> None:
         await db.commit()
 
 
+# Major-cap products always included in get_products() regardless of
+# volume_24h rank (#105). volume_24h on Coinbase is in NATIVE TOKEN UNITS,
+# so memecoins with billions of tokens dominate a pure DESC sort and push
+# real majors out of the top-N. Without this pin the CNN trains on a
+# memecoin-dominated dataset and OKX funding fetch silently skips BTC/ETH.
+_PINNED_MAJORS = (
+    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD",
+    "AVAX-USD", "LINK-USD", "DOT-USD", "DOGE-USD", "LTC-USD", "ATOM-USD",
+    "BCH-USD", "TRX-USD", "MATIC-USD",
+)
+
+
 async def get_products(tracked_only: bool = False, limit: int = 100) -> List[Dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         where = "WHERE is_tracked = 1" if tracked_only else ""
+        majors_csv = ",".join(f"'{m}'" for m in _PINNED_MAJORS)
         cursor = await db.execute(
-            f"SELECT * FROM products {where} ORDER BY volume_24h DESC LIMIT ?", (limit,)
+            f"""SELECT * FROM products {where}
+                ORDER BY
+                  CASE WHEN product_id IN ({majors_csv}) THEN 0 ELSE 1 END,
+                  volume_24h DESC
+                LIMIT ?""",
+            (limit,)
         )
         return [dict(r) for r in await cursor.fetchall()]
 
@@ -521,8 +564,10 @@ async def save_cnn_scan(scan: Dict) -> None:
                (product_id, price, cnn_prob, llm_prob, model_prob,
                 cnn_weight, llm_weight, side, strength, signal_gen,
                 regime, adx, rsi, macd, mfi, stoch_k, atr, vwap_dist,
-                fast_rsi, velocity, vol_z, scanned_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                fast_rsi, velocity, vol_z, xgb_prob, scanned_at,
+                xgb_prob_stdev, mc_telemetry, xgb_prob_v4,
+                xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan["product_id"], scan["price"],
                 scan.get("cnn_prob"), scan.get("llm_prob"), scan["model_prob"],
@@ -532,7 +577,13 @@ async def save_cnn_scan(scan: Dict) -> None:
                 scan.get("macd"), scan.get("mfi"), scan.get("stoch_k"),
                 scan.get("atr"), scan.get("vwap_dist"),
                 scan.get("fast_rsi"), scan.get("velocity"), scan.get("vol_z"),
+                scan.get("xgb_prob"),
                 _now(),
+                scan.get("xgb_prob_stdev"), scan.get("mc_telemetry"),
+                scan.get("xgb_prob_v4"),
+                scan.get("xgb_prob_v4_5_down"),
+                scan.get("xgb_prob_v4_5_neutral"),
+                scan.get("xgb_prob_v4_5_up"),
             )
         )
         await db.commit()
@@ -933,3 +984,54 @@ async def get_training_sessions(limit: int = 50) -> List[Dict]:
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Product status (#120c — auto-blacklist tier persistence) ──────────────────
+
+async def get_product_status(product_id: str) -> Optional[Dict]:
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM product_status WHERE product_id = ?", (product_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def set_product_status(
+    product_id: str,
+    status: str,
+    reason: Optional[str] = None,
+) -> None:
+    """Upsert a product's blacklist tier.
+
+    `demoted_at` is stamped only when transitioning into 'suspended' and
+    cleared on any other status (including promotion back to 'probation'),
+    so the next demotion records a fresh timestamp instead of reusing a
+    stale one.
+    """
+    now = _now()
+    demoted_at = now if status == "suspended" else None
+    async with _db() as db:
+        await db.execute(
+            """INSERT INTO product_status
+                 (product_id, status, reason, last_evaluated_at, demoted_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(product_id) DO UPDATE SET
+                 status            = excluded.status,
+                 reason            = excluded.reason,
+                 last_evaluated_at = excluded.last_evaluated_at,
+                 demoted_at        = excluded.demoted_at""",
+            (product_id, status, reason, now, demoted_at),
+        )
+        await db.commit()
+
+
+async def list_products_by_status(status: str) -> List[str]:
+    async with _db() as db:
+        cursor = await db.execute(
+            "SELECT product_id FROM product_status WHERE status = ? "
+            "ORDER BY product_id", (status,)
+        )
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]

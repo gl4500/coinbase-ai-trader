@@ -35,16 +35,21 @@ _GRANULARITY  = "ONE_HOUR"
 _BAR_SECS     = 3600          # seconds per hourly bar
 _FIVE_MINUTE_GRANULARITY = "FIVE_MINUTE"
 _FIVE_MINUTE_BAR_SECS    = 300          # seconds per 5-minute bar
+_ONE_MINUTE_GRANULARITY = "ONE_MINUTE"
+_ONE_MINUTE_BAR_SECS    = 60           # seconds per 1-minute bar
 _MAX_PER_REQ  = 300           # Coinbase max bars per request
 _REQ_DELAY    = 0.35          # seconds between requests (rate-limit friendly)
 
+_SCHEMA_VERSION = 1  # bronze schema version (#168) — bump on column changes
 _SCHEMA = pa.schema([
-    pa.field("start",  pa.int64()),
-    pa.field("open",   pa.float64()),
-    pa.field("high",   pa.float64()),
-    pa.field("low",    pa.float64()),
-    pa.field("close",  pa.float64()),
-    pa.field("volume", pa.float64()),
+    pa.field("start",          pa.int64()),
+    pa.field("open",            pa.float64()),
+    pa.field("high",            pa.float64()),
+    pa.field("low",             pa.float64()),
+    pa.field("close",           pa.float64()),
+    pa.field("volume",          pa.float64()),
+    pa.field("ingest_ts",       pa.int64()),   # PIT (#168)
+    pa.field("schema_version",  pa.int32()),   # PIT (#168)
 ])
 
 
@@ -59,15 +64,29 @@ def _parquet_path_5m(product_id: str) -> str:
     return os.path.join(_HISTORY_DIR, "5m", f"{safe}.parquet")
 
 
+def _parquet_path_1m(product_id: str) -> str:
+    """1-minute candle parquet path — separate namespace under history/1m/."""
+    safe = product_id.replace("/", "_")
+    return os.path.join(_HISTORY_DIR, "1m", f"{safe}.parquet")
+
+
 def _load_from_path(path: str) -> List[Dict]:
-    """Read a parquet candle file by absolute path; [] if missing."""
+    """Read a parquet candle file by absolute path; [] if missing.
+
+    Pre-#168 files (no ingest_ts / schema_version columns) load without
+    those keys on the returned dicts — the caller treats absence as "row
+    pre-dates PIT tagging" and `_save_to_path` will stamp it on next write.
+    """
     if not os.path.exists(path):
         return []
     table = pq.read_table(path)
     rows  = table.to_pydict()
     n     = len(rows["start"])
-    candles = [
-        {
+    has_ingest = "ingest_ts" in rows
+    has_sv = "schema_version" in rows
+    candles: List[Dict] = []
+    for i in range(n):
+        c = {
             "start":  rows["start"][i],
             "open":   rows["open"][i],
             "high":   rows["high"][i],
@@ -75,26 +94,58 @@ def _load_from_path(path: str) -> List[Dict]:
             "close":  rows["close"][i],
             "volume": rows["volume"][i],
         }
-        for i in range(n)
-    ]
+        if has_ingest and rows["ingest_ts"][i] is not None:
+            c["ingest_ts"] = int(rows["ingest_ts"][i])
+        if has_sv and rows["schema_version"][i] is not None:
+            c["schema_version"] = int(rows["schema_version"][i])
+        candles.append(c)
     return sorted(candles, key=lambda c: c["start"])
 
 
-def _save_to_path(path: str, candles: List[Dict]) -> None:
-    """Write full deduplicated candle list to an absolute parquet path."""
+def _save_to_path(
+    path: str,
+    candles: List[Dict],
+    *,
+    now_ts: Optional[int] = None,
+) -> None:
+    """Write full deduplicated candle list to an absolute parquet path.
+
+    PIT semantics (#168):
+      - Rows without `ingest_ts` are stamped with `now_ts` (or
+        `int(time.time())` if not provided).
+      - Rows already carrying `ingest_ts` keep it across rewrites.
+      - On `start`-collision dedup, prefer the version that has
+        `ingest_ts` so re-saves don't drop history.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if now_ts is None:
+        now_ts = int(time.time())
     seen: Dict[int, Dict] = {}
     for c in candles:
-        seen[c["start"]] = c
+        prev = seen.get(c["start"])
+        if prev is None:
+            seen[c["start"]] = c
+            continue
+        # Merge: prefer the one with ingest_ts (PIT preservation)
+        if "ingest_ts" in prev and "ingest_ts" not in c:
+            merged = dict(c)
+            merged["ingest_ts"] = prev["ingest_ts"]
+            if "schema_version" in prev and "schema_version" not in merged:
+                merged["schema_version"] = prev["schema_version"]
+            seen[c["start"]] = merged
+        else:
+            seen[c["start"]] = c
     ordered = sorted(seen.values(), key=lambda c: c["start"])
     table = pa.table(
         {
-            "start":  [c["start"]  for c in ordered],
-            "open":   [c["open"]   for c in ordered],
-            "high":   [c["high"]   for c in ordered],
-            "low":    [c["low"]    for c in ordered],
-            "close":  [c["close"]  for c in ordered],
-            "volume": [c["volume"] for c in ordered],
+            "start":           [c["start"]  for c in ordered],
+            "open":            [c["open"]   for c in ordered],
+            "high":            [c["high"]   for c in ordered],
+            "low":             [c["low"]    for c in ordered],
+            "close":           [c["close"]  for c in ordered],
+            "volume":          [c["volume"] for c in ordered],
+            "ingest_ts":       [int(c["ingest_ts"]) if "ingest_ts" in c else now_ts for c in ordered],
+            "schema_version":  [int(c["schema_version"]) if "schema_version" in c else _SCHEMA_VERSION for c in ordered],
         },
         schema=_SCHEMA,
     )
@@ -113,6 +164,11 @@ def load_history(product_id: str) -> List[Dict]:
 def load_5m_history(product_id: str) -> List[Dict]:
     """Load all stored 5-minute candles for product_id. [] if no file (#55)."""
     return _load_from_path(_parquet_path_5m(product_id))
+
+
+def load_1m_history(product_id: str) -> List[Dict]:
+    """Load all stored 1-minute candles for product_id. [] if no file."""
+    return _load_from_path(_parquet_path_1m(product_id))
 
 
 def _save_history(product_id: str, candles: List[Dict]) -> None:
@@ -236,6 +292,21 @@ async def backfill_product_5m(
     return await _backfill_to_path(
         product_id, days, _FIVE_MINUTE_GRANULARITY, _FIVE_MINUTE_BAR_SECS,
         _parquet_path_5m(product_id),
+    )
+
+
+async def backfill_product_1m(
+    product_id: str,
+    days: int = 7,
+) -> Dict:
+    """Backfill one product's 1-minute history. Same shape as hourly/5m.
+
+    1m bars are 60s; at 300 bars/request that is 5h per request, so a long
+    history is many paged requests — callers pass `days` explicitly.
+    """
+    return await _backfill_to_path(
+        product_id, days, _ONE_MINUTE_GRANULARITY, _ONE_MINUTE_BAR_SECS,
+        _parquet_path_1m(product_id),
     )
 
 

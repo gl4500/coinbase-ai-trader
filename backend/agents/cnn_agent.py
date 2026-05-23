@@ -47,7 +47,6 @@ import json
 import logging
 import math
 import os
-import re
 import shutil
 import time
 from typing import Dict, List, Optional, Tuple
@@ -56,62 +55,72 @@ import httpx
 
 import database
 from clients import coinbase_client
-from data.lgbm_filter import LGBMFilter
 from agents.signal_generator import (
     _rsi, _ema, _macd, _bollinger, _ema_cross,
     _atr, _adx, _mfi, _obv_slope, _stoch_rsi, _vwap,
-    _hurst_exponent, _dissimilarity_index, _kelly_fraction,
-    _realized_vol, _shannon_entropy,
+    _kelly_fraction, _realized_vol,
 )
 from config import config
 from services.outcome_tracker import get_tracker
-from services.fear_greed import get_fear_greed
 from services.history_backfill import load_history, load_5m_history
 from services.deribit_iv import get_iv, compute_iv_rv_spreads
 from services.binance_sentiment import get_ls_sentiment
 from services.okx_funding_history import fetch_funding_history
+from services.okx_oi_history import fetch_oi_history
 from services.hmm_regime import get_detector, regime_blend
+from services import product_status
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
 _CNN_MAX_FRAC        = 0.15    # max 15% of portfolio per position
 _CNN_STOP_LOSS_PCT    = 0.08    # 8% hard stop-loss below avg entry price
 _CNN_ATR_TRAIL_MULT   = 2.0     # trailing stop = ATR(14) × multiplier below peak
-_CNN_ATR_TRAIL_MIN    = 0.03    # floor: never tighter than 3% (prevents stop-hunting)
+_CNN_ATR_TRAIL_MIN    = 0.06    # floor: never tighter than 6% (Session 57 cash-flow lever 3 — was 3%, exited too early in low-ATR regimes)
 _CNN_ATR_TRAIL_MAX    = 0.15    # ceiling: never wider than 15% (limits max give-back)
 _CNN_MAX_HOLD_SECS    = 7 * 24 * 3600  # 7-day max-hold — last resort for flat/forgotten positions
 # Positions missing entry_time (opened before that field existed) are treated
 # as if they were opened _CNN_LEGACY_HOLD_SECS ago — triggers max-hold exit promptly.
 _CNN_LEGACY_HOLD_SECS = _CNN_MAX_HOLD_SECS + 1  # exceeds max-hold, forces exit on next check
 MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unprofitable spreads)
-_LGBM_RETRAIN_EVERY  = 50      # retrain LightGBM after every N new closed trades
-_LGBM_MODEL_PATH     = os.path.join(os.path.dirname(__file__), "..", "data", "lgbm_filter.pkl")
-_HURST_TREND_THRESH  = 0.55    # H > this → trending (CNN bias toward momentum signals)
-_HURST_MR_THRESH     = 0.45    # H < this → mean-reverting (suppress trending signals)
-_DI_SUPPRESS_THRESH  = 5.0     # DI > this % → price far from SMA, suppress Ollama
-_ENTROPY_SKIP_THRESH = 0.85    # entropy > this → signal is noise, skip entirely
 
 
-def _regime_gate_enabled() -> bool:
-    """CNN BUY regime gate — on by default. Set CNN_REGIME_GATE=off to disable.
+# LightGBM filter / Hurst / DI / entropy / regime-gate constants + helper
+# deleted #311-refactor-f. They only ever fired under MODEL_BACKEND=cnn
+# (Phase-1 CNN-tuned suppressions); under the live xgb backend they were
+# already skipped via the backend-only guards. The whole block was dead.
 
-    Phase-1 (2026-04-23) live data: CHAOTIC BUYs won 58.5% vs 44.3% in TRENDING
-    and 45.7% in RANGING. Gate blocks BUY unless HMM regime is CHAOTIC.
-    Read at call time (not import time) so env changes take effect without reload.
+
+def _backend_label() -> str:
+    """#267 — User-facing log prefix that reflects the active decider.
+
+    Both supported MODEL_BACKEND values ("xgb" and "xgb_v45") route through
+    xgb_signal, so signals are always XGB-driven. The xgb_v45 driver uses
+    the 3-class model + indep_thresholds decision; xgb (default) uses v3.
     """
-    return os.getenv("CNN_REGIME_GATE", "on").strip().lower() != "off"
+    if config.model_backend == "xgb_v45":
+        return "XGB_V45"
+    return "XGB"
 
 
 class _CNNBook:
     """Lightweight dry-run portfolio book for the CNN agent.
-    Mirrors the _Book class in tech_agent_cb so that
-    CNN trades appear in the `trades` table and per-product positions are tracked
-    (prevents buying the same asset repeatedly).
+    Previously mirrored the _Book class in the retired tech_agent_cb
+    (#311-refactor-c); now the only paper book in the system. Ensures CNN
+    trades appear in the `trades` table and per-product positions are
+    tracked (prevents buying the same asset repeatedly).
     """
     def __init__(self):
         self._agent      = "CNN"
         self.balance     = _CNN_DRY_RUN_BALANCE
         self.positions: Dict[str, Dict] = {}   # pid → {size, avg_price}
         self.realized_pnl = 0.0
+        # Per-pid lock so WS exit handler and scan-loop _check_risk_exits
+        # cannot race a duplicate database.close_trade write.
+        self._sell_locks: Dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, pid: str) -> asyncio.Lock:
+        if pid not in self._sell_locks:
+            self._sell_locks[pid] = asyncio.Lock()
+        return self._sell_locks[pid]
 
     async def load(self) -> None:
         state = await database.load_agent_state(self._agent)
@@ -196,6 +205,20 @@ class _CNNBook:
 
     async def buy(self, pid: str, price: float, frac: float,
                   trigger: str = "SCAN") -> Tuple[float, float]:
+        # #125a: tiered blacklist gating. Active (or no row) → full frac.
+        # Probation → half size (real money, reduced risk). Suspended →
+        # paper-trade only: log the signal but do not spend or open a trade.
+        status_row = await database.get_product_status(pid)
+        status = status_row["status"] if status_row else "active"
+        if status == "suspended":
+            logger.info(
+                "CNN PAPER %s @ %.6f frac=%.4f — suspended tier (no execution)",
+                pid, price, frac,
+            )
+            return 0.0, 0.0
+        if status == "probation":
+            frac *= 0.5
+
         spend = min(self.balance * frac, self.balance * 0.95)
         if spend < 1.0 or price <= 0:
             return 0.0, 0.0
@@ -222,30 +245,52 @@ class _CNNBook:
         return spend, size
 
     async def sell(self, pid: str, price: float, trigger: str = "SCAN") -> float:
-        if pid not in self.positions:
-            return 0.0
-        pos = self.positions.pop(pid)
-        proceeds = pos["size"] * price
-        pnl      = proceeds - pos["size"] * pos["avg_price"]
-        pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
-        self.balance      += proceeds
-        self.realized_pnl += pnl
+        # Per-pid lock prevents WS exit handler and scan-loop _check_risk_exits
+        # from racing a duplicate database.close_trade write on the same pid.
+        # In-memory guard inside the lock makes the loser a clean no-op.
+        async with self._lock_for(pid):
+            if pid not in self.positions:
+                return 0.0
+            pos = self.positions[pid]
+            proceeds = pos["size"] * price
+            pnl      = proceeds - pos["size"] * pos["avg_price"]
+            pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
 
-        # Update win/loss counters
-        if pnl > 0:
-            self.wins         += 1
-            self._sum_win_pct += pct_pnl
-        elif pnl < 0:
-            self.losses         += 1
-            self._sum_loss_pct  += abs(pct_pnl)
+            # #109: persist trade close to DB FIRST — trades table is the source of
+            # truth for realized PnL. If this raises, leave in-memory state intact
+            # so the caller (or a retry) can try again. Updating agent_state before
+            # close_trade caused the divergence seen in Session 54: agent_state
+            # captured the gain but no closed-trade row existed; on restart the
+            # reconcile path force-closed the orphan with pnl=0, locking in skew.
+            await database.close_trade(
+                agent=self._agent, product_id=pid, exit_price=price,
+                size=pos["size"], pnl=pnl, trigger_close=trigger,
+                balance_after=self.balance + proceeds,
+            )
 
-        await self._save()
-        await database.close_trade(
-            agent=self._agent, product_id=pid, exit_price=price,
-            size=pos["size"], pnl=pnl, trigger_close=trigger,
-            balance_after=self.balance,
-        )
-        return pnl
+            # close_trade succeeded — now mutate in-memory state and persist it
+            self.positions.pop(pid)
+            self.balance      += proceeds
+            self.realized_pnl += pnl
+
+            if pnl > 0:
+                self.wins         += 1
+                self._sum_win_pct += pct_pnl
+            elif pnl < 0:
+                self.losses         += 1
+                self._sum_loss_pct  += abs(pct_pnl)
+
+            await self._save()
+
+            # #125b: re-evaluate product status on every successful close so a
+            # fresh trade can immediately tip a product into Probation/Suspended
+            # (or recover it). Evaluator failures must not block the trade.
+            try:
+                await product_status.evaluate_and_persist(pid, agent=self._agent)
+            except Exception:
+                logger.exception("product_status evaluator failed for %s", pid)
+
+            return pnl
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +312,7 @@ except ImportError:
     _DEVICE = None
     logger.warning("PyTorch not found — CNN agent uses linear fallback")
 
-N_CHANNELS      = 27
+N_CHANNELS      = 28
 SEQ_LEN         = 60
 
 # Channels whose values are still constant-zero during training because the
@@ -348,6 +393,26 @@ def _volume_sentiment(closes, volumes, window):
         if tot > 0:
             out[i] = 2.0 * (up / tot) - 1.0
     return out
+
+
+def _indep_thresholds_decision(
+    p_down: float, p_neutral: float, p_up: float,
+    thresh_up: float, thresh_down: float,
+) -> Tuple[str, float]:
+    """v4.5 indep_thresholds rule. Mirrors tools/v4_5_horizon_compare.py:138.
+
+    BUY  when p_up   > thresh_up   AND p_up   >= p_down (tie -> BUY).
+    SELL when p_down > thresh_down AND p_down >  p_up  (strict).
+    Else HOLD.
+
+    Returns (side, strength) where strength is the winning class probability
+    rounded to 3 decimal places, or 0.0 for HOLD.
+    """
+    if p_up > thresh_up and p_up >= p_down:
+        return "BUY", round(p_up, 3)
+    if p_down > thresh_down and p_down > p_up:
+        return "SELL", round(p_down, 3)
+    return "HOLD", 0.0
 
 
 def _mask_training_constant_channels(channels):
@@ -443,11 +508,13 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # per product.
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
-_DATASET_CACHE_VERSION = 10  # bumped for #98: Ch 24/25 (rv20/rv60) now
-                            # from OKX (replacing geo-blocked Binance fapi);
-                            # v8 caches were built while Ch 20 was masked and
-                            # constant-zero — invalidate so the next rebuild
-                            # picks up real OKX funding values.
+_DATASET_CACHE_VERSION = 12  # bumped for #143-B: Ch 27 (OKX OI) added; channel count 27→28
+                            # a single value computed on the full candle
+                            # window across all 60 timesteps — every cached
+                            # sample's Ch 15 series leaked future info.
+                            # Now per-bar causal expanding window. v10 caches
+                            # must rebuild to pick up the corrected channel.
+                            # (Prior: v10 = #98 OKX rv20/rv60.)
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
@@ -804,11 +871,47 @@ def _aligned_funding_rates(target_candles: List[Dict],
     return out
 
 
+def _aligned_oi_history(target_candles: List[Dict],
+                        oi_history: Optional[List[Tuple[int, float]]]) -> Optional[List[float]]:
+    """Return open-interest values aligned 1:1 with `target_candles` (forward-fill).
+
+    `oi_history` is a list of `(oi_time_ms, value)` tuples sorted ascending —
+    the format returned by `services.okx_oi_history.fetch_oi_history`. Each
+    target bar gets the most-recent OI snapshot whose `oi_time_ms <=
+    target_start_seconds * 1000`. Pre-target snapshots seed the initial
+    value so the series never starts None; if every snapshot is *after* the
+    first target bar, early bars are seeded with the first available value
+    (mirrors `_aligned_funding_rates` / `_aligned_btc_closes`). Returns None
+    when `oi_history` is empty/None (caller treats that as "no OI signal,
+    leave Ch 27 at zero").
+    """
+    if not oi_history:
+        return None
+    oi_sorted = sorted(oi_history, key=lambda tr: tr[0])
+    oi_times  = [int(t) for t, _ in oi_sorted]
+    oi_vals   = [float(v) for _, v in oi_sorted]
+
+    out: List[float] = []
+    last: Optional[float] = None
+    j = 0
+    n_oi = len(oi_times)
+    for c in target_candles:
+        ts_ms = int(c.get("start") or c.get("time") or 0) * 1000
+        while j < n_oi and oi_times[j] <= ts_ms:
+            last = oi_vals[j]
+            j += 1
+        if last is None:
+            last = oi_vals[0]
+        out.append(last)
+    return out
+
+
 def _build_samples_range(candles, i_start: int, i_end: int,
                          fb, seq_len: int, forward_hours: int,
                          label_thresh: float,
                          btc_closes: Optional[List[float]] = None,
                          funding_rates: Optional[List[float]] = None,
+                         oi_rates: Optional[List[float]] = None,
                          candles_5m: Optional[List[Dict]] = None):
     """Build (X, y, indices) for sliding-window indices i in [i_start, i_end).
 
@@ -845,6 +948,16 @@ def _build_samples_range(candles, i_start: int, i_end: int,
     if candles_5m:
         c5m_starts = [int(c["start"]) for c in candles_5m]
 
+    # #143-B: z-score OI over the full per-product series so each sample's
+    # scalar OI is in standard-deviation units before fb.build clips at 3σ.
+    oi_mean: float = 0.0
+    oi_std: float = 1.0
+    if oi_rates is not None and len(oi_rates) > 0:
+        _oi_n = len(oi_rates)
+        oi_mean = sum(oi_rates) / _oi_n
+        _var = sum((v - oi_mean) ** 2 for v in oi_rates) / _oi_n
+        oi_std = math.sqrt(_var) if _var > 0 else 1.0
+
     for i in range(i_start, i_end):
         label = _label_triple_barrier(
             candles, i, forward_hours, _TB_UP_MULT, _TB_DN_MULT, label_thresh
@@ -861,6 +974,10 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         btc_win = (btc_closes[i - seq_len + 1: i + 1]
                    if btc_closes is not None else None)
         fr_val  = funding_rates[i] if funding_rates is not None else None
+        if oi_rates is not None:
+            oi_val_z = (oi_rates[i] - oi_mean) / oi_std
+        else:
+            oi_val_z = None
         # #98: 60-bar prefix lookback for RV20/RV60 — without it _rv_series
         # returns 0.0 for the first `window` bars, leaving Ch 25 (rv60)
         # constant-zero across the entire SEQ_LEN=60 window.
@@ -868,7 +985,7 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         closes_ext = [c["close"] for c in candles[ext_start: i + 1]]
         channels = fb.build(window, {}, candles_5m=five_m,
                             btc_closes=btc_win, funding_rate=fr_val,
-                            closes_ext=closes_ext)
+                            closes_ext=closes_ext, oi_rate=oi_val_z)
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
         idx_list.append(i)
@@ -879,6 +996,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
                                forward_hours: int, label_thresh: float,
                                btc_closes: Optional[List[float]] = None,
                                funding_rates: Optional[List[float]] = None,
+                               oi_rates: Optional[List[float]] = None,
                                candles_5m: Optional[List[Dict]] = None):
     """Return (new_entry, status) for one product's per-product cache slot.
 
@@ -911,6 +1029,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
             fb, seq_len, forward_hours, label_thresh,
             btc_closes=btc_closes,
             funding_rates=funding_rates,
+            oi_rates=oi_rates,
             candles_5m=candles_5m,
         )
         return {
@@ -936,6 +1055,7 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         fb, seq_len, forward_hours, label_thresh,
         btc_closes=btc_closes,
         funding_rates=funding_rates,
+        oi_rates=oi_rates,
         candles_5m=candles_5m,
     )
     return {
@@ -965,41 +1085,47 @@ def _load_pp_cache(path: str, schema: dict):
 
 
 def _save_pp_cache(path: str, schema: dict, products: dict) -> None:
-    """Atomically save {schema, products} to disk."""
-    import torch
+    """Atomically save {schema, products} to disk.
+
+    On Windows, os.replace raises PermissionError (WinError 5) when the
+    destination is held open by another process — most commonly the live
+    backend keeping cnn_dataset_cache.pt mapped during inference. The lock
+    window is brief, so retry a few times before giving up (#108).
+    """
+    import torch, time as _t
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
     torch.save({"schema": schema, "products": products}, tmp)
-    os.replace(tmp, path)
+    last_exc = None
+    for delay in (0.0, 0.5, 1.5, 3.0):
+        if delay:
+            _t.sleep(delay)
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as e:
+            last_exc = e
+    raise last_exc
 
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
 _CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
 
 
-def _model_path_for(arch: str) -> str:
-    """Resolve the on-disk checkpoint for a given arch.
-
-    glu2 keeps the legacy `cnn_model.pt` path so its working baseline
-    (val_loss=0.5828) stays addressable. Other archs get an `_<arch>` suffix
-    so a worse retrain on one arch can never overwrite the other's checkpoint.
-    """
-    if arch == "glu2":
-        return MODEL_PATH
-    root, ext = os.path.splitext(MODEL_PATH)
-    return f"{root}_{arch}{ext}"
+def _model_path_for() -> str:
+    """Path to the active CNN checkpoint. Multi-arch registry deleted
+    #311-refactor-e; glu1 is the only surviving arch."""
+    return os.path.join(os.path.dirname(__file__), "..", "cnn_model_glu1.pt")
 
 
-def _best_loss_path_for(arch: str) -> str:
-    """Per-arch save-if-better sentinel — paired with `_model_path_for`."""
-    if arch == "glu2":
-        return _BEST_LOSS_PATH
-    root, ext = os.path.splitext(_BEST_LOSS_PATH)
-    return f"{root}_{arch}{ext}"
+def _best_loss_path_for() -> str:
+    """Path to the active best-loss baseline (glu1)."""
+    return os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss_glu1.txt")
 _CKPT_EVERY     = 10   # save resume checkpoint every N epochs
-_HEARTBEAT_EVERY = 5   # emit INFO log every N epochs so train_watchdog log-mtime
+_HEARTBEAT_EVERY = 1   # #106: every epoch — under GPU contention 5+ min epochs caused
                        # check (1800s) doesn't kill healthy training on slow archs
-OLLAMA_URL      = "http://localhost:11434"
+# OLLAMA_URL deleted #311-refactor-f — Ollama LLM blend was CNN-backend-only
+# and is now removed; cnn_agent makes no HTTP calls to Ollama.
 _CACHE_TTL      = 300
 _EARLY_STOP_PATIENCE = 15   # stop if val_loss doesn't improve for this many epochs
 
@@ -1022,49 +1148,9 @@ if _TORCH:
             out = self.conv_main(x) * torch.sigmoid(self.conv_gate(x))
             return self.bn(out)
 
-    class SignalCNN(nn.Module):
-        """
-        GLU-gated CNN-LSTM hybrid:
-          1. 4× GatedConv1d blocks with BatchNorm — gate learns per-channel suppression
-          2. 2-layer LSTM captures long-range dependencies
-          3. FC head → sigmoid probability
-        arch tag "glu2" distinguishes from pre-BatchNorm checkpoints.
-        """
-        arch = "glu2"
-
-        def __init__(self, n_ch: int = N_CHANNELS):
-            super().__init__()
-            self.c1  = GatedConv1d(n_ch, 32)
-            self.c2  = GatedConv1d(32,   64)
-            self.p2  = nn.MaxPool1d(2)           # 60 → 30
-            self.c3  = GatedConv1d(64,  128)
-            self.p3  = nn.MaxPool1d(2)           # 30 → 15
-            self.c4  = GatedConv1d(128, 128)
-            self.lstm = nn.LSTM(128, 64, num_layers=2,
-                                batch_first=True, dropout=0.2)
-            self.drop = nn.Dropout(0.3)
-            self.fc   = nn.Linear(64, 1)
-
-        def forward(self, x):
-            x = self.c1(x)
-            x = self.c2(x); x = self.p2(x)
-            x = self.c3(x); x = self.p3(x)
-            x = self.c4(x)
-            x = x.permute(0, 2, 1)          # (B, seq, 128)
-            # flatten_parameters() fixes cuDNN LSTM inplace weight aliasing on CUDA
-            # without it the cuDNN kernel modifies weight_ih in-place during forward,
-            # incrementing the version counter and crashing backward()
-            self.lstm.flatten_parameters()
-            x, _ = self.lstm(x)
-            x = x[:, -1, :]                 # last timestep
-            x = self.drop(x)
-            return self.fc(x)   # raw logits — sigmoid applied at loss/predict time
-
-        def predict(self, tensor: "torch.Tensor") -> float:
-            self.eval()
-            with torch.no_grad():
-                device = next(self.parameters()).device
-                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+    # SignalCNN (arch="glu2", ~280k params) DELETED #311-refactor-e —
+    # multi-arch registry collapsed to glu1 only. Glu2 checkpoint preserved
+    # at backend/retired/cnn_model_glu2.pt (host-side, gitignored).
 
     class SignalCNNGlu1(nn.Module):
         """Capacity-reduced sibling of SignalCNN — half-depth, half-width.
@@ -1099,57 +1185,14 @@ if _TORCH:
                 device = next(self.parameters()).device
                 return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
 
-    class SignalCNNGluM(nn.Module):
-        """Mid-size arch between glu1 (UNDERFITs at val 0.69-0.70) and
-        glu2 (OVERFITs train→0.40 / val 0.58-0.69). ~50k params: enough capacity
-        to fit signal without memorizing noise.
-        """
-        arch = "glum"
-
-        def __init__(self, n_ch: int = N_CHANNELS):
-            super().__init__()
-            self.c1   = GatedConv1d(n_ch, 24)
-            self.c2   = GatedConv1d(24,   48)
-            self.p2   = nn.MaxPool1d(2)        # 60 → 30
-            self.c3   = GatedConv1d(48,   96)
-            self.lstm = nn.LSTM(96, 32, num_layers=1, batch_first=True)
-            self.drop = nn.Dropout(0.4)
-            self.fc   = nn.Linear(32, 1)
-
-        def forward(self, x):
-            x = self.c1(x)
-            x = self.c2(x); x = self.p2(x)
-            x = self.c3(x)
-            x = x.permute(0, 2, 1)
-            self.lstm.flatten_parameters()
-            x, _ = self.lstm(x)
-            x = x[:, -1, :]
-            x = self.drop(x)
-            return self.fc(x)
-
-        def predict(self, tensor: "torch.Tensor") -> float:
-            self.eval()
-            with torch.no_grad():
-                device = next(self.parameters()).device
-                return float(torch.sigmoid(self.forward(tensor.unsqueeze(0).to(device))).item())
+    # SignalCNNGluM (arch="glum", ~50k params) DELETED #311-refactor-e —
+    # never trained to production checkpoint; was a mid-size experiment.
 
 
-_ARCH_REGISTRY = {}
-if _TORCH:
-    _ARCH_REGISTRY = {"glu2": SignalCNN, "glu1": SignalCNNGlu1, "glum": SignalCNNGluM}
-
-
-def _active_arch() -> str:
-    """Read CNN_ARCH env at call-time so flips take effect without reimport."""
-    return os.environ.get("CNN_ARCH", "glu2").strip().lower() or "glu2"
-
-
-def _build_cnn(arch: str):
-    """Factory: arch tag → instance. Raises ValueError on unknown arch."""
-    cls = _ARCH_REGISTRY.get(arch)
-    if cls is None:
-        raise ValueError(f"Unknown CNN_ARCH '{arch}' — known: {sorted(_ARCH_REGISTRY)}")
-    return cls()
+def _build_cnn():
+    """Construct the active CNN arch (glu1). Multi-arch registry deleted
+    #311-refactor-e; glu1 is the only surviving arch."""
+    return SignalCNNGlu1()
 
 
 # ── Feature Builder ───────────────────────────────────────────────────────────
@@ -1171,6 +1214,7 @@ class FeatureBuilder:
               iv_rv60_spread: Optional[float] = None,
               ls_sentiment: Optional[float] = None,
               closes_ext: Optional[List[float]] = None,
+              oi_rate: Optional[float] = None,
               T: int = SEQ_LEN) -> List[List[float]]:
         if not candles:
             return [[0.0] * T] * N_CHANNELS
@@ -1196,6 +1240,14 @@ class FeatureBuilder:
         volumes = [c["volume"] for c in candles]
 
         # ── Ch 0: Normalised close ────────────────────────────────────────────
+        # Within-window min/max normalization. Strict-causality test in
+        # test_feature_builder_causality.py::TestAllChannelsLookahead xfails
+        # this channel: every value depends on global min/max across the
+        # whole input. Per #171 decision: accept-as-design — normalization
+        # is anchored at the terminal of the SEQ_LEN window the CNN sees,
+        # so the backward dependency does not cross the prediction
+        # boundary. Switching to per-bar expanding min/max would change
+        # the normalization scale and require a full retrain.
         mn, mx = min(closes), max(closes)
         rng    = mx - mn if mx != mn else 1.0
         norm_c = [(v - mn) / rng for v in closes]
@@ -1279,8 +1331,14 @@ class FeatureBuilder:
             stoch_ch[i] = k / 100.0
 
         # ── Ch 15: ADX(14) regime ─────────────────────────────────────────────
-        adx_val, _, _ = _adx(highs, lows, closes)
-        adx_ch = [adx_val / 100.0] * len(closes)
+        # Per-bar causal: ADX at bar i uses only highs/lows/closes[:i+1].
+        # Earlier impl computed adx_val once on the full window and broadcast
+        # it across all timesteps, which leaked future info into every bar
+        # of every cached sample.
+        adx_ch = [
+            _adx(highs[: i + 1], lows[: i + 1], closes[: i + 1])[0] / 100.0
+            for i in range(len(closes))
+        ]
 
         # ── Ch 16: VWAP distance per bar ──────────────────────────────────────
         # Rolling 20-bar VWAP; distance = (close - vwap) / vwap, norm to [-1,1]
@@ -1380,6 +1438,14 @@ class FeatureBuilder:
         # Replaced Binance L/S (geo-blocked) with rolling up-vol / total-vol.
         ls_ch = _volume_sentiment(closes, volumes, window=20)
 
+        # ── Ch 27: Open Interest (#143-B) ─────────────────────────────────────
+        # Z-scored upstream by `_build_samples_range` over full per-product series.
+        # Clip to [-1, 1] via /3.0 (3σ → 1.0). Broadcast scalar across window
+        # like Ch 20 funding pattern.
+        oi_val  = float(oi_rate) if oi_rate is not None else 0.0
+        oi_norm = max(-1.0, min(1.0, oi_val / 3.0))
+        oi_ch   = [oi_norm] * len(closes)
+
         P = self._pad
         channels = [
             P(norm_c,                                  T),   # 0
@@ -1409,6 +1475,7 @@ class FeatureBuilder:
             P(ivrv20_ch,                               T),   # 24
             P(ivrv60_ch,                               T),   # 25
             P(ls_ch,                                   T),   # 26
+            P(oi_ch,                                   T),   # 27
         ]
         assert len(channels) == N_CHANNELS
         return channels
@@ -1442,77 +1509,12 @@ class FeatureBuilder:
             return None
 
 
-# ── Ollama ────────────────────────────────────────────────────────────────────
-
-async def _ollama_prob(product_id: str, context: str,
-                       adx_val: float, rsi_val: float,
-                       macd_h: float, bb_pos: float,
-                       mfi_val: float, stoch_k: float,
-                       cnn_prob: float,
-                       lessons: Optional[List[str]] = None,
-                       fg_score: Optional[int] = None
-                       ) -> tuple[Optional[float], int, int]:
-    model  = config.ollama_model
-    regime = "TRENDING" if adx_val >= config.adx_trend_threshold else "RANGING"
-    lesson_block = ""
-    if lessons:
-        lesson_block = (
-            "\n\nPast 4-hour outcomes for this asset:\n"
-            + "\n".join(f"  • {l}" for l in lessons)
-            + "\n"
-        )
-    if fg_score is not None:
-        if fg_score < 25:
-            fg_label = "Extreme Fear"
-        elif fg_score < 50:
-            fg_label = "Fear"
-        elif fg_score < 75:
-            fg_label = "Greed"
-        else:
-            fg_label = "Extreme Greed"
-        fg_line = f"Market sentiment (Fear & Greed): {fg_score}/100 — {fg_label}\n"
-    else:
-        fg_line = ""
-    prompt = (
-        f"You are a quantitative crypto trading analyst. "
-        f"Estimate the probability (0.00-1.00) that {product_id} closes HIGHER in 4 hours.\n\n"
-        f"{fg_line}"
-        f"Market regime: {regime} (ADX={adx_val:.1f})\n"
-        f"RSI(14): {rsi_val:.1f} | MACD: {'bullish' if macd_h > 0 else 'bearish'} ({macd_h:+.5f})\n"
-        f"Bollinger: {bb_pos:.0%} of band | MFI(14): {mfi_val:.1f} | StochRSI-K: {stoch_k:.1f}\n"
-        f"CNN model probability: {cnn_prob:.3f}"
-        f"{lesson_block}\n"
-        f'Respond with ONLY valid JSON: {{"probability": <0.00-1.00>}}'
-    )
-    try:
-        _t0 = time.perf_counter()
-        async with httpx.AsyncClient(timeout=25) as client:
-            resp = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": model, "prompt": prompt,
-                      "stream": False, "format": "json"},
-            )
-            resp.raise_for_status()
-            raw      = resp.json()
-            text     = raw.get("response", "")
-            prompt_t = raw.get("prompt_eval_count", 0)
-            resp_t   = raw.get("eval_count", 0)
-        _elapsed = time.perf_counter() - _t0
-        if _elapsed > 15:
-            logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s (SLOW)")
-        else:
-            logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=_ollama_prob model={model} elapsed={_elapsed:.2f}s tokens=in:{prompt_t}/out:{resp_t}")
-        prob = float(json.loads(text).get("probability", -1))
-        if 0 <= prob <= 1:
-            return prob, prompt_t, resp_t
-    except Exception:
-        try:
-            m = re.search(r"\b0\.\d{2,4}\b", text)
-            if m:
-                return float(m.group()), 0, 0
-        except Exception:
-            pass
-    return None, 0, 0
+# ── Ollama LLM blend deleted #311-refactor-f ─────────────────────────────────
+# The Ollama probability call and the associated decisive-skip decision tree
+# were CNN-backend-only (per #250 the LLM was already skipped wholesale under
+# MODEL_BACKEND=xgb). Removed alongside Hurst / LightGBM / regime gates as
+# part of the dead CNN-only branch cleanup. Re-introducing an LLM blend would
+# need its own brainstorm + spec.
 
 
 # ── CNN-LSTM Agent ─────────────────────────────────────────────────────────────
@@ -1535,67 +1537,45 @@ class CoinbaseCNNAgent:
         self.last_trained_at:  Optional[float] = None
         self.train_count:      int = 0
         # ── LLM token tracking ─────────────────────────────────────────────
+        # Kept for main.py /api/cnn/status payload back-compat; always zero
+        # after #311-refactor-f removed the Ollama blend.
         self.llm_calls:          int = 0
         self.llm_prompt_tokens:  int = 0
         self.llm_response_tokens: int = 0
-        # ── LightGBM entry filter ───────────────────────────────────────────
-        self._lgbm             = LGBMFilter()
-        self._lgbm.load(_LGBM_MODEL_PATH)
-        self._lgbm_trades_seen: int = 0   # closed-trade count at last retrain
         # ── Model health flags ──────────────────────────────────────────────
         # True when the on-disk checkpoint is incompatible with the current
         # architecture (channel count changed).  Signals are suppressed until
         # a fresh train run completes and saves a compatible checkpoint.
         self._needs_retrain: bool = False
-        # Set by main.py when a training subprocess is running — causes scans
-        # to skip Ollama (GPU is saturated by training, LLM calls hang).
+        # Set by main.py when a training subprocess is running.  Read by
+        # /api/cnn/status; no longer consulted inside generate_signal after
+        # #311-refactor-f deleted the Ollama-skip tree.
         self.training_active: bool = False
-        # Active arch is read at construction time so flipping CNN_ARCH only
-        # takes effect on the next agent boot, not mid-run.
-        self._arch = _active_arch()
+        # Multi-arch registry deleted #311-refactor-e — glu1 is the only arch.
         if _TORCH:
-            self.model = _build_cnn(self._arch).to(_DEVICE)
+            self.model = _build_cnn().to(_DEVICE)
             self._load()
         _status = "incompatible — signals suppressed until retrained" if self._needs_retrain else \
                   ("loaded" if self._exists() else "random (untrained)")
         _device_str = str(_DEVICE) if _TORCH else "n/a"
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
-            f"device={_device_str} | model={_status} | arch={self._arch} | "
-            f"channels={N_CHANNELS} | lgbm={'ready' if self._lgbm.is_ready() else 'accumulating'}"
+            f"device={_device_str} | model={_status} | arch=glu1 | "
+            f"channels={N_CHANNELS}"
         )
 
     async def start(self) -> None:
         """Load persisted book state before first scan."""
         await self.book.load()
-        await self._lgbm_retrain_if_needed()
-
-    async def _lgbm_retrain_if_needed(self) -> None:
-        """Retrain LightGBM filter from cnn_scans + trades if enough new data exists."""
-        try:
-            rows = await database.get_lgbm_training_rows()
-            n = len(rows)
-            if n == self._lgbm_trades_seen:
-                return
-            metrics = self._lgbm.train(rows)
-            if metrics:
-                self._lgbm.save(_LGBM_MODEL_PATH)
-                self._lgbm_trades_seen = n
-                logger.info(
-                    f"LGBMFilter retrained: n={metrics['n_samples']} "
-                    f"win={metrics['win_rate']}% auc={metrics['auc']}"
-                )
-        except Exception as e:
-            logger.warning(f"LGBMFilter retrain failed: {e}")
 
     def _exists(self) -> bool:
-        return os.path.exists(_model_path_for(self._arch))
+        return os.path.exists(_model_path_for())
 
     def _load(self):
         if not _TORCH or not self.model or not self._exists():
             return
         try:
-            ckpt = torch.load(_model_path_for(self._arch), map_location="cpu", weights_only=False)
+            ckpt = torch.load(_model_path_for(), map_location="cpu", weights_only=False)
             if isinstance(ckpt, dict) and "state_dict" in ckpt:
                 arch          = ckpt.get("arch", "legacy")
                 ckpt_channels = ckpt.get("n_channels", N_CHANNELS)
@@ -1634,7 +1614,7 @@ class CoinbaseCNNAgent:
     def save_model(self, backup: bool = False):
         if not (_TORCH and self.model):
             return
-        path = _model_path_for(self._arch)
+        path = _model_path_for()
         if backup and os.path.exists(path):
             shutil.copy2(path, path + ".bak")
         torch.save(
@@ -1648,7 +1628,7 @@ class CoinbaseCNNAgent:
 
     def _read_best_loss(self) -> float:
         try:
-            v = float(open(_best_loss_path_for(self._arch)).read().strip())
+            v = float(open(_best_loss_path_for()).read().strip())
             # BCE at chance ≈ 0.693; anything below 0.1 is a stale/corrupted
             # sentinel (historic bug: content=1e-06 rejected every trained model).
             return v if v >= 0.1 else float("inf")
@@ -1657,35 +1637,20 @@ class CoinbaseCNNAgent:
 
     def _write_best_loss(self, loss: float) -> None:
         try:
-            with open(_best_loss_path_for(self._arch), "w") as f:
+            with open(_best_loss_path_for(), "w") as f:
                 f.write(str(loss))
         except Exception:
             pass
 
-    def _cnn_prob(self, channels) -> float:
+    def _cnn_prob(self, channels, pid: Optional[str] = None) -> float:
         # Align inference input with the training distribution — zero out the
         # channels that were constant-zero at training (P3b).
         channels = _mask_training_constant_channels(channels)
-        if _TORCH and self.model:
-            return self.model.predict(self.fb.to_tensor(channels))
-        return self._linear(channels)
-
-    @staticmethod
-    def _linear(channels) -> float:
-        """Fallback when PyTorch is unavailable — uses 6 of 16 channels."""
-        try:
-            score = (
-                0.50
-                + 0.20 * (channels[0][-1] - 0.5)      # normalised price
-                + 0.15 * (0.5 - channels[4][-1])       # inverted RSI
-                + 0.10 * channels[5][-1]                # MACD histogram
-                + 0.10 * (0.5 - channels[12][-1])      # inverted MFI
-                + 0.08 * channels[13][-1]               # OBV slope
-                + 0.07 * (1.0 - channels[15][-1])      # low ADX = mean revert
-            )
-            return max(0.01, min(0.99, score))
-        except Exception:
-            return 0.5
+        if config.model_backend in ("xgb", "xgb_v45"):
+            from agents import xgb_signal
+            return xgb_signal.xgb_prob(channels, pid=pid)
+        # Unreachable under config._validate_backend; defensive only.
+        raise RuntimeError(f"unsupported model_backend={config.model_backend!r}")
 
     async def _ob(self, product_id: str) -> Dict:
         try:
@@ -1763,6 +1728,10 @@ class CoinbaseCNNAgent:
             except Exception:
                 pass
 
+            # Cache for WS exit handler — read by agents/exit_watcher.on_price_tick
+            # so it doesn't recompute ATR per tick (~580 ticks/sec aggregate).
+            pos["trail_pct"] = trail_pct
+
             # Positions without entry_time are legacy — treat as already overdue
             entry_time = pos.get("entry_time")
             hold_secs  = _CNN_LEGACY_HOLD_SECS if entry_time is None else time.time() - entry_time
@@ -1791,7 +1760,12 @@ class CoinbaseCNNAgent:
         execute: bool = False,
         order_executor=None,
     ) -> Optional[Dict]:
-        if self._needs_retrain:
+        # #223 — XGB backend doesn't use the PyTorch CNN checkpoint, so an
+        # incompatible CNN model must not block XGB shadow logging or signal
+        # generation. Without this guard, the 28-channel migration left the
+        # 27-channel CNN checkpoint flagged incompatible and silently killed
+        # all save_cnn_scan writes for ~30 hours starting 2026-05-07 02:17 UTC.
+        if self._needs_retrain and config.model_backend != "xgb":
             logger.debug(
                 "CNN signal suppressed — checkpoint incompatible with current architecture. "
                 "Run retrain.py or trigger /api/cnn/train to generate a compatible model."
@@ -1818,6 +1792,9 @@ class CoinbaseCNNAgent:
         closes: List[float] = []
         ob = {}
 
+        xgb_shadow: Optional[float] = None
+        xgb_shadow_v45: Optional[Tuple[float, float, float]] = None
+        channels = None  # initialized to None for cache-hit path; MC chain accepts None
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob, _, _cached_ind = cached
@@ -1831,6 +1808,7 @@ class CoinbaseCNNAgent:
             fast_rsi_val = _cached_ind.get("fast_rsi_val", fast_rsi_val)
             vel_norm     = _cached_ind.get("vel_norm",     vel_norm)
             vol_z_norm   = _cached_ind.get("vol_z_norm",   vol_z_norm)
+            xgb_shadow   = _cached_ind.get("xgb_shadow",   None)
         else:
             # #98: fetch SEQ_LEN(60) + RV_PREFIX_BARS(60) + 20 buffer = 140
             # so closes_ext can satisfy the rv60 lookback at the first
@@ -1933,7 +1911,20 @@ class CoinbaseCNNAgent:
                 ls_sentiment=ls_sentiment,
                 closes_ext=closes,
             )
-            cnn_prob = self._cnn_prob(channels)
+            cnn_prob = self._cnn_prob(channels, pid=pid)
+
+            # Always log v3 + v4.5 shadow probabilities, regardless of driver
+            # (#181 + 2026-05-23 CNN deprecation). xgb_prob_shadow_v4_5 has
+            # built-in isolation: v4.5 failure -> v45=None, never affects v3.
+            try:
+                from agents import xgb_signal as _xgb
+                xgb_shadow, xgb_shadow_v45 = _xgb.xgb_prob_shadow_v4_5(
+                    _mask_training_constant_channels(channels),
+                    pid=pid,
+                )
+            except Exception:
+                xgb_shadow     = None
+                xgb_shadow_v45 = None
 
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)
@@ -1943,18 +1934,23 @@ class CoinbaseCNNAgent:
             stoch_k, _         = _stoch_rsi(closes)
             atr_val            = _atr(highs, lows, closes)
             vwap_price, vwap_d = _vwap(highs, lows, closes, volumes)
-            hurst              = _hurst_exponent(closes)
-            di                 = _dissimilarity_index(closes)
-            entropy            = _shannon_entropy(closes)
+            # Hurst / DI / entropy computations dropped #311-refactor-f —
+            # their only consumers were the CNN-backend-only suppression gates
+            # and the Ollama-skip decision tree, both now removed.
 
             self._cache[pid] = (cnn_prob, time.time(), {
                 "adx_val": adx_val, "rsi_val": rsi_val, "macd_h": macd_h,
                 "mfi_val": mfi_val, "stoch_k": stoch_k, "atr_val": atr_val,
                 "vwap_d": vwap_d, "fast_rsi_val": fast_rsi_val,
                 "vel_norm": vel_norm, "vol_z_norm": vol_z_norm,
+                "xgb_shadow": xgb_shadow,
             })
 
-        # ── HMM regime detection → dynamic CNN/LLM blend ─────────────────────
+        # ── HMM regime detection ─────────────────────────────────────────────
+        # Regime label is still persisted to cnn_scans for downstream analysis;
+        # the historical CNN/LLM blend weights are kept here for DB column
+        # back-compat even though the Ollama blend was deleted #311-refactor-f
+        # and llm_prob is now always None.
         hmm_regime, hmm_conf, _hmm_state = get_detector().predict(closes)
         if hmm_regime == "UNKNOWN":
             # Fallback to binary ADX gate when HMM not fitted yet
@@ -1965,17 +1961,6 @@ class CoinbaseCNNAgent:
             trending = hmm_regime == "TRENDING"
         cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
 
-        # Fetch most-recent Tech decisions for this product so the Ollama
-        # model can incorporate their votes into its reasoning.
-        agent_votes = await database.get_agent_decisions(pid, limit=2)
-        agent_ctx = ""
-        for av in agent_votes:
-            agent_ctx += (
-                f"\n  {av['agent']:8s}: {av['side']:4s} "
-                f"conf={av['confidence']:.2f} score={av.get('score', 0):.2f} "
-                f"— {(av.get('reasoning') or '')[:70]}"
-            )
-
         vwap_pct_delta = ((price - vwap_price) / vwap_price * 100) if vwap_price else 0.0
         vwap_side = "above" if vwap_pct_delta > 0 else "below"
         context = (
@@ -1984,78 +1969,52 @@ class CoinbaseCNNAgent:
             f"MACD hist: {macd_h:+.6f} | Bollinger: {bb_pos:.2f} | StochRSI K: {stoch_k:.1f}\n"
             f"VWAP(20): ${vwap_price:,.4f} | Price {vwap_side} VWAP by {abs(vwap_pct_delta):.2f}%\n"
             f"OB imbalance: {ob.get('imbalance', 0):+.2f} | ATR(14): {atr_val:.4f}\n"
-            f"CNN raw: {cnn_prob:.4f} | weights CNN={cnn_w} LLM={llm_w}"
-            + (f"\nSub-agent votes:{agent_ctx}" if agent_ctx else "")
+            f"CNN raw: {cnn_prob:.4f}"
         )
 
-        # ── Option 2: skip LLM when CNN is already decisive ───────────────────
-        # If cnn_prob is far from 0.5 (beyond llm_skip_threshold), the LLM
-        # cannot flip the direction — skip the 10–30s Ollama call entirely.
-        # Fetch outcome lessons so Ollama can learn from past signals
-        lessons = await get_tracker().get_lessons(pid, limit=5)
-
-        # Fetch Fear & Greed score as soft context for Ollama (not a hard gate)
-        try:
-            fg_data  = await get_fear_greed().fetch()
-            fg_score: Optional[int] = fg_data.get("value")
-        except Exception:
-            fg_score = None
-
-        cnn_dist = abs(cnn_prob - 0.5)
-        # Multiplicative regime gate: skip Ollama when regime is ambiguous (random walk)
-        # AND price has deviated significantly from its SMA (DI high = unreliable features)
-        regime_ambiguous = _HURST_MR_THRESH < hurst < _HURST_TREND_THRESH
-        di_high          = di > _DI_SUPPRESS_THRESH
-        entropy_noisy    = entropy > _ENTROPY_SKIP_THRESH
-        skip_llm = (
-            cnn_dist >= (config.llm_skip_threshold - 0.5)
-            or (regime_ambiguous and di_high)
-            or entropy_noisy
-            or self.training_active
-        )
-        if skip_llm:
-            llm_prob = None
-            if self.training_active:
-                logger.debug(f"LLM skipped for {pid}: training subprocess active (GPU busy)")
-            elif entropy_noisy:
-                logger.debug(
-                    f"LLM skipped for {pid}: entropy={entropy:.2f} > {_ENTROPY_SKIP_THRESH} (noise)"
-                )
-            elif regime_ambiguous and di_high:
-                logger.debug(
-                    f"LLM skipped for {pid}: regime ambiguous "
-                    f"(H={hurst:.2f} DI={di:.1f}% > {_DI_SUPPRESS_THRESH}%)"
-                )
-            else:
-                logger.debug(
-                    f"LLM skipped for {pid}: cnn_prob={cnn_prob:.3f} is decisive "
-                    f"(|{cnn_dist:.3f}| >= {config.llm_skip_threshold - 0.5:.3f})"
-                )
-        else:
-            llm_prob, _pt, _rt = await _ollama_prob(pid, context, adx_val, rsi_val,
-                                                     macd_h, bb_pos, mfi_val, stoch_k, cnn_prob,
-                                                     lessons=lessons, fg_score=fg_score)
-            self.llm_calls           += 1
-            self.llm_prompt_tokens   += _pt
-            self.llm_response_tokens += _rt
-
-        if llm_prob is not None:
-            model_prob = cnn_w * cnn_prob + llm_w * llm_prob
-        else:
-            model_prob = cnn_prob
-
-        model_prob = max(0.01, min(0.99, model_prob))
+        # Ollama LLM blend deleted #311-refactor-f — llm_prob is permanently
+        # None, so model_prob equals the backend's own probability.
+        llm_prob: Optional[float] = None
+        model_prob = max(0.01, min(0.99, cnn_prob))
 
         # ── Signal direction ──────────────────────────────────────────────────
-        if model_prob > config.cnn_buy_threshold:
-            side     = "BUY"
-            strength = round((model_prob - 0.5) * 2, 3)
-        elif model_prob < config.cnn_sell_threshold:
-            side     = "SELL"
-            strength = round((0.5 - model_prob) * 2, 3)
+        if config.model_backend == "xgb_v45":
+            # v4.5 3-class driver — indep_thresholds rule on (p_down, p_neutral, p_up).
+            if xgb_shadow_v45 is None:
+                # v4.5 inference failed — HOLD to avoid trading on garbage signal.
+                side, strength = "HOLD", 0.0
+            else:
+                p_down, p_neutral, p_up = xgb_shadow_v45
+                side, strength = _indep_thresholds_decision(
+                    p_down, p_neutral, p_up,
+                    thresh_up   = config.xgb_v45_thresh_up,
+                    thresh_down = config.xgb_v45_thresh_down,
+                )
         else:
-            side     = "HOLD"
-            strength = 0.0
+            # MODEL_BACKEND=xgb — existing 2-class gate on v3 prob.
+            if model_prob > config.cnn_buy_threshold:
+                side     = "BUY"
+                strength = round((model_prob - 0.5) * 2, 3)
+            elif model_prob < config.cnn_sell_threshold:
+                side     = "SELL"
+                strength = round((0.5 - model_prob) * 2, 3)
+            else:
+                side     = "HOLD"
+                strength = 0.0
+
+        # MC filter chain (off by default; MC_FILTERS env-gated). Returns the
+        # side unchanged and {} telemetry when MC_FILTERS is empty.
+        from agents.mc import registry as _mc
+        try:
+            from agents.mc import ci_filter as _ci_filter  # registers ci into _FILTER_CLASSES
+        except Exception:
+            pass
+        side, mc_telemetry = _mc.apply_buy_filters(
+            side=side, model_prob=model_prob, pid=pid,
+            channels=channels, context={"strength": strength},
+        )
+        if side == "HOLD":
+            strength = 0.0  # re-zero if MC down-graded BUY to HOLD
 
         passes = side != "HOLD"
 
@@ -2082,6 +2041,12 @@ class CoinbaseCNNAgent:
             "fast_rsi":    round(fast_rsi_val, 4),
             "velocity":    round(vel_norm, 4),
             "vol_z":       round(vol_z_norm, 4),
+            "xgb_prob":    round(xgb_shadow, 4) if xgb_shadow is not None else None,
+            "xgb_prob_v4_5_down":    round(xgb_shadow_v45[0], 4) if xgb_shadow_v45 is not None else None,
+            "xgb_prob_v4_5_neutral": round(xgb_shadow_v45[1], 4) if xgb_shadow_v45 is not None else None,
+            "xgb_prob_v4_5_up":      round(xgb_shadow_v45[2], 4) if xgb_shadow_v45 is not None else None,
+            "xgb_prob_stdev": mc_telemetry.get("ci", {}).get("stdev") if mc_telemetry else None,
+            "mc_telemetry":   json.dumps(mc_telemetry) if mc_telemetry else None,
         })
 
         if not passes:
@@ -2101,14 +2066,8 @@ class CoinbaseCNNAgent:
 
         quote_size = min(strength * config.max_position_usd, config.max_position_usd)
 
-        prob_line = (
-            f"\ncnn_prob={cnn_prob:.4f} "
-            f"llm_prob={llm_prob:.4f} "
-            f"model_prob={model_prob:.4f} "
-            f"cnn_w={cnn_w} llm_w={llm_w}"
-            if llm_prob is not None
-            else f"\ncnn_prob={cnn_prob:.4f} llm_prob=None model_prob={model_prob:.4f}"
-        )
+        # Ollama blend deleted #311-refactor-f — llm_prob is always None.
+        prob_line = f"\ncnn_prob={cnn_prob:.4f} llm_prob=None model_prob={model_prob:.4f}"
 
         signal = {
             "product_id":  pid,
@@ -2135,92 +2094,45 @@ class CoinbaseCNNAgent:
         else:
             self.signals_sell += 1
 
-        llm_str = f"{llm_prob:.2%}" if llm_prob is not None else "n/a"
+        _lbl = _backend_label()
         logger.info(
-            f"CNN [{side}] {pid} | cnn={cnn_prob:.2%} llm={llm_str} "
-            f"blend={model_prob:.2%} adx={adx_val:.1f}({'trend' if trending else 'range'}) "
+            f"{_lbl} [{side}] {pid} | {_lbl.lower()}={cnn_prob:.2%} "
+            f"model={model_prob:.2%} adx={adx_val:.1f}({'trend' if trending else 'range'}) "
             f"strength={strength:.2f} size=${quote_size:.2f}"
         )
 
         # ── Dry-run execution via _CNNBook (tracks positions + writes to trades table) ──
+        # Hurst / regime / LGBMFilter suppression gates deleted #311-refactor-f
+        # — all three were CNN-backend-only (Phase-1 CNN-tuned), already
+        # bypassed under the live xgb backend. BUYs now go straight to Kelly
+        # sizing + book.buy.
         if execute:
             if side == "BUY" and not self.book.has_position(pid):
-                # Hurst regime gate — suppress BUY in pure random-walk regime
-                hurst_ok = hurst >= _HURST_MR_THRESH
-
-                if not hurst_ok:
-                    signal["execution"] = {
-                        "success": False,
-                        "reason": f"Hurst={hurst:.2f} random-walk regime — no edge",
-                    }
+                # Kelly Criterion sizing: use model_prob as win probability.
+                # strength = (model_prob - 0.5)*2 is NOT a probability — passing
+                # it to Kelly gave frac=0 for all signals below model_prob=0.75.
+                frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
+                spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
+                if spent > 0:
+                    self.signals_executed += 1
+                    signal["execution"] = {"success": True, "spent": round(spent, 2)}
                     logger.info(
-                        f"CNN BUY {pid} suppressed: Hurst={hurst:.2f} < {_HURST_MR_THRESH}"
-                    )
-                elif _regime_gate_enabled() and hmm_regime != "CHAOTIC":
-                    # Phase-1 finding: CNN BUY edge is CHAOTIC-only (58.5% wr) —
-                    # TRENDING/RANGING BUYs win 44-46%. Set CNN_REGIME_GATE=off to disable.
-                    signal["execution"] = {
-                        "success": False,
-                        "reason": f"Regime {hmm_regime} — CNN BUY edge is CHAOTIC only",
-                    }
-                    logger.info(
-                        f"CNN BUY {pid} suppressed: regime={hmm_regime} != CHAOTIC"
+                        f"{_backend_label()} BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
+                        f"kelly_frac={frac:.2f} spent=${spent:.2f} "
+                        f"balance=${self.book.balance:.2f}"
                     )
                 else:
-                    # LightGBM entry filter — secondary gate trained on real outcomes
-                    from datetime import datetime as _dt
-                    _now_dt = _dt.utcnow()
-                    _lgbm_feat = {
-                        "cnn_prob":    cnn_prob,
-                        "rsi":         rsi_val,
-                        "adx":         adx_val,
-                        "strength":    strength,
-                        "macd":        macd_h,
-                        "mfi":         mfi_val,
-                        "stoch_k":     stoch_k,
-                        "hour_of_day": _now_dt.hour,
-                        "day_of_week": _now_dt.weekday(),
-                        "usd_open":    self.book.balance * min(_kelly_fraction(model_prob), _CNN_MAX_FRAC),
-                    }
-                    _lgbm_prob  = self._lgbm.predict(_lgbm_feat)
-                    _lgbm_allow = self._lgbm.allow_buy(_lgbm_feat)
-
-                    if not _lgbm_allow:
-                        signal["execution"] = {
-                            "success": False,
-                            "reason": f"LGBMFilter blocked: p(win)={_lgbm_prob:.2f}",
-                        }
-                        logger.info(
-                            f"CNN BUY {pid} blocked by LGBMFilter: "
-                            f"p(win)={_lgbm_prob:.2f}"
-                        )
-                    else:
-                        # Kelly Criterion sizing: use model_prob as win probability.
-                        # strength = (model_prob - 0.5)*2 is NOT a probability — passing
-                        # it to Kelly gave frac=0 for all signals below model_prob=0.75.
-                        frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
-                        spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
-                        if spent > 0:
-                            self.signals_executed += 1
-                            signal["execution"] = {"success": True, "spent": round(spent, 2)}
-                            logger.info(
-                                f"CNN BOOK BUY {pid} @{price:.4f} strength={strength:.2f} "
-                                f"kelly_frac={frac:.2f} spent=${spent:.2f} "
-                                f"H={hurst:.2f} DI={di:.1f}% "
-                                f"lgbm_p={_lgbm_prob:.2f} balance=${self.book.balance:.2f}"
-                            )
-                        else:
-                            signal["execution"] = {"success": False, "reason": "Insufficient balance"}
-                            logger.warning(
-                                f"CNN BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
-                                f"too low for kelly_frac={frac:.2f}"
-                            )
+                    signal["execution"] = {"success": False, "reason": "Insufficient balance"}
+                    logger.warning(
+                        f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
+                        f"too low for kelly_frac={frac:.2f}"
+                    )
             elif side == "SELL" and self.book.has_position(pid):
                 pnl = await self.book.sell(pid, price, trigger="SCAN")
                 self.signals_executed += 1
                 signal["execution"] = {"success": True, "pnl": round(pnl, 4)}
                 logger.info(
-                    f"CNN BOOK SELL {pid} @{price:.4f} pnl=${pnl:+.2f} "
+                    f"{_backend_label()} BOOK SELL {pid} @{price:.4f} pnl=${pnl:+.2f} "
                     f"balance=${self.book.balance:.2f}"
                 )
             elif side == "BUY" and self.book.has_position(pid):
@@ -2306,35 +2218,13 @@ class CoinbaseCNNAgent:
                     except Exception:
                         pass
 
-                # LightGBM retrain check — runs fast, only retrains when new closed trades exist
-                if self.scan_count % _LGBM_RETRAIN_EVERY == 0:
-                    await self._lgbm_retrain_if_needed()
-
-                # Auto-train after every N scans (aligned with new candle data)
-                if self.scan_count % train_every_n_scans == 0:
-                    logger.info(
-                        f"CNN auto-train triggered (scan #{self.scan_count}, "
-                        f"every {train_every_n_scans} scans)"
-                    )
-                    try:
-                        if auto_train_fn is not None:
-                            # Spawn subprocess (non-blocking) — same path as UI Train button
-                            await auto_train_fn()
-                        else:
-                            result = await self.train_on_history(epochs=50)
-                            if "error" in result:
-                                logger.warning(f"CNN auto-train skipped: {result['error']}")
-                            else:
-                                self.last_trained_at = time.time()
-                                self.train_count    += 1
-                                logger.info(
-                                    f"CNN auto-train done — {result['samples']} samples | "
-                                    f"train {result['initial_loss']:.4f}→{result['final_train_loss']:.4f} | "
-                                    f"val={result['final_val_loss']:.4f} | "
-                                    f"fit={result['fit_status']}"
-                                )
-                    except Exception as te:
-                        logger.error(f"CNN auto-train error: {te}")
+                # LightGBM-retrain hook + auto-train scheduler hook deleted
+                # #311-refactor-f. The lgbm filter was CNN-tuned; auto-train
+                # was a no-op under MODEL_BACKEND=xgb (#300 gated it off).
+                # The train_every_n_scans and auto_train_fn parameters on
+                # run_loop are kept for caller compat (main.py still passes
+                # them); they are now ignored here. Auto-train infrastructure
+                # cleanup (subprocess wiring, train_worker.py) is module 4c.
 
             except asyncio.CancelledError:
                 return
@@ -2382,7 +2272,7 @@ class CoinbaseCNNAgent:
                 if "start_time" in c and "start" not in c:
                     c["start"] = c["start_time"]
 
-        # [(pid, candles, btc_aligned, candles_5m, funding_aligned)]
+        # [(pid, candles, btc_aligned, candles_5m, funding_aligned, oi_aligned)]
         all_candle_sets: list = []
         for p in products:
             pid  = p["product_id"]
@@ -2425,8 +2315,15 @@ class CoinbaseCNNAgent:
                     pid, fr_start_ms, fr_end_ms
                 )
                 funding_aligned = _aligned_funding_rates(candles, funding_hist)
+                # Per-product OKX OI history (#143-A). Same forward-fill
+                # alignment as funding; `_aligned_oi_history` returns None
+                # when the fetcher yields no data, leaving Ch 27 at zero.
+                oi_hist = await fetch_oi_history(
+                    pid, fr_start_ms, fr_end_ms
+                )
+                oi_aligned = _aligned_oi_history(candles, oi_hist)
                 all_candle_sets.append(
-                    (pid, candles, btc_aligned, c5m, funding_aligned)
+                    (pid, candles, btc_aligned, c5m, funding_aligned, oi_aligned)
                 )
 
         _phase1_secs = _t.time() - _phase1_start
@@ -2462,12 +2359,13 @@ class CoinbaseCNNAgent:
                 )
             X_list, y_list, w_list = [], [], []
             hits = appends = rebuilds = skips = 0
-            for prod_idx, (pid, candles, btc_aligned, c5m, funding_aligned) in enumerate(all_candle_sets, 1):
+            for prod_idx, (pid, candles, btc_aligned, c5m, funding_aligned, oi_aligned) in enumerate(all_candle_sets, 1):
                 entry, status = _extend_or_rebuild_product(
                     cache.get(pid), candles, fb,
                     SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH,
                     btc_closes=btc_aligned,
                     funding_rates=funding_aligned,
+                    oi_rates=oi_aligned,
                     candles_5m=c5m,
                 )
                 if status == "skip":
@@ -2811,7 +2709,7 @@ class CoinbaseCNNAgent:
             logger.warning(f"HMM fit during training failed: {_he}")
 
         # True if the model file was written during this training run
-        _active_model_path = _model_path_for(self._arch)
+        _active_model_path = _model_path_for()
         _model_saved = os.path.exists(_active_model_path) and os.path.getmtime(_active_model_path) > _train_start
 
         result = {

@@ -227,6 +227,23 @@ def _is_startup_enabled() -> bool:
         return False
 
 
+def _maybe_default_startup_to_on(sentinel_path: Path, *, set_fn=None) -> bool:
+    """First-run only: enable Start-on-login by default and create a sentinel
+    so subsequent runs respect any user opt-out.
+
+    Returns True iff this call wrote to the registry (i.e. it was the first
+    run). Callers may inject `set_fn` to test without touching the real
+    registry; defaults to `_set_startup`."""
+    if set_fn is None:
+        set_fn = _set_startup
+    if sentinel_path.exists():
+        return False
+    set_fn(True)
+    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_path.touch()
+    return True
+
+
 def _set_startup(enabled: bool) -> bool:
     """
     Add or remove the Windows registry Run key.
@@ -275,6 +292,12 @@ class LauncherApp(tk.Tk):
         self._log_queue: queue.Queue = queue.Queue()
         self._running = True
         self._startup_var: tk.BooleanVar | None = None   # set in _build_ui
+
+        # First-run only: default Start-on-login to ON so the launcher (and
+        # therefore the trading services) come up automatically on Windows
+        # login. Sentinel under backend/logs/ ensures we only do this once;
+        # any later user opt-out via the toggle is preserved.
+        _maybe_default_startup_to_on(_LOG_DIR / ".startup_default_applied")
 
         self._build_ui()
         self._start_status_loop()

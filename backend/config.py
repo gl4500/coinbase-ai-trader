@@ -1,12 +1,33 @@
 """
 Central configuration loaded from .env.
 All modules import the `config` singleton — never read os.environ directly.
+
+Policy: every env var defined here MUST trace to a live consumer in backend/.
+Dead entries are deleted on sight per refactor sweep policy (#311-refactor).
 """
 import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+
+_VALID_BACKENDS = {"xgb", "xgb_v45"}
+
+
+def _validate_backend(value: str) -> str:
+    if value == "cnn":
+        raise ValueError(
+            "MODEL_BACKEND=cnn is deprecated as of 2026-05-23. "
+            "Use MODEL_BACKEND=xgb (default, v3 driver) or "
+            "MODEL_BACKEND=xgb_v45 (v4.5 driver). See "
+            "docs/superpowers/specs/2026-05-23-remove-cnn-driver-add-v45-driver-design.md"
+        )
+    if value not in _VALID_BACKENDS:
+        raise ValueError(
+            f"MODEL_BACKEND={value!r} invalid. Valid: {sorted(_VALID_BACKENDS)}"
+        )
+    return value
 
 
 @dataclass
@@ -56,17 +77,31 @@ class Config:
     # model_prob must exceed cnn_buy_threshold to fire a BUY (symmetric: < 1 - threshold for SELL)
     cnn_buy_threshold:      float = field(default_factory=lambda: float(os.getenv("CNN_BUY_THRESHOLD",      "0.60")))
     cnn_sell_threshold:     float = field(default_factory=lambda: float(os.getenv("CNN_SELL_THRESHOLD",     "0.40")))
-    # CNN/LLM blend weights per regime (must sum to 1.0 each pair)
-    cnn_trending_cnn_w:     float = field(default_factory=lambda: float(os.getenv("CNN_TRENDING_CNN_W",     "0.75")))
-    cnn_trending_llm_w:     float = field(default_factory=lambda: float(os.getenv("CNN_TRENDING_LLM_W",     "0.25")))
-    cnn_ranging_cnn_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_CNN_W",      "0.40")))
-    cnn_ranging_llm_w:      float = field(default_factory=lambda: float(os.getenv("CNN_RANGING_LLM_W",      "0.60")))
-    # How often to auto-train (in number of scans; default 4 = ~1 hour at 15-min scan interval)
+    # Auto-train cadence in scans. Active only under MODEL_BACKEND=cnn;
+    # auto-train is gated off under MODEL_BACKEND=xgb per #300, so flipping
+    # this knob has no effect while the xgb backend is live.
+    # Default 4 = ~1 hour at the 15-min scan interval.
     cnn_train_every_n_scans: int  = field(default_factory=lambda: int(os.getenv("CNN_TRAIN_EVERY_N_SCANS",  "8")))
+    # Scan-loop cadence in seconds (default 900 = 15 min). Lower to expedite
+    # XGB shadow accumulation; raise to ease Coinbase REST pressure.
+    scan_interval_secs:     int   = field(default_factory=lambda: int(os.getenv("SCAN_INTERVAL_SECS",       "900")))
 
     # ── Ollama LLM ─────────────────────────────────────────────────────────────
     # Central default so every module reads the same model (CLAUDE.md invariant 7).
     ollama_model:         str  = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
+
+    # ── Model backend selector ─────────────────────────────────────────────────
+    # Valid values: "xgb" (v3 driver, default) | "xgb_v45" (v4.5 driver, dev).
+    # Legacy "cnn" raises at startup — CNN driver was deprecated 2026-05-23.
+    # See docs/superpowers/specs/2026-05-23-remove-cnn-driver-add-v45-driver-design.md.
+    model_backend:       str  = field(default_factory=lambda: _validate_backend(os.getenv("MODEL_BACKEND", "xgb").lower()))
+
+    # ── v4.5 indep_thresholds decision rule ────────────────────────────────────
+    # BUY  when p_up   > xgb_v45_thresh_up   AND p_up   >= p_down.
+    # SELL when p_down > xgb_v45_thresh_down AND p_down >  p_up.
+    # Defaults 0.50/0.50 match tools/v4_5_horizon_compare.py:138.
+    xgb_v45_thresh_up:   float = field(default_factory=lambda: float(os.getenv("XGB_V45_THRESH_UP",   "0.50")))
+    xgb_v45_thresh_down: float = field(default_factory=lambda: float(os.getenv("XGB_V45_THRESH_DOWN", "0.50")))
 
     # ── History backfill schedule ──────────────────────────────────────────────
     # How many hours between automatic incremental backfill runs (0 = disabled)

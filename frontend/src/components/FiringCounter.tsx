@@ -75,14 +75,13 @@ export default function FiringCounter() {
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {/* CNN */}
+        {/* XGB */}
         <div className="flex gap-2 items-center">
-          <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-widest w-8">CNN</span>
+          <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-widest w-8">XGB</span>
           <Stat label="Scans" value={counts.cnn_scans} color="text-blue-300" />
           <Stat label="Signals" value={counts.cnn_signals} />
           <Stat label="BUY" value={counts.cnn_buy} color="text-green-400" />
           <Stat label="SELL" value={counts.cnn_sell} color="text-red-400" />
-          <Stat label="Trains" value={counts.train_count} color="text-purple-400" />
         </div>
 
         <div className="w-px bg-gray-700 self-stretch mx-1" />
@@ -96,14 +95,7 @@ export default function FiringCounter() {
           <Stat label="Total tok" value={counts.llm_total_tok.toLocaleString()} color="text-amber-400" />
         </div>
 
-        <div className="w-px bg-gray-700 self-stretch mx-1" />
-
-        {/* Tech */}
-        <div className="flex gap-2 items-center">
-          <span className="text-[10px] text-gray-500 font-semibold uppercase tracking-widest w-8">TECH</span>
-          <Stat label="Scans" value={counts.tech_scans} color="text-blue-300" />
-          <Stat label="Signals" value={counts.tech_signals} />
-        </div>
+        {/* TechAgent retired #311-refactor-c — TECH scan/signal counters removed */}
 
       </div>
     </div>

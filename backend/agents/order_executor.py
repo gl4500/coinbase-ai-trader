@@ -31,6 +31,16 @@ _SECS_PER_DAY  = 86_400
 _SECS_PER_WEEK = 604_800
 
 
+def _maker_price(side: str, bid: float, ask: float) -> float:
+    """Post-only price for a maker entry: bid for BUY, ask for SELL.
+
+    Posting AT the touch rests in the book and gets a maker fill once a
+    taker on the other side hits it. Crossing the spread (e.g. BUY at ask)
+    would auto-cancel the post_only order on Coinbase.
+    """
+    return bid if side.upper() == "BUY" else ask
+
+
 class OrderExecutor:
     def __init__(self, dry_run: bool = True):
         self.dry_run          = dry_run
@@ -245,6 +255,174 @@ class OrderExecutor:
                     await asyncio.sleep(2 ** attempt)
 
         return {"success": False, "reason": "Order failed after 3 attempts"}
+
+    # ── Maker (post-only LIMIT) entry with timeout fallback ────────────────────
+
+    async def _wait_for_fill(
+        self,
+        product_id:  str,
+        order_id:    str,
+        timeout_secs: float,
+    ) -> bool:
+        """Poll get_orders for `order_id` until status==FILLED or deadline.
+        Returns True on fill, False on timeout."""
+        deadline = time.time() + max(0.0, float(timeout_secs))
+        while True:
+            try:
+                orders = await coinbase_client.get_orders(product_id=product_id)
+            except Exception as e:
+                logger.warning(f"_wait_for_fill: get_orders failed: {e}")
+                orders = []
+            for o in orders:
+                if (o.get("order_id") == order_id
+                        and str(o.get("status", "")).upper() == "FILLED"):
+                    return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.5, max(0.01, remaining / 4)))
+
+    async def execute_maker_signal(
+        self,
+        signal:       Dict,
+        timeout_secs: float = 30.0,
+    ) -> Dict:
+        """Maker (post-only LIMIT) entry; falls back to MARKET on timeout.
+
+        Cuts the entry leg from taker (~0.60% on tier 0) to maker (~0.20%) by
+        posting at the bid (BUY) / ask (SELL). If the resting limit doesn't
+        fill within `timeout_secs`, cancel and place a market order so the
+        entry isn't lost. Purely additive — no caller is migrated until the
+        user opts in.
+
+        Signal must have: product_id, side, bid, ask. Optional: atr,
+        quote_size, signal_type, id.
+        """
+        # 1 — Drawdown gate
+        dd_err = await self._check_drawdown()
+        if dd_err:
+            return {"success": False, "reason": dd_err}
+
+        pid  = signal["product_id"]
+        side = signal["side"].upper()
+        bid  = float(signal.get("bid", 0.0) or 0.0)
+        ask  = float(signal.get("ask", 0.0) or 0.0)
+        if bid <= 0 or ask <= 0:
+            return {"success": False, "reason": "Maker path requires bid + ask quotes"}
+
+        maker_price = _maker_price(side, bid, ask)
+
+        # 2 — ATR sizing or signal default
+        atr = signal.get("atr", 0.0) or 0.0
+        if atr > 0:
+            quote_size = await self._size_from_atr(atr)
+        else:
+            quote_size = signal.get("quote_size", config.max_position_usd)
+
+        if quote_size < 1.0:
+            return {"success": False, "reason": "Position below $1 minimum"}
+
+        # 3 — Pre-flight
+        error = await self._preflight(quote_size)
+        if error:
+            return {"success": False, "reason": error}
+
+        base_size = round(quote_size / maker_price, 8)
+
+        # 4 — Dry-run short-circuit
+        if self.dry_run:
+            fake_id = f"DRY_MAKER_{pid}_{side}_{uuid.uuid4().hex[:6]}"
+            if side == "BUY":
+                self._dry_run_balance -= quote_size
+            logger.info(
+                f"DRY-RUN MAKER: {side} {base_size} {pid} @ ${maker_price:,.4f}"
+                f" (quote ${quote_size:.2f}) | sim balance: ${self._dry_run_balance:,.2f}"
+            )
+            await database.save_order({
+                "order_id":   fake_id,
+                "product_id": pid,
+                "side":       side,
+                "order_type": "LIMIT_MAKER",
+                "price":      maker_price,
+                "base_size":  base_size,
+                "quote_size": quote_size,
+                "status":     "dry_run",
+                "strategy":   signal.get("signal_type", "TA"),
+            })
+            if signal.get("id"):
+                await database.mark_signal_acted(signal["id"], fake_id)
+            return {
+                "success":           True,
+                "order_id":          fake_id,
+                "fill_mode":         "MAKER",
+                "dry_run":           True,
+                "simulated_balance": self._dry_run_balance,
+            }
+
+        # 5 — Live: place post-only LIMIT at maker price
+        try:
+            resp = await coinbase_client.place_limit_order(
+                pid, side, base_size, maker_price, post_only=True,
+            )
+        except Exception as e:
+            logger.error(f"Maker LIMIT placement failed: {e}")
+            return {"success": False, "reason": f"Limit placement failed: {e}"}
+
+        order = resp.get("success_response", resp)
+        order_id = order.get("order_id") or order.get("client_order_id", "unknown")
+        await database.save_order({
+            "order_id":   order_id,
+            "product_id": pid,
+            "side":       side,
+            "order_type": "LIMIT_MAKER",
+            "price":      maker_price,
+            "base_size":  base_size,
+            "quote_size": quote_size,
+            "status":     "live",
+            "strategy":   signal.get("signal_type", "TA"),
+        })
+        if signal.get("id"):
+            await database.mark_signal_acted(signal["id"], order_id)
+        logger.info(
+            f"MAKER ORDER: {side} {base_size} {pid} @ ${maker_price:,.4f} → {order_id}"
+        )
+
+        # 6 — Poll for fill within timeout
+        filled = await self._wait_for_fill(pid, order_id, timeout_secs)
+        if filled:
+            return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
+
+        # 7 — Timeout: cancel + market fallback so the entry isn't lost
+        logger.info(
+            f"MAKER timeout after {timeout_secs}s — canceling {order_id} "
+            f"and falling back to MARKET"
+        )
+        try:
+            await coinbase_client.cancel_orders([order_id])
+            await database.update_order_status(order_id, "canceled")
+        except Exception as e:
+            logger.error(f"Cancel during maker timeout failed: {e}")
+
+        try:
+            mkt_resp  = await coinbase_client.place_market_order(pid, side, quote_size)
+            mkt_order = mkt_resp.get("success_response", mkt_resp)
+            mkt_id    = mkt_order.get("order_id", "unknown")
+            await database.save_order({
+                "order_id":   mkt_id,
+                "product_id": pid,
+                "side":       side,
+                "order_type": "MARKET",
+                "quote_size": quote_size,
+                "status":     "live",
+                "strategy":   signal.get("signal_type", "TA") + "_TAKER_FALLBACK",
+            })
+            return {"success": True, "order_id": mkt_id, "fill_mode": "TAKER_FALLBACK"}
+        except Exception as e:
+            logger.error(f"Market fallback failed: {e}")
+            return {
+                "success": False,
+                "reason":  f"Maker timed out and market fallback failed: {e}",
+            }
 
     # ── Execute market order ───────────────────────────────────────────────────
 

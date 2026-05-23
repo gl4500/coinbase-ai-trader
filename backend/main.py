@@ -48,8 +48,8 @@ from agents.market_scanner import MarketScanner
 from agents.signal_generator import SignalGenerator
 from agents.order_executor import OrderExecutor
 from agents.cnn_agent import CoinbaseCNNAgent
-from agents.tech_agent_cb import TechAgentCB
 from services.ws_subscriber import CoinbaseWSSubscriber
+from agents.exit_watcher import attach as attach_exit_watcher
 from services.portfolio_tracker import PortfolioTracker
 from services.outcome_tracker import get_tracker
 from services.history_backfill import get_backfill
@@ -194,13 +194,12 @@ class AppState:
     signal_gen:      SignalGenerator       = None
     order_executor:  OrderExecutor         = None
     cnn_agent:       CoinbaseCNNAgent      = None
-    tech_agent:      TechAgentCB           = None
     ws_subscriber:   CoinbaseWSSubscriber  = None
     portfolio:       PortfolioTracker      = None
     scanner_task:    asyncio.Task          = None
     portfolio_task:  asyncio.Task          = None
     cnn_task:        asyncio.Task          = None
-    tech_task:       asyncio.Task          = None
+    # tech_task removed #311-refactor-c (TechAgent retired)
     outcome_task:    asyncio.Task          = None
     backfill_task:   asyncio.Task          = None
     ws_connections:  List[WebSocket]       = []
@@ -278,9 +277,10 @@ _TRAIN_LOG_FILE      = os.path.join(os.path.dirname(__file__), "logs", "cnn_trai
 # train_worker.py only writes the progress file at start and end, so its mtime
 # is useless mid-run. We watch the training log mtime instead.
 _TRAIN_STALE_START_SECS = 1800   # 30 min grace after start before staleness applies
-_TRAIN_STALE_LOG_SECS   = 1800   # 30 min without log writes = stuck (phase-2 dataset
-                                 # build logs every 10-13 min per 10 products, so the
-                                 # old 15-min window tripped on normal cadence)
+_TRAIN_STALE_LOG_SECS   = 3600   # #107: 1 hr without log writes = stuck. Bumped from
+                                 # 1800 after the live backend's CNN inference contended
+                                 # with glum training for the same GPU and stretched
+                                 # epochs to 5+ min, false-killing healthy runs.
 
 
 def _is_training_stale(data: dict, log_mtime, now: float) -> bool:
@@ -387,7 +387,7 @@ async def _train_progress_watcher() -> None:
 
 
 # ── Agent startup stagger delays (seconds) ────────────────────────────────────
-_TECH_START_DELAY     =  5   # CNN starts at 0; Tech after 5s
+# _TECH_START_DELAY removed #311-refactor-c (TechAgent retired)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ async def lifespan(app: FastAPI):
     app_state.order_executor  = OrderExecutor(dry_run=app_state.dry_run)
     app_state.cnn_agent       = CoinbaseCNNAgent(ws_subscriber=app_state.ws_subscriber)
     _is_trading = lambda: app_state.is_trading
-    app_state.tech_agent      = TechAgentCB(ws_subscriber=app_state.ws_subscriber)
+    # TechAgent retired #311-refactor-c
     app_state.portfolio       = PortfolioTracker(ws_subscriber=app_state.ws_subscriber)
 
     # Seed WS subscriber from DB-cached tracked products immediately —
@@ -418,6 +418,12 @@ async def lifespan(app: FastAPI):
         app_state.ws_subscriber.set_products(cached_ids)
         logger.info(f"WS seeded from DB cache: {len(cached_ids)} products")
     await app_state.ws_subscriber.start()
+
+    # WS-driven exit checker: fires WS_TRAIL_STOP / WS_STOP_LOSS on every
+    # held position without waiting for the 60s scan cycle.
+    # Spec: docs/superpowers/specs/2026-05-23-ws-exit-checker-design.md
+    attach_exit_watcher(app_state.ws_subscriber, app_state.cnn_agent.book)
+    logger.info("WS exit watcher attached")
 
     # Background scan — refreshes product list without blocking startup
     async def _background_scan():
@@ -458,6 +464,7 @@ async def lifespan(app: FastAPI):
 
     app_state.cnn_task = asyncio.create_task(
         app_state.cnn_agent.run_loop(
+            interval            = config.scan_interval_secs,
             order_executor      = app_state.order_executor,
             is_trading_fn       = lambda: app_state.is_trading,
             train_every_n_scans = config.cnn_train_every_n_scans,
@@ -466,12 +473,7 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # Sub-agents: short stagger so they don't all hammer the DB simultaneously
-    async def _delayed_tech():
-        await asyncio.sleep(_TECH_START_DELAY)
-        await app_state.tech_agent.run_loop(is_trading_fn=_is_trading)
-
-    app_state.tech_task     = asyncio.create_task(_delayed_tech())
+    # TechAgent retired #311-refactor-c — only CNN agent runs as a sub-agent
     app_state.train_watcher_task  = asyncio.create_task(_train_progress_watcher())
 
     logger.info("Coinbase Trader ready — http://localhost:8001")
@@ -483,7 +485,7 @@ async def lifespan(app: FastAPI):
 
     for task in [
         app_state.scanner_task, app_state.portfolio_task,
-        app_state.cnn_task, app_state.tech_task,
+        app_state.cnn_task,
         app_state.outcome_task, app_state.backfill_task,
         app_state.train_watcher_task,
     ]:
@@ -837,6 +839,34 @@ async def reload_cnn_model(_: None = Depends(verify_api_key)):
     }
 
 
+@app.post("/api/xgb/calibration/reload")
+async def reload_xgb_calibration(_: None = Depends(verify_api_key)):
+    """Hot-reload the XGB booster + isotonic calibrator from disk (#192).
+
+    Use after refitting `backend/xgb_calibration.pkl` via
+    `tools.fit_xgb_calibration --source cache` (#187) so the running
+    process picks up the new artifacts without a backend restart.
+
+    Returns:
+      - 200 {"status": "reloaded", "load_succeeded": True/False, ...}
+      - 200 {"status": "missing", ...} if booster artifacts are absent
+    """
+    from agents import xgb_signal
+    ok = xgb_signal.force_reload()
+    cal_present = xgb_signal._calibration is not None
+    logger.info(
+        "xgb_signal hot-reload via /api/xgb/calibration/reload "
+        f"(load_succeeded={ok}, calibration_loaded={cal_present})"
+    )
+    return {
+        "status": "reloaded" if ok else "missing",
+        "load_succeeded": ok,
+        "calibration_loaded": cal_present,
+        "feature_set": xgb_signal._feature_set if ok else None,
+        "n_features": len(xgb_signal._feature_names) if ok else 0,
+    }
+
+
 @app.post("/api/cnn/lgbm/retrain")
 async def force_lgbm_retrain(_: None = Depends(verify_api_key)):
     """
@@ -1105,7 +1135,9 @@ async def clear_logs(_: None = Depends(verify_api_key)):
 
 @app.get("/api/agents/status")
 async def get_agent_status():
-    tech_status = app_state.tech_agent.status     if app_state.tech_agent     else {}
+    # TechAgent retired #311-refactor-c — tech_status kept as empty dict for
+    # frontend back-compat during the Phase A → Phase B window.
+    tech_status: Dict = {}
 
     # CNN book status
     cnn_book = app_state.cnn_agent.book if app_state.cnn_agent else None
@@ -1381,8 +1413,13 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    _free_port(8001)
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False,
+    # Honor PORT env so a second backend instance (e.g. Spyder dev kernel)
+    # can run on a different port without conflicting with the launcher's
+    # default 8001 instance. Frontend hits 8001 unchanged.
+    _port = int(os.getenv("PORT", "8001"))
+    _free_port(_port)
+    uvicorn.run("main:app", host="0.0.0.0", port=_port, reload=False,
                 log_level=config.log_level.lower(),
                 ws_ping_interval=20, ws_ping_timeout=20)
