@@ -24,8 +24,8 @@ if BACKEND not in sys.path:
 
 class TestConfigField:
 
-    def test_model_backend_defaults_to_cnn(self, monkeypatch):
-        """MODEL_BACKEND unset → config.model_backend == 'cnn'.
+    def test_model_backend_defaults_to_xgb(self, monkeypatch):
+        """MODEL_BACKEND unset → config.model_backend == 'xgb' (CNN deprecated 2026-05-23).
 
         importlib.reload(config) re-runs load_dotenv() which re-injects any
         MODEL_BACKEND value present in .env. Clear it again post-reload and
@@ -37,7 +37,7 @@ class TestConfigField:
         importlib.reload(cfg_mod)
         monkeypatch.delenv("MODEL_BACKEND", raising=False)
         fresh = cfg_mod.Config()
-        assert fresh.model_backend == "cnn"
+        assert fresh.model_backend == "xgb"
 
     def test_model_backend_reads_env(self, monkeypatch):
         """MODEL_BACKEND=xgb propagates into config.model_backend."""
@@ -99,30 +99,15 @@ class TestCnnProbBranching:
         agent.model = None  # forces _linear path when backend == "cnn"
         return agent
 
-    def test_default_backend_uses_cnn_path(self, monkeypatch):
-        """config.model_backend == 'cnn' → _cnn_prob does NOT call xgb_prob."""
-        monkeypatch.setenv("MODEL_BACKEND", "cnn")
+    def test_cnn_backend_is_deprecated(self, monkeypatch):
+        """MODEL_BACKEND=cnn raises ValueError as of 2026-05-23 (CNN deprecated).
+
+        Tests _validate_backend directly to avoid module-reload side-effects that
+        can corrupt the config singleton for downstream tests.
+        """
         import config as cfg_mod
-        importlib.reload(cfg_mod)
-        # cnn_agent imports `config` at module top, reload it so the agent
-        # picks up our reloaded config singleton.
-        if "agents.cnn_agent" in sys.modules:
-            importlib.reload(sys.modules["agents.cnn_agent"])
-
-        called = {"xgb": False}
-        if "agents.xgb_signal" in sys.modules:
-            del sys.modules["agents.xgb_signal"]
-        import agents.xgb_signal as xs
-
-        def _spy(_channels):
-            called["xgb"] = True
-            return 0.7
-        monkeypatch.setattr(xs, "xgb_prob", _spy)
-
-        agent = self._make_agent()
-        channels = [[0.5] * 60 for _ in range(27)]
-        agent._cnn_prob(channels)
-        assert called["xgb"] is False, "CNN backend must not invoke xgb_prob"
+        with pytest.raises(ValueError, match="MODEL_BACKEND=cnn is deprecated"):
+            cfg_mod._validate_backend("cnn")
 
     def test_xgb_backend_calls_xgb_prob(self, monkeypatch):
         """config.model_backend == 'xgb' → _cnn_prob returns xgb_prob's value."""
@@ -184,24 +169,16 @@ class TestPidPlumbing:
         assert result == 0.7
         assert called["pid"] == "BTC-USD"
 
-    def test_cnn_prob_no_pid_kwarg_under_cnn_backend(self, monkeypatch):
-        """Under MODEL_BACKEND=cnn, xgb_signal must NOT be called."""
+    def test_cnn_prob_raises_on_cnn_backend(self, monkeypatch):
+        """_cnn_prob raises RuntimeError when model_backend is forced to 'cnn' (deprecated)."""
         import config as cfg
         monkeypatch.setattr(cfg.config, "model_backend", "cnn")
 
-        from agents import cnn_agent, xgb_signal
-        called = {"hit": False}
-
-        def fake_prob(channels, pid=None):
-            called["hit"] = True
-            return 0.5
-
-        monkeypatch.setattr(xgb_signal, "xgb_prob", fake_prob)
-
+        from agents import cnn_agent
         agent = cnn_agent.CoinbaseCNNAgent.__new__(cnn_agent.CoinbaseCNNAgent)
-        agent.model = None  # forces _linear fallback
+        agent.model = None
         agent.fb = None
         import numpy as np
         channels = np.zeros((28, 60), dtype=np.float64).tolist()
-        agent._cnn_prob(channels, pid="BTC-USD")
-        assert called["hit"] is False
+        with pytest.raises(RuntimeError, match="unsupported model_backend"):
+            agent._cnn_prob(channels, pid="BTC-USD")

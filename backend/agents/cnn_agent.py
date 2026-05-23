@@ -92,12 +92,13 @@ MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unpr
 def _backend_label() -> str:
     """#267 — User-facing log prefix that reflects the active decider.
 
-    When MODEL_BACKEND=xgb, `_cnn_prob` delegates to xgb_signal.xgb_prob,
-    so signals printed by the scan loop are XGB decisions, not CNN. Using
-    "CNN" in those log lines misled the operator. Any non-"xgb" value
-    falls back to "CNN" so the label never prints a raw env value.
+    Both supported MODEL_BACKEND values ("xgb" and "xgb_v45") route through
+    xgb_signal, so signals are always XGB-driven. The xgb_v45 driver uses
+    the 3-class model + indep_thresholds decision; xgb (default) uses v3.
     """
-    return "XGB" if config.model_backend == "xgb" else "CNN"
+    if config.model_backend == "xgb_v45":
+        return "XGB_V45"
+    return "XGB"
 
 
 class _CNNBook:
@@ -380,6 +381,26 @@ def _volume_sentiment(closes, volumes, window):
         if tot > 0:
             out[i] = 2.0 * (up / tot) - 1.0
     return out
+
+
+def _indep_thresholds_decision(
+    p_down: float, p_neutral: float, p_up: float,
+    thresh_up: float, thresh_down: float,
+) -> Tuple[str, float]:
+    """v4.5 indep_thresholds rule. Mirrors tools/v4_5_horizon_compare.py:138.
+
+    BUY  when p_up   > thresh_up   AND p_up   >= p_down (tie -> BUY).
+    SELL when p_down > thresh_down AND p_down >  p_up  (strict).
+    Else HOLD.
+
+    Returns (side, strength) where strength is the winning class probability
+    rounded to 3 decimal places, or 0.0 for HOLD.
+    """
+    if p_up > thresh_up and p_up >= p_down:
+        return "BUY", round(p_up, 3)
+    if p_down > thresh_down and p_down > p_up:
+        return "SELL", round(p_down, 3)
+    return "HOLD", 0.0
 
 
 def _mask_training_constant_channels(channels):
@@ -1613,29 +1634,11 @@ class CoinbaseCNNAgent:
         # Align inference input with the training distribution — zero out the
         # channels that were constant-zero at training (P3b).
         channels = _mask_training_constant_channels(channels)
-        if config.model_backend == "xgb":
+        if config.model_backend in ("xgb", "xgb_v45"):
             from agents import xgb_signal
             return xgb_signal.xgb_prob(channels, pid=pid)
-        if _TORCH and self.model:
-            return self.model.predict(self.fb.to_tensor(channels))
-        return self._linear(channels)
-
-    @staticmethod
-    def _linear(channels) -> float:
-        """Fallback when PyTorch is unavailable — uses 6 of 16 channels."""
-        try:
-            score = (
-                0.50
-                + 0.20 * (channels[0][-1] - 0.5)      # normalised price
-                + 0.15 * (0.5 - channels[4][-1])       # inverted RSI
-                + 0.10 * channels[5][-1]                # MACD histogram
-                + 0.10 * (0.5 - channels[12][-1])      # inverted MFI
-                + 0.08 * channels[13][-1]               # OBV slope
-                + 0.07 * (1.0 - channels[15][-1])      # low ADX = mean revert
-            )
-            return max(0.01, min(0.99, score))
-        except Exception:
-            return 0.5
+        # Unreachable under config._validate_backend; defensive only.
+        raise RuntimeError(f"unsupported model_backend={config.model_backend!r}")
 
     async def _ob(self, product_id: str) -> Dict:
         try:
@@ -1894,21 +1897,18 @@ class CoinbaseCNNAgent:
             )
             cnn_prob = self._cnn_prob(channels, pid=pid)
 
-            # Shadow XGB probability — log every scan regardless of MODEL_BACKEND
-            # so we can compare CNN vs XGB calibration on identical inputs (#181).
-            if config.model_backend == "xgb":
-                xgb_shadow = cnn_prob
+            # Always log v3 + v4.5 shadow probabilities, regardless of driver
+            # (#181 + 2026-05-23 CNN deprecation). xgb_prob_shadow_v4_5 has
+            # built-in isolation: v4.5 failure -> v45=None, never affects v3.
+            try:
+                from agents import xgb_signal as _xgb
+                xgb_shadow, xgb_shadow_v45 = _xgb.xgb_prob_shadow_v4_5(
+                    _mask_training_constant_channels(channels),
+                    pid=pid,
+                )
+            except Exception:
+                xgb_shadow     = None
                 xgb_shadow_v45 = None
-            else:
-                try:
-                    from agents import xgb_signal as _xgb
-                    xgb_shadow, xgb_shadow_v45 = _xgb.xgb_prob_shadow_v4_5(
-                        _mask_training_constant_channels(channels),
-                        pid=pid,
-                    )
-                except Exception:
-                    xgb_shadow = None
-                    xgb_shadow_v45 = None
 
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)
@@ -1962,15 +1962,29 @@ class CoinbaseCNNAgent:
         model_prob = max(0.01, min(0.99, cnn_prob))
 
         # ── Signal direction ──────────────────────────────────────────────────
-        if model_prob > config.cnn_buy_threshold:
-            side     = "BUY"
-            strength = round((model_prob - 0.5) * 2, 3)
-        elif model_prob < config.cnn_sell_threshold:
-            side     = "SELL"
-            strength = round((0.5 - model_prob) * 2, 3)
+        if config.model_backend == "xgb_v45":
+            # v4.5 3-class driver — indep_thresholds rule on (p_down, p_neutral, p_up).
+            if xgb_shadow_v45 is None:
+                # v4.5 inference failed — HOLD to avoid trading on garbage signal.
+                side, strength = "HOLD", 0.0
+            else:
+                p_down, p_neutral, p_up = xgb_shadow_v45
+                side, strength = _indep_thresholds_decision(
+                    p_down, p_neutral, p_up,
+                    thresh_up   = config.xgb_v45_thresh_up,
+                    thresh_down = config.xgb_v45_thresh_down,
+                )
         else:
-            side     = "HOLD"
-            strength = 0.0
+            # MODEL_BACKEND=xgb — existing 2-class gate on v3 prob.
+            if model_prob > config.cnn_buy_threshold:
+                side     = "BUY"
+                strength = round((model_prob - 0.5) * 2, 3)
+            elif model_prob < config.cnn_sell_threshold:
+                side     = "SELL"
+                strength = round((0.5 - model_prob) * 2, 3)
+            else:
+                side     = "HOLD"
+                strength = 0.0
 
         # MC filter chain (off by default; MC_FILTERS env-gated). Returns the
         # side unchanged and {} telemetry when MC_FILTERS is empty.

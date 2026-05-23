@@ -8,6 +8,8 @@ without a live consumer, this test fails.
 import os
 import sys
 
+import pytest
+
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
@@ -135,3 +137,36 @@ class TestNoCnnBackendOnlyBranches:
                 f"was deleted #311-refactor-f (no-op under xgb backend; "
                 f"auto-train infrastructure cleanup is module 4c)."
             )
+
+
+class TestModelBackendValidation:
+    """Validates the MODEL_BACKEND env-var contract after CNN deprecation
+    (2026-05-23). Valid values: 'xgb' (v3 driver, default) | 'xgb_v45'
+    (v4.5 driver). Legacy 'cnn' raises ValueError at startup."""
+
+    def test_model_backend_cnn_raises_value_error(self, monkeypatch):
+        monkeypatch.setenv("MODEL_BACKEND", "cnn")
+        from config import Config
+        with pytest.raises(ValueError, match="deprecated"):
+            Config()
+
+    def test_model_backend_xgb_v45_accepted(self, monkeypatch):
+        monkeypatch.setenv("MODEL_BACKEND", "xgb_v45")
+        from config import Config
+        cfg = Config()
+        assert cfg.model_backend == "xgb_v45"
+
+    def test_model_backend_unknown_raises(self, monkeypatch):
+        monkeypatch.setenv("MODEL_BACKEND", "lstm")
+        from config import Config
+        with pytest.raises(ValueError, match="invalid"):
+            Config()
+
+    def test_xgb_v45_threshold_defaults(self, monkeypatch):
+        monkeypatch.delenv("XGB_V45_THRESH_UP",   raising=False)
+        monkeypatch.delenv("XGB_V45_THRESH_DOWN", raising=False)
+        monkeypatch.setenv("MODEL_BACKEND", "xgb")
+        from config import Config
+        cfg = Config()
+        assert cfg.xgb_v45_thresh_up   == 0.50
+        assert cfg.xgb_v45_thresh_down == 0.50

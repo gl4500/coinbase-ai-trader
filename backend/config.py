@@ -12,6 +12,24 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 
+_VALID_BACKENDS = {"xgb", "xgb_v45"}
+
+
+def _validate_backend(value: str) -> str:
+    if value == "cnn":
+        raise ValueError(
+            "MODEL_BACKEND=cnn is deprecated as of 2026-05-23. "
+            "Use MODEL_BACKEND=xgb (default, v3 driver) or "
+            "MODEL_BACKEND=xgb_v45 (v4.5 driver). See "
+            "docs/superpowers/specs/2026-05-23-remove-cnn-driver-add-v45-driver-design.md"
+        )
+    if value not in _VALID_BACKENDS:
+        raise ValueError(
+            f"MODEL_BACKEND={value!r} invalid. Valid: {sorted(_VALID_BACKENDS)}"
+        )
+    return value
+
+
 @dataclass
 class Config:
     # ── Coinbase Advanced Trade API (CDP keys — jwt auth) ──────────────────────
@@ -72,11 +90,18 @@ class Config:
     # Central default so every module reads the same model (CLAUDE.md invariant 7).
     ollama_model:         str  = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.1:8b"))
 
-    # ── Model backend selector (#135 Phase 5) ──────────────────────────────────
-    # "cnn" (default) keeps current behavior; "xgb" routes _cnn_prob through
-    # agents.xgb_signal.xgb_prob. Phase 6 (#136) will flip this for the 7-day
-    # shadow-mode comparison without retraining or recompiling.
-    model_backend:       str  = field(default_factory=lambda: os.getenv("MODEL_BACKEND", "cnn").lower())
+    # ── Model backend selector ─────────────────────────────────────────────────
+    # Valid values: "xgb" (v3 driver, default) | "xgb_v45" (v4.5 driver, dev).
+    # Legacy "cnn" raises at startup — CNN driver was deprecated 2026-05-23.
+    # See docs/superpowers/specs/2026-05-23-remove-cnn-driver-add-v45-driver-design.md.
+    model_backend:       str  = field(default_factory=lambda: _validate_backend(os.getenv("MODEL_BACKEND", "xgb").lower()))
+
+    # ── v4.5 indep_thresholds decision rule ────────────────────────────────────
+    # BUY  when p_up   > xgb_v45_thresh_up   AND p_up   >= p_down.
+    # SELL when p_down > xgb_v45_thresh_down AND p_down >  p_up.
+    # Defaults 0.50/0.50 match tools/v4_5_horizon_compare.py:138.
+    xgb_v45_thresh_up:   float = field(default_factory=lambda: float(os.getenv("XGB_V45_THRESH_UP",   "0.50")))
+    xgb_v45_thresh_down: float = field(default_factory=lambda: float(os.getenv("XGB_V45_THRESH_DOWN", "0.50")))
 
     # ── History backfill schedule ──────────────────────────────────────────────
     # How many hours between automatic incremental backfill runs (0 = disabled)

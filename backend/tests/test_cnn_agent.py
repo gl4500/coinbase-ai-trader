@@ -331,17 +331,8 @@ class TestCoinbaseCNNAgent:
         assert len(results) == 2
         assert results[0]["strength"] >= results[1]["strength"]
 
-    def test_linear_fallback_high_prob(self, agent):
-        """Linear fallback returns > 0.5 when normalised close (ch0) is high."""
-        channels = [[0.9] * SEQ_LEN] * N_CHANNELS
-        p = agent._linear(channels)
-        assert p > 0.5
-
-    def test_linear_fallback_low_prob(self, agent):
-        """Linear fallback returns < 0.5 when normalised close (ch0) is low."""
-        channels = [[0.1] * SEQ_LEN] + [[0.9] * SEQ_LEN] * (N_CHANNELS - 1)
-        p = agent._linear(channels)
-        assert p < 0.5
+    # test_linear_fallback_high_prob + test_linear_fallback_low_prob DELETED
+    # 2026-05-23 — _linear method removed alongside CNN driver deprecation.
 
 
 # ── train_on_history ───────────────────────────────────────────────────────────
@@ -2667,17 +2658,17 @@ class TestBackendLabelHelper:
         with patch.object(ca.config, "model_backend", "xgb"):
             assert ca._backend_label() == "XGB"
 
-    def test_returns_cnn_when_backend_is_cnn(self):
+    def test_returns_xgb_v45_when_backend_is_xgb_v45(self):
+        """xgb_v45 driver → label 'XGB_V45' (2026-05-23 CNN deprecation)."""
         import agents.cnn_agent as ca
-        with patch.object(ca.config, "model_backend", "cnn"):
-            assert ca._backend_label() == "CNN"
+        with patch.object(ca.config, "model_backend", "xgb_v45"):
+            assert ca._backend_label() == "XGB_V45"
 
-    def test_returns_cnn_when_backend_is_unknown(self):
-        """Defensive: any non-xgb value falls back to CNN — the label
-        should never print as a raw env value or 'unknown'."""
+    def test_returns_xgb_for_any_other_backend(self):
+        """Defensive: any non-xgb_v45 value falls back to 'XGB' — CNN is deprecated."""
         import agents.cnn_agent as ca
-        with patch.object(ca.config, "model_backend", "ensemble"):
-            assert ca._backend_label() == "CNN"
+        with patch.object(ca.config, "model_backend", "xgb"):
+            assert ca._backend_label() == "XGB"
 
 
 # ── #57 stage (a): real BTC + real 5m into _build_dataset, mask shrink ────────
@@ -3804,3 +3795,179 @@ class TestV4ShadowWriteThrough:
             "Integration test stub — wire to existing TestGenerateSignal "
             "harness during implementation."
         )
+
+
+# ── v4.5 shadow + driver tests (2026-05-23 CNN deprecation) ──────────────────
+
+
+class TestV45ShadowAndDriver:
+    """v4.5 always-on shadow logging + MODEL_BACKEND=xgb_v45 driver path."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_mc_chain(self, monkeypatch):
+        """MC filter chain state leaks across tests (test_mc_filters_ci_blocks_*
+        reloads ci_filter module and the registry caches by env state).
+        Reset MC_FILTERS to empty + clear chain cache so my tests see a clean
+        no-MC environment. Without this, BUY decisions get downgraded to HOLD."""
+        monkeypatch.setenv("MC_FILTERS", "")
+        from agents.mc import registry
+        registry._reset_chain_cache()
+        yield
+        registry._reset_chain_cache()
+
+    @pytest.mark.asyncio
+    async def test_generate_signal_xgb_logs_v45_shadow(self, agent, product, monkeypatch):
+        """Under MODEL_BACKEND=xgb (v3 driver), v4.5 shadow logs every scan."""
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca.config, "model_backend", "xgb")
+        monkeypatch.setattr(
+            "agents.xgb_signal.xgb_prob_shadow_v4_5",
+            lambda channels, pid=None: (0.65, (0.10, 0.10, 0.80)),
+        )
+
+        captured = []
+        async def _capture_save(scan, db_path=None):
+            captured.append(scan)
+
+        candles = _make_candles(80)
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",
+                  side_effect=_capture_save),
+            patch("agents.cnn_agent.database.get_recent_lessons",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(return_value=1)),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+        ):
+            await agent.generate_signal(product)
+
+        assert captured, "save_cnn_scan was not called"
+        scan = captured[0]
+        # v3 driver decision still controls side (model_prob 0.82 > 0.60 → BUY)
+        assert scan["side"] == "BUY"
+        # v4.5 shadow probs persisted atomically (invariant #17)
+        assert scan["xgb_prob_v4_5_down"]    == 0.10
+        assert scan["xgb_prob_v4_5_neutral"] == 0.10
+        assert scan["xgb_prob_v4_5_up"]      == 0.80
+
+    @pytest.mark.asyncio
+    async def test_generate_signal_xgb_handles_v45_shadow_failure(
+        self, agent, product, monkeypatch,
+    ):
+        """v4.5 failure → all three probs NULL atomically; v3 driver unaffected."""
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca.config, "model_backend", "xgb")
+        monkeypatch.setattr(
+            "agents.xgb_signal.xgb_prob_shadow_v4_5",
+            lambda channels, pid=None: (0.65, None),
+        )
+
+        captured = []
+        async def _capture_save(scan, db_path=None):
+            captured.append(scan)
+
+        candles = _make_candles(80)
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",
+                  side_effect=_capture_save),
+            patch("agents.cnn_agent.database.get_recent_lessons",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(return_value=1)),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+        ):
+            await agent.generate_signal(product)
+
+        scan = captured[0]
+        assert scan["xgb_prob_v4_5_down"]    is None
+        assert scan["xgb_prob_v4_5_neutral"] is None
+        assert scan["xgb_prob_v4_5_up"]      is None
+        # v3 shadow still recorded
+        assert scan["xgb_prob"] == pytest.approx(0.65, abs=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_generate_signal_xgb_v45_driver_path(self, agent, product, monkeypatch):
+        """Under MODEL_BACKEND=xgb_v45, BUY decided by indep_thresholds on v4.5 probs."""
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca.config, "model_backend", "xgb_v45")
+        monkeypatch.setattr(ca.config, "xgb_v45_thresh_up",   0.50)
+        monkeypatch.setattr(ca.config, "xgb_v45_thresh_down", 0.50)
+        monkeypatch.setattr(
+            "agents.xgb_signal.xgb_prob_shadow_v4_5",
+            lambda channels, pid=None: (0.55, (0.10, 0.10, 0.80)),
+        )
+
+        captured = []
+        async def _capture_save(scan, db_path=None):
+            captured.append(scan)
+
+        candles = _make_candles(80)
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",
+                  side_effect=_capture_save),
+            patch("agents.cnn_agent.database.get_recent_lessons",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(return_value=1)),
+            patch.object(agent, "_cnn_prob", return_value=0.55),
+        ):
+            sig = await agent.generate_signal(product)
+
+        # v4.5 drove the decision (p_up=0.80 → BUY)
+        assert sig is not None
+        assert sig["side"] == "BUY"
+        # Both v3 and v4.5 shadow probs persisted (always-on)
+        scan = captured[0]
+        assert scan["xgb_prob_v4_5_up"]   == 0.80
+        assert scan["xgb_prob_v4_5_down"] == 0.10
+
+    @pytest.mark.asyncio
+    async def test_generate_signal_xgb_v45_holds_on_v45_failure(
+        self, agent, product, monkeypatch,
+    ):
+        """Under MODEL_BACKEND=xgb_v45, v4.5 inference failure → HOLD (no garbage trades)."""
+        import agents.cnn_agent as ca
+        monkeypatch.setattr(ca.config, "model_backend", "xgb_v45")
+        monkeypatch.setattr(
+            "agents.xgb_signal.xgb_prob_shadow_v4_5",
+            lambda channels, pid=None: (0.55, None),
+        )
+
+        candles = _make_candles(80)
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan",
+                  new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons",
+                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.coinbase_client.get_orderbook",
+                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent.database.save_signal",
+                  new=AsyncMock(return_value=1)),
+            patch.object(agent, "_cnn_prob", return_value=0.55),
+        ):
+            sig = await agent.generate_signal(product)
+
+        # HOLD → no signal returned (matches existing no_conviction test)
+        assert sig is None

@@ -7,6 +7,18 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+- **2026-05-23: Remove CNN trade-driver path + add `MODEL_BACKEND=xgb_v45`** — CNN was declared deprecated 2026-05-18 but the driver branch in `_cnn_prob` and the `_linear` fallback remained. The dev backend on 8002 was forced to run `MODEL_BACKEND=cnn` solely to activate v4.5 shadow logging — directly contradicting "XGB only" and blocking v4.5 paper-ROI measurement.
+  - `config.py`: added `_validate_backend(value)`. Valid `MODEL_BACKEND` values now `{xgb, xgb_v45}`. Legacy `cnn` raises `ValueError` with migration message. Default flipped `cnn`→`xgb`. New env vars `XGB_V45_THRESH_UP` / `XGB_V45_THRESH_DOWN` (default 0.50 each, mirror `tools/v4_5_horizon_compare.py:138`).
+  - `agents/cnn_agent.py`: deleted CNN driver branch in `_cnn_prob` and `_linear` method. `_cnn_prob` now routes through `xgb_signal.xgb_prob` for both `xgb` and `xgb_v45`; defensive `RuntimeError` for any other value (`_validate_backend` already gates upstream).
+  - `agents/cnn_agent.py:generate_signal` — shadow gate flipped to unconditional. `xgb_prob_shadow_v4_5` runs every scan regardless of driver, so v4.5 3-class telemetry persists on 8001 (xgb driver) too.
+  - `agents/cnn_agent.py:generate_signal` decision branch: under `MODEL_BACKEND=xgb_v45`, BUY/SELL/HOLD is decided by new `_indep_thresholds_decision` helper (mirrors `tools/v4_5_horizon_compare.py:138` exactly — asymmetric tie: BUY accepts `p_up >= p_down`, SELL requires `p_down > p_up`). v4.5 inference failure → HOLD.
+  - `agents/cnn_agent.py:_backend_label` — now returns "XGB_V45" under xgb_v45, otherwise "XGB". Old "CNN" branch removed.
+  - `tests/test_config.py`: +4 tests (`TestModelBackendValidation`). `tests/test_xgb_v45_decision.py` NEW: +8 tests covering strong/marginal/threshold-edge/tie cases. `tests/test_cnn_agent.py`: +4 tests (`TestV45ShadowAndDriver`); −2 deleted (`test_linear_fallback_high_prob`, `test_linear_fallback_low_prob`).
+  - **Out of scope (deferred to backlog task #7):** class rename `CoinbaseCNNAgent`, DB columns `cnn_scans/cnn_w/llm_w`, `CNNDashboard.tsx` filename, removal of `SignalCNNGlu1`/`_build_cnn`/`_TORCH`/CNN checkpoint load (still referenced by dead-but-callable training code).
+  - **Verify:** `cd backend && python -m pytest tests/test_config.py tests/test_xgb_v45_decision.py tests/test_cnn_agent.py::TestV45ShadowAndDriver -v` — 23/23 PASS.
+  - **Deployment:** Operator restarts 8001 with `MODEL_BACKEND=xgb` (or default). Kills current 8002 PID and relaunches with `PORT=8002 MODEL_BACKEND=xgb_v45 DATABASE_URL=coinbase_dev.db`.
+  - **Spec:** `docs/superpowers/specs/2026-05-23-remove-cnn-driver-add-v45-driver-design.md`. **Plan:** `docs/superpowers/plans/2026-05-23-remove-cnn-driver-add-v45-driver.md`.
+- **2026-05-23: Strategy-discovery rebuild Phase 1 Task 2** — added `fetch_supply_snapshot(pid)` to `services/coinpaprika_marketcap.py`. Hits `/v1/tickers/{cp_id}` and returns `(circulating_supply, total_supply, max_supply_or_None)`. Enables FDV computation (`price × total_supply`) and circ/total ratio for the rebuild's tokenomic feature set.
 - **2026-05-23: Strategy-discovery rebuild Phase 1 Task 1** — local data inventory script (`tools/strategy_discovery/inventory.py`) writes a Markdown report + JSON sidecar of what 1h OHLCV / CoinPaprika tokenomic / 1m OHLCV data exists locally. Read-only; no API calls. Outputs feed universe curation (Task 5). Per the data-first directive.
 
 ---
