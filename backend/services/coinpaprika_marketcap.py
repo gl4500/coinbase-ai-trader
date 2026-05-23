@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://api.coinpaprika.com/v1"
 _HISTORY_URL = f"{_BASE}/tickers/{{cp_id}}/historical"
+_TICKER_URL  = f"{_BASE}/tickers/{{cp_id}}"
 
 _SCHEMA_VERSION = 1
 
@@ -184,3 +185,69 @@ async def fetch_marketcap_history(
         rows.append((ts_ms, mc_f, vol_f))
     rows.sort(key=lambda r: r[0])
     return rows
+
+
+async def fetch_supply_snapshot(
+    product_id: str,
+) -> Optional[Tuple[float, float, Optional[float]]]:
+    """Current-ticker supply snapshot for one Coinbase pid.
+
+    Returns (circulating_supply, total_supply, max_supply_or_None) or None on
+    any failure (unmapped pid, disabled, non-200, malformed body, missing
+    circulating/total).
+
+    max_supply is None for tokens with no fixed cap (e.g. ETH) — the
+    distinction matters because it changes how FDV is interpreted downstream.
+
+    Endpoint: GET /v1/tickers/{cp_id}  (no key, free tier).
+    """
+    if _is_disabled():
+        return None
+
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return None
+
+    url = _TICKER_URL.format(cp_id=cp_id)
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url)
+    except Exception as e:
+        logger.warning(
+            "coinpaprika_marketcap ticker HTTP error pid=%s: %r", product_id, e
+        )
+        return None
+
+    if resp.status_code != 200:
+        logger.warning(
+            "coinpaprika_marketcap ticker non-200 pid=%s status=%d",
+            product_id, resp.status_code,
+        )
+        return None
+
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+
+    if not isinstance(body, dict):
+        return None
+
+    try:
+        circ  = float(body["circulating_supply"])
+        total = float(body["total_supply"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    max_raw = body.get("max_supply")
+    max_supply: Optional[float]
+    if max_raw is None:
+        max_supply = None
+    else:
+        try:
+            max_supply = float(max_raw)
+        except (TypeError, ValueError):
+            max_supply = None
+
+    return (circ, total, max_supply)
