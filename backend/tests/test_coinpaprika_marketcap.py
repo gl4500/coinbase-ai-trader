@@ -212,3 +212,13 @@ class TestVolume24hExtraction:
         assert rows[0][1] == 1.0e9
         assert rows[0][2] == 5.0e7
         assert rows[1][2] == 6.0e7
+
+
+def test_product_to_cp_id_has_at_least_100_entries():
+    """The mapping was extended in 2026-05-23 to support the strategy-discovery
+    rebuild's 50-pid universe curation (needs a ~100+ candidate pool)."""
+    from services.coinpaprika_marketcap import _PRODUCT_TO_CP_ID
+    assert len(_PRODUCT_TO_CP_ID) >= 100, (
+        f"_PRODUCT_TO_CP_ID has only {len(_PRODUCT_TO_CP_ID)} entries; "
+        f"Phase 1 Task 4 requires >= 100 for universe curation candidate pool"
+    )
