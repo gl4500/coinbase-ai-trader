@@ -68,9 +68,10 @@ What concretely makes a strategy "winning"? Pass/fail gates + a ranking metric.
 
 | Component | What it asks | Status |
 |---|---|---|
-| Min win rate | What precision must a strategy achieve to qualify? | OPEN |
-| Min avg win magnitude | What's the smallest meaningful winning trade size (after fees)? | OPEN |
-| Max avg loss magnitude | Cap on losing-trade size? | OPEN |
+| Min win rate | What precision must a strategy achieve to qualify? | **RESOLVED 2026-05-23: ≥ 70% (hard gate). "Higher is better" — also enters the ranking metric.** |
+| Fee convention | Wins/losses measured at which fee tier? | **RESOLVED 2026-05-23: retail (0.6%/side, 1.2% round-trip).** All win/loss magnitudes are after-fee, net. |
+| Min avg win magnitude | What's the smallest meaningful winning trade size (after fees)? | **RESOLVED 2026-05-23: ≥ +5% net (the asymmetric-momentum floor — operator selected the band Asymmetric momentum / Cohort rotation / Long-shot).** |
+| Max avg loss magnitude | Cap on losing-trade size? | **RESOLVED 2026-05-23: ≤ −10% magnitude net (the long-shot ceiling).** |
 | Min net expectancy | Avg P&L per trade floor (after fees)? | OPEN |
 | Min trade frequency | Min trades/year to qualify (does it fire meaningfully)? | OPEN |
 | Max drawdown | Worst cumulative loss tolerated? | OPEN |
@@ -152,6 +153,10 @@ Affects data availability — CoinPaprika's free tier and the marketcap parquet 
 - 2026-05-23: **Methodology = target-spec-first ("backprop"-style).** Define the winning-strategy target (gates + ranking) BEFORE building the optimizer. Mining hunts for strategies that pass the target.
 - 2026-05-23: **Trade horizon = SEARCH DIMENSION** within the data-feasible band (hours to ~weeks), not pre-fixed. Optimization criterion is high win rate × meaningful magnitude; horizon emerges from the search.
 - 2026-05-23: **Optimization criterion: high win rate × meaningful win magnitude** (specific thresholds TBD via Q0). Operator stated framing: "high win rates, timescale is based on the win rate and percentage of the win."
+- 2026-05-23: **Min win rate gate = 70%.** Higher is better — also enters the ranking metric. Operator: "70% win rate ... but higher is better."
+- 2026-05-23: **Fee convention = retail tier (0.6%/side, 1.2% round-trip).** All win/loss magnitudes throughout this discovery are NET of round-trip fees. A trade that nets +0.5% gross is a LOSS under this convention.
+- 2026-05-23: **Per-trade profile band** — operator selected Asymmetric Momentum + Cohort Rotation + Long-Shot. Concrete gates: **avg_win ≥ +5% net** AND **avg_loss ≤ −10% net magnitude**. Strategies whose profile lands outside this band are rejected. Strategies on tight-scalp or standard-swing profiles are out of scope.
+- 2026-05-23: **Long-shot caveat** — strategies whose profile lands at the long-shot end (avg_win ≥ +15%, avg_loss ≥ −7%) at 70%+ win rate are statistically unusual on this data scale. Validation methodology must require extra rigor for them (higher minimum trade count, out-of-sample re-test, possibly bootstrap CI). To be revisited at the validation-methodology question.
 
 ## What this rebuild is NOT
 
