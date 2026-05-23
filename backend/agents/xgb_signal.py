@@ -285,8 +285,13 @@ def xgb_prob_v4(channels, pid: Optional[str] = None) -> float:
 
 def xgb_prob_v4_5(
     channels, pid: Optional[str] = None,
+    now_ts: Optional[float] = None,
 ) -> Tuple[float, float, float]:
     """v4.5 3-class probabilities (p_down, p_neutral, p_up).
+
+    When `now_ts` is provided, fetch_tiered uses it to look up the tier
+    slices as they would have been at that historical timestamp (drops
+    candles with start >= now_ts). Default None = live (current behavior).
 
     Each clipped to [0.01, 0.99] then renormalized to sum to 1.0. Returns
     neutral fallback (0.33, 0.34, 0.33) if artifacts missing, pid is None,
@@ -305,7 +310,7 @@ def xgb_prob_v4_5(
         from services.tiered_history import fetch_tiered
         from tools.xgb_v4_5_features import extract_v4_5
 
-        tiers = fetch_tiered(pid, source="live")
+        tiers = fetch_tiered(pid, source="live", now_ts=now_ts)
         features, _ = extract_v4_5(tiers)
         dmat = xgb.DMatrix(features, feature_names=_feature_names_v45)
         raw = _booster_v45.predict(dmat)
