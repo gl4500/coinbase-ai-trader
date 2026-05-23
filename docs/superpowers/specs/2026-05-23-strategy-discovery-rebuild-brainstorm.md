@@ -161,12 +161,22 @@ Are we mining for *one* winning strategy that works on the whole universe, or a 
 
 What's the universe the strategy operates over?
 
-- v3's choice: survivorship-aware top-20 Coinbase USD spot.
-- Alternatives: all Coinbase USD pairs; all pairs with sufficient tokenomic data; regime-stratified subsets; explicitly include the long tail (which v3 explicitly excluded).
+**Status: RESOLVED 2026-05-23 — (c) diverse-sample ~50 products spanning the tokenomic state space, with a data-first inventory directive.** Operator: "c is fine, look through all the I have collected first before going to coinpaprika for more calls."
 
-Affects data availability — CoinPaprika's free tier and the marketcap parquet writer cover a basket but not all products.
+**Curation criteria for the 50 products** (applied when assembling the universe):
+- ~15 large-cap (top by market_cap)
+- ~15 mid-cap
+- ~10 with high FDV/MC ratio (high dilution overhang — distinct strategy patterns expected)
+- ~10 with low turnover ratio (low-velocity cohort)
+- All filtered to require ≥ 6 months of 1h OHLCV AND CoinPaprika daily tokenomic data available.
 
-**Status: OPEN**
+**Data-first directive (implementation phase):** before any new CoinPaprika API calls, inventory existing local data:
+- `backend/data/history/*.parquet` — 1h OHLCV (~220 products)
+- `backend/data/history/1m/` — 1m OHLCV (SP1 infrastructure shipped; populated status TBD at inventory time)
+- `backend/data/marketcap/*.parquet` — CoinPaprika bronze parquets (BTC/ETH/SOL written from the SP1-era smoke run; more may exist)
+- `backend/cnn_dataset_cache.pt` — v3 cache contains the survivorship-aware top-20 pid list (input to curation, not the universe itself)
+
+Only backfill the pids that curation requires AND don't already have CoinPaprika data. Minimize unnecessary API hits.
 
 ## Decisions locked so far
 
@@ -195,6 +205,30 @@ Affects data availability — CoinPaprika's free tier and the marketcap parquet 
 - 2026-05-23: **Q2a RESOLVED — mining algorithm = (i) single decision tree with custom profit-based split criterion.** Each split chosen to maximize cumulative-profit-after-retail-fees of resulting subgroups, under the Q0 sizing rule. Backlog: upgrade to (ii) gradient-boosted trees or (iii) custom greedy rule search if (i) proves too noisy.
 - 2026-05-23: **Q3 RESOLVED — 11-feature candidate set, same-tree mixing.** 6 tokenomic (MC, FDV, FDV/MC, circ/total, vol, vol/MC) + 5 trend (price/EMA20, 1h/24h/7d return signs, ATR-recent). Operator: "go with your recommendation."
 - 2026-05-23: **Q4 RESOLVED — family of strategies, naturally produced by the tree.** Each leaf is a candidate profile; min-samples-per-leaf forces 5-20 leaves per tree; 1-5 typically pass Q0 hard gates and become winning profiles. No pre-imposed cohort count.
+- 2026-05-23: **Q5 RESOLVED — diverse-sample ~50 products** spanning tokenomic state space (~15 large-cap, ~15 mid-cap, ~10 high FDV/MC, ~10 low turnover; all with ≥6 months 1h OHLCV + CoinPaprika data). Operator: "c is fine."
+- 2026-05-23: **Data-first directive** — inventory existing local data (`data/history/`, `data/marketcap/`, cache) BEFORE any new CoinPaprika API calls. Backfill only the pids curation requires that don't already have data. Operator: "look through all the I have collected first before going to coinpaprika for more calls."
+
+## BRAINSTORM COMPLETE (2026-05-23)
+
+All walking questions resolved. Q0 (target spec, 9 components) + Q1 (horizon = search dimension) + Q2 (data-mined cohort boundaries) + Q2a (single decision tree, custom profit split) + Q3 (11-feature candidate set, same-tree mixing) + Q4 (family from tree leaves) + Q5 (diverse-sample 50 + data-first inventory). The "Decisions locked" block above is the consolidated design spec.
+
+Per the brainstorming workflow, post-compact next steps:
+
+1. **Spec self-review** of this doc — placeholder scan, internal consistency, scope check, ambiguity check.
+2. **Operator review** of the captured spec.
+3. **Invoke writing-plans skill** to convert into a task-by-task implementation plan.
+4. **Execute the plan** (subagent-driven or inline).
+
+The implementation plan will cover (preview, not yet committed):
+- Inventory pass over existing local data.
+- Universe curation: pick the 50 products spanning the cohort categories.
+- Tokenomic feature backfill: extend CoinPaprika coverage from current ~3 → 50; FDV / supply if not already in schema.
+- Trend feature computation: derive the 5 trend features from existing 1h OHLCV.
+- Per-(token, day) labeling: realized PnL at multiple horizons spanning the hours-to-weeks band.
+- Custom-criterion decision tree: profit-based split, concurrency-capped fixed-fraction sizing (max 3-5).
+- Q0 gate evaluation per leaf: win-rate, avg-win, avg-loss, max-DD, cumulative-profit, Sortino, trade-count.
+- Profile-ranked output doc analogous to the scorecard and #16 verdict.
+- Long-shot caveat: extra validation rigor (bootstrap CI, OOS re-test) for high-magnitude low-frequency profiles.
 
 ## What this rebuild is NOT
 
