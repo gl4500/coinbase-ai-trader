@@ -16,6 +16,7 @@ Deflates the XGB feature-search probe history for selection bias — gate task f
 - `tools/probe_selection_bias.py` — deflation math (`expected_max_under_null`, `deflated_probability`).
 - `tools/probe_selection_bias.py` — `TRIALS` table + `analyze()` (two tracks × N tiers × noise scales).
 - `tools/probe_selection_bias.py` — `render_report` + `verdict_line` + `main` CLI.
+- `docs/superpowers/specs/2026-05-22-probe-selection-bias-results.md` — generated verdict doc.
 
 ## Session 58.71o — Off-the-clock XGB track (SP2) — 2026-05-21
 
