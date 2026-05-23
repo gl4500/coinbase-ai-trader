@@ -5,6 +5,12 @@ Format: reverse-chronological by session date.
 
 ---
 
+## Unreleased
+
+- **2026-05-23: Strategy-discovery rebuild Phase 1 Task 1** — local data inventory script (`tools/strategy_discovery/inventory.py`) writes a Markdown report + JSON sidecar of what 1h OHLCV / CoinPaprika tokenomic / 1m OHLCV data exists locally. Read-only; no API calls. Outputs feed universe curation (Task 5). Per the data-first directive.
+
+---
+
 ## Session 58.71p — Probe selection-bias meta-analysis (roadmap #16) — 2026-05-22
 
 **Spec:** `docs/superpowers/specs/2026-05-22-probe-selection-bias-design.md`
