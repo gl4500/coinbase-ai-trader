@@ -42,3 +42,34 @@ def fold_level_se(fold_aucs: list[float]) -> float:
     mean = sum(fold_aucs) / n
     var = sum((a - mean) ** 2 for a in fold_aucs) / (n - 1)
     return math.sqrt(var)
+
+
+def expected_max_under_null(n_trials: int, se: float, center: float) -> float:
+    """Best result a true-null search of N trials would still produce.
+
+    `center + se * E[max of N standard normals]`, using Bailey & Lopez de
+    Prado's expected-max approximation. `center` is the null value — 0.5 for
+    an AUC, 0.0 for a lift Delta.
+
+    Raises:
+        ValueError: if n_trials < 2.
+    """
+    if n_trials < 2:
+        raise ValueError(f"n_trials must be >= 2, got {n_trials}")
+    e_max_z = (
+        (1.0 - _EULER_GAMMA) * _NORM.inv_cdf(1.0 - 1.0 / n_trials)
+        + _EULER_GAMMA * _NORM.inv_cdf(1.0 - 1.0 / (n_trials * math.e))
+    )
+    return center + se * e_max_z
+
+
+def deflated_probability(observed: float, n_trials: int, se: float,
+                         center: float) -> float:
+    """Probability the observed result exceeds the best-of-N-trials noise floor.
+
+    A Deflated-Sharpe-style statistic: `Phi((observed - expected_max) / se)`.
+    ~1.0 when the observed result is far above the noise floor; ~0.5 when it
+    sits exactly on it; ~0.0 when it is below.
+    """
+    floor = expected_max_under_null(n_trials, se, center)
+    return _NORM.cdf((observed - floor) / se)
