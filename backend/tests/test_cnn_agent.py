@@ -3971,3 +3971,52 @@ class TestV45ShadowAndDriver:
 
         # HOLD → no signal returned (matches existing no_conviction test)
         assert sig is None
+
+
+class TestCNNBookSellLock:
+    """Per-pid asyncio.Lock in _CNNBook.sell() serializes concurrent callers
+    to prevent duplicate database.close_trade writes when the WS exit handler
+    races scan-loop _check_risk_exits on the same position.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sell_lock_serializes_concurrent_callers(self, monkeypatch):
+        from agents.cnn_agent import _CNNBook
+
+        book = _CNNBook()
+        book.balance = 1000.0
+        book.positions["BTC-USD"] = {
+            "size": 1.0, "avg_price": 100.0,
+            "entry_time": 0.0, "peak_price": 100.0,
+        }
+
+        close_trade_calls = []
+
+        async def _fake_close_trade(**kwargs):
+            close_trade_calls.append(kwargs)
+            await asyncio.sleep(0.01)  # widen race window
+
+        async def _fake_save(*args, **kwargs):
+            pass
+
+        async def _fake_evaluate(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr("agents.cnn_agent.database.close_trade", _fake_close_trade)
+        monkeypatch.setattr("agents.cnn_agent.database.save_agent_state", _fake_save)
+        monkeypatch.setattr(
+            "agents.cnn_agent.product_status.evaluate_and_persist", _fake_evaluate,
+        )
+
+        results = await asyncio.gather(
+            book.sell("BTC-USD", 90.0, trigger="WS_TRAIL_STOP"),
+            book.sell("BTC-USD", 90.0, trigger="TRAIL_STOP"),
+        )
+
+        assert len(close_trade_calls) == 1, (
+            f"expected exactly 1 close_trade call, got {len(close_trade_calls)}: "
+            f"{close_trade_calls}"
+        )
+        assert "BTC-USD" not in book.positions
+        # Loser returns 0.0; winner returns pnl = (90-100)*1.0 = -10.0
+        assert sorted(results) == [-10.0, 0.0]

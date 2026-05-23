@@ -49,6 +49,7 @@ from agents.signal_generator import SignalGenerator
 from agents.order_executor import OrderExecutor
 from agents.cnn_agent import CoinbaseCNNAgent
 from services.ws_subscriber import CoinbaseWSSubscriber
+from agents.exit_watcher import attach as attach_exit_watcher
 from services.portfolio_tracker import PortfolioTracker
 from services.outcome_tracker import get_tracker
 from services.history_backfill import get_backfill
@@ -417,6 +418,12 @@ async def lifespan(app: FastAPI):
         app_state.ws_subscriber.set_products(cached_ids)
         logger.info(f"WS seeded from DB cache: {len(cached_ids)} products")
     await app_state.ws_subscriber.start()
+
+    # WS-driven exit checker: fires WS_TRAIL_STOP / WS_STOP_LOSS on every
+    # held position without waiting for the 60s scan cycle.
+    # Spec: docs/superpowers/specs/2026-05-23-ws-exit-checker-design.md
+    attach_exit_watcher(app_state.ws_subscriber, app_state.cnn_agent.book)
+    logger.info("WS exit watcher attached")
 
     # Background scan — refreshes product list without blocking startup
     async def _background_scan():

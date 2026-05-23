@@ -30,6 +30,7 @@ from agents.cnn_agent import (
     _CNN_STOP_LOSS_PCT,
     _CNN_MAX_HOLD_SECS,
     _CNN_ATR_TRAIL_MIN,
+    _CNN_ATR_TRAIL_MAX,
 )
 
 
@@ -359,3 +360,34 @@ class TestTrailFloor:
         trigger = sell_mock.call_args[1].get("trigger") or sell_mock.call_args[0][2]
         assert "TRAIL" in trigger.upper(), \
             f"Expected TRAIL_STOP trigger, got: {trigger}"
+
+
+# ── WS exit handler contract: trail_pct cache write ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_check_risk_exits_writes_trail_pct_to_position():
+    """Scan loop caches the computed trail_pct on pos['trail_pct'] so the WS
+    exit handler can read it without recomputing ATR per tick. Contract
+    between scan loop and WS handler (see agents/exit_watcher.on_price_tick).
+    """
+    agent = CoinbaseCNNAgent()
+    agent.book = _book_with_position("BTC-USD", avg_price=100.0, peak_price=105.0)
+
+    ws_mock = MagicMock()
+    ws_mock.get_price.return_value = 104.0  # between trail and stop-loss → no exit
+    agent.ws = ws_mock
+
+    # 20 candles with deterministic non-zero ATR (high-low range = 2.0)
+    fake_candles = [{"high": 100.0, "low": 98.0, "close": 99.0} for _ in range(20)]
+
+    with (
+        patch("agents.cnn_agent.database.get_candles",
+              new=AsyncMock(return_value=fake_candles)),
+        patch.object(agent.book, "sell", new=AsyncMock()),
+    ):
+        await agent._check_risk_exits()
+
+    pos = agent.book.positions["BTC-USD"]
+    assert "trail_pct" in pos, "scan loop must write trail_pct for WS handler"
+    assert _CNN_ATR_TRAIL_MIN <= pos["trail_pct"] <= _CNN_ATR_TRAIL_MAX

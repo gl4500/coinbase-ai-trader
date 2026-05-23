@@ -113,6 +113,14 @@ class _CNNBook:
         self.balance     = _CNN_DRY_RUN_BALANCE
         self.positions: Dict[str, Dict] = {}   # pid → {size, avg_price}
         self.realized_pnl = 0.0
+        # Per-pid lock so WS exit handler and scan-loop _check_risk_exits
+        # cannot race a duplicate database.close_trade write.
+        self._sell_locks: Dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, pid: str) -> asyncio.Lock:
+        if pid not in self._sell_locks:
+            self._sell_locks[pid] = asyncio.Lock()
+        return self._sell_locks[pid]
 
     async def load(self) -> None:
         state = await database.load_agent_state(self._agent)
@@ -237,48 +245,52 @@ class _CNNBook:
         return spend, size
 
     async def sell(self, pid: str, price: float, trigger: str = "SCAN") -> float:
-        if pid not in self.positions:
-            return 0.0
-        pos = self.positions[pid]
-        proceeds = pos["size"] * price
-        pnl      = proceeds - pos["size"] * pos["avg_price"]
-        pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
+        # Per-pid lock prevents WS exit handler and scan-loop _check_risk_exits
+        # from racing a duplicate database.close_trade write on the same pid.
+        # In-memory guard inside the lock makes the loser a clean no-op.
+        async with self._lock_for(pid):
+            if pid not in self.positions:
+                return 0.0
+            pos = self.positions[pid]
+            proceeds = pos["size"] * price
+            pnl      = proceeds - pos["size"] * pos["avg_price"]
+            pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
 
-        # #109: persist trade close to DB FIRST — trades table is the source of
-        # truth for realized PnL. If this raises, leave in-memory state intact
-        # so the caller (or a retry) can try again. Updating agent_state before
-        # close_trade caused the divergence seen in Session 54: agent_state
-        # captured the gain but no closed-trade row existed; on restart the
-        # reconcile path force-closed the orphan with pnl=0, locking in skew.
-        await database.close_trade(
-            agent=self._agent, product_id=pid, exit_price=price,
-            size=pos["size"], pnl=pnl, trigger_close=trigger,
-            balance_after=self.balance + proceeds,
-        )
+            # #109: persist trade close to DB FIRST — trades table is the source of
+            # truth for realized PnL. If this raises, leave in-memory state intact
+            # so the caller (or a retry) can try again. Updating agent_state before
+            # close_trade caused the divergence seen in Session 54: agent_state
+            # captured the gain but no closed-trade row existed; on restart the
+            # reconcile path force-closed the orphan with pnl=0, locking in skew.
+            await database.close_trade(
+                agent=self._agent, product_id=pid, exit_price=price,
+                size=pos["size"], pnl=pnl, trigger_close=trigger,
+                balance_after=self.balance + proceeds,
+            )
 
-        # close_trade succeeded — now mutate in-memory state and persist it
-        self.positions.pop(pid)
-        self.balance      += proceeds
-        self.realized_pnl += pnl
+            # close_trade succeeded — now mutate in-memory state and persist it
+            self.positions.pop(pid)
+            self.balance      += proceeds
+            self.realized_pnl += pnl
 
-        if pnl > 0:
-            self.wins         += 1
-            self._sum_win_pct += pct_pnl
-        elif pnl < 0:
-            self.losses         += 1
-            self._sum_loss_pct  += abs(pct_pnl)
+            if pnl > 0:
+                self.wins         += 1
+                self._sum_win_pct += pct_pnl
+            elif pnl < 0:
+                self.losses         += 1
+                self._sum_loss_pct  += abs(pct_pnl)
 
-        await self._save()
+            await self._save()
 
-        # #125b: re-evaluate product status on every successful close so a
-        # fresh trade can immediately tip a product into Probation/Suspended
-        # (or recover it). Evaluator failures must not block the trade.
-        try:
-            await product_status.evaluate_and_persist(pid, agent=self._agent)
-        except Exception:
-            logger.exception("product_status evaluator failed for %s", pid)
+            # #125b: re-evaluate product status on every successful close so a
+            # fresh trade can immediately tip a product into Probation/Suspended
+            # (or recover it). Evaluator failures must not block the trade.
+            try:
+                await product_status.evaluate_and_persist(pid, agent=self._agent)
+            except Exception:
+                logger.exception("product_status evaluator failed for %s", pid)
 
-        return pnl
+            return pnl
 
 logger = logging.getLogger(__name__)
 
@@ -1715,6 +1727,10 @@ class CoinbaseCNNAgent:
                         trail_pct = max(_CNN_ATR_TRAIL_MIN, min(raw, _CNN_ATR_TRAIL_MAX))
             except Exception:
                 pass
+
+            # Cache for WS exit handler — read by agents/exit_watcher.on_price_tick
+            # so it doesn't recompute ATR per tick (~580 ticks/sec aggregate).
+            pos["trail_pct"] = trail_pct
 
             # Positions without entry_time are legacy — treat as already overdue
             entry_time = pos.get("entry_time")
