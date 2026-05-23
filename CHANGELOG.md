@@ -5,6 +5,15 @@ Format: reverse-chronological by session date.
 
 ---
 
+## Session 58.71p — Probe selection-bias meta-analysis (roadmap #16) — 2026-05-22
+
+**Spec:** `docs/superpowers/specs/2026-05-22-probe-selection-bias-design.md`
+**Plan:** `docs/superpowers/plans/2026-05-22-probe-selection-bias.md`
+
+Deflates the XGB feature-search probe history for selection bias — gate task for the post-scorecard roadmap.
+
+- `tools/probe_selection_bias.py` — noise model (`iid_auc_se`, `fold_level_se`).
+
 ## Session 58.71o — Off-the-clock XGB track (SP2) — 2026-05-21
 
 **Spec:** `docs/superpowers/specs/2026-05-21-offclock-xgb-track-design.md`
