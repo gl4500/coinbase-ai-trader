@@ -18,14 +18,14 @@ Three findings stack to motivate a step away from v3:
 | Row | What v3 does today | What this rebuild may do |
 |---|---|---|
 | Inputs | OHLCV tier-summary stats (`extract_v4`, 150 features) | **Tokenomic + activity state** (market cap, FDV, supply ratios, 24h volume) **plus a price-trend signal** — confirmed direction 2026-05-23 |
-| Label | Binary UP/DOWN direction (or 3-class for v4.5) | 3-class direction (v4.5 infra reusable) — *or* PnL regression / per-strategy realized-return — TBD |
+| Label | Binary UP/DOWN direction (or 3-class for v4.5) | **Per-(token, candidate-entry-bar) realized PnL at each evaluated horizon**, consumed by the custom-criterion tree's profit-based split (no probabilistic class label per se) |
 | Optimization target | AUC / logloss | **Realized PnL** — confirmed direction 2026-05-23 |
-| Model class | XGBoost gradient-boosted trees | TBD — depends on rule-mining vs predictor choice (Q1–Q5 below) |
-| Trade horizon | k bars ahead, k ∈ {4..168} (1h candles) | TBD — **Q1** |
+| Model class | XGBoost gradient-boosted trees | **Single decision tree, custom profit-based split criterion** (Q2a) |
+| Trade horizon | k bars ahead, k ∈ {4..168} (1h candles) | **Search dimension** across the hours-to-weeks band; example horizon set `{1h, 4h, 24h, 72h, 168h, 336h}` — Q1 |
 | Decision artifact | Single classifier → threshold → BUY/SELL every bar | **Discovery / rule-mining of conditional strategies**, plural — confirmed 2026-05-23 |
-| Validation | 5-fold purged walk-forward CV, 4h embargo | TBD — depends on horizon + sample density |
-| Universe | Survivorship-aware top-20 Coinbase USD spot | TBD — **Q5** |
-| Execution gating | Threshold on a continuous score | TBD — filter / trigger / hybrid — **Q3** |
+| Validation | 5-fold purged walk-forward CV, 4h embargo | **TBD (validation-methodology gap — see operator-review questions below)** |
+| Universe | Survivorship-aware top-20 Coinbase USD spot | **~50 diverse products** (15 large-cap, 15 mid-cap, 10 high FDV/MC, 10 low turnover), with a data-first inventory pass first — Q5 |
+| Execution gating | Threshold on a continuous score | **Tree leaf-path acts as both filter and trigger** (Q3 same-tree mixing); a token-day reaching a qualifying leaf IS the BUY signal |
 
 ## Stage
 
@@ -42,7 +42,7 @@ Three findings stack to motivate a step away from v3:
 | FDV (price × total supply) | Forward valuation including all unlocks |
 | 24h trading volume | Activity / liquidity state right now |
 | Volume ÷ Market cap (turnover) | Velocity of trading — how hot is the float |
-| Price-trend signal | TBD form — Q3 |
+| Price-trend signal | Resolved Q3: 5 features — price/EMA20 ratio, 1h/24h/7d return signs, ATR-recent (volatility regime) |
 
 These are **not** equity fundamentals (no earnings, P/E, dividends). They are crypto-native state variables — tokenomics + activity. Distinction matters because it rules out equity-style factor-rotation strategies as a blueprint.
 
@@ -148,15 +148,6 @@ Are we mining for *one* winning strategy or a *family* of strategies?
 
 **Status: RESOLVED 2026-05-23 — family, naturally produced by Q2+Q2a.** Each leaf of the mined decision tree is a candidate profile (with its own rule path + Q0-evaluation metrics). With min-samples-per-leaf constraints we expect 5–20 leaves per tree; typically 1–5 will pass all Q0 hard gates and become "winning profiles." The family emerges from the mining; we do not pre-impose the cohort count. (Future upgrade path: ensemble of trees on different seeds/subsamples for more robust profile boundaries — backlog with Q2a's (ii)/(iii) upgrades.)
 
-### Q4 — Single strategy or family of strategies
-
-Are we mining for *one* winning strategy that works on the whole universe, or a *family* of strategies — different rules for different cohorts (small-cap vs mega-cap, low-volume vs high-volume, etc.)?
-
-- *Single*: one rule set; simpler; risk that no universal pattern exists.
-- *Family*: per-cohort strategies; matches the intuition that different parts of the market behave differently; more complex to maintain.
-
-**Status: OPEN**
-
 ### Q5 — Universe scope
 
 What's the universe the strategy operates over?
@@ -208,9 +199,23 @@ Only backfill the pids that curation requires AND don't already have CoinPaprika
 - 2026-05-23: **Q5 RESOLVED — diverse-sample ~50 products** spanning tokenomic state space (~15 large-cap, ~15 mid-cap, ~10 high FDV/MC, ~10 low turnover; all with ≥6 months 1h OHLCV + CoinPaprika data). Operator: "c is fine."
 - 2026-05-23: **Data-first directive** — inventory existing local data (`data/history/`, `data/marketcap/`, cache) BEFORE any new CoinPaprika API calls. Backfill only the pids curation requires that don't already have data. Operator: "look through all the I have collected first before going to coinpaprika for more calls."
 
-## BRAINSTORM COMPLETE (2026-05-23)
+## Open question surfaced by spec self-review
 
-All walking questions resolved. Q0 (target spec, 9 components) + Q1 (horizon = search dimension) + Q2 (data-mined cohort boundaries) + Q2a (single decision tree, custom profit split) + Q3 (11-feature candidate set, same-tree mixing) + Q4 (family from tree leaves) + Q5 (diverse-sample 50 + data-first inventory). The "Decisions locked" block above is the consolidated design spec.
+**Q6 — Validation methodology** (was deferred under "Validation: TBD" in the v3-frames table; partial answer in the long-shot caveat). Concretely: how do we honestly score a candidate profile?
+
+Options to choose / combine:
+- **(a) Purged walk-forward CV** (5-fold, embargo set to max evaluated horizon = 336h / 14d) — same shape as v3's validation, well-understood.
+- **(b) Train / hold-out split** — fit the tree on the first ~70-80% of dates, score profiles on the remaining 20-30%. Simpler but uses less data.
+- **(c) Bootstrap CI on per-profile metrics** — for low-frequency / long-shot profiles, resample the trade list to put a confidence band on cumulative profit / win rate.
+- **(d) Combined Purged WF + Bootstrap CI** — (a) for the primary numbers, (c) layered on top for any profile with < N trades or that lands in the long-shot band.
+
+The long-shot caveat already commits to "extra rigor" for high-magnitude low-frequency profiles, which implies at least (c). The question is whether the *baseline* (every profile) gets (a), (b), or (d).
+
+**Status: OPEN — for operator decision before writing-plans phase.**
+
+## BRAINSTORM COMPLETE (2026-05-23, pending Q6)
+
+All originally enumerated walking questions resolved. Q0 (target spec, 9 components) + Q1 (horizon = search dimension) + Q2 (data-mined cohort boundaries) + Q2a (single decision tree, custom profit split) + Q3 (11-feature candidate set, same-tree mixing) + Q4 (family from tree leaves) + Q5 (diverse-sample 50 + data-first inventory). The "Decisions locked" block above is the consolidated design spec. Q6 (validation methodology) surfaced by the self-review pass and needs operator input before writing-plans.
 
 Per the brainstorming workflow, post-compact next steps:
 
