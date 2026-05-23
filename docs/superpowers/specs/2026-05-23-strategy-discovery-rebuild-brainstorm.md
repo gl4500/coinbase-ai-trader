@@ -68,18 +68,20 @@ What concretely makes a strategy "winning"? Pass/fail gates + a ranking metric.
 
 | Component | What it asks | Status |
 |---|---|---|
-| Min win rate | What precision must a strategy achieve to qualify? | **RESOLVED 2026-05-23: ≥ 70% (hard gate). "Higher is better" — also enters the ranking metric.** |
+| **Optimization criterion** | What does the mining maximize? | **RESOLVED 2026-05-23: maximize CUMULATIVE PROFIT (after retail fees) — primary ranking.** Mining outputs a ranked set of profiles; top profiles by cumulative profit are the "winners." Operator: "produce profiles that maximize profit." |
 | Fee convention | Wins/losses measured at which fee tier? | **RESOLVED 2026-05-23: retail (0.6%/side, 1.2% round-trip).** All win/loss magnitudes are after-fee, net. |
 | Min avg win magnitude | What's the smallest meaningful winning trade size (after fees)? | **RESOLVED 2026-05-23: ≥ +5% net (the asymmetric-momentum floor — operator selected the band Asymmetric momentum / Cohort rotation / Long-shot).** |
 | Max avg loss magnitude | Cap on losing-trade size? | **RESOLVED 2026-05-23: ≤ −10% magnitude net (the long-shot ceiling).** |
-| Min net expectancy | Avg P&L per trade floor (after fees)? | OPEN |
-| Min trade frequency | Min trades/year to qualify (does it fire meaningfully)? | OPEN |
-| Max drawdown | Worst cumulative loss tolerated? | OPEN |
-| Risk-adjusted return | Sharpe / Sortino / Calmar floor for ranking? | OPEN |
+| Min win rate | What precision must a strategy achieve to qualify? | **RESOLVED 2026-05-23 (revised): ranking direction ONLY — higher is better, but NOT a hard gate.** Operator pivoted from "70% gate" to "profit-maximize over just 70%-win-rate fixation." A 55%-win-rate strategy with rich per-trade profit beats a 75%-win-rate strategy with thin profit. The 70% number is now informational. |
+| Min net expectancy | Avg P&L per trade floor (after fees)? | **RESOLVED 2026-05-23: no explicit floor — subsumed by the profit-maximize ranking. Cumulative profit = expectancy × frequency; ranking on cumulative is sufficient.** |
+| Position sizing | Fixed-$, fixed-fraction, concurrency-capped, Kelly, or conviction-weighted? | **RESOLVED 2026-05-23: concurrency-capped fixed-fraction, max 3-5 concurrent positions.** Per-slot size = capital / max_concurrent. Mining simulates at max=5 as the primary case, with sensitivity at max=3 and max=4. When all slots are full the strategy cannot fire; closing a position frees a slot. |
+| Min trade frequency | Min trades/year — high enough for statistical validity, low enough to allow meaningful per-trade sizing (depends on sizing approach) | **RESOLVED 2026-05-23: NO HARD GATE.** Trade count is reported on each profile (informational). Qualification is defined by the other gates (win/loss band, max DD, profit ranking). Statistical validity of low-frequency strategies is enforced via the long-shot caveat (extra validation rigor), not via a frequency floor. Operator: "I don't want to have a trade limit, more of what meets the model standards." |
+| Max drawdown | Worst cumulative loss tolerated? | **RESOLVED 2026-05-23: ≤ 30% peak-to-trough.** Aggressive / risk-tolerant. Strategies whose historical drawdown exceeded 30% are rejected. |
+| Risk-adjusted return | Sharpe / Sortino / Calmar floor for ranking? | **RESOLVED 2026-05-23: Sortino as SECONDARY ranking, no hard gate.** Primary rank = cumulative profit; Sortino surfaces alongside as a risk-quality tiebreaker / context column. Sortino chosen over Sharpe because it doesn't penalize upside volatility — appropriate for the asymmetric (Asymmetric Momentum / Cohort Rotation / Long-Shot) profile band the operator selected. |
 
 These don't all have to be hard gates — some can be ranking metrics, some can be informational-only (reported but not enforced). The point is to pin down which dimensions matter to the operator BEFORE building any mining infrastructure, so the mining knows what it's optimizing toward.
 
-**Status: OPEN — walked through one component at a time.**
+**Status: COMPLETE 2026-05-23.** All 9 components resolved. See "Decisions locked" at the bottom for the consolidated target spec. Q1–Q5 below (optimizer-shape) follow from the resolved target.
 
 ### Q1 — Trade horizon
 
@@ -157,6 +159,15 @@ Affects data availability — CoinPaprika's free tier and the marketcap parquet 
 - 2026-05-23: **Fee convention = retail tier (0.6%/side, 1.2% round-trip).** All win/loss magnitudes throughout this discovery are NET of round-trip fees. A trade that nets +0.5% gross is a LOSS under this convention.
 - 2026-05-23: **Per-trade profile band** — operator selected Asymmetric Momentum + Cohort Rotation + Long-Shot. Concrete gates: **avg_win ≥ +5% net** AND **avg_loss ≤ −10% net magnitude**. Strategies whose profile lands outside this band are rejected. Strategies on tight-scalp or standard-swing profiles are out of scope.
 - 2026-05-23: **Long-shot caveat** — strategies whose profile lands at the long-shot end (avg_win ≥ +15%, avg_loss ≥ −7%) at 70%+ win rate are statistically unusual on this data scale. Validation methodology must require extra rigor for them (higher minimum trade count, out-of-sample re-test, possibly bootstrap CI). To be revisited at the validation-methodology question.
+- 2026-05-23: **PRIMARY OPTIMIZATION = MAXIMIZE CUMULATIVE PROFIT.** Mining outputs a ranked set of profiles; top profiles by cumulative profit (after retail fees) are the "winners." Operator: "produce profiles that maximize profit."
+- 2026-05-23: **70% win rate DOWNGRADED from hard gate to ranking direction.** Higher win rates still rank better all else equal, but a 55%-win-rate strategy with rich per-trade profit beats a 75%-win-rate strategy with thin profit. Operator: "I would like to base it on profit wins over just 70% winning rates."
+- 2026-05-23: **No explicit per-trade expectancy floor** — subsumed by cumulative-profit ranking. Per-trade economics are still gated by the avg_win/avg_loss band so the ranking doesn't reward degenerate per-trade profiles.
+- 2026-05-23: **Per-trade sizing matters and is a Q0 component.** Operator: "higher investment amount will equal a greater return..vs. many small trades that dilute the amount of available cash." Mining must surface sizing-aware metrics; min trade frequency must balance statistical validity against capital dilution. Cumulative profit is sensitive to sizing — the ranking metric should be computed under whatever sizing approach is chosen, not under an arbitrary fixed-$.
+- 2026-05-23: **Sizing approach = concurrency-capped fixed-fraction, max 3–5 concurrent.** Per-slot size = capital / max_concurrent (so at max=5, each slot = 20% of capital). Mining simulates at max=5 as primary, with sensitivity runs at max=3 and max=4. When all slots are full, the strategy cannot fire; closing a position frees a slot. Higher firing frequencies are effectively capped by slot availability — this is the structural answer to the "dilution" concern.
+- 2026-05-23: **Max drawdown gate = ≤ 30% peak-to-trough.** Aggressive / risk-tolerant. Strategies whose historical drawdown exceeded 30% are rejected outright, regardless of cumulative profit.
+- 2026-05-23: **No min-trade-frequency gate.** Operator: "I don't want to have a trade limit, more of what meets the model standards." Trade count is reported per profile; statistical validity for low-frequency profiles is enforced via the long-shot caveat (extra OOS / bootstrap-CI rigor at validation time), not via a hard floor.
+- 2026-05-23: **Risk-adjusted return = Sortino as SECONDARY ranking, no hard gate.** Primary ranking = cumulative profit. Sortino is surfaced alongside as a risk-quality tiebreaker. Sortino over Sharpe because the asymmetric profile band (Asym Momentum / Cohort Rotation / Long-Shot) shouldn't be penalized for upside volatility. Max DD gate (≤30%) already handles catastrophic-risk protection.
+- **2026-05-23: Q0 COMPLETE — target spec finalized.** Hard gates: avg_win ≥ +5%, avg_loss ≤ -10% magnitude, max DD ≤ 30%, profile inside band {Asym Momentum / Cohort Rotation / Long-Shot}, at retail fees. Primary ranking: cumulative profit. Secondary ranking: Sortino. Informational: win rate (higher better), trade count. Sizing: concurrency-capped fixed-fraction, max 3-5 concurrent.
 
 ## What this rebuild is NOT
 
