@@ -23,7 +23,7 @@ Three findings stack to motivate a step away from v3:
 | Model class | XGBoost gradient-boosted trees | **Single decision tree, custom profit-based split criterion** (Q2a) |
 | Trade horizon | k bars ahead, k ∈ {4..168} (1h candles) | **Search dimension** across the hours-to-weeks band; example horizon set `{1h, 4h, 24h, 72h, 168h, 336h}` — Q1 |
 | Decision artifact | Single classifier → threshold → BUY/SELL every bar | **Discovery / rule-mining of conditional strategies**, plural — confirmed 2026-05-23 |
-| Validation | 5-fold purged walk-forward CV, 4h embargo | **TBD (validation-methodology gap — see operator-review questions below)** |
+| Validation | 5-fold purged walk-forward CV, 4h embargo | **5-fold purged WF (embargo = max evaluated horizon, ~336h/14d) as baseline for every profile; Bootstrap CI layered on top for low-frequency / long-shot profiles** (Q6) |
 | Universe | Survivorship-aware top-20 Coinbase USD spot | **~50 diverse products** (15 large-cap, 15 mid-cap, 10 high FDV/MC, 10 low turnover), with a data-first inventory pass first — Q5 |
 | Execution gating | Threshold on a continuous score | **Tree leaf-path acts as both filter and trigger** (Q3 same-tree mixing); a token-day reaching a qualifying leaf IS the BUY signal |
 
@@ -198,24 +198,24 @@ Only backfill the pids that curation requires AND don't already have CoinPaprika
 - 2026-05-23: **Q4 RESOLVED — family of strategies, naturally produced by the tree.** Each leaf is a candidate profile; min-samples-per-leaf forces 5-20 leaves per tree; 1-5 typically pass Q0 hard gates and become winning profiles. No pre-imposed cohort count.
 - 2026-05-23: **Q5 RESOLVED — diverse-sample ~50 products** spanning tokenomic state space (~15 large-cap, ~15 mid-cap, ~10 high FDV/MC, ~10 low turnover; all with ≥6 months 1h OHLCV + CoinPaprika data). Operator: "c is fine."
 - 2026-05-23: **Data-first directive** — inventory existing local data (`data/history/`, `data/marketcap/`, cache) BEFORE any new CoinPaprika API calls. Backfill only the pids curation requires that don't already have data. Operator: "look through all the I have collected first before going to coinpaprika for more calls."
+- 2026-05-23: **Q6 RESOLVED — validation = (d) Purged Walk-Forward + Bootstrap CI.** Baseline for every profile: 5-fold purged WF, embargo = max evaluated horizon (~336h / 14d). Layered for low-frequency / long-shot profiles: bootstrap CI on per-profile metrics. Q0 hard-gate rejection happens at the WF-fold level; bootstrap CIs report uncertainty but don't gate. Operator: "go with your recommendation."
 
-## Open question surfaced by spec self-review
+### Q6 — Validation methodology
 
-**Q6 — Validation methodology** (was deferred under "Validation: TBD" in the v3-frames table; partial answer in the long-shot caveat). Concretely: how do we honestly score a candidate profile?
+How do we honestly score a mined profile?
 
-Options to choose / combine:
-- **(a) Purged walk-forward CV** (5-fold, embargo set to max evaluated horizon = 336h / 14d) — same shape as v3's validation, well-understood.
-- **(b) Train / hold-out split** — fit the tree on the first ~70-80% of dates, score profiles on the remaining 20-30%. Simpler but uses less data.
-- **(c) Bootstrap CI on per-profile metrics** — for low-frequency / long-shot profiles, resample the trade list to put a confidence band on cumulative profit / win rate.
-- **(d) Combined Purged WF + Bootstrap CI** — (a) for the primary numbers, (c) layered on top for any profile with < N trades or that lands in the long-shot band.
+**Status: RESOLVED 2026-05-23 — (d) Combined Purged Walk-Forward + Bootstrap CI.**
 
-The long-shot caveat already commits to "extra rigor" for high-magnitude low-frequency profiles, which implies at least (c). The question is whether the *baseline* (every profile) gets (a), (b), or (d).
+- **Baseline (every profile):** 5-fold purged walk-forward CV with embargo set to the max evaluated horizon (~336h / 14 days). Same shape as v3's validation — proven, infra reusable.
+- **Layered on top (low-frequency / long-shot profiles):** Bootstrap CI on per-profile metrics (cumulative profit, win rate, avg-win, avg-loss). Resample the trade list with replacement; report a 95% CI alongside the point estimate.
+- **Trigger for the bootstrap layer:** any profile that (i) has < N trades per fold (N TBD by writing-plans — likely 30) OR (ii) lands in the long-shot band (avg_win ≥ +15%, avg_loss magnitude ≤ 7%, win rate ≥ 70%).
+- **Combined rejection:** if any fold of the purged WF would fail a Q0 hard gate (avg_win < +5%, avg_loss > -10% magnitude, max DD > 30%), reject the profile. Bootstrap CIs are reported but informational at this stage — used to communicate uncertainty, not to gate.
 
-**Status: OPEN — for operator decision before writing-plans phase.**
+Rationale: purged WF catches regime-overfitting (the failure mode the long-shot caveat hints at); bootstrap CI catches low-N luck (the other failure mode). Together they cover both. Operator selected (d): "go with your recommendation."
 
-## BRAINSTORM COMPLETE (2026-05-23, pending Q6)
+## BRAINSTORM COMPLETE (2026-05-23)
 
-All originally enumerated walking questions resolved. Q0 (target spec, 9 components) + Q1 (horizon = search dimension) + Q2 (data-mined cohort boundaries) + Q2a (single decision tree, custom profit split) + Q3 (11-feature candidate set, same-tree mixing) + Q4 (family from tree leaves) + Q5 (diverse-sample 50 + data-first inventory). The "Decisions locked" block above is the consolidated design spec. Q6 (validation methodology) surfaced by the self-review pass and needs operator input before writing-plans.
+All walking questions resolved. Q0 (target spec, 9 components) + Q1 (horizon = search dimension) + Q2 (data-mined cohort boundaries) + Q2a (single decision tree, custom profit split) + Q3 (11-feature candidate set, same-tree mixing) + Q4 (family from tree leaves) + Q5 (diverse-sample 50 + data-first inventory) + Q6 (Purged WF + Bootstrap CI). The "Decisions locked" block above is the consolidated design spec.
 
 Per the brainstorming workflow, post-compact next steps:
 
