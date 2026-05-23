@@ -148,3 +148,95 @@ def analyze() -> list[dict]:
                 "deflated_prob": deflated_probability(BEST_LIFT_DELTA, n, se, 0.0),
             })
     return rows
+
+
+def verdict_line(headline_prob: float) -> str:
+    """One-line verdict from the headline deflated probability.
+
+    headline = Track A, best documented AUC, fold-level noise, N=100.
+    """
+    if headline_prob >= 0.95:
+        return (f"VERDICT: real edge — deflated probability {headline_prob:.2f} "
+                "clears the 0.95 bar; feature work on this cache is justified.")
+    if headline_prob <= 0.50:
+        return (f"VERDICT: indistinguishable from noise — deflated probability "
+                f"{headline_prob:.2f} sits at/below the best-of-N noise floor; "
+                "further single-add feature work on this cache is not justified.")
+    return (f"VERDICT: marginal — deflated probability {headline_prob:.2f} is "
+            "above the noise floor but short of the 0.95 bar; the edge is weak "
+            "and selection-fragile.")
+
+
+def _headline_prob(rows: list[dict]) -> float:
+    """Track A, best documented AUC, fold noise, N=100 — the headline cell."""
+    for r in rows:
+        if (r["track"].startswith("A") and r["n_trials"] == 100
+                and r["noise"] == "fold" and "best" in r["observed_label"]):
+            return r["deflated_prob"]
+    raise RuntimeError("headline cell not found in analysis rows")
+
+
+def render_report(rows: list[dict]) -> str:
+    """Render the full meta-analysis as a markdown doc."""
+    lines = [
+        "# Probe Selection-Bias Meta-Analysis",
+        "",
+        "Spec: `2026-05-22-probe-selection-bias-design.md`. Deflates the recorded",
+        "XGB feature-search results for the size of the search.",
+        "",
+        "## Verdict",
+        "",
+        verdict_line(_headline_prob(rows)),
+        "",
+        "## Trial table",
+        "",
+        f"{len(TRIALS)} single-add channel-candidate probes (marketcap excluded —",
+        "null-coverage). Source: `xgb_probe_results_log.md`.",
+        "",
+        "| probe | Delta AUC | passed |",
+        "|---|---|---|",
+    ]
+    for t in TRIALS:
+        lines.append(f"| {t['name']} | {t['delta']:+.4f} | {t['passed']} |")
+
+    lines += [
+        "",
+        "## Deflation analysis",
+        "",
+        "Noise scales: `fold` = empirical purged-WF per-fold SE (honest for",
+        "overlapping labels); `iid` = Mann-Whitney null SE (contrast — optimistic).",
+        "",
+        "| track | observed | N | noise | SE | exp_max_under_null | deflated_prob |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        lines.append(
+            f"| {r['track']} | {r['observed_label']} {r['observed']:.4f} | "
+            f"{r['n_trials']} | {r['noise']} | {r['se']:.5f} | "
+            f"{r['expected_max']:.5f} | {r['deflated_prob']:.3f} |"
+        )
+    return "\n".join(lines)
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Probe selection-bias meta-analysis (roadmap task #16)"
+    )
+    parser.add_argument(
+        "--out",
+        default="../docs/superpowers/specs/2026-05-22-probe-selection-bias-results.md",
+        help="results doc path (default: the SP-#16 results spec)",
+    )
+    args = parser.parse_args()
+    doc = render_report(analyze())
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(doc)
+    print(doc, flush=True)
+    print(f"\nwrote {args.out}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

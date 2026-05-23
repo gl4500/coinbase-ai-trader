@@ -94,3 +94,26 @@ def test_analyze_iid_inflates_confidence_vs_fold():
                     and r["noise"] == noise
                     and "best" in r["observed_label"])
     assert cell("iid")["deflated_prob"] > cell("fold")["deflated_prob"]
+
+
+from tools.probe_selection_bias import render_report, verdict_line
+
+
+def test_verdict_line_reflects_headline_probability():
+    # headline = Track A, best documented AUC, fold noise, N=100
+    assert "marginal" in verdict_line(0.73).lower()
+    assert "noise" in verdict_line(0.20).lower()       # below floor
+    assert "real" in verdict_line(0.99).lower()        # clears the bar
+
+
+def test_render_report_structure():
+    rows = analyze()
+    doc = render_report(rows)
+    assert "# Probe Selection-Bias Meta-Analysis" in doc
+    assert "## Trial table" in doc
+    assert "## Verdict" in doc
+    # every trial name appears in the rendered trial table
+    for t in TRIALS:
+        assert t["name"] in doc
+    # both noise scales are reported
+    assert "fold" in doc and "iid" in doc
