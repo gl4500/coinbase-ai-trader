@@ -60,3 +60,37 @@ def test_deflated_probability_low_when_below_floor():
     # a Delta of 0 against a positive best-of-N noise floor
     p = deflated_probability(0.0, 100, 0.009, 0.0)
     assert p < 0.5
+
+
+from tools.probe_selection_bias import TRIALS, N_TIERS, analyze
+
+
+def test_trials_table_shape():
+    assert len(TRIALS) == 17                       # channel-candidate trials
+    for t in TRIALS:
+        assert set(t) == {"name", "delta", "passed"}
+    # exactly the two RSI-rank runs are marked passed
+    assert sum(1 for t in TRIALS if t["passed"]) == 2
+
+
+def test_analyze_row_structure():
+    rows = analyze()
+    # 2 Track-A observed values x 3 N tiers x 2 noise scales = 12
+    # + Track B: 1 x 3 x 2 = 6  -> 18 rows
+    assert len(rows) == 18
+    for r in rows:
+        assert {"track", "observed_label", "observed", "n_trials", "noise",
+                "se", "center", "expected_max", "deflated_prob"} <= set(r)
+        assert 0.0 <= r["deflated_prob"] <= 1.0
+
+
+def test_analyze_iid_inflates_confidence_vs_fold():
+    rows = analyze()
+    # for Track A best AUC at N=100, the iid noise scale gives a much higher
+    # deflated probability than the honest fold-level scale
+    def cell(noise):
+        return next(r for r in rows
+                    if r["track"].startswith("A") and r["n_trials"] == 100
+                    and r["noise"] == noise
+                    and "best" in r["observed_label"])
+    assert cell("iid")["deflated_prob"] > cell("fold")["deflated_prob"]

@@ -73,3 +73,78 @@ def deflated_probability(observed: float, n_trials: int, se: float,
     """
     floor = expected_max_under_null(n_trials, se, center)
     return _NORM.cdf((observed - floor) / se)
+
+
+# Trial table — transcribed from xgb_probe_results_log.md. Each entry is one
+# single-add channel-candidate probe run. The marketcap probe is excluded
+# (null-coverage — CoinGecko 401/429, never a real signal trial). sma50_d1's
+# Delta is the leak-corrected value (the +0.0852 was 100% lookahead leak).
+TRIALS: list[dict] = [
+    {"name": "RSI-rank (survivorship)", "delta": +0.0124, "passed": True},
+    {"name": "RSI-rank (legacy)",       "delta": +0.0208, "passed": True},
+    {"name": "log10-vol-rank",          "delta": -0.0010, "passed": False},
+    {"name": "MFI-rank",                "delta": +0.0031, "passed": False},
+    {"name": "BTC-dominance",           "delta": +0.0077, "passed": False},
+    {"name": "OKX long/short",          "delta": +0.0014, "passed": False},
+    {"name": "sma50_1h",                "delta": +0.0007, "passed": False},
+    {"name": "sma200_1h",               "delta": +0.0007, "passed": False},
+    {"name": "sma50_d1",                "delta": -0.0002, "passed": False},
+    {"name": "sma200_d1",               "delta": +0.0004, "passed": False},
+    {"name": "golden_cross_d1",         "delta": +0.0006, "passed": False},
+    {"name": "btc_ret_lag_1",           "delta": -0.0021, "passed": False},
+    {"name": "btc_ret_lag_4",           "delta": -0.0100, "passed": False},
+    {"name": "btc_ret_lag_12",          "delta": -0.0038, "passed": False},
+    {"name": "btc_beta_60",             "delta": -0.0003, "passed": False},
+    {"name": "btc_beta_residual_60",    "delta": -0.0003, "passed": False},
+    {"name": "btc_residual_ch9",        "delta": -0.0000, "passed": False},
+]
+
+# Documented constants (from xgb_feature_optimization_findings.md / the
+# scorecard baseline / xgb_probe_results_log.md).
+N_SAMPLES = 167933          # pooled top-20, 28-channel cache
+POS_RATE = 0.488            # label balance
+V3_BEST_AUC = 0.5284        # best documented config (top-40, tuned)
+V3_OOF_AUC = 0.512          # scorecard 5-fold purged-WF OOF AUC
+BEST_LIFT_DELTA = 0.0124    # RSI-rank survivorship-aware — the only confirmed PASS
+BASELINE_FOLD_AUCS = [0.516, 0.507, 0.527, 0.523, 0.529]  # logged purged-WF folds
+N_TIERS = (17, 100, 200)    # channel candidates / full search / conservative
+
+
+def analyze() -> list[dict]:
+    """Run both deflation tracks across the N tiers and both noise scales.
+
+    Track A — v3's base AUC edge (center 0.5), for the best documented AUC and
+    the scorecard OOF AUC. Track B — the best channel-add lift (center 0.0).
+    Returns one row dict per (track, observed value, N tier, noise scale).
+    """
+    n_pos = round(N_SAMPLES * POS_RATE)
+    n_neg = N_SAMPLES - n_pos
+    noise_scales = (
+        ("fold", fold_level_se(BASELINE_FOLD_AUCS)),
+        ("iid", iid_auc_se(n_pos, n_neg)),
+    )
+
+    rows: list[dict] = []
+    track_a = (("v3 best documented AUC", V3_BEST_AUC),
+               ("v3 scorecard OOF AUC", V3_OOF_AUC))
+    for label, observed in track_a:
+        for n in N_TIERS:
+            for noise_label, se in noise_scales:
+                rows.append({
+                    "track": "A: base AUC edge",
+                    "observed_label": label, "observed": observed,
+                    "n_trials": n, "noise": noise_label, "se": se,
+                    "center": 0.5,
+                    "expected_max": expected_max_under_null(n, se, 0.5),
+                    "deflated_prob": deflated_probability(observed, n, se, 0.5),
+                })
+    for n in N_TIERS:
+        for noise_label, se in noise_scales:
+            rows.append({
+                "track": "B: best channel lift",
+                "observed_label": "RSI-rank Delta", "observed": BEST_LIFT_DELTA,
+                "n_trials": n, "noise": noise_label, "se": se, "center": 0.0,
+                "expected_max": expected_max_under_null(n, se, 0.0),
+                "deflated_prob": deflated_probability(BEST_LIFT_DELTA, n, se, 0.0),
+            })
+    return rows
