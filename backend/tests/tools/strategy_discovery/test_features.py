@@ -40,3 +40,23 @@ def test_ema_warmup_returns_finite_after_n_bars():
     for col in ("price_over_ema20", "price_over_ema50", "price_over_ema200"):
         tail = out[col].iloc[200:]
         assert np.isfinite(tail.to_numpy()).all(), f"non-finite values in {col} after warmup"
+
+
+def test_atr14_wilder_smoothing_formula():
+    df = _synthetic_ohlcv(400)
+    out = add_trend_features(df)
+    # Recompute Wilder ATR-14 from first principles and compare.
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        (df["high"] - df["low"]).abs(),
+        (df["high"] - prev_close).abs(),
+        (df["low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    # Wilder smoothing = ewm with alpha = 1/14, adjust=False.
+    atr = tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
+    expected = atr / df["close"]
+    np.testing.assert_allclose(
+        out["atr14_pct"].iloc[14:].to_numpy(),
+        expected.iloc[14:].to_numpy(),
+        rtol=1e-9,
+    )
