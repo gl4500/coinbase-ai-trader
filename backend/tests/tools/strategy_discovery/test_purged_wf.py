@@ -28,3 +28,17 @@ def test_embargo_drops_train_rows_within_horizon_of_test_start():
     assert set(range(60, 100)).issubset(set(train_idx.tolist()))
     for embargoed in range(30, 40):
         assert embargoed not in train_idx.tolist()
+
+
+def test_nested_inner_cv_uses_only_outer_train():
+    n = 600
+    outer = outer_folds(n, n_folds=5, embargo_bars=0)
+    outer_train, outer_test = outer[2]
+    inner = inner_folds(outer_train, n_folds=3, embargo_bars=0)
+    assert len(inner) == 3
+    outer_train_set = set(outer_train.tolist())
+    outer_test_set  = set(outer_test.tolist())
+    for inner_train, inner_test in inner:
+        for idx in inner_train.tolist() + inner_test.tolist():
+            assert idx in outer_train_set, f"inner idx {idx} not in outer train"
+            assert idx not in outer_test_set, f"inner idx {idx} leaked from outer test"
