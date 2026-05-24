@@ -82,3 +82,6 @@ cnn_*.html
 training_audit.txt
 tools/claude_train_results.jsonl
 tools/__pycache__/
+
+# Obsidian vault config (per-user UI/plugin state, not project config)
+.obsidian/
