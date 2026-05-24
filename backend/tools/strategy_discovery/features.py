@@ -56,6 +56,9 @@ def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
     out["price_over_ema20"]  = close / _ema(close, 20)
     out["price_over_ema50"]  = close / _ema(close, 50)
     out["price_over_ema200"] = close / _ema(close, 200)
+    out["ret_1h_sign"]  = np.sign(close - close.shift(1)).astype("float64")
+    out["ret_24h_sign"] = np.sign(close - close.shift(24)).astype("float64")
+    out["ret_7d_sign"]  = np.sign(close - close.shift(168)).astype("float64")
     out["atr14_pct"] = _wilder_atr14(out["high"], out["low"], close) / close
     return out
 

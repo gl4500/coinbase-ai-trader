@@ -60,3 +60,18 @@ def test_atr14_wilder_smoothing_formula():
         expected.iloc[14:].to_numpy(),
         rtol=1e-9,
     )
+
+
+def test_ret_sign_at_zero_returns_zero():
+    # Construct a series where close_t == close_{t-1} == close_{t-24} == close_{t-168}.
+    n = 300
+    df = _synthetic_ohlcv(n)
+    df["close"] = 100.0  # all closes identical → sign of any diff is 0
+    df["high"]  = 100.5
+    df["low"]   = 99.5
+    df["open"]  = 100.0
+    out = add_trend_features(df)
+    tail = out.iloc[200:]   # post-warmup
+    assert (tail["ret_1h_sign"]  == 0).all()
+    assert (tail["ret_24h_sign"] == 0).all()
+    assert (tail["ret_7d_sign"]  == 0).all()
