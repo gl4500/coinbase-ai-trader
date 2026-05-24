@@ -57,7 +57,7 @@ const STUDIES: Study[] = [
   { label: 'VWAP',          id: 'VWAP@tv-basicstudies' },
   { label: 'OBV',           id: 'OBV@tv-basicstudies' },
   { label: 'Ichimoku',      id: 'IchimokuCloud@tv-basicstudies' },
-  { label: 'MFI',           id: 'MoneyFlow@tv-basicstudies' },
+  { label: 'CMF',           id: 'CMF@tv-basicstudies' },
   { label: 'CCI',           id: 'CCI@tv-basicstudies' },
   { label: 'Parabolic SAR', id: 'PSAR@tv-basicstudies' },
   { label: 'Williams %R',   id: 'WilliamR@tv-basicstudies' },
