@@ -64,7 +64,12 @@ def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
 
 
 def first_valid_index(df: pd.DataFrame, min_warmup: int = 200) -> int:
-    """First row index where all trend feature columns are finite."""
+    """First row index where all trend feature columns are finite.
+
+    Returns ``len(df)`` if no row in ``[min_warmup, n)`` qualifies; callers
+    should check ``idx < len(df)`` before slicing or they will silently get
+    an empty DataFrame.
+    """
     cols = [c for c in _TREND_COLUMNS if c in df.columns]
     if not cols:
         return min(min_warmup, len(df))
