@@ -29,6 +29,21 @@ def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
+def _wilder_atr14(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """Wilder ATR-14.
+
+    TR_t = max(high_t - low_t, |high_t - close_{t-1}|, |low_t - close_{t-1}|).
+    Wilder smoothing is equivalent to ewm(alpha=1/14, adjust=False).
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
+
+
 def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
     """Add the 7 trend feature columns to a 1h OHLCV DataFrame.
 
@@ -41,6 +56,7 @@ def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
     out["price_over_ema20"]  = close / _ema(close, 20)
     out["price_over_ema50"]  = close / _ema(close, 50)
     out["price_over_ema200"] = close / _ema(close, 200)
+    out["atr14_pct"] = _wilder_atr14(out["high"], out["low"], close) / close
     return out
 
 
