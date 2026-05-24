@@ -54,6 +54,20 @@ All commits include both the implementation file and its test file.
 `Co-Authored-By` line required (added automatically by Claude Code).
 Update `CHANGELOG.md` in the same commit as the feature or fix.
 
+### Branch discipline — always use a fresh clean branch
+
+For ANY work that will produce > 1 commit, create a fresh branch off `main` before the first commit. Never commit on top of an existing feature branch that another agent (or session) might have touched. Reusing an existing branch is how parallel-agent collisions happen — `git commit -a`-style races bundle a parallel agent's staged files into your commit (or vice versa), producing commits with misleading messages or files on the wrong branch.
+
+Rule:
+- Fresh branch name format: `feat/<scope>-<short-desc>` (e.g. `feat/strategy-discovery-phase2`, `fix/exit-watcher-race`).
+- Branch from `main` (or the parent feature branch if explicitly stacking), never from another in-progress agent's branch.
+- Every commit MUST use surgical pathspec: `git commit -m "msg" -- <explicit paths>`. NEVER `git commit -a` / `git commit -am`.
+- Before every `git add`: `git rev-parse --abbrev-ref HEAD` to confirm you're on YOUR branch.
+- After every `git commit`: `git log -1 --stat` to confirm only intended files landed.
+- If pre-commit hook fails because of another agent's unrelated WIP in the working tree, use `git stash push -m "<other-agent>-WIP"` to relocate it, retry commit, then `git stash pop`. Never `--no-verify` without explicit operator authorization.
+
+Reinforced 2026-05-24 after a Phase 2 collision where parallel agent's `git commit -a` swept my staged Phase 2 file into their GPU-kernel commit on my branch, AND one of my Phase 2 test commits accidentally landed on their branch and was pushed to origin. See `feedback_parallel_agent_coordination.md` for the full incident log.
+
 ---
 
 ## Security Gate — Pre-commit Checks
