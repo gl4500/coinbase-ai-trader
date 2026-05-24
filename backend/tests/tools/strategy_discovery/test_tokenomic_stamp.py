@@ -64,3 +64,32 @@ def test_forward_fill_supplies_carry_indefinitely():
     out = stamp_tokenomic(df_hourly, df_daily, _trivial_supply(), drop_on_missing_volume=False)
     assert out["market_cap"].notna().all()
     np.testing.assert_allclose(out["market_cap"].to_numpy(), 100.0)
+
+
+def test_missing_volume_drops_candidate_row():
+    # Daily snapshot exists for Day D but not for Day D+1. Hourly rows on
+    # Day D+1 (which read Day D's snapshot — vol present) survive; hourly
+    # rows on Day D+2 (which read Day D+1's snapshot — vol missing) drop.
+    d0 = 1_000 * _DAY_MS
+    df_daily = pd.DataFrame({
+        "ts":         [d0],          # only Day D — Day D+1 is missing
+        "market_cap": [100.0],
+        "volume_24h": [10.0],
+    })
+    df_hourly = pd.DataFrame({
+        "ts":    _hourly_ts(d0 + _DAY_MS, 48),     # 24h on D+1 + 24h on D+2
+        "close": np.full(48, 5.0, dtype="float64"),
+    })
+    # With drop_on_missing_volume=True, ALL 48 rows survive — because vol
+    # IS present (forward-filled from Day D for all 48 hours via merge_asof).
+    # So we need to construct the missing-vol case differently: leave a
+    # genuine gap by passing a daily frame where vol_24h is NaN on Day D+1.
+    df_daily_with_gap = pd.DataFrame({
+        "ts":         [d0,    d0 + _DAY_MS],
+        "market_cap": [100.0, 200.0],
+        "volume_24h": [10.0,  float("nan")],
+    })
+    out = stamp_tokenomic(df_hourly, df_daily_with_gap, _trivial_supply(), drop_on_missing_volume=True)
+    # Day D+1 rows (24h) keep vol=10. Day D+2 rows would read NaN — dropped.
+    assert len(out) == 24, f"expected 24 surviving rows, got {len(out)}"
+    np.testing.assert_allclose(out["vol_24h"].to_numpy(), 10.0)
