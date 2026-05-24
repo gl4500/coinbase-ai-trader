@@ -44,3 +44,19 @@ def test_stop_loss_fires_at_8pct_drawdown():
     )
     out = simulate_dynamic_exit_labels(df, horizons=[3])
     assert out.loc[0, "label_h3"] == pytest.approx(-0.092, abs=1e-9)
+
+
+def test_trail_stop_fires_at_atr_floor():
+    # Entry at close=100. Bar 1: high=110 (new peak). Bar 2: low=103.4
+    # → drawdown from peak = 103.4/110 - 1 = -0.06 (exactly the 6% floor).
+    # ATR provided is 0.03 (below floor) → effective trail = 6% floor.
+    # Trail exit price = peak * (1 - 0.06) = 110 * 0.94 = 103.4.
+    # Net label = (103.4/100 - 1) - 0.012 = 0.034 - 0.012 = 0.022.
+    df = _frame(
+        closes=[100.0, 110.0, 103.4, 103.4],
+        highs=[100.0, 110.0, 103.4, 103.4],
+        lows=[100.0, 100.0, 103.4, 103.4],
+        atrs=[0.03, 0.03, 0.03, 0.03],
+    )
+    out = simulate_dynamic_exit_labels(df, horizons=[3])
+    assert out.loc[0, "label_h3"] == pytest.approx(0.022, abs=1e-9)
