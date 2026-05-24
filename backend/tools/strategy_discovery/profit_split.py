@@ -12,12 +12,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import torch
 
+_MS_PER_BAR: int = 3_600_000   # one 1h bar in epoch milliseconds
 
-@dataclass(frozen=True)
+
+@dataclass
 class SplitResult:
+    """Best-split outcome from one node's candidate scan.
+
+    Treat as immutable — not frozen because the `left_mask` torch.Tensor is
+    unhashable, so `frozen=True` would create a misleading hashability contract.
+    """
     feature: int
     threshold: float
     left_mask: torch.Tensor   # (n,) bool — True for rows going to left subtree
@@ -30,7 +36,7 @@ def build_next_eligible(ts_ms: torch.Tensor, horizon_bars: int) -> torch.Tensor:
     Returns `len(ts)` for any row whose horizon would extend past the end.
     """
     n = ts_ms.shape[0]
-    horizon_ms = int(horizon_bars) * 3_600_000
+    horizon_ms = int(horizon_bars) * _MS_PER_BAR
     target = ts_ms + horizon_ms
     out = torch.searchsorted(ts_ms, target, right=False)
     return out.clamp_max(n)
@@ -117,9 +123,8 @@ def best_split(
             subset_idx = torch.full((T, max_k), -1, dtype=torch.int64,
                                     device=features.device)
             row_pos = mask.cumsum(dim=1) - 1
-            valid_mask = mask
             abs_idx_broadcast = indices.unsqueeze(0).expand(T, n)
-            r_t, r_n = torch.where(valid_mask)
+            r_t, r_n = torch.where(mask)
             subset_idx[r_t, row_pos[r_t, r_n]] = abs_idx_broadcast[r_t, r_n]
             scores = walk_and_sum(subset_idx, next_eligible, labels)
             best_t = int(scores.argmax().item())
