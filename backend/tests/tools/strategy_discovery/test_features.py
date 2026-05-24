@@ -31,3 +31,12 @@ def test_ema20_matches_pandas_ewm():
         expected.to_numpy(),
         rtol=1e-9,
     )
+
+
+def test_ema_warmup_returns_finite_after_n_bars():
+    df = _synthetic_ohlcv(400)
+    out = add_trend_features(df)
+    # All three EMA ratios must be finite for every row at or after index 200.
+    for col in ("price_over_ema20", "price_over_ema50", "price_over_ema200"):
+        tail = out[col].iloc[200:]
+        assert np.isfinite(tail.to_numpy()).all(), f"non-finite values in {col} after warmup"
