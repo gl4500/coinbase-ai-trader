@@ -75,3 +75,14 @@ def test_ret_sign_at_zero_returns_zero():
     assert (tail["ret_1h_sign"]  == 0).all()
     assert (tail["ret_24h_sign"] == 0).all()
     assert (tail["ret_7d_sign"]  == 0).all()
+
+
+def test_first_valid_index_at_200():
+    df = _synthetic_ohlcv(400)
+    out = add_trend_features(df)
+    idx = first_valid_index(out, min_warmup=200)
+    assert idx == 200, f"expected first_valid_index == 200, got {idx}"
+    # And every row from idx onward has finite values in all trend cols.
+    tail = out.iloc[idx:]
+    for col in _TREND_COLUMNS:
+        assert np.isfinite(tail[col].to_numpy()).all(), f"non-finite in {col}"
