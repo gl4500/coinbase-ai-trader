@@ -80,3 +80,17 @@ def test_max_hold_cap_at_168_for_h168():
     exit_close  = closes[168]
     expected = (exit_close / entry_close - 1.0) - _DEFAULT_ROUND_TRIP_FEE
     assert out.loc[0, "label_h168"] == pytest.approx(expected, abs=1e-9)
+
+
+def test_horizon_reached_without_trigger_uses_close():
+    # Entry at close=100. Bars 1..4 stay flat. horizon=4 reaches without
+    # SL or trail triggers — exit at closes[4] = 100.
+    # Net label = (100/100 - 1) - 0.012 = -0.012.
+    df = _frame(
+        closes=[100.0] * 6,
+        highs=[100.0]  * 6,
+        lows= [100.0]  * 6,
+        atrs= [0.02]   * 6,
+    )
+    out = simulate_dynamic_exit_labels(df, horizons=[4])
+    assert out.loc[0, "label_h4"] == pytest.approx(-0.012, abs=1e-9)
