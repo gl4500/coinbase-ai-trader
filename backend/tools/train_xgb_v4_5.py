@@ -192,9 +192,10 @@ def _train_booster_3class(
     X_train: np.ndarray, y_train: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     feature_names: List[str], feature_weights: np.ndarray,
+    device: str = "cpu",
 ):
     """Train one 3-class xgb.Booster (multi:softprob). Returns booster +
-    val mlogloss."""
+    val mlogloss. When device='cuda', xgboost runs on the GPU."""
     import xgboost as xgb
 
     d_tr = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
@@ -213,6 +214,8 @@ def _train_booster_3class(
         "learning_rate": 0.05,
         "seed": 0,
     }
+    if device == "cuda":
+        params["device"] = "cuda"
     booster = xgb.train(
         params, d_tr, num_boost_round=200,
         evals=[(d_va, "val")], verbose_eval=False,
@@ -271,6 +274,18 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="triple-barrier threshold (e.g. 0.015, 0.03, 0.06)")
     p.add_argument("--embargo-bars", type=int, default=0,
                    help="defaults to forward_hours if 0")
+    p.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help=(
+            "Feature-extraction backend. 'cpu' (default) uses the per-bar numpy "
+            "loop in _build_samples_for_pid — bit-exact to historical behavior. "
+            "'cuda' uses the batched PyTorch kernel from "
+            "tools.xgb_v4_5_features_batch.batch_build_samples_for_pid, which "
+            "also routes xgb.train onto the GPU."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -282,9 +297,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     macro = TIER_WINDOWS_V45["macro"]
     embargo = args.embargo_bars if args.embargo_bars > 0 else args.forward_hours
 
+    if args.device == "cuda":
+        import torch
+        if not torch.cuda.is_available():
+            print("ERROR: --device cuda requested but torch.cuda.is_available() is False",
+                  flush=True)
+            return 2
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}", flush=True)
+
     t0 = time.time()
     print(f"v4.5 train: pids={pids} forward_hours={args.forward_hours} "
           f"label_thresh={args.label_thresh} embargo_bars={embargo} "
+          f"device={args.device} "
           f"-> xgb_*_v4_5_h{args.forward_hours}.*", flush=True)
 
     all_X: List[np.ndarray] = []
@@ -297,11 +322,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             skipped.append(pid)
             print(f"  {pid}: no parquet — skip", flush=True)
             continue
-        X, y, ts = _build_samples_for_pid(
-            candles, label_thresh=args.label_thresh,
-            forward_hours=args.forward_hours,
-            micro=micro, meso=meso, macro=macro,
-        )
+        if args.device == "cpu":
+            X, y, ts = _build_samples_for_pid(
+                candles, label_thresh=args.label_thresh,
+                forward_hours=args.forward_hours,
+                micro=micro, meso=meso, macro=macro,
+            )
+        else:
+            from tools.xgb_v4_5_features_batch import batch_build_samples_for_pid
+            X, y, ts = batch_build_samples_for_pid(
+                candles,
+                forward_hours=args.forward_hours,
+                label_thresh=args.label_thresh,
+                device="cuda",
+            )
         if X.shape[0] == 0:
             skipped.append(pid)
             print(f"  {pid}: too few candles ({len(candles)}) — skip", flush=True)
@@ -334,6 +368,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     weights = feature_weights_v4_5()
     booster, val_mlogloss = _train_booster_3class(
         X_tr, y_tr, X_va, y_va, names, weights,
+        device=args.device,
     )
     print(f"Train done: val_mlogloss={val_mlogloss:.4f}", flush=True)
 
