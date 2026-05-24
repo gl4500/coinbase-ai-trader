@@ -55,6 +55,7 @@ def test_atr14_wilder_smoothing_formula():
     # Wilder smoothing = ewm with alpha = 1/14, adjust=False.
     atr = tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
     expected = atr / df["close"]
+    # Skip the first 14 rows where Wilder smoothing is still bootstrapping.
     np.testing.assert_allclose(
         out["atr14_pct"].iloc[14:].to_numpy(),
         expected.iloc[14:].to_numpy(),
