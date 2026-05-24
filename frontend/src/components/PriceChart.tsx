@@ -53,14 +53,14 @@ const STUDIES: Study[] = [
   { label: 'SMA',           id: 'MASimple@tv-basicstudies' },
   { label: 'Stoch RSI',     id: 'StochasticRSI@tv-basicstudies' },
   { label: 'ATR',           id: 'ATR@tv-basicstudies' },
-  { label: 'ADX',           id: 'ADX@tv-basicstudies' },
+  { label: 'ADX (DMI)',     id: 'DM@tv-basicstudies' },
   { label: 'VWAP',          id: 'VWAP@tv-basicstudies' },
   { label: 'OBV',           id: 'OBV@tv-basicstudies' },
   { label: 'Ichimoku',      id: 'IchimokuCloud@tv-basicstudies' },
-  { label: 'MFI',           id: 'MFI@tv-basicstudies' },
+  { label: 'MFI',           id: 'MoneyFlow@tv-basicstudies' },
   { label: 'CCI',           id: 'CCI@tv-basicstudies' },
-  { label: 'Parabolic SAR', id: 'ParabolicSAR@tv-basicstudies' },
-  { label: 'Williams %R',   id: 'WilliamsR@tv-basicstudies' },
+  { label: 'Parabolic SAR', id: 'PSAR@tv-basicstudies' },
+  { label: 'Williams %R',   id: 'WilliamR@tv-basicstudies' },
   { label: 'ROC',           id: 'ROC@tv-basicstudies' },
 ]
 
