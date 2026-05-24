@@ -14,6 +14,34 @@ const INTERVALS: { label: string, value: Interval }[] = [
   { label: '1D',  value: 'D' },
 ]
 
+/** TradingView free "basic studies" — no account required. Each maps to a
+ *  STUDY_ID@tv-basicstudies string the widget understands via the `studies`
+ *  URL param. Click to toggle on/off; selected studies auto-load into the
+ *  chart. The chart's own fx toolbar still lets the user add more ad-hoc. */
+type Study = {
+  label: string
+  id: string        // TradingView study id
+  defaultOn?: boolean
+}
+const STUDIES: Study[] = [
+  { label: 'RSI',           id: 'RSI@tv-basicstudies',           defaultOn: true },
+  { label: 'MACD',          id: 'MACD@tv-basicstudies',          defaultOn: true },
+  { label: 'Bollinger',     id: 'BB@tv-basicstudies',            defaultOn: true },
+  { label: 'EMA',           id: 'MAExp@tv-basicstudies' },
+  { label: 'SMA',           id: 'MASimple@tv-basicstudies' },
+  { label: 'Stoch RSI',     id: 'StochasticRSI@tv-basicstudies' },
+  { label: 'ATR',           id: 'ATR@tv-basicstudies' },
+  { label: 'ADX',           id: 'ADX@tv-basicstudies' },
+  { label: 'VWAP',          id: 'VWAP@tv-basicstudies' },
+  { label: 'OBV',           id: 'OBV@tv-basicstudies' },
+  { label: 'Ichimoku',      id: 'IchimokuCloud@tv-basicstudies' },
+  { label: 'MFI',           id: 'MFI@tv-basicstudies' },
+  { label: 'CCI',           id: 'CCI@tv-basicstudies' },
+  { label: 'Parabolic SAR', id: 'ParabolicSAR@tv-basicstudies' },
+  { label: 'Williams %R',   id: 'WilliamsR@tv-basicstudies' },
+  { label: 'ROC',           id: 'ROC@tv-basicstudies' },
+]
+
 /** Convert a Coinbase product_id (BTC-USD) to a TradingView symbol.
  *  Coinbase pairs map cleanly to COINBASE:{BASE}{QUOTE}. */
 function tradingViewSymbol(pid: string): string {
@@ -26,6 +54,9 @@ export default function PriceChart() {
   const [pid, setPid] = useState<string>('BTC-USD')
   const [interval, setInterval] = useState<Interval>('60')
   const [err, setErr] = useState<string | null>(null)
+  const [selectedStudies, setSelectedStudies] = useState<Set<string>>(
+    () => new Set(STUDIES.filter(s => s.defaultOn).map(s => s.id))
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -49,6 +80,7 @@ export default function PriceChart() {
   const symbol = useMemo(() => tradingViewSymbol(pid), [pid])
 
   const iframeUrl = useMemo(() => {
+    const studiesJson = JSON.stringify(Array.from(selectedStudies))
     const params = new URLSearchParams({
       symbol,
       interval,
@@ -60,11 +92,20 @@ export default function PriceChart() {
       hide_side_toolbar: '0',
       allow_symbol_change: '1',
       save_image: '0',
-      studies: '[]',
+      studies: studiesJson,
       locale: 'en',
     })
     return `https://www.tradingview.com/widgetembed/?${params.toString()}`
-  }, [symbol, interval])
+  }, [symbol, interval, selectedStudies])
+
+  const toggleStudy = (id: string) => {
+    setSelectedStudies(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   return (
     <div className="space-y-4">
@@ -110,9 +151,47 @@ export default function PriceChart() {
           </div>
         </div>
 
+        {/* Indicator toggle row — TradingView free basic studies, no account needed */}
+        <div className="mb-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-400 mr-1">Indicators:</span>
+            {STUDIES.map(s => {
+              const on = selectedStudies.has(s.id)
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => toggleStudy(s.id)}
+                  className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                    on
+                      ? 'bg-blue-700 border-blue-500 text-white'
+                      : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-600'
+                  }`}
+                  title={`${on ? 'Hide' : 'Show'} ${s.label}`}
+                >
+                  {s.label}
+                </button>
+              )
+            })}
+            {selectedStudies.size > 0 && (
+              <button
+                onClick={() => setSelectedStudies(new Set())}
+                className="text-xs px-2 py-0.5 rounded border bg-transparent border-gray-700 text-gray-500 hover:text-gray-300 ml-1"
+                title="Clear all indicators"
+              >
+                clear
+              </button>
+            )}
+          </div>
+          <p className="text-[10px] text-gray-600 mt-1">
+            {selectedStudies.size === 0
+              ? 'No indicators loaded — click any above to add. Use the fx button inside the chart for more.'
+              : `${selectedStudies.size} indicator${selectedStudies.size === 1 ? '' : 's'} loaded. The fx button in the chart toolbar can add ad-hoc more without a TradingView account.`}
+          </p>
+        </div>
+
         <div className="bg-[#131722] rounded overflow-hidden" style={{ height: '600px' }}>
           <iframe
-            key={`${symbol}-${interval}`}
+            key={`${symbol}-${interval}-${Array.from(selectedStudies).sort().join(',')}`}
             src={iframeUrl}
             title={`TradingView chart ${symbol}`}
             width="100%"
