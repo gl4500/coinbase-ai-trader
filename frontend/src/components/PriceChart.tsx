@@ -1,4 +1,26 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+
+// Global handle for the TradingView script (only inject once across re-mounts).
+declare global {
+  interface Window { TradingView?: any }
+}
+let _tvScriptPromise: Promise<void> | null = null
+function ensureTradingViewScript(): Promise<void> {
+  if (typeof window === 'undefined') return Promise.resolve()
+  if (window.TradingView) return Promise.resolve()
+  if (_tvScriptPromise) return _tvScriptPromise
+  _tvScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[src*="s3.tradingview.com/tv.js"]')
+    if (existing) { existing.addEventListener('load', () => resolve()); return }
+    const s = document.createElement('script')
+    s.src   = 'https://s3.tradingview.com/tv.js'
+    s.async = true
+    s.onload  = () => resolve()
+    s.onerror = () => reject(new Error('Failed to load tv.js'))
+    document.head.appendChild(s)
+  })
+  return _tvScriptPromise
+}
 
 interface Product {
   product_id: string
@@ -79,25 +101,6 @@ export default function PriceChart() {
 
   const symbol = useMemo(() => tradingViewSymbol(pid), [pid])
 
-  const iframeUrl = useMemo(() => {
-    const studiesJson = JSON.stringify(Array.from(selectedStudies))
-    const params = new URLSearchParams({
-      symbol,
-      interval,
-      theme: 'dark',
-      style: '1',                    // 1 = candles
-      timezone: 'America/New_York',
-      hide_top_toolbar: '0',
-      hide_legend: '0',
-      hide_side_toolbar: '0',
-      allow_symbol_change: '1',
-      save_image: '0',
-      studies: studiesJson,
-      locale: 'en',
-    })
-    return `https://www.tradingview.com/widgetembed/?${params.toString()}`
-  }, [symbol, interval, selectedStudies])
-
   const toggleStudy = (id: string) => {
     setSelectedStudies(prev => {
       const next = new Set(prev)
@@ -106,6 +109,48 @@ export default function PriceChart() {
       return next
     })
   }
+
+  // TradingView JavaScript widget — does support `studies` arg (the URL
+  // iframe variant silently ignores it). Recreate widget on symbol /
+  // interval / studies change. No account required.
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const containerId  = useMemo(() => `tv-container-${Math.random().toString(36).slice(2, 10)}`, [])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        await ensureTradingViewScript()
+        if (cancelled || !window.TradingView || !containerRef.current) return
+        // Clear any previous widget
+        containerRef.current.innerHTML = ''
+        const inner = document.createElement('div')
+        inner.id = containerId
+        inner.style.height = '100%'
+        containerRef.current.appendChild(inner)
+        // Build studies array for the widget config
+        const studies = Array.from(selectedStudies)
+        new window.TradingView.widget({
+          container_id:        containerId,
+          symbol,
+          interval,
+          theme:               'dark',
+          style:               '1',           // candles
+          timezone:            'America/New_York',
+          locale:              'en',
+          autosize:            true,
+          enable_publishing:   false,
+          allow_symbol_change: true,
+          hide_side_toolbar:   false,
+          hide_legend:         false,
+          studies,
+        })
+      } catch (e) {
+        if (!cancelled) setErr((e as Error).message)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [symbol, interval, selectedStudies, containerId])
 
   return (
     <div className="space-y-4">
@@ -189,19 +234,12 @@ export default function PriceChart() {
           </p>
         </div>
 
-        <div className="bg-[#131722] rounded overflow-hidden" style={{ height: '600px' }}>
-          <iframe
-            key={`${symbol}-${interval}-${Array.from(selectedStudies).sort().join(',')}`}
-            src={iframeUrl}
-            title={`TradingView chart ${symbol}`}
-            width="100%"
-            height="600"
-            frameBorder="0"
-            allowTransparency
-            scrolling="no"
-            allowFullScreen
-          />
-        </div>
+        <div
+          ref={containerRef}
+          className="bg-[#131722] rounded overflow-hidden"
+          style={{ height: '600px' }}
+        />
+        {err && <p className="text-xs text-red-400 mt-2">Chart error: {err}</p>}
 
         <p className="text-xs text-gray-600 mt-2">
           Free TradingView embed widget. Data is from TradingView's Coinbase feed, not our
