@@ -156,7 +156,7 @@ class TestCNNStopLoss:
         entry   = 1000.0
         current = entry * (1 - 0.05)   # -5% from entry → above -8% hard stop
         # peak_price just above current so pct_from_peak ≈ -1%, below 3% ATR floor
-        agent.book = _book_with_position("SOL-USD", avg_price=entry, peak_price=current * 1.01)
+        agent.book = _book_with_position("SOL-USD", avg_price=entry, size=0.01, peak_price=current * 1.01)
 
         sell_mock = AsyncMock(return_value=0.0)
         ws_mock   = MagicMock()
@@ -317,7 +317,7 @@ class TestTrailFloor:
         entry  = 1000.0
         peak   = 1000.0
         current = peak * (1 - 0.04)   # -4% from peak → above 6% floor
-        agent.book = _book_with_position("OP-USD", avg_price=entry,
+        agent.book = _book_with_position("OP-USD", avg_price=entry, size=0.01,
                                           peak_price=peak)
 
         sell_mock = AsyncMock(return_value=0.0)
@@ -336,12 +336,13 @@ class TestTrailFloor:
 
     @pytest.mark.asyncio
     async def test_65pct_drawdown_triggers_trail_stop(self):
-        """Position 6.5% off peak must exit (below 6% floor)."""
+        """Position with peak above entry, then 6.5% pullback fires trail.
+        Under B2 design, peak must be above entry for trail to engage."""
         agent = CoinbaseCNNAgent()
         entry  = 1000.0
-        peak   = 1000.0
-        current = peak * (1 - 0.065)   # -6.5% from peak → below 6% floor
-        agent.book = _book_with_position("ARB-USD", avg_price=entry,
+        peak   = 1100.0   # peak_pnl 10% → threshold = 10 - 1.2 = 8.8%
+        current = 1080.0   # pnl 8% < threshold 8.8% → fire
+        agent.book = _book_with_position("ARB-USD", avg_price=entry, size=0.01,
                                           peak_price=peak)
 
         sell_mock = AsyncMock(return_value=0.0)
@@ -372,7 +373,7 @@ async def test_check_risk_exits_writes_trail_pct_to_position():
     between scan loop and WS handler (see agents/exit_watcher.on_price_tick).
     """
     agent = CoinbaseCNNAgent()
-    agent.book = _book_with_position("BTC-USD", avg_price=100.0, peak_price=105.0)
+    agent.book = _book_with_position("BTC-USD", avg_price=100.0, size=0.01, peak_price=105.0)
 
     ws_mock = MagicMock()
     ws_mock.get_price.return_value = 104.0  # between trail and stop-loss → no exit
@@ -391,3 +392,156 @@ async def test_check_risk_exits_writes_trail_pct_to_position():
     pos = agent.book.positions["BTC-USD"]
     assert "trail_pct" in pos, "scan loop must write trail_pct for WS handler"
     assert _CNN_ATR_TRAIL_MIN <= pos["trail_pct"] <= _CNN_ATR_TRAIL_MAX
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Task #46 — PnL-anchored trail behavior in _check_risk_exits
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCNNRiskExitsPnLAnchored:
+    """_check_risk_exits dispatches through _compute_exit_threshold (task #46).
+    Position state gains peak_pnl_pct + position_dollars on each scan."""
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_writes_peak_pnl_pct_and_position_dollars(self):
+        """After one scan, position should have peak_pnl_pct + position_dollars set."""
+        agent = CoinbaseCNNAgent()
+        entry = 1000.0
+        current = 1080.0
+        agent.book = _book_with_position("DASH-USD", avg_price=entry,
+                                         peak_price=current)
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = current
+        agent.ws = ws_mock
+
+        fake_candles = [{"high": 1010 + i, "low": 990 + i, "close": 1000 + i,
+                         "start_time": i} for i in range(20)]
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=fake_candles)),
+            patch.object(agent.book, "sell", new=AsyncMock()),
+        ):
+            await agent._check_risk_exits()
+
+        pos = agent.book.positions["DASH-USD"]
+        assert "peak_pnl_pct" in pos
+        # peak_pnl_pct seeded from ratcheted peak_price (1080)
+        assert pos["peak_pnl_pct"] == pytest.approx(0.08)
+        assert "position_dollars" in pos
+        # size from _book_with_position default is 10.0; position_dollars = size * current_price
+        assert pos["position_dollars"] == pytest.approx(10.0 * current)
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_uses_pnl_anchored_threshold(self):
+        """DASH-like setup. Price $43.30 (pnl +0.77%) below the threshold
+        (baseline 1.8% from peak_pnl 7.8% − atr 6%, or break-even 1.2% — either
+        way fires). Verifies the new PnL-anchored trail dispatches sell."""
+        agent = CoinbaseCNNAgent()
+        entry = 42.97
+        peak = 46.32
+        current = 43.30   # pnl ≈ +0.77%
+        agent.book = _book_with_position(
+            "DASH-USD", avg_price=entry, size=1.35,
+            peak_price=peak,
+        )
+        agent.book.balance = 942.0   # → total capital after position dollars ≈ $1k
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = current
+        agent.ws = ws_mock
+
+        fake_candles = [{"high": entry + 1, "low": entry - 1, "close": entry,
+                         "start_time": i} for i in range(20)]
+        sell_mock = AsyncMock(return_value=0.0)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=fake_candles)),
+            patch.object(agent.book, "sell", sell_mock),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_called_once()
+        trigger = sell_mock.call_args[1].get("trigger") or sell_mock.call_args[0][2]
+        assert trigger == "TRAIL_STOP", f"Expected TRAIL_STOP, got: {trigger}"
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_fires_model_down_when_p_down_above_threshold(self):
+        """B2 MODEL_DOWN: when v4.5 says p_down > 0.55 (cached on position),
+        force exit regardless of price/trail state."""
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD
+        agent = CoinbaseCNNAgent()
+        entry = 1000.0
+        agent.book = _book_with_position("ABC-USD", avg_price=entry, size=0.01)
+        # Cache a strong DOWN signal
+        agent.book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05  # 0.60
+
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = entry * 1.01   # +1% PnL — trail wouldn't fire
+        agent.ws = ws_mock
+        sell_mock = AsyncMock(return_value=0.0)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", sell_mock),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_called_once()
+        trigger = sell_mock.call_args[1].get("trigger") or sell_mock.call_args[0][2]
+        assert trigger == "MODEL_DOWN", f"Expected MODEL_DOWN, got: {trigger}"
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_does_not_fire_model_down_below_threshold(self):
+        """B2 MODEL_DOWN: p_down at 0.50 (below 0.55 threshold) → no model exit."""
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD
+        agent = CoinbaseCNNAgent()
+        entry = 1000.0
+        peak = 1100.0   # +10% peak, well above trail threshold
+        agent.book = _book_with_position("ABC-USD", avg_price=entry, size=0.01,
+                                          peak_price=peak)
+        # p_down just below threshold
+        agent.book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD - 0.05
+
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = peak * 0.99   # near peak, won't trail-fire
+        agent.ws = ws_mock
+        sell_mock = AsyncMock(return_value=0.0)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", sell_mock),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_does_not_fire_above_threshold(self):
+        """B2: DASH peak +7.8% → exit threshold = 7.8 - 1.2 = 6.6%. Current
+        pnl +7.5% > 6.6% threshold → no fire."""
+        agent = CoinbaseCNNAgent()
+        entry = 42.97
+        peak = 46.32
+        current = 46.20   # pnl ≈ +7.5% > 6.6% threshold
+        agent.book = _book_with_position(
+            "DASH-USD", avg_price=entry, size=1.35,
+            peak_price=peak,
+        )
+        agent.book.balance = 942.0
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = current
+        agent.ws = ws_mock
+
+        fake_candles = [{"high": entry + 1, "low": entry - 1, "close": entry,
+                         "start_time": i} for i in range(20)]
+        sell_mock = AsyncMock(return_value=0.0)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles",
+                  new=AsyncMock(return_value=fake_candles)),
+            patch.object(agent.book, "sell", sell_mock),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_not_called()
