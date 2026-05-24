@@ -7,6 +7,36 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+- **2026-05-24: PnL-anchored trail with capital-relative profit floors (`agents/exit_thresholds.py`)** — replaces the peak-price-anchored trail with a three-layer design: (1) ATR-scaled profit-floor tiers (volatility-relative; engage at 0.5×/1.5×/3.0× ATR multiples of peak PnL, lock 0.5×/1.5× ATR), (2) capital-relative dollar-cap on large positions (>max($200, 5% of capital)) with tighter-of-(2% position $, 0.5% capital/position $) giveback, (3) fee-aware break-even at 2× FEE_RATE so exit covers Coinbase round-trip fees.
+  - Operator-identified as the PRIMARY root cause of paper-profit-to-realized-loss conversion. On the live 10-position book worst-case, prevents a $28 swing the wrong way (old rule realizes −$28.92; new rule realizes −$0.79, +$28.12 saved per fire event).
+  - `agents/cnn_agent.py:_CNNBook` — new `_migrate_position_state(pos)` static method adds `peak_pnl_pct` + `position_dollars` to legacy positions on load. `_check_risk_exits` ratchets `peak_pnl_pct`, refreshes `position_dollars`, and dispatches through `_compute_exit_threshold`.
+  - `agents/exit_watcher.py:on_price_tick` — ratchets `peak_pnl_pct` on every WS tick (per-pid lock from Session 58.71m unchanged); reads cached `position_dollars` (scan-loop owns refresh); fires `WS_TRAIL_STOP` / `WS_STOP_LOSS` per the new threshold.
+  - **Tests:** 30 new total (15 unit in `tests/test_exit_thresholds.py` + 3 migration in `tests/test_cnn_agent.py::TestCNNBookPnLMigration` + 3 risk-exit in `tests/test_cnn_risk_exits.py::TestCNNRiskExitsPnLAnchored` + 3 WS in `tests/test_exit_watcher.py::TestOnPriceTickPnLAnchored` + spec-validation worked-example assertions).
+  - **Constants** (override via `.env` if needed): `FEE_RATE=0.006`, `LARGE_POSITION_FRAC=0.05`, `LARGE_POSITION_FLOOR=200.0`, `MAX_DOLLAR_GIVEBACK_FRAC=0.02`, `MAX_LOSS_FRAC_OF_CAPITAL=0.005`.
+  - **Existing-test updates:** 3 `test_cnn_risk_exits.py` tests adjusted to use `size=0.01` positions so Layer 2 capital-cap doesn't engage (preserves the original ATR-floor test intent on Layers 1+3).
+  - **Verify:** `cd backend && python -m pytest tests/test_exit_thresholds.py tests/test_cnn_agent.py::TestCNNBookPnLMigration tests/test_cnn_risk_exits.py tests/test_exit_watcher.py -v` — 48/48 PASS. Full suite: 1228 passed, 0 failed.
+  - **Validate in shadow on port 8002 for 7 days** before promoting to 8001 alone. Promotion criteria: realized PnL > current rule by ≥$15 over the window AND no new exit-mode failures.
+  - **Spec:** `docs/superpowers/specs/2026-05-23-pnl-anchored-trail-design.md`. **Plan:** `docs/superpowers/plans/2026-05-23-pnl-anchored-trail.md`.
+
+### Session — 2026-05-24 — Strategy-discovery Phase 2: feature compute + dynamic-exit labels
+
+Implemented Phase 2 of the strategy-discovery rebuild per spec
+`docs/superpowers/specs/2026-05-23-strategy-discovery-phase2-design.md`
+and plan `docs/superpowers/plans/2026-05-23-strategy-discovery-phase2-implementation.md`.
+
+**New modules (all under `backend/tools/strategy_discovery/`):**
+- `features.py` — 7 trend features (EMA20/50/200 ratios, sign-only returns at 1h/24h/7d, Wilder ATR-14 percentage).
+- `tokenomic_stamp.py` — T+1 daily-to-hourly merge for 6 tokenomic features (MC, FDV, FDV/MC, circ/total, vol_24h, vol/MC).
+- `labels.py` — dynamic-exit simulator mirroring the deployed WS exit checker (SL 8%, ATR trail 6% floor, max-hold 168 bars, 1.2% net fee) across horizons {1, 4, 24, 72, 168}.
+- `build_phase2.py` — orchestrator + CLI; writes one parquet per pid to `backend/data/phase2/{pid}.parquet`.
+
+**Test surface added:** 19 new tests under `backend/tests/tools/strategy_discovery/`. Full backend suite green.
+
+**Operator step (post-merge):**
+
+    cd backend && python -m tools.strategy_discovery.build_phase2 \
+        --universe ../docs/superpowers/specs/2026-05-23-universe-50.json
+
 - **2026-05-23: GPU-batched XGB v4.5 feature kernel (`tools/xgb_v4_5_features_batch.py`)** — new module vectorizes feature extraction across all sample bars per PID via PyTorch `tensor.unfold` strided windows; runs on CPU or CUDA via `device` arg.
   - `tools/train_xgb_v4_5.py`: added `--device {cpu,cuda}` flag (default `cpu`, bit-exact to prior behavior). When `cuda`: validates `torch.cuda.is_available()`, calls `torch.use_deterministic_algorithms(True, warn_only=True)` for stable reduction order, dispatches to `batch_build_samples_for_pid`, and adds `device="cuda"` to xgb params so `xgb.train` runs on the GPU too. CPU path is untouched.
   - Cuts per-horizon wall time from ~22 hr (CPU per-bar Python loop, single-core bound) to <30 min on RTX 2060 (target). Enables routine horizon-sweep retraining instead of overnight-only.
