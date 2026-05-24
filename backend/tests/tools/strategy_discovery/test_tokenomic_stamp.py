@@ -44,3 +44,23 @@ def test_t_plus_1_boundary_uses_yesterday_snapshot():
     # Day D+2 00:00 (index 24) must read Day D+1's snapshot (MC=200, vol=20).
     assert out.loc[24, "market_cap"] == pytest.approx(200.0)
     assert out.loc[24, "vol_24h"]    == pytest.approx(20.0)
+
+
+def test_forward_fill_supplies_carry_indefinitely():
+    # Daily MC reported only on Day D=1000. Hourly grid spans Days D+1..D+5
+    # (i.e. 4 days * 24 h = 96 hourly rows after the T+1 boundary). MC must
+    # forward-fill across the whole window — slow-moving features have no
+    # time cap.
+    d0 = 1_000 * _DAY_MS
+    df_daily = pd.DataFrame({
+        "ts":         [d0],
+        "market_cap": [100.0],
+        "volume_24h": [10.0],
+    })
+    df_hourly = pd.DataFrame({
+        "ts":    _hourly_ts(d0 + _DAY_MS, 96),
+        "close": np.full(96, 5.0, dtype="float64"),
+    })
+    out = stamp_tokenomic(df_hourly, df_daily, _trivial_supply(), drop_on_missing_volume=False)
+    assert out["market_cap"].notna().all()
+    np.testing.assert_allclose(out["market_cap"].to_numpy(), 100.0)
