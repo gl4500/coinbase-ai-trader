@@ -93,3 +93,28 @@ def test_missing_volume_drops_candidate_row():
     # Day D+1 rows (24h) keep vol=10. Day D+2 rows would read NaN — dropped.
     assert len(out) == 24, f"expected 24 surviving rows, got {len(out)}"
     np.testing.assert_allclose(out["vol_24h"].to_numpy(), 10.0)
+
+
+def test_fdv_derived_from_price_and_total_supply():
+    # FDV = close_t * supply.total at each row, and fdv_over_mc = fdv / market_cap.
+    d0 = 1_000 * _DAY_MS
+    df_daily = pd.DataFrame({
+        "ts":         [d0],
+        "market_cap": [50_000.0],   # 50k market_cap
+        "volume_24h": [1_000.0],
+    })
+    df_hourly = pd.DataFrame({
+        "ts":    _hourly_ts(d0 + _DAY_MS, 3),
+        "close": np.array([2.0, 4.0, 8.0]),
+    })
+    supply = SupplySnapshot(pid="FOO-USD", circulating=10_000.0, total=25_000.0, max_supply=None)
+    out = stamp_tokenomic(df_hourly, df_daily, supply, drop_on_missing_volume=False)
+    np.testing.assert_allclose(out["fdv"].to_numpy(),
+                                np.array([2.0, 4.0, 8.0]) * 25_000.0)
+    np.testing.assert_allclose(out["fdv_over_mc"].to_numpy(),
+                                (np.array([2.0, 4.0, 8.0]) * 25_000.0) / 50_000.0)
+    # circ_over_total is a constant row-derived value: 10_000 / 25_000 = 0.4
+    np.testing.assert_allclose(out["circ_over_total"].to_numpy(),
+                                np.full(3, 0.4))
+    np.testing.assert_allclose(out["vol_over_mc"].to_numpy(),
+                                np.full(3, 1_000.0 / 50_000.0))
