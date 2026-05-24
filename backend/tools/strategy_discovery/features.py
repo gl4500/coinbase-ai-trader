@@ -38,7 +38,9 @@ def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
     out = df_ohlcv.copy()
     close = out["close"]
-    out["price_over_ema20"] = close / _ema(close, 20)
+    out["price_over_ema20"]  = close / _ema(close, 20)
+    out["price_over_ema50"]  = close / _ema(close, 50)
+    out["price_over_ema200"] = close / _ema(close, 200)
     return out
 
 
