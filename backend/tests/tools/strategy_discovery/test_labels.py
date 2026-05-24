@@ -60,3 +60,23 @@ def test_trail_stop_fires_at_atr_floor():
     )
     out = simulate_dynamic_exit_labels(df, horizons=[3])
     assert out.loc[0, "label_h3"] == pytest.approx(0.022, abs=1e-9)
+
+
+def test_max_hold_cap_at_168_for_h168():
+    # Construct a 200-bar series where price drifts up linearly (no SL, no
+    # trail triggers given small ATR). horizon=168 should exit at index 168
+    # post-entry, NOT at any later bar.
+    n = 200
+    closes = list(np.linspace(100.0, 200.0, n))
+    df = _frame(
+        closes=closes,
+        highs=[c + 0.01 for c in closes],          # tiny range → trail never fires
+        lows= [c - 0.01 for c in closes],
+        atrs=[0.0001] * n,                          # ATR floor (6%) governs; never fires
+    )
+    out = simulate_dynamic_exit_labels(df, horizons=[168])
+    # Entry at index 0, horizon_cap = min(168, 168) = 168, exit at index 168.
+    entry_close = closes[0]
+    exit_close  = closes[168]
+    expected = (exit_close / entry_close - 1.0) - _DEFAULT_ROUND_TRIP_FEE
+    assert out.loc[0, "label_h168"] == pytest.approx(expected, abs=1e-9)
