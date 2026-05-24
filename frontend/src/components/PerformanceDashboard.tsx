@@ -355,8 +355,9 @@ export default function PerformanceDashboard() {
         {filteredTrades.length === 0 ? (
           <div className="text-gray-500 text-xs py-6 text-center">No trades match the current filter.</div>
         ) : (
+          <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-gray-900 z-10">
               <tr className="text-gray-400 border-b border-gray-700">
                 <th className="text-left py-1.5 pr-3">Agent</th>
                 <th className="text-left pr-3">Product</th>
@@ -399,6 +400,7 @@ export default function PerformanceDashboard() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -415,8 +417,9 @@ export default function PerformanceDashboard() {
         {filteredDecisions.length === 0 ? (
           <div className="text-gray-500 text-xs py-6 text-center">No decisions found.</div>
         ) : (
+          <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-gray-900 z-10">
               <tr className="text-gray-400 border-b border-gray-700">
                 <th className="text-left py-1.5 pr-3">Agent</th>
                 <th className="text-left pr-3">Product</th>
@@ -455,6 +458,7 @@ export default function PerformanceDashboard() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import PerformanceDashboard from './PerformanceDashboard'
+import FiringCounter from './FiringCounter'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -103,6 +105,7 @@ export default function AgentsDashboard() {
   // TechAgent retired #311-refactor-c — tech field kept in shape for API back-compat but ignored
   const [agentStatus, setAgentStatus] = useState<{ tech: SubAgentStatus | null; cnn: SubAgentStatus | null }>({ tech: null, cnn: null })
   const [signals,     setSignals]     = useState<AgentDecision[]>([])
+  const [view,        setView]        = useState<'Live' | 'Performance'>('Live')
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -145,7 +148,27 @@ export default function AgentsDashboard() {
   const totalPnl  = (cnnAg?.realized_pnl ?? 0)
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
+      {/* ── Inner sub-tabs: live agent view / performance ── */}
+      <div className="flex gap-0.5 border-b border-gray-800 pb-2">
+        {(['Live', 'Performance'] as const).map(v => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            className={`tab ${view === v ? 'tab-active' : 'tab-inactive'}`}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
+
+      {view === 'Performance' ? (
+        <div className="space-y-6">
+          <PerformanceDashboard />
+          <FiringCounter />
+        </div>
+      ) : (
+      <div className="space-y-6">
 
       {/* ── Combined stat row ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -287,6 +310,8 @@ export default function AgentsDashboard() {
           Historical TECH signals remain queryable via PerformanceDashboard's
           TECH filter. */}
 
+      </div>
+      )}
     </div>
   )
 }

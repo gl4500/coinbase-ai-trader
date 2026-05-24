@@ -25,9 +25,8 @@ import SignalDashboard  from './components/SignalDashboard'
 import CNNDashboard     from './components/CNNDashboard'
 import AgentsDashboard      from './components/AgentsDashboard'
 import LogViewer             from './components/LogViewer'
-import PerformanceDashboard  from './components/PerformanceDashboard'
-import FiringCounter         from './components/FiringCounter'
 import ComparisonHeader      from './components/ComparisonHeader'
+import PriceChart            from './components/PriceChart'
 import EquityCurve           from './components/EquityCurve'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -108,7 +107,7 @@ interface AppData {
   products:   Product[]
 }
 
-const TABS = ['Markets', 'Order Book', 'Positions', 'Signals', 'XGB', 'Agents', 'Performance', 'Logs'] as const
+const TABS = ['Markets', 'Chart', 'Order Book', 'Positions', 'Signals', 'XGB', 'Agents', 'Logs'] as const
 type Tab = typeof TABS[number]
 
 // ── App ────────────────────────────────────────────────────────────────────────
@@ -313,17 +312,14 @@ export default function App() {
         {activeTab === 'XGB' && (
           <CNNDashboard signals={appData.signals} orders={appData.orders} postJSON={postJSON} />
         )}
+        {activeTab === 'Chart' && (
+          <PriceChart />
+        )}
         {activeTab === 'Agents' && (
           <AgentsDashboard />
         )}
-        {activeTab === 'Performance' && (
-          <PerformanceDashboard />
-        )}
         {activeTab === 'Logs' && (
-          <>
-            <FiringCounter />
-            <LogViewer />
-          </>
+          <LogViewer />
         )}
       </main>
     </div>

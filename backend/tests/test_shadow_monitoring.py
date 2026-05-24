@@ -27,6 +27,7 @@ os.environ.setdefault("OLLAMA_MODEL",             "llama3.1:8b")
 from main import (  # noqa: E402
     _read_agent_state,
     _equity_curve_series,
+    _fetch_live_agent_state,
 )
 
 
@@ -62,6 +63,60 @@ def _make_trades_db(path: str, trades: list) -> None:
         )
     con.commit()
     con.close()
+
+
+class TestFetchLiveAgentState:
+    """_fetch_live_agent_state(port) hits /api/agents/status via HTTP — used by
+    /api/compare so the dev DB (no agent_state row until first trade closes)
+    doesn't report $0 balance for a freshly-started 8002 backend."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_unreachable_port(self):
+        result = await _fetch_live_agent_state(port=59999)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_extracts_state_from_http_response(self):
+        from unittest.mock import MagicMock
+        fake_response = MagicMock()
+        fake_response.status_code = 200
+        fake_response.json = MagicMock(return_value={
+            "cnn": {
+                "balance": 1000.0, "realized_pnl": -5.5, "open_positions": 2,
+                "positions": {
+                    "BTC-USD": {"unrealized_pnl": 1.5},
+                    "ETH-USD": {"unrealized_pnl": 3.0},
+                },
+            }
+        })
+
+        class _FakeClient:
+            def __init__(self, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, *a, **kw): return fake_response
+
+        with patch("httpx.AsyncClient", _FakeClient):
+            result = await _fetch_live_agent_state(port=8001)
+        assert result == {
+            "balance": 1000.0, "realized_pnl": -5.5,
+            "open_positions": 2, "unrealized_pnl_est": 4.5,
+        }
+
+    @pytest.mark.asyncio
+    async def test_handles_non_200_response(self):
+        from unittest.mock import MagicMock
+        fake_response = MagicMock(); fake_response.status_code = 500
+
+        class _FakeClient:
+            def __init__(self, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, *a, **kw): return fake_response
+
+        with patch("httpx.AsyncClient", _FakeClient):
+            result = await _fetch_live_agent_state(port=8001)
+        assert result is None
 
 
 class TestReadAgentState:
