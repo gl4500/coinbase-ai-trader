@@ -94,3 +94,19 @@ def test_horizon_reached_without_trigger_uses_close():
     )
     out = simulate_dynamic_exit_labels(df, horizons=[4])
     assert out.loc[0, "label_h4"] == pytest.approx(-0.012, abs=1e-9)
+
+
+def test_stop_loss_priority_over_trail():
+    # Entry at close=100. Bar 1: high=120 (new peak), low=91.
+    # - SL trigger: low/entry - 1 = 91/100 - 1 = -0.09 <= -0.08 → SL fires.
+    # - Trail trigger: low/peak - 1 = 91/120 - 1 = -0.2417 <= -max(atr, 0.06)=-0.06 → also fires.
+    # Both trigger in the same bar — SL must win.
+    # SL exit price = 100 * 0.92 = 92; label = -0.08 - 0.012 = -0.092.
+    df = _frame(
+        closes=[100.0, 95.0, 95.0],
+        highs=[100.0, 120.0, 95.0],
+        lows=[100.0, 91.0, 95.0],
+        atrs=[0.02, 0.02, 0.02],
+    )
+    out = simulate_dynamic_exit_labels(df, horizons=[2])
+    assert out.loc[0, "label_h2"] == pytest.approx(-0.092, abs=1e-9)
