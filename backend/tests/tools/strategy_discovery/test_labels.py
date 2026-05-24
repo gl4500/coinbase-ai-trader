@@ -126,3 +126,21 @@ def test_fee_subtracted_from_label():
     # With zero fee — gross PnL should be zero
     out_zero = simulate_dynamic_exit_labels(df, horizons=[5], round_trip_fee=0.0)
     assert out_zero.loc[0, "label_h5"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_insufficient_forward_bars_returns_nan():
+    # Only 3 rows total; horizon=5 requires 5 forward bars → entry at index 0
+    # has only 2 forward bars → NaN label. Horizons that fit (h=2) must NOT be NaN.
+    df = _frame(
+        closes=[100.0, 100.0, 100.0],
+        highs=[100.0, 100.0, 100.0],
+        lows= [100.0, 100.0, 100.0],
+        atrs= [0.02, 0.02, 0.02],
+    )
+    out = simulate_dynamic_exit_labels(df, horizons=[2, 5])
+    # h=2 fits at index 0 (entry+2 = 2 is in-bounds)
+    assert not math.isnan(out.loc[0, "label_h2"])
+    # h=5 does NOT fit (entry+5 = 5 out of bounds)
+    assert math.isnan(out.loc[0, "label_h5"])
+    # h=2 does NOT fit at index 2 (entry+2 = 4 out of bounds) — NaN expected
+    assert math.isnan(out.loc[2, "label_h2"])
