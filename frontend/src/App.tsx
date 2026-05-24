@@ -27,6 +27,8 @@ import AgentsDashboard      from './components/AgentsDashboard'
 import LogViewer             from './components/LogViewer'
 import PerformanceDashboard  from './components/PerformanceDashboard'
 import FiringCounter         from './components/FiringCounter'
+import ComparisonHeader      from './components/ComparisonHeader'
+import EquityCurve           from './components/EquityCurve'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -287,6 +289,9 @@ export default function App() {
           ))}
         </div>
       </header>
+
+      {/* Shadow-week monitoring: sticky comparison strip (#52) */}
+      <ComparisonHeader />
 
       {/* Main content */}
       <main className="max-w-screen-2xl mx-auto px-4 py-6">

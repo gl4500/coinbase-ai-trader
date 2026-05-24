@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import EquityCurve from './EquityCurve'
 
 // Module-level cache — survives tab switches, cleared on manual refresh.
 // #111: 30s TTL aligns with AgentsDashboard's 15s polling so closed CNN
@@ -262,6 +263,10 @@ export default function PerformanceDashboard() {
         </div>
         <button onClick={() => load(true)} className="btn-secondary text-xs py-1.5 px-3">Refresh</button>
       </div>
+
+      {/* Shadow-week equity curve (#54): 8001 v3 vs 8002 v4.5 cumulative PnL */}
+      <EquityCurve days={7} />
+
 
       {/* Top stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

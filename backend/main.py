@@ -1374,6 +1374,106 @@ async def get_performance():
     }
 
 
+# ── Shadow-week monitoring: comparison header (#52) + equity curve (#54) ────
+
+def _read_agent_state(db_path: str) -> Dict:
+    """Read CNN agent state from a sqlite DB. Returns {balance, realized_pnl,
+    open_positions, unrealized_pnl_est} or None on error. Used by /api/compare
+    to read both coinbase.db (8001 v3) and coinbase_dev.db (8002 v4.5)."""
+    import json as _json
+    import sqlite3 as _sql
+    try:
+        con = _sql.connect(db_path)
+        row = con.execute(
+            "SELECT balance, realized_pnl, positions_json "
+            "FROM agent_state WHERE agent='CNN'"
+        ).fetchone()
+        con.close()
+    except Exception:
+        return None
+    if not row:
+        return {"balance": 0.0, "realized_pnl": 0.0,
+                "open_positions": 0, "unrealized_pnl_est": 0.0}
+    balance, realized, positions_json = row
+    positions = _json.loads(positions_json) if positions_json else {}
+    unrealized = 0.0
+    for _pid, pos in positions.items():
+        avg = pos.get("avg_price", 0.0)
+        size = pos.get("size", 0.0)
+        pd = pos.get("position_dollars", size * avg)
+        unrealized += pd - (size * avg)
+    return {
+        "balance": float(balance or 0.0),
+        "realized_pnl": float(realized or 0.0),
+        "open_positions": len(positions),
+        "unrealized_pnl_est": float(unrealized),
+    }
+
+
+@app.get("/api/compare")
+async def compare_backends():
+    """Side-by-side state of 8001 (XGB v3, coinbase.db) and 8002 (XGB v4.5,
+    coinbase_dev.db). Used by the sticky comparison header in the dashboard.
+    Polled every ~30s by the frontend.
+
+    Returns:
+      {
+        "v3": {balance, realized_pnl, open_positions, unrealized_pnl_est},
+        "v45": {...same...},
+        "delta_realized": v45.realized - v3.realized,
+      }
+    If a DB is missing/unreadable, that side returns null.
+    """
+    import os as _os
+    v3 = _read_agent_state(_os.path.join(_os.path.dirname(__file__), "coinbase.db"))
+    v45 = _read_agent_state(_os.path.join(_os.path.dirname(__file__), "coinbase_dev.db"))
+    delta = 0.0
+    if v3 and v45:
+        delta = v45["realized_pnl"] - v3["realized_pnl"]
+    return {"v3": v3, "v45": v45, "delta_realized": delta}
+
+
+def _equity_curve_series(db_path: str, days: int) -> List:
+    """Cumulative realized PnL time series from a sqlite trades table.
+    Returns list of [closed_at_iso, cumulative_pnl] points."""
+    import sqlite3 as _sql
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    cutoff = (_dt.now(_tz.utc) - _td(days=days)).isoformat()
+    try:
+        con = _sql.connect(db_path)
+        rows = con.execute(
+            "SELECT closed_at, pnl FROM trades "
+            "WHERE closed_at IS NOT NULL AND closed_at >= ? "
+            "ORDER BY closed_at ASC",
+            (cutoff,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return []
+    cum = 0.0
+    out = []
+    for closed_at, pnl in rows:
+        cum += (pnl or 0.0)
+        out.append([closed_at, round(cum, 4)])
+    return out
+
+
+@app.get("/api/equity_curve")
+async def equity_curve(days: int = 7):
+    """Cumulative realized PnL series for both backends over the last `days`.
+    Used by the EquityCurve chart component on the dashboard. Two series
+    rendered as overlay lines: v3 (8001) and v45 (8002).
+    """
+    import os as _os
+    return {
+        "v3":  _equity_curve_series(
+            _os.path.join(_os.path.dirname(__file__), "coinbase.db"), days),
+        "v45": _equity_curve_series(
+            _os.path.join(_os.path.dirname(__file__), "coinbase_dev.db"), days),
+        "days": days,
+    }
+
+
 @app.get("/api/agents/decisions")
 async def get_agent_decisions(
     agent:        Optional[str] = Query(None, description="TECH or CNN"),
