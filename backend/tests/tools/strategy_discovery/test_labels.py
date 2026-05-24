@@ -110,3 +110,19 @@ def test_stop_loss_priority_over_trail():
     )
     out = simulate_dynamic_exit_labels(df, horizons=[2])
     assert out.loc[0, "label_h2"] == pytest.approx(-0.092, abs=1e-9)
+
+
+def test_fee_subtracted_from_label():
+    # Entry at 100, flat 5 bars → exit at close[5] = 100. Default fee = 0.012.
+    df = _frame(
+        closes=[100.0] * 6,
+        highs=[100.0]  * 6,
+        lows= [100.0]  * 6,
+        atrs= [0.02]   * 6,
+    )
+    # With default fee
+    out_default = simulate_dynamic_exit_labels(df, horizons=[5])
+    assert out_default.loc[0, "label_h5"] == pytest.approx(-_DEFAULT_ROUND_TRIP_FEE, abs=1e-9)
+    # With zero fee — gross PnL should be zero
+    out_zero = simulate_dynamic_exit_labels(df, horizons=[5], round_trip_fee=0.0)
+    assert out_zero.loc[0, "label_h5"] == pytest.approx(0.0, abs=1e-9)
