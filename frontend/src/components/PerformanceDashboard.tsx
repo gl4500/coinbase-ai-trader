@@ -90,7 +90,7 @@ interface Decision {
   created_at: string
 }
 
-type AgentFilter = 'ALL' | 'TECH' | 'CNN'
+type AgentFilter = 'ALL' | 'CNN'
 type TradeView   = 'ALL' | 'OPEN' | 'CLOSED'
 type TimeWindow  = 'ALL' | '1h' | '24h' | '7d'
 
@@ -116,12 +116,10 @@ function fmtTime(iso: string): string {
 
 const AGENT_COLORS: Record<string, string> = {
   CNN:  'text-blue-400',
-  TECH: 'text-green-400',
 }
 
 const AGENT_BADGES: Record<string, string> = {
   CNN:  'bg-blue-900/40 text-blue-300',
-  TECH: 'bg-green-900/40 text-green-300',
 }
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
@@ -254,8 +252,10 @@ export default function PerformanceDashboard() {
   const windowCutoffMs = windowHrs !== null ? Date.now() - windowHrs * 3600 * 1000 : null
   const pidQuery = tradePid.trim().toUpperCase()
 
-  // Filtered trades
+  // Filtered trades — TECH agent retired 2026-05-16; its historical rows
+  // are excluded from every view (no longer a selectable agent filter).
   const filteredTrades = trades.filter(t => {
+    if (t.agent === 'TECH') return false
     if (tradeAgent !== 'ALL' && t.agent !== tradeAgent) return false
     if (tradeView === 'OPEN'   && t.closed_at !== null)  return false
     if (tradeView === 'CLOSED' && t.closed_at === null)  return false
@@ -271,12 +271,12 @@ export default function PerformanceDashboard() {
   const filtersActive =
     tradePid !== '' || tradeTrigger !== 'ALL' || tradeWindow !== 'ALL'
 
-  // Filtered decisions
+  // Filtered decisions — TECH agent retired 2026-05-16; excluded.
   const filteredDecisions = decisions.filter(d =>
-    decisionAgent === 'ALL' || d.agent === decisionAgent
+    d.agent !== 'TECH' && (decisionAgent === 'ALL' || d.agent === decisionAgent)
   )
 
-  const AGENTS: AgentFilter[] = ['ALL', 'CNN', 'TECH']
+  const AGENTS: AgentFilter[] = ['ALL', 'CNN']
 
   return (
     <div className="space-y-6">

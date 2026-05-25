@@ -306,9 +306,9 @@ export default function AgentsDashboard() {
         })}
       </div>
 
-      {/* TechAgent retired #311-refactor-c (2026-05-16).
-          Historical TECH signals remain queryable via PerformanceDashboard's
-          TECH filter. */}
+      {/* TechAgent retired #311-refactor-c (2026-05-16) — fully removed from
+          the UI as of dashboard cleanup. Historical TECH trades still live in
+          the trades table but are filtered out of every view. */}
 
       </div>
       )}
