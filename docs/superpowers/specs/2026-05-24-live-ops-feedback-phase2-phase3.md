@@ -15,20 +15,21 @@ This doc captures **empirical findings from 6 weeks of live ops (2026-04-12 → 
 
 ## TL;DR
 
-| Metric | Value |
+> **Important context.** The 8001 backend runs in **paper-trading mode** — no real funds are at risk. All PnL figures below are *simulated* portfolio values against the live Coinbase data feed. The analytical findings remain valid (the strategy is unprofitable in simulation), but the urgency framing is *not* "stop the bleed" — there is no bleed. The operator has elected to keep the backend running as a data/telemetry generator for shadow comparisons and future Phase 4 selection.
+
+| Metric (paper trading, $1,000 simulated start) | Value |
 |---|---|
-| Live trading window | 2026-04-12 → 2026-05-24 (42 days) |
-| Trades | 1,277 (496 W / 684 L) |
+| Paper-trading window | 2026-04-12 → 2026-05-24 (42 days) |
+| Trades simulated | 1,277 (496 W / 684 L) |
 | Win rate | 42% |
 | Break-even win rate (given win/loss ratio 1.19) | 45.6% |
-| Net realized PnL | **−$77.12** |
-| Gross PnL **before fees** | **+$361** |
+| Net paper PnL | **−$77.12** |
+| Gross paper PnL **before fees** | **+$361** |
 | Round-trip fees @ ~1.2% | **−$438** |
-| Starting capital | $1,000 |
 | BTC HODL same window | −18.8% |
-| Strategy cash return | −42.9% |
+| Strategy paper return | −42.9% |
 
-**One-sentence summary.** The live signal has real alpha (+$361 gross), but at 30 trades/day Coinbase taker fees consume the edge ~5× over. Phase 2/3 will only beat live ops if the deflated, fee-aware profit gates are set high enough to filter out marginal-conviction patterns that look profitable pre-fee.
+**One-sentence summary.** The simulated signal has real alpha (+$361 gross), but at 30 paper-trades/day modeled Coinbase taker fees would consume the edge ~5× over. Phase 2/3 will only produce profiles that beat what live paper-ops have shown if the deflated, fee-aware profit gates are set high enough to filter out marginal-conviction patterns that look profitable pre-fee.
 
 ---
 
@@ -201,11 +202,13 @@ A single BILL-USD trade in the v4.5 backtest wiped out 80% of the strategy's gai
 
 ## What live ops should consider stopping or changing
 
-| Activity | Why |
+**Operator decision (2026-05-24):** Backend stays up to keep data flowing. Paper-trading mode means no capital pressure, and the ongoing scan + trigger logs are themselves the most valuable input to Phase 4 selection. The recommendations below are tuning options, not urgent fixes.
+
+| Activity | Why consider |
 |---|---|
-| Continued operation at $1.84/day net loss while waiting for Phase 4 | Either pause live trading entirely (preserve capital) or accept the burn as cost of feedback |
-| Trading on ALL Coinbase USD pairs without an allowlist | Phase 3 will eventually emit per-pid profiles; consider an interim allowlist based on the per-pid evidence in this doc (TAO/ALGO/ENA/PAXG-class only) |
-| Taker (market) orders at 0.6% fee | Maker (limit) orders at 0.0–0.4% fee — partial maker path already exists (commit `4dcbfa9`); promote to default. This single change cuts fee burden 3–5×. |
+| Trading-simulation on ALL Coinbase USD pairs without an allowlist | Phase 3 will eventually emit per-pid profiles; an interim allowlist based on the per-pid evidence in this doc (TAO/ALGO/ENA/PAXG-class only) would make the paper PnL more representative of what a Phase 4 deployment would experience |
+| Taker-order fee simulation at 0.6% per side | The deployed maker path (commit `4dcbfa9`) routes limit orders at 0.0–0.4%. If paper PnL switched to maker-fee modeling, the simulated edge would be 3–5× higher and the alpha would no longer be fee-eaten. Worth confirming the paper-trade fee model matches the dominant order type. |
+| `MODEL_BACKEND=xgb` (v3) on 8001, `MODEL_BACKEND=xgb_v45` on 8002 | Keep both running — shadow comparison data accumulates through 5/31 review and is essential input for the Phase 4 deployment selection |
 
 ---
 
