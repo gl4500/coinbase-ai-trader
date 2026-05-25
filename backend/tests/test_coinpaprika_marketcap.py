@@ -222,3 +222,61 @@ def test_product_to_cp_id_has_at_least_100_entries():
         f"_PRODUCT_TO_CP_ID has only {len(_PRODUCT_TO_CP_ID)} entries; "
         f"Phase 1 Task 4 requires >= 100 for universe curation candidate pool"
     )
+
+
+# ── Pro-tier authentication (added 2026-05-25 after free-tier paywall) ──────
+
+
+class TestProTierAuth:
+    """Switching to Pro tier when COINPAPRIKA_API_KEY env var is set."""
+
+    @pytest.mark.asyncio
+    async def test_history_uses_pro_base_url_when_api_key_set(self, monkeypatch):
+        monkeypatch.setenv("COINPAPRIKA_API_KEY", "test-key-abc123")
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_get = AsyncMock(return_value=_ok([]))
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            await cp.fetch_marketcap_history(
+                "BTC-USD", start_ms=1735689600 * 1000, end_ms=1735862400 * 1000,
+            )
+            url = mock_get.call_args.args[0]
+            assert "api-pro.coinpaprika.com" in url, f"Pro URL not used: {url}"
+
+    @pytest.mark.asyncio
+    async def test_history_uses_free_base_url_when_api_key_unset(self, monkeypatch):
+        monkeypatch.delenv("COINPAPRIKA_API_KEY", raising=False)
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_get = AsyncMock(return_value=_ok([]))
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            await cp.fetch_marketcap_history(
+                "BTC-USD", start_ms=1735689600 * 1000, end_ms=1735862400 * 1000,
+            )
+            url = mock_get.call_args.args[0]
+            assert url.startswith("https://api.coinpaprika.com/v1"), (
+                f"free-tier URL not used: {url}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_history_attaches_authorization_header_when_api_key_set(self, monkeypatch):
+        monkeypatch.setenv("COINPAPRIKA_API_KEY", "test-key-abc123")
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_get = AsyncMock(return_value=_ok([]))
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            await cp.fetch_marketcap_history(
+                "BTC-USD", start_ms=1735689600 * 1000, end_ms=1735862400 * 1000,
+            )
+            headers = mock_get.call_args.kwargs.get("headers", {})
+            assert headers.get("Authorization") == "test-key-abc123"
+
+    @pytest.mark.asyncio
+    async def test_supply_attaches_authorization_header_when_api_key_set(self, monkeypatch):
+        monkeypatch.setenv("COINPAPRIKA_API_KEY", "test-key-abc123")
+        body = {"circulating_supply": 20_000_000.0, "total_supply": 21_000_000.0, "max_supply": 21_000_000.0}
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_get = AsyncMock(return_value=_ok(body))
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            await cp.fetch_supply_snapshot("BTC-USD")
+            headers = mock_get.call_args.kwargs.get("headers", {})
+            assert headers.get("Authorization") == "test-key-abc123"
+            url = mock_get.call_args.args[0]
+            assert "api-pro.coinpaprika.com" in url

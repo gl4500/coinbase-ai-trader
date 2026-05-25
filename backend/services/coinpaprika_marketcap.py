@@ -1,25 +1,26 @@
-"""CoinPaprika historical marketcap fetcher (#293) — free-tier sibling of
-services/coingecko_marketcap (#260) that does NOT require an API key.
+"""CoinPaprika historical marketcap fetcher (#293).
 
-Why a second source: CoinGecko's free tier began returning 401 on its
-historical market_chart/range endpoint (probe #260d/e/f, 2026-05-09).
-CoinPaprika offers the same shape of data (one daily row per coin with a
-market_cap field) at 25,000 requests/day with no key.
+Originally written as a free-tier sibling of services/coingecko_marketcap
+(#260); since CoinPaprika moved the `/v1/tickers/*` endpoints behind their
+paid tier (2026-05-25), authentication is now also supported.
+
+Auth modes:
+  - Free tier (no key): hits `https://api.coinpaprika.com/v1` directly.
+    Both supply (`/v1/tickers/{cp_id}`) and history (`/v1/tickers/{cp_id}/historical`)
+    return HTTP 402 since the policy change — kept for back-compat only.
+  - Pro tier (key set): set `COINPAPRIKA_API_KEY` in the environment. Requests
+    go to `https://api-pro.coinpaprika.com/v1` with `Authorization: <key>` header.
 
 Public API mirrors coingecko_marketcap so the probe harness can swap providers
 without changing downstream code:
 
     await fetch_marketcap_history(pid: str, start_ms: int, end_ms: int)
-        -> list[(ts_ms, market_cap)] sorted ascending
+        -> list[(ts_ms, market_cap, volume_24h)] sorted ascending
+
+    await fetch_supply_snapshot(pid: str)
+        -> Optional[(circ_supply, total_supply, max_supply_or_None)]
 
     _coinbase_to_cp_id(pid)   -> Optional[str]    ("BTC-USD" -> "btc-bitcoin")
-
-Endpoint (free tier — `coins/{id}/ohlcv/historical` is paywalled, this one
-isn't):
-    GET https://api.coinpaprika.com/v1/tickers/{cp_id}/historical
-        ?start=YYYY-MM-DD&interval=1d
-    Returns one row per UTC day with: timestamp, price, volume_24h, market_cap.
-    Free tier window is rolling ~12 months; older starts return HTTP 402.
 
 Strict causality: same EOD-UTC stamping as CoinGecko, so the same 1-day lag
 applies at align time. This module returns raw rows; alignment lives in the
@@ -32,17 +33,31 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_BASE = "https://api.coinpaprika.com/v1"
-_HISTORY_URL = f"{_BASE}/tickers/{{cp_id}}/historical"
-_TICKER_URL  = f"{_BASE}/tickers/{{cp_id}}"
+_BASE_FREE = "https://api.coinpaprika.com/v1"
+_BASE_PRO  = "https://api-pro.coinpaprika.com/v1"
 
 _SCHEMA_VERSION = 1
+
+
+def _api_key() -> Optional[str]:
+    """Read COINPAPRIKA_API_KEY from env each call (test-friendly)."""
+    v = os.environ.get("COINPAPRIKA_API_KEY", "").strip()
+    return v or None
+
+
+def _base_url() -> str:
+    return _BASE_PRO if _api_key() else _BASE_FREE
+
+
+def _auth_headers() -> Dict[str, str]:
+    k = _api_key()
+    return {"Authorization": k} if k else {}
 
 
 # ── Coinbase product → CoinPaprika id mapping ───────────────────────────────
@@ -303,11 +318,11 @@ async def fetch_marketcap_history(
         "start":    _ms_to_iso_date(start_ms),
         "interval": "1d",
     }
-    url = _HISTORY_URL.format(cp_id=cp_id)
+    url = f"{_base_url()}/tickers/{cp_id}/historical"
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=_auth_headers())
     except Exception as e:
         logger.warning(
             "coinpaprika_marketcap history HTTP error pid=%s: %r", product_id, e
@@ -375,11 +390,11 @@ async def fetch_supply_snapshot(
     if cp_id is None:
         return None
 
-    url = _TICKER_URL.format(cp_id=cp_id)
+    url = f"{_base_url()}/tickers/{cp_id}"
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=_auth_headers())
     except Exception as e:
         logger.warning(
             "coinpaprika_marketcap ticker HTTP error pid=%s: %r", product_id, e
