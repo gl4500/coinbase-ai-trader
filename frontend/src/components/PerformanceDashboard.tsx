@@ -92,6 +92,11 @@ interface Decision {
 
 type AgentFilter = 'ALL' | 'TECH' | 'CNN'
 type TradeView   = 'ALL' | 'OPEN' | 'CLOSED'
+type TimeWindow  = 'ALL' | '1h' | '24h' | '7d'
+
+const WINDOW_HOURS: Record<TimeWindow, number | null> = {
+  ALL: null, '1h': 1, '24h': 24, '7d': 24 * 7,
+}
 
 const agentLabel = (name: string): string => (name === 'CNN' ? 'XGB' : name)
 
@@ -183,6 +188,9 @@ export default function PerformanceDashboard() {
   // Filter state
   const [tradeAgent,    setTradeAgent]    = useState<AgentFilter>('ALL')
   const [tradeView,     setTradeView]     = useState<TradeView>('CLOSED')
+  const [tradePid,      setTradePid]      = useState<string>('')
+  const [tradeTrigger,  setTradeTrigger]  = useState<string>('ALL')
+  const [tradeWindow,   setTradeWindow]   = useState<TimeWindow>('ALL')
   const [decisionAgent, setDecisionAgent] = useState<AgentFilter>('ALL')
 
   const load = async (force = false) => {
@@ -235,13 +243,33 @@ export default function PerformanceDashboard() {
 
   const pnlColor = (v: number) => v >= 0 ? 'text-green-400' : 'text-red-400'
 
+  // Derived: unique triggers across the currently-loaded trades, so the
+  // dropdown reflects whatever the backend has actually emitted (no hard-
+  // coded list to drift from WS_MODEL_DOWN / WS_TRAIL_STOP / STOP_LOSS / etc).
+  const availableTriggers = Array.from(
+    new Set(trades.map(t => t.trigger_close ?? t.trigger_open).filter(Boolean))
+  ).sort()
+
+  const windowHrs = WINDOW_HOURS[tradeWindow]
+  const windowCutoffMs = windowHrs !== null ? Date.now() - windowHrs * 3600 * 1000 : null
+  const pidQuery = tradePid.trim().toUpperCase()
+
   // Filtered trades
   const filteredTrades = trades.filter(t => {
     if (tradeAgent !== 'ALL' && t.agent !== tradeAgent) return false
     if (tradeView === 'OPEN'   && t.closed_at !== null)  return false
     if (tradeView === 'CLOSED' && t.closed_at === null)  return false
+    if (pidQuery && !t.product_id.toUpperCase().includes(pidQuery)) return false
+    if (tradeTrigger !== 'ALL' && (t.trigger_close ?? t.trigger_open) !== tradeTrigger) return false
+    if (windowCutoffMs !== null) {
+      const ts = new Date(t.closed_at ?? t.opened_at).getTime()
+      if (ts < windowCutoffMs) return false
+    }
     return true
   })
+
+  const filtersActive =
+    tradePid !== '' || tradeTrigger !== 'ALL' || tradeWindow !== 'ALL'
 
   // Filtered decisions
   const filteredDecisions = decisions.filter(d =>
@@ -351,6 +379,42 @@ export default function PerformanceDashboard() {
             ))}
           </div>
         </SectionHeader>
+
+        {/* Secondary filter row: PID search, trigger dropdown, time-window */}
+        <div className="flex items-center gap-2 flex-wrap mb-3 px-1">
+          <input
+            type="text"
+            value={tradePid}
+            onChange={e => setTradePid(e.target.value)}
+            placeholder="Filter PID (e.g. BTC, ETH-USD)…"
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono text-gray-100 w-44 placeholder:text-gray-600"
+          />
+          <select
+            value={tradeTrigger}
+            onChange={e => setTradeTrigger(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono text-gray-100"
+            title="Filter by trigger (close trigger if set, else open trigger)"
+          >
+            <option value="ALL">All triggers</option>
+            {availableTriggers.map(tr => (
+              <option key={tr} value={tr}>{tr}</option>
+            ))}
+          </select>
+          <div className="flex gap-1">
+            {(['1h', '24h', '7d', 'ALL'] as TimeWindow[]).map(w => (
+              <Pill key={w} active={tradeWindow === w} onClick={() => setTradeWindow(w)}>{w}</Pill>
+            ))}
+          </div>
+          {filtersActive && (
+            <button
+              onClick={() => { setTradePid(''); setTradeTrigger('ALL'); setTradeWindow('ALL') }}
+              className="text-xs px-2 py-1 rounded border bg-transparent border-gray-700 text-gray-500 hover:text-gray-300"
+              title="Clear PID / trigger / time-window filters"
+            >
+              clear
+            </button>
+          )}
+        </div>
 
         {filteredTrades.length === 0 ? (
           <div className="text-gray-500 text-xs py-6 text-center">No trades match the current filter.</div>
