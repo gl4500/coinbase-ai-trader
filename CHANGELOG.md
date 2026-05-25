@@ -7,6 +7,31 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session — 2026-05-24 — Strategy-discovery Phase 3: custom-criterion decision tree mining
+
+Implemented Phase 3 of the strategy-discovery rebuild per spec
+`docs/superpowers/specs/2026-05-24-strategy-discovery-phase3-design.md`
+and plan `docs/superpowers/plans/2026-05-24-strategy-discovery-phase3-implementation.md`.
+
+**New modules (all under `backend/tools/strategy_discovery/`):**
+- `profit_split.py` — GPU-vectorized concurrency-capped (max-1-per-token) cumulative-PnL split criterion (`walk_and_sum`, `best_split`, `build_next_eligible`).
+- `profit_tree.py` — Recursive profit-maximizing decision-tree fitter (`fit_tree`, `collect_leaves`).
+- `purged_wf.py` — Purged Walk-Forward CV + nested inner CV (`outer_folds`, `inner_folds`).
+- `mine_profiles.py` — Per-(pid, horizon) orchestrator: hyperparam search → deflation factor → Q0 gates → bootstrap CI. Composes the helpers above.
+- `mine_universe.py` — CLI + universe driver; writes `profiles_h{h}.parquet` + `rule_paths_h{h}.json` per horizon.
+
+**Test surface added:** 21 new tests under `backend/tests/tools/strategy_discovery/`. Full backend suite green.
+
+**Operator step (post-merge):**
+
+    cd backend && python -m tools.strategy_discovery.mine_universe \
+        --universe ../docs/superpowers/specs/2026-05-23-universe-50.json \
+        --device cuda --seed 42
+
+Outputs land in `backend/data/phase3/`. Expected runtime ~30-60 min on RTX 2060.
+Companion: `backend/tools/phase3_deflation_explainer.html` walks through the
+selection-bias inflation math.
+
 ### Session — 2026-05-24 — Strategy-discovery Phase 2: feature compute + dynamic-exit labels
 
 Implemented Phase 2 of the strategy-discovery rebuild per spec
