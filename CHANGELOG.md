@@ -7,6 +7,29 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session — 2026-05-25 — Strategy-discovery Phase 4: scorecard + deployment selection
+
+Implemented Phase 4 of the strategy-discovery rebuild per spec
+`docs/superpowers/specs/2026-05-24-strategy-discovery-phase4-design.md`
+and plan `docs/superpowers/plans/2026-05-24-strategy-discovery-phase4-implementation.md`.
+
+**New modules (all under `backend/tools/strategy_discovery/`):**
+- `profile_loader.py` — Phase 3 parquets + sidecars + Phase 2 features loader (pure I/O).
+- `portfolio_sim.py` — Time-walk portfolio simulator with concurrency cap and per-pid max-1.
+- `knapsack_search.py` — Beam-search over profile subsets with σ × √(2 ln K) portfolio-level deflation.
+- `scorecard.py` — Per-cap Q0 gates (max_dd ≤ 30%, deflated > 0, trades ≥ 50, sortino ≥ 0), Markdown render, verdict.
+- `build_phase4.py` — Orchestrator + CLI; sweeps N∈{3,4,5}, writes deployment JSON + telemetry parquet + scorecard.md per cap.
+
+**Test surface added:** 21 new tests under `backend/tests/tools/strategy_discovery/`. All mock-only — no torch, no GPU.
+
+**Operator step (post-merge):**
+
+    cd backend && python -m tools.strategy_discovery.build_phase4 \
+        --phase3-dir data/phase3 --phase2-dir data/phase2 \
+        --output-dir data/phase4 --seed 42
+
+Reads scorecard.md, picks winning cap (or aborts), then opens a separate integration commit to wire the chosen `deployment_n{N}.json` into `agents/cnn_agent.py`.
+
 - **2026-05-23: WS-driven exit checker (`agents/exit_watcher.py`)** — new module registers an async price-tick handler on the existing Coinbase WS ticker channel. Fires `WS_TRAIL_STOP` / `WS_STOP_LOSS` exits on held positions in sub-second latency instead of waiting for the 60s scan cycle. Max-hold (7-day) exit stays on the scan loop where 60s cadence is appropriate.
   - `agents/cnn_agent.py:_CNNBook` — added `_sell_locks: Dict[str, asyncio.Lock]` field + `_lock_for(pid)` helper. `sell()` body wrapped in `async with self._lock_for(pid):` so the WS handler and scan-loop `_check_risk_exits` cannot race a duplicate `database.close_trade` write. Existing DB-first ordering (`cnn_agent.py:255-260` comment) preserved unchanged inside the lock.
   - `agents/cnn_agent.py:_check_risk_exits` — caches the computed `trail_pct` to `pos['trail_pct']` after the ATR compute block. WS handler reads `pos.get('trail_pct', _CNN_ATR_TRAIL_MIN)`; no DB calls per tick. Up to 60s lag on regime shifts; acceptable since ATR drifts slowly.
