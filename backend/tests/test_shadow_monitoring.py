@@ -146,13 +146,20 @@ class TestReadAgentState:
         assert result["open_positions"] == 0
         assert result["unrealized_pnl_est"] == 0.0
 
-    def test_reads_state_with_positions_and_unrealized(self, tmp_path):
+    def test_reads_state_with_positions_returns_zero_unrealized(self, tmp_path):
+        """_read_agent_state can't compute unrealized PnL — the DB only has
+        avg_price + size + cached position_dollars, not the live current
+        price. The old formula `position_dollars - (size * avg_price)`
+        produced garbage (mix of fees + partial-fill variance) that
+        disagreed with /api/agents/status's live-price enrichment.
+        Now always returns 0.0; callers needing unrealized must use
+        _fetch_live_agent_state."""
         path = str(tmp_path / "v3.db")
         positions = {
             "BTC-USD": {"size": 0.001, "avg_price": 75000.0,
-                        "position_dollars": 76.5},  # +$1.5 unrealized
+                        "position_dollars": 76.5},
             "ETH-USD": {"size": 0.05, "avg_price": 2000.0,
-                        "position_dollars": 105.0},  # +$5 unrealized
+                        "position_dollars": 105.0},
         }
         _make_agent_state_db(path, balance=300.0, realized=-50.0,
                              positions=positions)
@@ -160,20 +167,16 @@ class TestReadAgentState:
         assert result["balance"] == 300.0
         assert result["realized_pnl"] == -50.0
         assert result["open_positions"] == 2
-        # Unrealized = $76.5 - 0.001*75000=$75 → +$1.5
-        #            + $105 - 0.05*2000=$100  → +$5
-        #            = +$6.5
-        assert result["unrealized_pnl_est"] == pytest.approx(6.5)
+        assert result["unrealized_pnl_est"] == 0.0
 
-    def test_unrealized_falls_back_to_zero_when_position_dollars_absent(self, tmp_path):
+    def test_unrealized_always_zero_when_position_dollars_absent(self, tmp_path):
         path = str(tmp_path / "v3.db")
         positions = {
-            "BTC-USD": {"size": 0.001, "avg_price": 75000.0},  # no position_dollars
+            "BTC-USD": {"size": 0.001, "avg_price": 75000.0},
         }
         _make_agent_state_db(path, balance=300.0, realized=0.0, positions=positions)
         result = _read_agent_state(path)
-        # position_dollars defaults to size * avg_price = 75 → unrealized 0
-        assert result["unrealized_pnl_est"] == pytest.approx(0.0)
+        assert result["unrealized_pnl_est"] == 0.0
 
 
 class TestEquityCurveSeries:

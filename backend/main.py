@@ -1412,9 +1412,16 @@ async def get_performance():
 # ── Shadow-week monitoring: comparison header (#52) + equity curve (#54) ────
 
 def _read_agent_state(db_path: str) -> Dict:
-    """Read CNN agent state from a sqlite DB. Kept for tests + as a DB-side
-    fallback; the live /api/compare endpoint prefers _fetch_live_agent_state
-    so it sees in-memory balances on fresh DBs that haven't traded yet."""
+    """Read CNN agent state from a sqlite DB. DB-side fallback for tests +
+    cases where the live HTTP path is unavailable.
+
+    NOTE: unrealized_pnl_est is ALWAYS 0.0 from this path. Unrealized PnL
+    needs the live current price, which the DB doesn't store. The old
+    formula `position_dollars - (size * avg_price)` mixed fees + partial
+    fills + topup variance and produced garbage that disagreed with the
+    in-memory enrichment in /api/agents/status. Use _fetch_live_agent_state
+    when you need unrealized PnL.
+    """
     import json as _json
     import sqlite3 as _sql
     try:
@@ -1431,17 +1438,11 @@ def _read_agent_state(db_path: str) -> Dict:
                 "open_positions": 0, "unrealized_pnl_est": 0.0}
     balance, realized, positions_json = row
     positions = _json.loads(positions_json) if positions_json else {}
-    unrealized = 0.0
-    for _pid, pos in positions.items():
-        avg = pos.get("avg_price", 0.0)
-        size = pos.get("size", 0.0)
-        pd = pos.get("position_dollars", size * avg)
-        unrealized += pd - (size * avg)
     return {
         "balance": float(balance or 0.0),
         "realized_pnl": float(realized or 0.0),
         "open_positions": len(positions),
-        "unrealized_pnl_est": float(unrealized),
+        "unrealized_pnl_est": 0.0,
     }
 
 
