@@ -133,3 +133,18 @@ def bootstrap_ci(
     samples = rng.choice(trades_net, size=(int(n_iter), n), replace=True)
     cum = samples.sum(axis=1)
     return float(np.percentile(cum, 2.5)), float(np.percentile(cum, 97.5))
+
+
+def mine_profiles_for_pid_horizon(
+    pid: str,
+    horizon: int,
+    parquet_path,
+    device: str = "cuda",
+    seed: int = 42,
+) -> List[LeafProfile]:
+    """End-to-end per-(pid, horizon) mining. Stub — full body lands in Task 6.
+
+    Tests at the mine_universe layer mock this function. The full implementation
+    composes profit_tree + purged_wf + the helpers in this module.
+    """
+    return []
