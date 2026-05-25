@@ -404,6 +404,138 @@ async def fetch_marketcap_history(
     return deduped
 
 
+async def _fetch_marketcap_page_priced(
+    cp_id: str, start_ms: int,
+) -> List[Tuple[int, float, float, float]]:
+    """Single API call returning 4-tuples (ts_ms, price, market_cap, volume_24h).
+
+    Mirrors _fetch_marketcap_page but keeps the `price` field from each row.
+    """
+    params = {"start": _ms_to_iso_date(start_ms), "interval": "1d"}
+    url = f"{_base_url()}/tickers/{cp_id}/historical"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, params=params, headers=_auth_headers())
+    except Exception:
+        return []
+    if resp.status_code != 200:
+        return []
+    try:
+        body = resp.json()
+    except Exception:
+        return []
+    if not isinstance(body, list):
+        return []
+    rows: List[Tuple[int, float, float, float]] = []
+    for entry in body:
+        if not isinstance(entry, dict):
+            continue
+        mc = entry.get("market_cap")
+        if mc is None:
+            continue
+        try:
+            mc_f = float(mc)
+        except (TypeError, ValueError):
+            continue
+        if mc_f <= 0.0:
+            continue
+        ts_ms = _iso_to_ms(entry.get("timestamp"))
+        if ts_ms is None:
+            continue
+        try:
+            vol_f = float(entry.get("volume_24h") or 0.0)
+        except (TypeError, ValueError):
+            vol_f = 0.0
+        try:
+            price_f = float(entry.get("price") or 0.0)
+        except (TypeError, ValueError):
+            price_f = 0.0
+        rows.append((ts_ms, price_f, mc_f, vol_f))
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+async def fetch_marketcap_history_full(
+    product_id: str, start_ms: int, end_ms: int
+) -> List[Tuple[int, float, float, float]]:
+    """Like fetch_marketcap_history but returns 4-tuples (ts_ms, price, market_cap, volume_24h).
+
+    Captures the `price` field from CoinPaprika's /v1/tickers/{id}/historical
+    response (which fetch_marketcap_history drops for back-compat). Use this
+    when persisting a complete bronze parquet — strategy-discovery Phase 2's
+    tokenomic_stamp doesn't need `price` (Coinbase OHLCV is the price source),
+    but downstream analyses may want it for cross-reference.
+    """
+    if _is_disabled():
+        return []
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return []
+    all_rows: List[Tuple[int, float, float, float]] = []
+    cur_start = int(start_ms)
+    for page_idx in range(_MAX_PAGES):
+        rows = await _fetch_marketcap_page_priced(cp_id, cur_start)
+        if not rows:
+            break
+        all_rows.extend(rows)
+        last_ts = rows[-1][0]
+        if len(rows) < _RESPONSE_ROW_CAP:
+            break
+        if last_ts >= int(end_ms):
+            break
+        cur_start = last_ts + 86_400_000
+    seen: set = set()
+    deduped: List[Tuple[int, float, float, float]] = []
+    for r in all_rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            deduped.append(r)
+    deduped.sort(key=lambda r: r[0])
+    return deduped
+
+
+async def fetch_ticker_snapshot_full(
+    product_id: str,
+) -> Optional[dict]:
+    """Full ticker snapshot — every field CoinPaprika returns.
+
+    Endpoint: GET /v1/tickers/{cp_id}. Returns the raw response dict (id, name,
+    symbol, rank, supply fields, beta_value, first_data_at, last_updated, plus
+    nested quotes.USD with price, volume_24h, percent_change_15m..1y, ath_*,
+    market_cap_change_24h, etc.) or None on any failure.
+
+    Sibling of fetch_supply_snapshot which returns only (circ, total, max).
+    Use this when persisting the full bronze ticker parquet.
+    """
+    if _is_disabled():
+        return None
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return None
+    url = f"{_base_url()}/tickers/{cp_id}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, headers=_auth_headers())
+    except Exception as e:
+        logger.warning(
+            "coinpaprika_marketcap ticker HTTP error pid=%s: %r", product_id, e
+        )
+        return None
+    if resp.status_code != 200:
+        logger.warning(
+            "coinpaprika_marketcap ticker non-200 pid=%s status=%d",
+            product_id, resp.status_code,
+        )
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    return body
+
+
 async def fetch_supply_snapshot(
     product_id: str,
 ) -> Optional[Tuple[float, float, Optional[float]]]:

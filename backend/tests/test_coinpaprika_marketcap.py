@@ -349,6 +349,53 @@ class TestPagination:
         assert len(rows) == 2
 
     @pytest.mark.asyncio
+    async def test_full_history_returns_4tuples_with_price(self):
+        """fetch_marketcap_history_full preserves the `price` field that the
+        3-tuple back-compat function drops."""
+        body = [
+            {"timestamp": "2025-01-01T00:00:00Z", "market_cap": 1e9,
+             "volume_24h": 5e7, "price": 100.0},
+            {"timestamp": "2025-01-02T00:00:00Z", "market_cap": 1.1e9,
+             "volume_24h": 6e7, "price": 110.0},
+        ]
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=_ok(body)
+            )
+            rows = await cp.fetch_marketcap_history_full(
+                "BTC-USD", start_ms=1735689600000, end_ms=1830211200000,
+            )
+        assert len(rows) == 2
+        # Tuple shape: (ts_ms, price, market_cap, volume_24h)
+        assert all(len(r) == 4 for r in rows)
+        assert rows[0] == (1735689600 * 1000, 100.0, 1e9, 5e7)
+        assert rows[1] == (1735776000 * 1000, 110.0, 1.1e9, 6e7)
+
+    @pytest.mark.asyncio
+    async def test_ticker_snapshot_full_returns_raw_dict(self):
+        """fetch_ticker_snapshot_full returns the entire CoinPaprika response
+        dict — no field is dropped, no parsing applied."""
+        body = {
+            "id": "btc-bitcoin", "name": "Bitcoin", "symbol": "BTC", "rank": 1,
+            "circulating_supply": 20_034_381, "total_supply": 20_034_375,
+            "max_supply": 21_000_000, "beta_value": 0.9458,
+            "quotes": {"USD": {
+                "price": 77508.24, "volume_24h": 1.96e10,
+                "percent_change_24h": 1.09,
+                "ath_price": 126173.18, "percent_from_price_ath": -38.54,
+            }},
+        }
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=_ok(body)
+            )
+            snap = await cp.fetch_ticker_snapshot_full("BTC-USD")
+        assert snap is not None
+        assert snap["beta_value"] == pytest.approx(0.9458)
+        assert snap["rank"] == 1
+        assert snap["quotes"]["USD"]["percent_from_price_ath"] == pytest.approx(-38.54)
+
+    @pytest.mark.asyncio
     async def test_pagination_dedupes_overlapping_timestamps(self):
         """If consecutive pages overlap on the seam day, the duplicate is removed."""
         # Page 1: 1000 rows ending on day 1000 (timestamp T).
