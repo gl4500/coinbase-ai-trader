@@ -7,7 +7,7 @@ It defines responsibilities, workflows, and rules that every agent must follow.
 
 ## Engineering Rules — apply to ALL work
 
-These 12 rules govern HOW every agent works on this repo, regardless of which workflow (TDD, find-list-fix, etc.) is active. They override style preferences and are higher-priority than convenience.
+These 11 rules govern HOW every agent works on this repo, regardless of which workflow (TDD, find-list-fix, etc.) is active. They override style preferences and are higher-priority than convenience.
 
 ### Rule 1 — Think Before Coding
 State assumptions explicitly. If uncertain, ask rather than guess.
@@ -35,34 +35,29 @@ Use me for: classification, drafting, summarization, extraction.
 Do NOT use me for: routing, retries, deterministic transforms.
 If code can answer, code answers.
 
-### Rule 6 — Token budgets are not advisory
-Per-task: 4,000 tokens. Per-session: 30,000 tokens.
-If approaching budget, summarize and start fresh.
-Surface the breach. Do not silently overrun.
-
-### Rule 7 — Surface conflicts, don't average them
+### Rule 6 — Surface conflicts, don't average them
 If two patterns contradict, pick one (more recent / more tested).
 Explain why. Flag the other for cleanup.
 Don't blend conflicting patterns.
 
-### Rule 8 — Read before you write
+### Rule 7 — Read before you write
 Before adding code, read exports, immediate callers, shared utilities.
 "Looks orthogonal" is dangerous. If unsure why code is structured a way, ask.
 
-### Rule 9 — Tests verify intent, not just behavior
+### Rule 8 — Tests verify intent, not just behavior
 Tests must encode WHY behavior matters, not just WHAT it does.
 A test that can't fail when business logic changes is wrong.
 
-### Rule 10 — Checkpoint after every significant step
+### Rule 9 — Checkpoint after every significant step
 Summarize what was done, what's verified, what's left.
 Don't continue from a state you can't describe back.
 If you lose track, stop and restate.
 
-### Rule 11 — Match the codebase's conventions, even if you disagree
+### Rule 10 — Match the codebase's conventions, even if you disagree
 Conformance > taste inside the codebase.
 If you genuinely think a convention is harmful, surface it. Don't fork silently.
 
-### Rule 12 — Fail loud
+### Rule 11 — Fail loud
 "Completed" is wrong if anything was skipped silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
