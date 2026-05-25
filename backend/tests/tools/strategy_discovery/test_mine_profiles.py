@@ -79,3 +79,54 @@ def test_bootstrap_ci_returns_95pct_band_on_resampled_trades():
     lo2, hi2 = bootstrap_ci(mixed, n_iter=500, rng=rng)
     assert lo2 < 2.0 < hi2
     assert (hi2 - lo2) > 0.1
+
+
+def test_mine_profiles_for_pid_horizon_returns_qualifying_leaves_only(tmp_path):
+    """Integration: build a synthetic Phase 2 parquet where a clear cohort exists,
+    run mine_profiles_for_pid_horizon end-to-end (on CPU), and assert at least
+    one qualifying profile comes back."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pandas as pd
+    from tools.strategy_discovery.mine_profiles import mine_profiles_for_pid_horizon
+
+    rng = np.random.default_rng(101)
+    n = 1000
+    ts_ms = np.arange(n, dtype="int64") * 3_600_000
+    feat_0 = rng.uniform(0.0, 1.0, size=n)
+    feat_1 = rng.uniform(0.0, 1.0, size=n)
+    labels = np.where(feat_0 > 0.5, 0.08, -0.02).astype("float64")
+    df = pd.DataFrame({
+        "ts":               ts_ms,
+        "open":             np.full(n, 1.0),
+        "high":             np.full(n, 1.0),
+        "low":              np.full(n, 1.0),
+        "close":            np.full(n, 1.0),
+        "market_cap":       np.full(n, 1e9),
+        "fdv":              np.full(n, 2e9),
+        "fdv_over_mc":      np.full(n, 2.0),
+        "circ_over_total":  np.full(n, 0.5),
+        "vol_24h":          np.full(n, 1e7),
+        "vol_over_mc":      np.full(n, 0.01),
+        "price_over_ema20": feat_0,
+        "price_over_ema50": np.full(n, 1.0),
+        "price_over_ema200":np.full(n, 1.0),
+        "ret_1h_sign":      np.full(n, 0.0),
+        "ret_24h_sign":     feat_1,
+        "ret_7d_sign":      np.full(n, 0.0),
+        "atr14_pct":        np.full(n, 0.02),
+        "label_h1":   labels,
+        "label_h4":   labels,
+        "label_h24":  labels,
+        "label_h72":  labels,
+        "label_h168": labels,
+    })
+    parquet_path = tmp_path / "FOO-USD.parquet"
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), parquet_path)
+
+    profiles = mine_profiles_for_pid_horizon(
+        pid="FOO-USD", horizon=24, parquet_path=parquet_path, device="cpu", seed=42,
+    )
+    assert len(profiles) >= 1
+    winners = [p for p in profiles if p.avg_win >= 0.05 and p.cumulative_profit_deflated > 0]
+    assert len(winners) >= 1, f"no winners; got profiles: {[(p.avg_win, p.cumulative_profit_deflated) for p in profiles]}"
