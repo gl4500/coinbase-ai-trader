@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Phase 3 — Deflation Factor Explainer</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 920px;
+    margin: 2rem auto;
+    padding: 0 1.5rem;
+    line-height: 1.55;
+    color: #1a1a1a;
+    background: #fafafa;
+  }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid #444; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.0rem; margin-top: 1.5rem; color: #555; }
+  .callout {
+    background: #fff7e6;
+    border-left: 4px solid #d97706;
+    padding: 0.6rem 1rem;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  .callout.green {
+    background: #ecfdf5;
+    border-left-color: #059669;
+  }
+  .callout.red {
+    background: #fef2f2;
+    border-left-color: #dc2626;
+  }
+  code, pre {
+    font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+    background: #f0f0f0;
+    border-radius: 3px;
+  }
+  code { padding: 0.1em 0.35em; font-size: 0.9rem; }
+  pre {
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  table {
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.92rem;
+  }
+  th, td { border: 1px solid #ccc; padding: 0.4rem 0.7rem; text-align: right; }
+  th { background: #eee; font-weight: 600; }
+  td:first-child, th:first-child { text-align: left; }
+  .winner { background: #fef3c7; font-weight: 600; }
+  .formula {
+    font-family: "Georgia", "Cambria", serif;
+    font-size: 1.05rem;
+    text-align: center;
+    margin: 1rem 0;
+    padding: 0.8rem;
+    background: #f7fafc;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+  }
+  svg { display: block; margin: 1rem auto; }
+  .bar-true   { fill: #94a3b8; }
+  .bar-raw    { fill: #3b82f6; }
+  .bar-winner { fill: #f59e0b; stroke: #b45309; stroke-width: 2; }
+  .bar-deflated { fill: #059669; }
+  .axis { stroke: #444; }
+  .axis-label { font-size: 11px; fill: #444; }
+  .legend { font-size: 12px; }
+  .legend rect { width: 14px; height: 14px; }
+</style>
+</head>
+<body>
+
+<h1>Phase 3 — Why we deflate the reported cumulative profit</h1>
+
+<p>The hyperparameter search inspects <strong>9 combos</strong> per <code>(pid, horizon)</code> pair
+(<code>depth ∈ {3, 5, 7}</code> × <code>min_leaf ∈ {20, 50, 100}</code>) and picks the combo with
+the highest cumulative profit on the inner CV folds. <strong>Picking the max of 9 noisy estimates
+inflates the reported number</strong> — even if every combo has the same true profit, the maximum
+will overshoot by an amount that depends on (a) how many combos we tried, and (b) how noisy each
+combo's estimate is. This is the same failure mode that the <a href="../../../docs/superpowers/specs/2026-05-22-probe-selection-bias-results.md">probe-selection-bias diagnostic</a>
+(Session 58.71p) found in v3.</p>
+
+<div class="callout">
+This is not a bug in the search — searching is fine. The bug is <em>reporting the raw maximum
+as if it were the true expected profit</em>. The deflation factor corrects the reported number
+so reviewers see what the strategy is honestly worth, not the cherry-picked peak.
+</div>
+
+<h2>Setup: a toy (pid, horizon) example</h2>
+
+<p>Suppose the <strong>true</strong> cumulative profit of every combo is <code>+5.0%</code>
+(we don't actually know this — we're constructing a worked example). Each combo's measured
+profit on the inner CV is noisy: it's the true value plus a sample of Gaussian noise with
+standard error <code>σ = 1.5%</code> (derived from the variance across the 3 inner folds).</p>
+
+<p>Here are the 9 simulated measurements (true = 5.0%, σ = 1.5%):</p>
+
+<table>
+<thead><tr>
+  <th>combo</th><th>depth</th><th>min_leaf</th><th>measured profit</th>
+</tr></thead>
+<tbody>
+  <tr><td>1</td><td>3</td><td>20</td><td>4.2%</td></tr>
+  <tr><td>2</td><td>3</td><td>50</td><td>5.8%</td></tr>
+  <tr><td>3</td><td>3</td><td>100</td><td>3.1%</td></tr>
+  <tr><td>4</td><td>5</td><td>20</td><td>6.0%</td></tr>
+  <tr><td>5</td><td>5</td><td>50</td><td>4.7%</td></tr>
+  <tr><td>6</td><td>5</td><td>100</td><td>5.5%</td></tr>
+  <tr class="winner"><td>7</td><td>7</td><td>20</td><td>7.2% ← picked</td></tr>
+  <tr><td>8</td><td>7</td><td>50</td><td>4.0%</td></tr>
+  <tr><td>9</td><td>7</td><td>100</td><td>5.1%</td></tr>
+</tbody>
+</table>
+
+<p>The naive hyperparam-search would report: <strong>"best combo found, cumulative profit = 7.2%"</strong>.
+But the truth is <strong>5.0%</strong>. The 7.2% is the lucky max of 9 draws — selection inflated it
+by 2.2 percentage points.</p>
+
+<h2>The formula</h2>
+
+<p>For <code>N</code> iid Gaussian draws with standard error <code>σ</code>, the expected gap
+between the maximum and the true mean is approximated by:</p>
+
+<div class="formula">
+E[max − true] ≈ σ × √(2 × ln(N))
+</div>
+
+<p>(This is the leading term of the expected maximum of <code>N</code> standard normals, a
+standard result in order statistics.) For our case:</p>
+
+<pre>
+N = 9                       # hyperparam combos
+σ = 1.5%                    # per-combo standard error from inner CV variance
+inflation = 1.5% × √(2 × ln(9))
+          = 1.5% × √(2 × 2.197)
+          = 1.5% × √4.394
+          = 1.5% × 2.097
+          ≈ 3.15%
+</pre>
+
+<p>So the deflated estimate is:</p>
+
+<div class="formula">
+deflated_profit = raw_max − σ × √(2 × ln(N))
+              = 7.2% − 3.15%
+              = <strong>4.05%</strong>
+</div>
+
+<div class="callout green">
+<strong>Reported in Phase 3 output:</strong>
+<ul>
+  <li><code>cumulative_profit_raw</code> = 7.2% (what the search found)</li>
+  <li><code>cumulative_profit_deflated</code> = 4.05% (selection-corrected estimate)</li>
+  <li><code>deflation_factor</code> = 3.15 percentage points</li>
+  <li><code>n_combos_searched</code> = 9 (for audit)</li>
+  <li><code>inner_cv_se</code> = 1.5% (the σ that drove the deflation)</li>
+</ul>
+Both numbers go into the parquet. Phase 4 scorecard ranks on <code>cumulative_profit_deflated</code>;
+the raw number is kept for audit so we can see how much selection bias each profile was carrying.
+</div>
+
+<h2>Visualization</h2>
+
+<svg width="820" height="340" viewBox="0 0 820 340">
+  <!-- y-axis -->
+  <line class="axis" x1="60" y1="20" x2="60" y2="280" />
+  <!-- x-axis -->
+  <line class="axis" x1="60" y1="280" x2="780" y2="280" />
+  <!-- y gridlines + labels -->
+  <line stroke="#ddd" x1="60" y1="60"  x2="780" y2="60"  />
+  <line stroke="#ddd" x1="60" y1="100" x2="780" y2="100" />
+  <line stroke="#ddd" x1="60" y1="140" x2="780" y2="140" />
+  <line stroke="#ddd" x1="60" y1="180" x2="780" y2="180" />
+  <line stroke="#ddd" x1="60" y1="220" x2="780" y2="220" />
+  <text class="axis-label" x="55" y="65"  text-anchor="end">8%</text>
+  <text class="axis-label" x="55" y="105" text-anchor="end">6%</text>
+  <text class="axis-label" x="55" y="145" text-anchor="end">4%</text>
+  <text class="axis-label" x="55" y="185" text-anchor="end">2%</text>
+  <text class="axis-label" x="55" y="225" text-anchor="end">0%</text>
+  <text class="axis-label" x="40" y="160" text-anchor="middle" transform="rotate(-90 40 160)">cumulative profit</text>
+
+  <!-- True (dashed horizontal at 5%) -->
+  <line stroke="#94a3b8" stroke-width="2" stroke-dasharray="6 4" x1="60" y1="120" x2="780" y2="120" />
+  <text class="axis-label" x="785" y="124" fill="#64748b">true = 5.0%</text>
+
+  <!-- 9 bars at y-axis: bar_height = value * 20px per 1% -->
+  <!-- bar widths = 50, gap = 20, starting x = 80 -->
+  <!-- y_top = 220 - value*20  (so 5% bar top = 220-100 = 120) -->
+  <!-- combo 1: 4.2% -->
+  <rect class="bar-raw" x="80"  y="136" width="50" height="84"  />
+  <text class="axis-label" x="105" y="295" text-anchor="middle">c1</text>
+  <text class="axis-label" x="105" y="131" text-anchor="middle">4.2</text>
+  <!-- combo 2: 5.8% -->
+  <rect class="bar-raw" x="150" y="104" width="50" height="116" />
+  <text class="axis-label" x="175" y="295" text-anchor="middle">c2</text>
+  <text class="axis-label" x="175" y="99"  text-anchor="middle">5.8</text>
+  <!-- combo 3: 3.1% -->
+  <rect class="bar-raw" x="220" y="158" width="50" height="62"  />
+  <text class="axis-label" x="245" y="295" text-anchor="middle">c3</text>
+  <text class="axis-label" x="245" y="153" text-anchor="middle">3.1</text>
+  <!-- combo 4: 6.0% -->
+  <rect class="bar-raw" x="290" y="100" width="50" height="120" />
+  <text class="axis-label" x="315" y="295" text-anchor="middle">c4</text>
+  <text class="axis-label" x="315" y="95"  text-anchor="middle">6.0</text>
+  <!-- combo 5: 4.7% -->
+  <rect class="bar-raw" x="360" y="126" width="50" height="94"  />
+  <text class="axis-label" x="385" y="295" text-anchor="middle">c5</text>
+  <text class="axis-label" x="385" y="121" text-anchor="middle">4.7</text>
+  <!-- combo 6: 5.5% -->
+  <rect class="bar-raw" x="430" y="110" width="50" height="110" />
+  <text class="axis-label" x="455" y="295" text-anchor="middle">c6</text>
+  <text class="axis-label" x="455" y="105" text-anchor="middle">5.5</text>
+  <!-- combo 7: 7.2% WINNER -->
+  <rect class="bar-winner" x="500" y="76"  width="50" height="144" />
+  <text class="axis-label" x="525" y="295" text-anchor="middle">c7 ★</text>
+  <text class="axis-label" x="525" y="71"  text-anchor="middle" font-weight="bold">7.2</text>
+  <!-- combo 8: 4.0% -->
+  <rect class="bar-raw" x="570" y="140" width="50" height="80"  />
+  <text class="axis-label" x="595" y="295" text-anchor="middle">c8</text>
+  <text class="axis-label" x="595" y="135" text-anchor="middle">4.0</text>
+  <!-- combo 9: 5.1% -->
+  <rect class="bar-raw" x="640" y="118" width="50" height="102" />
+  <text class="axis-label" x="665" y="295" text-anchor="middle">c9</text>
+  <text class="axis-label" x="665" y="113" text-anchor="middle">5.1</text>
+
+  <!-- Deflated estimate (4.05%) horizontal at y = 220 - 4.05*20 = 220 - 81 = 139 -->
+  <line stroke="#059669" stroke-width="3" x1="60" y1="139" x2="780" y2="139" />
+  <text class="axis-label" x="785" y="143" fill="#059669" font-weight="bold">deflated = 4.05%</text>
+
+  <!-- Legend -->
+  <g class="legend" transform="translate(80,310)">
+    <rect class="bar-raw" /><text x="20" y="12">9 combo measurements (raw)</text>
+    <rect class="bar-winner" x="240" /><text x="260" y="12">"max picked" — 7.2% (cherry-picked)</text>
+    <line stroke="#94a3b8" stroke-width="2" stroke-dasharray="6 4" x1="500" y1="7" x2="530" y2="7" />
+    <text x="535" y="12">true profit (unknown in practice)</text>
+  </g>
+</svg>
+
+<h2>What this changes in the Phase 3 output</h2>
+
+<p>Each row in <code>backend/data/phase3/profiles_h{h}.parquet</code> carries both numbers:</p>
+
+<pre>
+pid             BTC-USD
+horizon         24
+leaf_id         3
+rule_path       "vol_over_mc > 0.08 AND price_over_ema20 > 1.02"
+trade_count     47
+win_rate        0.617
+avg_win         0.083    # +8.3% net per win
+avg_loss       -0.054    # -5.4% net per loss
+max_dd          0.219    # 21.9%
+sortino         1.34
+cumulative_profit_raw      0.072   # what the inner CV search found  ← old reporting
+cumulative_profit_deflated 0.041   # selection-corrected             ← new ranking metric
+deflation_pp               0.031   # the σ × √(2 ln N) gap
+n_combos_searched          9
+inner_cv_se                0.015
+</pre>
+
+<h2>Edge cases the formula handles cleanly</h2>
+
+<ul>
+  <li><strong>Low noise → low deflation.</strong> If σ is tiny (combos all measured very tightly),
+      then σ × √(2 ln 9) is tiny, and raw ≈ deflated. The strategy was honestly good.</li>
+  <li><strong>Big noise → big deflation.</strong> If σ is large (combos disagree wildly), the max
+      is mostly luck and the deflation gap is large. The reported number tells you it was noisy.</li>
+  <li><strong>Fewer combos → less deflation.</strong> If we searched only 3 combos instead of 9,
+      <code>√(2 ln 3) = 1.48</code> vs <code>√(2 ln 9) = 2.10</code> — penalty scales with the
+      number of trials.</li>
+  <li><strong>Negative deflated profit.</strong> A strategy can have <code>raw &gt; 0</code> but
+      <code>deflated &lt; 0</code> — meaning "we found a positive number but after correcting for
+      how many we looked at, the strategy probably isn't profitable." Q0 hard gates should be
+      applied to the <strong>deflated</strong> number.</li>
+</ul>
+
+<div class="callout red">
+<strong>What this does NOT do:</strong>
+<ul>
+  <li>It does <strong>not</strong> correct for selection across <em>pids or horizons</em> (250
+      total pairs). Phase 4 scorecard handles cross-profile selection.</li>
+  <li>It does <strong>not</strong> correct for in-sample data snooping (the rule paths themselves
+      were extracted from looking at the data). Purged WF + the 4-of-5-fold gate handle that.</li>
+  <li>It is not a Sharpe ratio deflation — for that see the Deflated Sharpe Ratio diagnostic
+      from task #16. Phase 3 uses the simpler max-of-N correction since cumulative profit is the
+      ranking metric, not Sharpe.</li>
+</ul>
+</div>
+
+<hr>
+
+<p style="font-size: 0.85rem; color: #777; text-align: center;">
+Companion to <code>docs/superpowers/specs/2026-05-24-strategy-discovery-phase3-design.md</code>
+(Section 3 — Validation). Open this file in a browser to view.
+</p>
+
+</body>
+</html>
