@@ -368,7 +368,8 @@ export default function PerformanceDashboard() {
                 <th className="text-right pr-3">P&L %</th>
                 <th className="text-right pr-3">Hold</th>
                 <th className="text-right pr-3">Trigger</th>
-                <th className="text-right">Opened</th>
+                <th className="text-right pr-3">Opened</th>
+                <th className="text-right">Closed</th>
               </tr>
             </thead>
             <tbody>
@@ -395,7 +396,10 @@ export default function PerformanceDashboard() {
                   <td className="text-right pr-3 text-gray-400 font-mono text-xs">
                     {t.trigger_close ?? t.trigger_open}
                   </td>
-                  <td className="text-right text-gray-500">{fmtTime(t.opened_at)}</td>
+                  <td className="text-right pr-3 text-gray-500">{fmtTime(t.opened_at)}</td>
+                  <td className="text-right text-gray-500">
+                    {t.closed_at ? fmtTime(t.closed_at) : <span className="text-yellow-500/60">—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
