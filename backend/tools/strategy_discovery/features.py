@@ -1,0 +1,81 @@
+"""Trend feature compute for the strategy-discovery rebuild (Phase 2).
+
+Adds 7 trend columns to a 1h OHLCV DataFrame:
+  - price_over_ema20 / 50 / 200 (close / EMA, scale-free ratio)
+  - ret_1h_sign / ret_24h_sign / ret_7d_sign (numpy.sign of close-vs-past-close)
+  - atr14_pct (Wilder ATR-14 divided by close)
+
+Pure functions on pandas DataFrames. No I/O. No tokenomics. No labels.
+"""
+from __future__ import annotations
+
+from typing import Tuple
+
+import numpy as np
+import pandas as pd
+
+_TREND_COLUMNS: Tuple[str, ...] = (
+    "price_over_ema20",
+    "price_over_ema50",
+    "price_over_ema200",
+    "ret_1h_sign",
+    "ret_24h_sign",
+    "ret_7d_sign",
+    "atr14_pct",
+)
+
+
+def _ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def _wilder_atr14(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """Wilder ATR-14.
+
+    TR_t = max(high_t - low_t, |high_t - close_{t-1}|, |low_t - close_{t-1}|).
+    Wilder smoothing is equivalent to ewm(alpha=1/14, adjust=False).
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
+
+
+def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """Add the 7 trend feature columns to a 1h OHLCV DataFrame.
+
+    Requires columns: ts, open, high, low, close. Returns a copy with 7 added
+    columns. Rows inside the warm-up region (< 200 bars from the start) will
+    have NaN in EMA200-dependent ratios; use first_valid_index() to skip them.
+    """
+    out = df_ohlcv.copy()
+    close = out["close"]
+    out["price_over_ema20"]  = close / _ema(close, 20)
+    out["price_over_ema50"]  = close / _ema(close, 50)
+    out["price_over_ema200"] = close / _ema(close, 200)
+    out["ret_1h_sign"]  = np.sign(close - close.shift(1)).astype("float64")
+    out["ret_24h_sign"] = np.sign(close - close.shift(24)).astype("float64")
+    out["ret_7d_sign"]  = np.sign(close - close.shift(168)).astype("float64")
+    out["atr14_pct"] = _wilder_atr14(out["high"], out["low"], close) / close
+    return out
+
+
+def first_valid_index(df: pd.DataFrame, min_warmup: int = 200) -> int:
+    """First row index where all trend feature columns are finite.
+
+    Returns ``len(df)`` if no row in ``[min_warmup, n)`` qualifies; callers
+    should check ``idx < len(df)`` before slicing or they will silently get
+    an empty DataFrame.
+    """
+    cols = [c for c in _TREND_COLUMNS if c in df.columns]
+    if not cols:
+        return min(min_warmup, len(df))
+    finite = df[cols].notna().all(axis=1) & np.isfinite(df[cols]).all(axis=1)
+    n = len(df)
+    for i in range(min_warmup, n):
+        if bool(finite.iloc[i]):
+            return i
+    return n

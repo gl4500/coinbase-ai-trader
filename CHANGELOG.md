@@ -30,6 +30,49 @@ and plan `docs/superpowers/plans/2026-05-24-strategy-discovery-phase4-implementa
 
 Reads scorecard.md, picks winning cap (or aborts), then opens a separate integration commit to wire the chosen `deployment_n{N}.json` into `agents/cnn_agent.py`.
 
+### Session — 2026-05-24 — Strategy-discovery Phase 3: custom-criterion decision tree mining
+
+Implemented Phase 3 of the strategy-discovery rebuild per spec
+`docs/superpowers/specs/2026-05-24-strategy-discovery-phase3-design.md`
+and plan `docs/superpowers/plans/2026-05-24-strategy-discovery-phase3-implementation.md`.
+
+**New modules (all under `backend/tools/strategy_discovery/`):**
+- `profit_split.py` — GPU-vectorized concurrency-capped (max-1-per-token) cumulative-PnL split criterion (`walk_and_sum`, `best_split`, `build_next_eligible`).
+- `profit_tree.py` — Recursive profit-maximizing decision-tree fitter (`fit_tree`, `collect_leaves`).
+- `purged_wf.py` — Purged Walk-Forward CV + nested inner CV (`outer_folds`, `inner_folds`).
+- `mine_profiles.py` — Per-(pid, horizon) orchestrator: hyperparam search → deflation factor → Q0 gates → bootstrap CI. Composes the helpers above.
+- `mine_universe.py` — CLI + universe driver; writes `profiles_h{h}.parquet` + `rule_paths_h{h}.json` per horizon.
+
+**Test surface added:** 21 new tests under `backend/tests/tools/strategy_discovery/`. Full backend suite green.
+
+**Operator step (post-merge):**
+
+    cd backend && python -m tools.strategy_discovery.mine_universe \
+        --universe ../docs/superpowers/specs/2026-05-23-universe-50.json \
+        --device cuda --seed 42
+
+Outputs land in `backend/data/phase3/`. Expected runtime ~30-60 min on RTX 2060.
+Companion: `backend/tools/phase3_deflation_explainer.html` walks through the
+selection-bias inflation math.
+
+### Session — 2026-05-24 — Strategy-discovery Phase 2: feature compute + dynamic-exit labels
+
+Implemented Phase 2 of the strategy-discovery rebuild per spec
+`docs/superpowers/specs/2026-05-23-strategy-discovery-phase2-design.md`
+and plan `docs/superpowers/plans/2026-05-23-strategy-discovery-phase2-implementation.md`.
+
+**New modules (all under `backend/tools/strategy_discovery/`):**
+- `features.py` — 7 trend features (EMA20/50/200 ratios, sign-only returns at 1h/24h/7d, Wilder ATR-14 percentage).
+- `tokenomic_stamp.py` — T+1 daily-to-hourly merge for 6 tokenomic features (MC, FDV, FDV/MC, circ/total, vol_24h, vol/MC).
+- `labels.py` — dynamic-exit simulator mirroring the deployed WS exit checker (SL 8%, ATR trail 6% floor, max-hold 168 bars, 1.2% net fee) across horizons {1, 4, 24, 72, 168}.
+- `build_phase2.py` — orchestrator + CLI; writes one parquet per pid to `backend/data/phase2/{pid}.parquet`.
+
+**Test surface added:** 19 new tests under `backend/tests/tools/strategy_discovery/`. Full backend suite green.
+
+**Operator step (post-merge):**
+
+    cd backend && python -m tools.strategy_discovery.build_phase2 \
+        --universe ../docs/superpowers/specs/2026-05-23-universe-50.json
 - **2026-05-23: WS-driven exit checker (`agents/exit_watcher.py`)** — new module registers an async price-tick handler on the existing Coinbase WS ticker channel. Fires `WS_TRAIL_STOP` / `WS_STOP_LOSS` exits on held positions in sub-second latency instead of waiting for the 60s scan cycle. Max-hold (7-day) exit stays on the scan loop where 60s cadence is appropriate.
   - `agents/cnn_agent.py:_CNNBook` — added `_sell_locks: Dict[str, asyncio.Lock]` field + `_lock_for(pid)` helper. `sell()` body wrapped in `async with self._lock_for(pid):` so the WS handler and scan-loop `_check_risk_exits` cannot race a duplicate `database.close_trade` write. Existing DB-first ordering (`cnn_agent.py:255-260` comment) preserved unchanged inside the lock.
   - `agents/cnn_agent.py:_check_risk_exits` — caches the computed `trail_pct` to `pos['trail_pct']` after the ATR compute block. WS handler reads `pos.get('trail_pct', _CNN_ATR_TRAIL_MIN)`; no DB calls per tick. Up to 60s lag on regime shifts; acceptable since ATR drifts slowly.
