@@ -280,3 +280,103 @@ class TestProTierAuth:
             assert headers.get("Authorization") == "test-key-abc123"
             url = mock_get.call_args.args[0]
             assert "api-pro.coinpaprika.com" in url
+
+
+# ── Pagination (added 2026-05-25 to handle Pro tier 1000-row response cap) ──
+
+
+class TestPagination:
+    """Multi-call pagination to assemble windows longer than 1000 rows."""
+
+    @pytest.mark.asyncio
+    async def test_full_page_response_triggers_next_call(self):
+        """A response with exactly 1000 rows triggers another call from
+        the day after the last returned row."""
+        # Page 1: 1000 daily rows from 2023-01-01.
+        # Page 2: 200 rows starting day 1001.
+        # Total expected: 1200 unique daily rows.
+        def _day(idx, year=2023):
+            import datetime as dt
+            d = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=idx)
+            return d.strftime("%Y-%m-%dT00:00:00Z")
+
+        page1_body = [
+            {"timestamp": _day(i), "market_cap": 1e9 + i, "volume_24h": 5e7}
+            for i in range(1000)
+        ]
+        page2_body = [
+            {"timestamp": _day(1000 + i), "market_cap": 2e9 + i, "volume_24h": 6e7}
+            for i in range(200)
+        ]
+
+        call_count = {"n": 0}
+        async def mock_get(*args, **kwargs):
+            call_count["n"] += 1
+            return _ok(page1_body if call_count["n"] == 1 else page2_body)
+
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            # ask for a wide window — must encompass all 1200 returned rows
+            rows = await cp.fetch_marketcap_history(
+                "BTC-USD",
+                start_ms=int(1672531200 * 1000),         # 2023-01-01
+                end_ms=int(2208988800 * 1000),           # 2040-01-01 (far future)
+            )
+
+        assert call_count["n"] == 2, f"expected 2 paginated calls, got {call_count['n']}"
+        assert len(rows) == 1200
+
+    @pytest.mark.asyncio
+    async def test_short_response_stops_pagination(self):
+        """A response with < 1000 rows stops the loop (no more data)."""
+        body = [
+            {"timestamp": "2025-01-01T00:00:00Z", "market_cap": 1e9, "volume_24h": 5e7},
+            {"timestamp": "2025-01-02T00:00:00Z", "market_cap": 1e9, "volume_24h": 5e7},
+        ]
+        call_count = {"n": 0}
+        async def mock_get(*args, **kwargs):
+            call_count["n"] += 1
+            return _ok(body)
+
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            rows = await cp.fetch_marketcap_history(
+                "BTC-USD",
+                start_ms=int(1735689600 * 1000),
+                end_ms=int(1767225600 * 1000),
+            )
+        assert call_count["n"] == 1, f"expected single call, got {call_count['n']}"
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_pagination_dedupes_overlapping_timestamps(self):
+        """If consecutive pages overlap on the seam day, the duplicate is removed."""
+        # Page 1: 1000 rows ending on day 1000 (timestamp T).
+        # Page 2: 100 rows starting on day 1000 (timestamp T) -- 1 day overlap.
+        # Expected: 1099 unique rows (one overlap dedup'd).
+        def _day(idx):
+            import datetime as dt
+            return (dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(days=idx)).strftime("%Y-%m-%dT00:00:00Z")
+
+        page1_body = [
+            {"timestamp": _day(i), "market_cap": 1e9, "volume_24h": 5e7}
+            for i in range(1000)
+        ]
+        page2_body = [
+            {"timestamp": _day(999 + i), "market_cap": 2e9, "volume_24h": 6e7}
+            for i in range(100)
+        ]
+        call_count = {"n": 0}
+        async def mock_get(*args, **kwargs):
+            call_count["n"] += 1
+            return _ok(page1_body if call_count["n"] == 1 else page2_body)
+        with patch.object(cp.httpx, "AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.get = mock_get
+            rows = await cp.fetch_marketcap_history(
+                "BTC-USD",
+                start_ms=int(1672531200 * 1000),
+                end_ms=int(1830211200 * 1000),
+            )
+        timestamps = [r[0] for r in rows]
+        assert len(timestamps) == len(set(timestamps)), "duplicates not removed"
+        assert len(rows) == 1099   # 1000 + 100 - 1 overlap

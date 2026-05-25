@@ -292,58 +292,33 @@ def _iso_to_ms(iso: str) -> Optional[int]:
         return None
 
 
-async def fetch_marketcap_history(
-    product_id: str, start_ms: int, end_ms: int
-) -> List[Tuple[int, float, float]]:
-    """Daily marketcap timeseries for one Coinbase pid.
+_MAX_PAGES = 10            # safety bound on paginated calls per fetch
+_RESPONSE_ROW_CAP = 1000   # CoinPaprika returns at most 1000 rows per call
 
-    Returns list of (ts_ms, market_cap, volume_24h) sorted ascending. Skips
-    rows with a missing or non-positive market_cap. Empty list when:
-      - pid is unmapped
-      - COINPAPRIKA_DISABLED=1
-      - HTTP non-200 or transport error
-      - response shape unexpected
 
-    Step A (2026-05-16): return tuple shape extended to carry volume_24h
-    parsed from the response's `volume_24h` field. Missing -> 0.0 fill.
-    """
-    if _is_disabled():
-        return []
-
-    cp_id = _coinbase_to_cp_id(product_id)
-    if cp_id is None:
-        return []
-
+async def _fetch_marketcap_page(
+    cp_id: str, start_ms: int,
+) -> Tuple[int, List[Tuple[int, float, float]]]:
+    """Single API call. Returns (status_code, rows). On any failure → (status, [])."""
     params = {
         "start":    _ms_to_iso_date(start_ms),
         "interval": "1d",
     }
     url = f"{_base_url()}/tickers/{cp_id}/historical"
-
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.get(url, params=params, headers=_auth_headers())
     except Exception as e:
-        logger.warning(
-            "coinpaprika_marketcap history HTTP error pid=%s: %r", product_id, e
-        )
-        return []
-
+        logger.warning("coinpaprika_marketcap history HTTP error cp_id=%s: %r", cp_id, e)
+        return 0, []
     if resp.status_code != 200:
-        logger.warning(
-            "coinpaprika_marketcap history non-200 pid=%s status=%d",
-            product_id, resp.status_code,
-        )
-        return []
-
+        return resp.status_code, []
     try:
         body = resp.json()
     except Exception:
-        return []
-
+        return resp.status_code, []
     if not isinstance(body, list):
-        return []
-
+        return resp.status_code, []
     rows: List[Tuple[int, float, float]] = []
     for entry in body:
         if not isinstance(entry, dict):
@@ -366,7 +341,67 @@ async def fetch_marketcap_history(
             vol_f = 0.0
         rows.append((ts_ms, mc_f, vol_f))
     rows.sort(key=lambda r: r[0])
-    return rows
+    return resp.status_code, rows
+
+
+async def fetch_marketcap_history(
+    product_id: str, start_ms: int, end_ms: int
+) -> List[Tuple[int, float, float]]:
+    """Daily marketcap timeseries for one Coinbase pid.
+
+    Returns list of (ts_ms, market_cap, volume_24h) sorted ascending. Skips
+    rows with a missing or non-positive market_cap. Empty list when:
+      - pid is unmapped
+      - COINPAPRIKA_DISABLED=1
+      - HTTP non-200 or transport error on FIRST page
+      - response shape unexpected
+
+    Pagination (added 2026-05-25 after CoinPaprika Pro tier cap discovery):
+    CoinPaprika returns at most 1000 rows per call (~2.74 years of daily data).
+    For longer windows, this function makes multiple calls with a shifting
+    `start` date until either (a) a page returns < 1000 rows, (b) the next page
+    would extend past `end_ms`, or (c) `_MAX_PAGES` safety bound is hit.
+
+    Subsequent pages that fail with non-200 status are treated as "no more
+    data available" rather than a hard error (the partial result is returned).
+    """
+    if _is_disabled():
+        return []
+
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return []
+
+    all_rows: List[Tuple[int, float, float]] = []
+    cur_start = int(start_ms)
+
+    for page_idx in range(_MAX_PAGES):
+        status, rows = await _fetch_marketcap_page(cp_id, cur_start)
+        if not rows:
+            if page_idx == 0 and status != 200:
+                # First-page hard failure: log once, return empty.
+                logger.warning(
+                    "coinpaprika_marketcap history non-200 pid=%s status=%d",
+                    product_id, status,
+                )
+            break
+        all_rows.extend(rows)
+        last_ts = rows[-1][0]
+        if len(rows) < _RESPONSE_ROW_CAP:
+            break               # got everything available from this start
+        if last_ts >= int(end_ms):
+            break               # past our window
+        cur_start = last_ts + 86_400_000   # next page: day after last row
+
+    # Dedupe by timestamp (pages can overlap on the seam day).
+    seen: set = set()
+    deduped: List[Tuple[int, float, float]] = []
+    for r in all_rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            deduped.append(r)
+    deduped.sort(key=lambda r: r[0])
+    return deduped
 
 
 async def fetch_supply_snapshot(
