@@ -34,6 +34,21 @@ Format: reverse-chronological by session date.
 - **2026-05-23: Strategy-discovery rebuild Phase 1 Task 3** — supply-snapshot parquet writer (`tools/strategy_discovery/build_supply_snapshot.py`). Persists `(pid, circulating, total, max_supply, ingest_ts)` rows to `backend/data/supply/snapshot.parquet`. CLI fetches via `fetch_supply_snapshot` with rate-limit-friendly sleep; merges with existing parquet (dedup by pid, last wins).
 - **2026-05-23: Strategy-discovery rebuild Phase 1 Task 2** — added `fetch_supply_snapshot(pid)` to `services/coinpaprika_marketcap.py`. Hits `/v1/tickers/{cp_id}` and returns `(circulating_supply, total_supply, max_supply_or_None)`. Enables FDV computation (`price × total_supply`) and circ/total ratio for the rebuild's tokenomic feature set.
 - **2026-05-23: Strategy-discovery rebuild Phase 1 Task 1** — local data inventory script (`tools/strategy_discovery/inventory.py`) writes a Markdown report + JSON sidecar of what 1h OHLCV / CoinPaprika tokenomic / 1m OHLCV data exists locally. Read-only; no API calls. Outputs feed universe curation (Task 5). Per the data-first directive.
+- **Pattern C event-sourced architecture (`feat/event-sourced-architecture`)** —
+  New event store (`events` + `consumer_cursors` tables, append-only SQLite WAL)
+  plus three worker processes:
+  - `services/ingest_worker.py` (WS / REST / marketcap → `price_tick`,
+    `candle_close`, `marketcap_snapshot` events)
+  - `services/model_service.py --model {v3,v4_5}` (poll events → inference →
+    `signal_scored`, `trade_decided`, `trade_closed`, `exit_triggered` events)
+  - `services/api_server.py` (FastAPI port 8001 reads materialized views, WS
+    bridge tails events; replaces today's `main.py` API surface in Phase 4
+    cutover, gated behind `MONOLITH_SCAN_DISABLED` env)
+  Plus typed `event_types.py`, `event_writer.py`, `event_consumer.py`,
+  `feature_snapshot.py`, `view_materializer.py`, `tools/event_inspector.py`,
+  `tools/replay_consumer.py`, and 11 new test files. Migration runs parallel-
+  stream (monolith and new processes co-running) per spec
+  `docs/superpowers/specs/2026-05-25-event-sourced-architecture-design.md`.
 
 ---
 

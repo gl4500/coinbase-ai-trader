@@ -298,6 +298,10 @@ async def init_db() -> None:
             except Exception:
                 pass   # column already exists — safe to ignore
 
+        # Event-sourced architecture substrate (Pattern C, 2026-05-25 spec)
+        from services.events_schema import init_events_schema
+        await init_events_schema(db)
+
     logger.info("Database initialised")
 
 

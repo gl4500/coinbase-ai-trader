@@ -248,6 +248,12 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 16. **Shadow telemetry isolation** — Inference shadow paths (v4 alongside v3) must NEVER affect the driver path. Failures in any shadow inference are caught + logged + recorded as NULL, never re-raised. `xgb_signal.xgb_prob_shadow` is the only function that may be called from `cnn_agent` during shadow validation; it returns `(driver_prob, shadow_prob_or_None)`. Mirrors invariant #14's MC chain rule.
 17. **v4.5 3-class telemetry contract.** The three v4.5 probability columns (`xgb_prob_v4_5_down`, `xgb_prob_v4_5_neutral`, `xgb_prob_v4_5_up`) are written atomically: either all three are populated and sum to ~1.0 (after clip [0.01, 0.99] + renormalize), or all three are NULL. A v4.5 failure must NEVER affect the v3 driver path or v4 shadow path. Implemented via isolated try/except in `xgb_signal.xgb_prob_shadow_v4_5`.
 18. **WS exit-handler isolation.** `agents/exit_watcher.on_price_tick` MUST catch every exception in its body and log it at ERROR. Exceptions in handlers spawned via `asyncio.create_task` (which is how `CoinbaseWSSubscriber._handle` fires registered price handlers) do not crash the WS receive loop — the task captures them — but unretrieved-Task warnings hide errors from logs. Explicit `try/except + logger.exception` is required so failures stay visible. Mirrors invariant #14's MC chain rule and invariant #16's shadow-telemetry isolation rule. Also: the per-pid `_CNNBook._sell_locks: Dict[str, asyncio.Lock]` (consumed via `_lock_for(pid)`) is the single source of truth for serializing the WS exit handler against scan-loop `_check_risk_exits`; do not duplicate the lock at call sites.
+19. **`events` table is append-only.** Code MUST NOT issue `UPDATE` or `DELETE`
+    against rows in `events`. Corrections are new events (compensating events).
+    `consumer_cursors` rows are mutable (cursor advance); `materialized_*`
+    rows are mutable views built from events. The append-only discipline is
+    what makes replay deterministic and is the foundation of the Pattern C
+    architecture (`docs/superpowers/specs/2026-05-25-event-sourced-architecture-design.md`).
 
 ---
 

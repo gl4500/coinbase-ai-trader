@@ -390,6 +390,13 @@ async def _train_progress_watcher() -> None:
 # _TECH_START_DELAY removed #311-refactor-c (TechAgent retired)
 
 
+def _should_run_monolith_scan() -> bool:
+    """Phase 3 cutover gate. Set MONOLITH_SCAN_DISABLED=true to silence the
+    monolith's scan loop once model_service is driving inference."""
+    val = os.environ.get("MONOLITH_SCAN_DISABLED", "").strip().lower()
+    return val not in ("true", "1", "yes", "on")
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -462,16 +469,23 @@ async def lifespan(app: FastAPI):
             app_state.train_status = "failed"
             logger.error(f"CNN auto-train subprocess failed to start: {exc}")
 
-    app_state.cnn_task = asyncio.create_task(
-        app_state.cnn_agent.run_loop(
-            interval            = config.scan_interval_secs,
-            order_executor      = app_state.order_executor,
-            is_trading_fn       = lambda: app_state.is_trading,
-            train_every_n_scans = config.cnn_train_every_n_scans,
-            broadcast_fn        = broadcast_state,
-            auto_train_fn       = _auto_train_subprocess,
+    if _should_run_monolith_scan():
+        # ── Existing scan loop spawn stays exactly as-is below ─────────
+        app_state.cnn_task = asyncio.create_task(
+            app_state.cnn_agent.run_loop(
+                interval            = config.scan_interval_secs,
+                order_executor      = app_state.order_executor,
+                is_trading_fn       = lambda: app_state.is_trading,
+                train_every_n_scans = config.cnn_train_every_n_scans,
+                broadcast_fn        = broadcast_state,
+                auto_train_fn       = _auto_train_subprocess,
+            )
         )
-    )
+    else:
+        logger.warning(
+            "MONOLITH_SCAN_DISABLED=true — scan loop suppressed. "
+            "model_service is expected to drive inference."
+        )
 
     # TechAgent retired #311-refactor-c — only CNN agent runs as a sub-agent
     app_state.train_watcher_task  = asyncio.create_task(_train_progress_watcher())
