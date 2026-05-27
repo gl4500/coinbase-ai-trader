@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 
 _MS_PER_BAR: int = 3_600_000   # one 1h bar in epoch milliseconds
@@ -47,29 +48,38 @@ def walk_and_sum(
     next_eligible: torch.Tensor,
     labels: torch.Tensor,
 ) -> torch.Tensor:
-    """Vectorized concurrency-capped (max-1) cumulative PnL across B candidate subsets.
+    """Concurrency-capped (max-1) cumulative PnL across B candidate subsets.
 
     For each row in B, scan its K rows in order; if a row's index is below the
     current open_until, skip; else add its label and advance open_until to its
     next_eligible. Padding (-1) is treated as "no row".
+
+    Computed on CPU with numpy: each iteration of the K-loop costs ~1µs in numpy
+    vs. ~120µs of CUDA kernel-launch overhead, which on real mining sizes
+    (K~4600) is the difference between sub-second and multi-second per call.
+    Result is moved back to the input device for API compatibility.
     """
-    B, K = subset_indices.shape
-    N = labels.shape[0]
-    valid = subset_indices >= 0
-    safe_idx = subset_indices.clamp_min(0)
-    row_labels = labels.gather(0, safe_idx.reshape(-1)).reshape(B, K)
-    row_next   = next_eligible.gather(0, safe_idx.reshape(-1)).reshape(B, K)
-    open_until = torch.full((B,), -1, dtype=torch.int64, device=subset_indices.device)
-    total      = torch.zeros((B,), dtype=labels.dtype, device=subset_indices.device)
+    out_dev = subset_indices.device
+    si = subset_indices.detach().cpu().numpy()
+    ne = next_eligible.detach().cpu().numpy()
+    lb = labels.detach().cpu().numpy()
+    B, K = si.shape
+    valid     = si >= 0
+    safe      = np.where(valid, si, 0)
+    row_label = lb[safe]
+    row_next  = ne[safe]
+    open_until = np.full(B, -1, dtype=np.int64)
+    total      = np.zeros(B, dtype=lb.dtype)
+    zero_lab   = np.zeros(B, dtype=lb.dtype)
     for k in range(K):
-        col_idx   = safe_idx[:, k]
-        col_lab   = row_labels[:, k]
+        col_idx   = safe[:, k]
+        col_lab   = row_label[:, k]
         col_next  = row_next[:, k]
         col_valid = valid[:, k]
         fire = col_valid & (col_idx >= open_until)
-        total      = total + torch.where(fire, col_lab, torch.zeros_like(col_lab))
-        open_until = torch.where(fire, col_next, open_until)
-    return total
+        total      = total + np.where(fire, col_lab, zero_lab)
+        open_until = np.where(fire, col_next, open_until)
+    return torch.from_numpy(total).to(out_dev)
 
 
 def _quantile_thresholds(values: torch.Tensor, n: int) -> torch.Tensor:
