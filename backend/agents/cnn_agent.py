@@ -49,12 +49,13 @@ import math
 import os
 import shutil
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 import database
 from clients import coinbase_client
+from agents.exit_thresholds import _compute_exit_threshold  # task #46
 from agents.signal_generator import (
     _rsi, _ema, _macd, _bollinger, _ema_cross,
     _atr, _adx, _mfi, _obv_slope, _stoch_rsi, _vwap,
@@ -81,6 +82,12 @@ _CNN_MAX_HOLD_SECS    = 7 * 24 * 3600  # 7-day max-hold — last resort for flat
 # as if they were opened _CNN_LEGACY_HOLD_SECS ago — triggers max-hold exit promptly.
 _CNN_LEGACY_HOLD_SECS = _CNN_MAX_HOLD_SECS + 1  # exceeds max-hold, forces exit on next check
 MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unprofitable spreads)
+
+# Task #46 B2 — model-driven exit: force-exit a held position when v4.5 says
+# DOWN is the most likely 72-hour outcome with confidence > threshold.
+# generate_signal caches p_down on pos['p_down'] (~5min staleness max);
+# _check_risk_exits + exit_watcher.on_price_tick read it.
+_P_DOWN_EXIT_THRESHOLD = 0.55
 
 
 # LightGBM filter / Hurst / DI / entropy / regime-gate constants + helper
@@ -122,6 +129,27 @@ class _CNNBook:
             self._sell_locks[pid] = asyncio.Lock()
         return self._sell_locks[pid]
 
+    @staticmethod
+    def _migrate_position_state(pos: Dict[str, Any]) -> Dict[str, Any]:
+        """Add peak_pnl_pct + position_dollars to legacy position dicts (#46).
+
+        peak_pnl_pct = (peak_price - avg_price) / avg_price, clamped to 0 if
+        avg_price is zero (corrupt-entry case).
+        position_dollars = size * avg_price as an initial value; next scan
+        updates with the live current_price.
+
+        Idempotent — preserves existing values if already present.
+        """
+        if "peak_pnl_pct" not in pos:
+            avg = pos.get("avg_price", 0.0)
+            peak = pos.get("peak_price", avg)
+            pos["peak_pnl_pct"] = ((peak - avg) / avg) if avg > 0 else 0.0
+        if "position_dollars" not in pos:
+            size = pos.get("size", 0.0)
+            avg = pos.get("avg_price", 0.0)
+            pos["position_dollars"] = float(size * avg)
+        return pos
+
     async def load(self) -> None:
         state = await database.load_agent_state(self._agent)
         if state:
@@ -139,6 +167,11 @@ class _CNNBook:
                     f"CNN book: dropped corrupt position {pid} (avg_price=0) — "
                     f"will reconcile open trade row below"
                 )
+
+            # Migrate legacy positions to include peak_pnl_pct + position_dollars
+            # (task #46). Idempotent — preserves any values already present.
+            for pid in list(self.positions.keys()):
+                self.positions[pid] = self._migrate_position_state(self.positions[pid])
 
             logger.info(
                 f"CNN book restored | balance=${self.balance:.2f} | "
@@ -1732,14 +1765,38 @@ class CoinbaseCNNAgent:
             # so it doesn't recompute ATR per tick (~580 ticks/sec aggregate).
             pos["trail_pct"] = trail_pct
 
+            # Task #46: PnL-anchored trail. Ratchet peak_pnl_pct from the
+            # ratcheted peak_price (handles positions whose peak existed before
+            # the field was added; migration also seeds this on load).
+            peak_pnl_from_peak_price = (peak_price - avg_price) / avg_price if avg_price > 0 else 0.0
+            pos["peak_pnl_pct"] = max(pos.get("peak_pnl_pct", 0.0), peak_pnl_from_peak_price)
+            pos["position_dollars"] = float(pos["size"]) * price
+
+            total_capital = self.book.balance + sum(
+                p.get("position_dollars", 0.0) for p in self.book.positions.values()
+            )
+            exit_threshold = _compute_exit_threshold(
+                peak_pnl_pct=pos["peak_pnl_pct"],
+                atr_pct=trail_pct,
+                position_dollars=pos["position_dollars"],
+                total_capital=total_capital,
+            )
+
             # Positions without entry_time are legacy — treat as already overdue
             entry_time = pos.get("entry_time")
             hold_secs  = _CNN_LEGACY_HOLD_SECS if entry_time is None else time.time() - entry_time
 
+            # Task #46 B2: MODEL_DOWN — force-exit when v4.5 says drop is
+            # likely (cached by generate_signal). Sits between STOP_LOSS
+            # (capital protection) and TRAIL_STOP (profit protection).
+            p_down = pos.get("p_down", 0.0)
+
             trigger = None
             if pct_entry <= -_CNN_STOP_LOSS_PCT:
                 trigger = "STOP_LOSS"
-            elif pct_from_peak <= -trail_pct:
+            elif p_down > _P_DOWN_EXIT_THRESHOLD:
+                trigger = "MODEL_DOWN"
+            elif pct_entry < exit_threshold:
                 trigger = "TRAIL_STOP"
             elif hold_secs >= _CNN_MAX_HOLD_SECS:
                 trigger = "MAX_HOLD" if entry_time else "LEGACY_EXIT"
@@ -1749,7 +1806,8 @@ class CoinbaseCNNAgent:
                 logger.info(
                     f"CNN RISK EXIT {pid} @{price:.6f} | {trigger} | "
                     f"entry={pct_entry*100:+.2f}% peak={peak_price:.6f} "
-                    f"trail={pct_from_peak*100:+.2f}% (atr_trail={trail_pct*100:.1f}%) "
+                    f"peak_pnl={pos['peak_pnl_pct']*100:+.2f}% "
+                    f"exit_thr={exit_threshold*100:+.2f}% (atr_trail={trail_pct*100:.1f}%) "
                     f"hold={hold_secs/3600:.1f}h | "
                     f"pnl=${pnl:+.2f} | balance=${self.book.balance:.2f}"
                 )
@@ -1925,6 +1983,13 @@ class CoinbaseCNNAgent:
             except Exception:
                 xgb_shadow     = None
                 xgb_shadow_v45 = None
+
+            # Task #46 B2: cache v4.5 p_down on the held position (if any) so
+            # both _check_risk_exits + exit_watcher.on_price_tick can fire
+            # MODEL_DOWN exits without re-running inference. Skip if no
+            # position or no v4.5 result (failure isolation per invariant #17).
+            if xgb_shadow_v45 is not None and pid in self.book.positions:
+                self.book.positions[pid]["p_down"] = float(xgb_shadow_v45[0])
 
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)

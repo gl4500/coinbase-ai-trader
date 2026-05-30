@@ -554,7 +554,42 @@ async def get_products(
         live = app_state.ws_subscriber.state.get(p["product_id"]) if app_state.ws_subscriber else None
         if live and live.get("price"):
             p["price"] = live["price"]
+    # Compute 24h high/low/pct-change from the candles table — Coinbase Advanced
+    # Trade's /products endpoint omits these fields, so the DB columns sit at
+    # default 0. Fill them from the last ~24 hourly candles per pid.
+    await _enrich_products_with_24h(products)
     return products
+
+
+async def _enrich_products_with_24h(products: List[Dict]) -> None:
+    """For each product in the list, query the last 24 hourly candles and
+    set high_24h = max(highs), low_24h = min(lows),
+    price_pct_change_24h = (latest_close − oldest_close) / oldest_close * 100.
+    Mutates products in-place. Silent on per-pid failures."""
+    for p in products:
+        try:
+            candles = await database.get_candles(p["product_id"], limit=24)
+        except Exception:
+            continue
+        if not candles or len(candles) < 2:
+            continue
+        # Coinbase rows: start_time desc by default in get_candles — accept either
+        highs = [c.get("high") for c in candles if c.get("high") is not None]
+        lows  = [c.get("low")  for c in candles if c.get("low")  is not None]
+        if highs:
+            p["high_24h"] = max(highs)
+        if lows:
+            p["low_24h"]  = min(lows)
+        # %pct change: use first vs last close in chronological order
+        closes_sorted = sorted(
+            [c for c in candles if c.get("close") is not None and c.get("start_time")],
+            key=lambda c: c["start_time"],
+        )
+        if len(closes_sorted) >= 2:
+            first = closes_sorted[0]["close"]
+            last  = closes_sorted[-1]["close"]
+            if first and first > 0:
+                p["price_pct_change_24h"] = ((last - first) / first) * 100.0
 
 
 @app.get("/api/products/{product_id}")
@@ -1371,6 +1406,130 @@ async def get_performance():
             "trailing_monthly_pct": rolling_return_pct,
             "months_to_goal":     projected_months,
         },
+    }
+
+
+# ── Shadow-week monitoring: comparison header (#52) + equity curve (#54) ────
+
+def _read_agent_state(db_path: str) -> Dict:
+    """Read CNN agent state from a sqlite DB. DB-side fallback for tests +
+    cases where the live HTTP path is unavailable.
+
+    NOTE: unrealized_pnl_est is ALWAYS 0.0 from this path. Unrealized PnL
+    needs the live current price, which the DB doesn't store. The old
+    formula `position_dollars - (size * avg_price)` mixed fees + partial
+    fills + topup variance and produced garbage that disagreed with the
+    in-memory enrichment in /api/agents/status. Use _fetch_live_agent_state
+    when you need unrealized PnL.
+    """
+    import json as _json
+    import sqlite3 as _sql
+    try:
+        con = _sql.connect(db_path)
+        row = con.execute(
+            "SELECT balance, realized_pnl, positions_json "
+            "FROM agent_state WHERE agent='CNN'"
+        ).fetchone()
+        con.close()
+    except Exception:
+        return None
+    if not row:
+        return {"balance": 0.0, "realized_pnl": 0.0,
+                "open_positions": 0, "unrealized_pnl_est": 0.0}
+    balance, realized, positions_json = row
+    positions = _json.loads(positions_json) if positions_json else {}
+    return {
+        "balance": float(balance or 0.0),
+        "realized_pnl": float(realized or 0.0),
+        "open_positions": len(positions),
+        "unrealized_pnl_est": 0.0,
+    }
+
+
+async def _fetch_live_agent_state(port: int) -> Dict:
+    """Hit /api/agents/status on the given port via HTTP — uses the running
+    backend's IN-MEMORY balance/positions instead of the DB. The DB only
+    writes agent_state after a trade closes, so a fresh dev backend (8002)
+    that hasn't traded yet has a NULL row in the DB but a live $1000 balance
+    in memory.
+    """
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"http://localhost:{port}/api/agents/status")
+            if r.status_code != 200:
+                return None
+            d = (r.json() or {}).get("cnn", {}) or {}
+    except Exception:
+        return None
+    positions = d.get("positions", {}) or {}
+    unrealized = sum(
+        float((p or {}).get("unrealized_pnl", 0.0) or 0.0)
+        for p in positions.values()
+    )
+    return {
+        "balance": float(d.get("balance", 0.0) or 0.0),
+        "realized_pnl": float(d.get("realized_pnl", 0.0) or 0.0),
+        "open_positions": int(d.get("open_positions") or len(positions)),
+        "unrealized_pnl_est": float(unrealized),
+    }
+
+
+@app.get("/api/compare")
+async def compare_backends():
+    """Side-by-side state of 8001 (XGB v3) and 8002 (XGB v4.5).
+
+    Uses the live /api/agents/status endpoint on each port (in-memory state)
+    rather than the DB — necessary because the dev DB (coinbase_dev.db)
+    doesn't get an agent_state row until the first trade closes. If a port
+    isn't reachable, that side returns null in the response.
+    """
+    v3  = await _fetch_live_agent_state(8001)
+    v45 = await _fetch_live_agent_state(8002)
+    delta = 0.0
+    if v3 and v45:
+        delta = v45["realized_pnl"] - v3["realized_pnl"]
+    return {"v3": v3, "v45": v45, "delta_realized": delta}
+
+
+def _equity_curve_series(db_path: str, days: int) -> List:
+    """Cumulative realized PnL time series from a sqlite trades table.
+    Returns list of [closed_at_iso, cumulative_pnl] points."""
+    import sqlite3 as _sql
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    cutoff = (_dt.now(_tz.utc) - _td(days=days)).isoformat()
+    try:
+        con = _sql.connect(db_path)
+        rows = con.execute(
+            "SELECT closed_at, pnl FROM trades "
+            "WHERE closed_at IS NOT NULL AND closed_at >= ? "
+            "ORDER BY closed_at ASC",
+            (cutoff,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return []
+    cum = 0.0
+    out = []
+    for closed_at, pnl in rows:
+        cum += (pnl or 0.0)
+        out.append([closed_at, round(cum, 4)])
+    return out
+
+
+@app.get("/api/equity_curve")
+async def equity_curve(days: int = 7):
+    """Cumulative realized PnL series for both backends over the last `days`.
+    Used by the EquityCurve chart component on the dashboard. Two series
+    rendered as overlay lines: v3 (8001) and v45 (8002).
+    """
+    import os as _os
+    return {
+        "v3":  _equity_curve_series(
+            _os.path.join(_os.path.dirname(__file__), "coinbase.db"), days),
+        "v45": _equity_curve_series(
+            _os.path.join(_os.path.dirname(__file__), "coinbase_dev.db"), days),
+        "days": days,
     }
 
 

@@ -629,8 +629,11 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                           {t.trigger_close}
                         </span>
                       )}
-                      <div className="text-xs text-gray-600">
-                        {new Date(t.opened_at).toLocaleTimeString()}
+                      <div className="text-xs text-gray-600 text-right leading-tight">
+                        <div>open {new Date(t.opened_at).toLocaleTimeString()}</div>
+                        {t.closed_at && (
+                          <div className="text-gray-500">close {new Date(t.closed_at).toLocaleTimeString()}</div>
+                        )}
                       </div>
                     </div>
                   </div>

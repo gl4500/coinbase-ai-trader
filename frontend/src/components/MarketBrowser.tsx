@@ -6,14 +6,21 @@ interface Props {
   onSelectProduct: (p: Product) => void
 }
 
-export default function MarketBrowser({ products, onSelectProduct }: Props) {
-  const [search, setSearch] = useState('')
+type SortKey = 'product_id' | 'price' | 'price_pct_change_24h' | 'volume_24h' | 'high_24h' | 'low_24h'
 
-  const filtered = products.filter(p =>
-    p.product_id.toLowerCase().includes(search.toLowerCase()) ||
-    p.base_currency.toLowerCase().includes(search.toLowerCase()) ||
-    (p.display_name || '').toLowerCase().includes(search.toLowerCase())
-  )
+const COLUMNS: { key: SortKey; label: string; align: 'left' | 'right' }[] = [
+  { key: 'product_id',           label: 'Market',   align: 'left'  },
+  { key: 'price',                label: 'Price',    align: 'right' },
+  { key: 'price_pct_change_24h', label: '24h %',    align: 'right' },
+  { key: 'volume_24h',           label: '24h Vol',  align: 'right' },
+  { key: 'high_24h',             label: '24h High', align: 'right' },
+  { key: 'low_24h',              label: '24h Low',  align: 'right' },
+]
+
+export default function MarketBrowser({ products, onSelectProduct }: Props) {
+  const [search,  setSearch]  = useState('')
+  const [sortKey, setSortKey] = useState<SortKey>('volume_24h')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const fmtPrice = (n: number) =>
     n >= 1000 ? n.toLocaleString('en-US', { maximumFractionDigits: 2 }) : n.toFixed(4)
@@ -23,6 +30,31 @@ export default function MarketBrowser({ products, onSelectProduct }: Props) {
     : v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M`
     : v >= 1e3 ? `$${(v / 1e3).toFixed(1)}K`
     : `$${v.toFixed(0)}`
+
+  const filtered = products.filter(p =>
+    p.product_id.toLowerCase().includes(search.toLowerCase()) ||
+    p.base_currency.toLowerCase().includes(search.toLowerCase()) ||
+    (p.display_name || '').toLowerCase().includes(search.toLowerCase())
+  )
+
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp: number
+    if (sortKey === 'product_id') {
+      cmp = a.product_id.localeCompare(b.product_id)
+    } else {
+      cmp = ((a[sortKey] as number) ?? 0) - ((b[sortKey] as number) ?? 0)
+    }
+    return sortDir === 'asc' ? cmp : -cmp
+  })
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir(key === 'product_id' ? 'asc' : 'desc')
+    }
+  }
 
   return (
     <div>
@@ -39,7 +71,7 @@ export default function MarketBrowser({ products, onSelectProduct }: Props) {
         />
       </div>
 
-      {filtered.length === 0 ? (
+      {sorted.length === 0 ? (
         <div className="card text-center py-12">
           <p className="text-gray-500 text-sm">
             {products.length === 0
@@ -48,54 +80,64 @@ export default function MarketBrowser({ products, onSelectProduct }: Props) {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {filtered.map(p => {
-            const pct = p.price_pct_change_24h ?? 0
-            return (
-              <div
-                key={p.product_id}
-                onClick={() => onSelectProduct(p)}
-                className="card hover:border-blue-500/50 cursor-pointer transition-all"
-              >
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-white text-base">{p.base_currency}</span>
-                      <span className="text-xs text-gray-500">/ {p.quote_currency}</span>
-                    </div>
-                    <div className="text-xs text-gray-500 mt-0.5">{p.display_name || p.product_id}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="font-mono font-bold text-white text-sm">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-800">
+                {COLUMNS.map(col => (
+                  <th
+                    key={col.key}
+                    onClick={() => toggleSort(col.key)}
+                    className={`px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-gray-500
+                               cursor-pointer select-none hover:text-gray-300 transition-colors
+                               ${col.align === 'right' ? 'text-right' : 'text-left'}`}
+                  >
+                    {col.label}
+                    <span className="ml-1 text-blue-400">
+                      {sortKey === col.key ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+                    </span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(p => {
+                const pct = p.price_pct_change_24h ?? 0
+                return (
+                  <tr
+                    key={p.product_id}
+                    onClick={() => onSelectProduct(p)}
+                    className="border-b border-gray-800/60 last:border-0 hover:bg-gray-800/50
+                               cursor-pointer transition-colors"
+                  >
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-white">{p.base_currency}</span>
+                        <span className="text-xs text-gray-500">/ {p.quote_currency}</span>
+                      </div>
+                      <div className="text-xs text-gray-500">{p.display_name || p.product_id}</div>
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-white">
                       ${fmtPrice(p.price ?? 0)}
-                    </div>
-                    <div className={`text-xs font-medium ${pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    </td>
+                    <td className={`px-3 py-2.5 text-right font-mono font-medium
+                                   ${pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                       {pct >= 0 ? '+' : ''}{pct.toFixed(2)}%
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2 text-xs">
-                  <div>
-                    <div className="text-gray-500">24h Vol</div>
-                    <div className="text-gray-300">{fmtVol(p.volume_24h ?? 0)}</div>
-                  </div>
-                  <div>
-                    <div className="text-gray-500">24h High</div>
-                    <div className="text-green-400">${fmtPrice(p.high_24h ?? 0)}</div>
-                  </div>
-                  <div>
-                    <div className="text-gray-500">24h Low</div>
-                    <div className="text-red-400">${fmtPrice(p.low_24h ?? 0)}</div>
-                  </div>
-                </div>
-
-                <div className="mt-3 flex justify-end">
-                  <span className="text-xs text-blue-400">View Order Book →</span>
-                </div>
-              </div>
-            )
-          })}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-gray-300">
+                      {fmtVol(p.volume_24h ?? 0)}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-green-400">
+                      ${fmtPrice(p.high_24h ?? 0)}
+                    </td>
+                    <td className="px-3 py-2.5 text-right font-mono text-red-400">
+                      ${fmtPrice(p.low_24h ?? 0)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
