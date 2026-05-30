@@ -36,6 +36,21 @@ _EVENTS_INDICES = (
     "CREATE INDEX IF NOT EXISTS idx_events_producer ON events(producer, id);",
 )
 
+# Task #86: DDL-level enforcement of CLAUDE.md invariant #19 (events table is
+# append-only). Code discipline alone is fragile; these BEFORE triggers make
+# any errant UPDATE or DELETE fail loudly with the message in the assertion.
+# Corrections to historical events are themselves new events (compensating
+# events), never row mutations. consumer_cursors + materialized_* tables
+# remain mutable and are NOT guarded.
+_EVENTS_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS events_no_update "
+    "BEFORE UPDATE ON events "
+    "BEGIN SELECT RAISE(ABORT, 'events table is append-only — corrections are new events'); END;",
+    "CREATE TRIGGER IF NOT EXISTS events_no_delete "
+    "BEFORE DELETE ON events "
+    "BEGIN SELECT RAISE(ABORT, 'events table is append-only — corrections are new events'); END;",
+)
+
 _CURSORS_DDL = """
 CREATE TABLE IF NOT EXISTS consumer_cursors (
     consumer_name      TEXT    PRIMARY KEY,
@@ -46,9 +61,12 @@ CREATE TABLE IF NOT EXISTS consumer_cursors (
 
 
 async def init_events_schema(db: aiosqlite.Connection) -> None:
-    """Create events + consumer_cursors tables and indices. Idempotent."""
+    """Create events + consumer_cursors tables, indices, and append-only
+    triggers (#86). Idempotent."""
     await db.execute(_EVENTS_DDL)
     for stmt in _EVENTS_INDICES:
+        await db.execute(stmt)
+    for stmt in _EVENTS_TRIGGERS:
         await db.execute(stmt)
     await db.execute(_CURSORS_DDL)
     await db.commit()

@@ -81,6 +81,66 @@ async def test_init_materialized_creates_per_model_positions(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_events_table_rejects_update_via_trigger(tmp_path):
+    """Task #86: invariant #19 (events append-only) is DDL-enforced by a
+    BEFORE UPDATE trigger. Prevents accidental UPDATE statements from
+    code that bypasses the writer module."""
+    db_path = str(tmp_path / "test.db")
+    async with aiosqlite.connect(db_path) as db:
+        await events_schema.init_events_schema(db)
+        await db.execute(
+            "INSERT INTO events (ts_ms, event_type, pid, payload_json, schema_version, producer) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (1, "price_tick", "BTC-USD", "{}", 1, "test"),
+        )
+        await db.commit()
+        with pytest.raises(Exception, match="append-only"):
+            await db.execute("UPDATE events SET event_type='hijacked' WHERE id=1")
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_events_table_rejects_delete_via_trigger(tmp_path):
+    """Task #86: same as update guard, for DELETE. Corrections are new events
+    (compensating events), never row-deletions."""
+    db_path = str(tmp_path / "test.db")
+    async with aiosqlite.connect(db_path) as db:
+        await events_schema.init_events_schema(db)
+        await db.execute(
+            "INSERT INTO events (ts_ms, event_type, pid, payload_json, schema_version, producer) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (1, "price_tick", "BTC-USD", "{}", 1, "test"),
+        )
+        await db.commit()
+        with pytest.raises(Exception, match="append-only"):
+            await db.execute("DELETE FROM events WHERE id=1")
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_events_table_still_accepts_inserts_after_triggers(tmp_path):
+    """Task #86 regression: append-only triggers must NOT block legitimate
+    INSERTs from the writer. Sanity check the happy path still works."""
+    db_path = str(tmp_path / "test.db")
+    async with aiosqlite.connect(db_path) as db:
+        await events_schema.init_events_schema(db)
+        await db.execute(
+            "INSERT INTO events (ts_ms, event_type, pid, payload_json, schema_version, producer) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (1, "price_tick", "BTC-USD", "{}", 1, "test"),
+        )
+        await db.execute(
+            "INSERT INTO events (ts_ms, event_type, pid, payload_json, schema_version, producer) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (2, "candle_close", "BTC-USD", "{}", 1, "test"),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT COUNT(*) FROM events")
+        (n,) = await cur.fetchone()
+    assert n == 2
+
+
+@pytest.mark.asyncio
 async def test_init_materialized_rejects_bad_model_name(tmp_path):
     db_path = str(tmp_path / "test.db")
     async with aiosqlite.connect(db_path) as db:

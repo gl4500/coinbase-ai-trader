@@ -164,7 +164,12 @@ class ModelService:
         await event_writer.write_exit_triggered(
             self._write_db, producer=self._producer, ts_ms=evt.ts_ms, payload=exit_payload,
         )
-        pnl = (price - avg) * pos["size"] - (pos["size_usd"] * self._FEE_RATE * 2)
+        # Task #87: exit-side fee scales with the exit notional, not the entry
+        # notional. Pre-#87 the calc charged entry-notional * FEE_RATE * 2,
+        # under/over-stating the realized PnL when exit price diverged from entry.
+        exit_notional = price * pos["size"]
+        fees = (pos["size_usd"] + exit_notional) * self._FEE_RATE
+        pnl = (price - avg) * pos["size"] - fees
         close_payload = et.TradeClosedPayload(
             pid=evt.pid, trade_uid=pos["trade_uid"], exit_price=price,
             exit_size=pos["size"], pnl=pnl, pct_pnl=pct_entry * 100,
@@ -215,10 +220,24 @@ class ModelService:
             deployment_profile_id=decision.get("deployment_profile_id"),
             trade_uid=trade_uid,
         )
-        await event_writer.write_trade_decided(
+        decision_event_id = await event_writer.write_trade_decided(
             self._write_db, producer=self._producer, ts_ms=evt.ts_ms, payload=payload,
         )
         self._open_trades_by_pid[evt.pid] = trade_uid
+        # Task #82: wire the in-memory position so subsequent price_tick events
+        # can fire exit triggers via _on_price_tick. Pre-#82 _positions_by_pid
+        # was populated only by tests; production trade_decided emission left
+        # the exit logic structurally unreachable.
+        entry_price = decision["actual_entry_price"]
+        self._positions_by_pid[evt.pid] = {
+            "trade_uid":         trade_uid,
+            "avg_price":         entry_price,
+            "peak_price":        entry_price,
+            "size":              decision["size"],
+            "size_usd":          decision["size_usd"],
+            "entry_ts_ms":       evt.ts_ms,
+            "decision_event_id": decision_event_id,
+        }
 
     async def run_forever(self) -> None:
         while True:
