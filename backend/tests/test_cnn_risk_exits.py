@@ -473,8 +473,9 @@ class TestCNNRiskExitsPnLAnchored:
         agent = CoinbaseCNNAgent()
         entry = 1000.0
         agent.book = _book_with_position("ABC-USD", avg_price=entry, size=0.01)
-        # Cache a strong DOWN signal
+        # Cache a strong DOWN signal — fresh ts (task #80)
         agent.book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05  # 0.60
+        agent.book.positions["ABC-USD"]["p_down_ts_ms"] = int(time.time() * 1000)
 
         ws_mock = MagicMock()
         ws_mock.get_price.return_value = entry * 1.01   # +1% PnL — trail wouldn't fire
@@ -500,11 +501,65 @@ class TestCNNRiskExitsPnLAnchored:
         peak = 1100.0   # +10% peak, well above trail threshold
         agent.book = _book_with_position("ABC-USD", avg_price=entry, size=0.01,
                                           peak_price=peak)
-        # p_down just below threshold
+        # p_down just below threshold — fresh ts (task #80)
         agent.book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD - 0.05
+        agent.book.positions["ABC-USD"]["p_down_ts_ms"] = int(time.time() * 1000)
 
         ws_mock = MagicMock()
         ws_mock.get_price.return_value = peak * 0.99   # near peak, won't trail-fire
+        agent.ws = ws_mock
+        sell_mock = AsyncMock(return_value=0.0)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", sell_mock),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_does_not_fire_model_down_when_p_down_stale(self):
+        """Task #80: p_down > threshold but p_down_ts_ms > _P_DOWN_STALE_MS old → no fire.
+        Market may have reversed since last scan; cached p_down is no longer trustworthy."""
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD, _P_DOWN_STALE_MS
+        agent = CoinbaseCNNAgent()
+        entry = 1000.0
+        peak = 1100.0
+        agent.book = _book_with_position("ABC-USD", avg_price=entry, size=0.01,
+                                          peak_price=peak)
+        pos = agent.book.positions["ABC-USD"]
+        pos["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05  # would fire if fresh
+        pos["p_down_ts_ms"] = int(time.time() * 1000) - _P_DOWN_STALE_MS - 1000  # 1s past stale
+
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = peak * 0.99   # near peak, no trail fire
+        agent.ws = ws_mock
+        sell_mock = AsyncMock(return_value=0.0)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", sell_mock),
+        ):
+            await agent._check_risk_exits()
+
+        sell_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_risk_exits_does_not_fire_model_down_when_ts_missing(self):
+        """Task #80: legacy position with p_down but no p_down_ts_ms → treated as stale, no fire.
+        Backward compat: positions migrated before the staleness gate must not fire spuriously."""
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD
+        agent = CoinbaseCNNAgent()
+        entry = 1000.0
+        peak = 1100.0
+        agent.book = _book_with_position("ABC-USD", avg_price=entry, size=0.01,
+                                          peak_price=peak)
+        pos = agent.book.positions["ABC-USD"]
+        pos["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05   # no ts_ms set
+
+        ws_mock = MagicMock()
+        ws_mock.get_price.return_value = peak * 0.99
         agent.ws = ws_mock
         sell_mock = AsyncMock(return_value=0.0)
 

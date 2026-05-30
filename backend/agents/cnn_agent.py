@@ -89,6 +89,16 @@ MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unpr
 # _check_risk_exits + exit_watcher.on_price_tick read it.
 _P_DOWN_EXIT_THRESHOLD = 0.55
 
+# Task #80 — staleness gate. Cached p_down expires after _P_DOWN_STALE_MS
+# because the WS handler reads it on every tick (~5-10/sec/pid) but the scan
+# that refreshes it runs every SCAN_INTERVAL_SECS (60s). If the market
+# reverses between scans, a cached high p_down would fire MODEL_DOWN/
+# WS_MODEL_DOWN against a position that is now genuinely climbing.
+# generate_signal writes pos['p_down_ts_ms'] alongside pos['p_down'];
+# both exit paths must check freshness before reading the value. Missing
+# ts_ms (legacy position) counts as stale to fail closed.
+_P_DOWN_STALE_MS = 90_000
+
 
 # LightGBM filter / Hurst / DI / entropy / regime-gate constants + helper
 # deleted #311-refactor-f. They only ever fired under MODEL_BACKEND=cnn
@@ -1789,7 +1799,13 @@ class CoinbaseCNNAgent:
             # Task #46 B2: MODEL_DOWN — force-exit when v4.5 says drop is
             # likely (cached by generate_signal). Sits between STOP_LOSS
             # (capital protection) and TRAIL_STOP (profit protection).
-            p_down = pos.get("p_down", 0.0)
+            # Task #80: ignore cached p_down older than _P_DOWN_STALE_MS;
+            # missing ts means legacy position → fail closed (no fire).
+            now_ms = int(time.time() * 1000)
+            p_down_ts = pos.get("p_down_ts_ms")
+            p_down = pos.get("p_down", 0.0) if (
+                p_down_ts is not None and (now_ms - p_down_ts) <= _P_DOWN_STALE_MS
+            ) else 0.0
 
             trigger = None
             if pct_entry <= -_CNN_STOP_LOSS_PCT:
@@ -1988,8 +2004,10 @@ class CoinbaseCNNAgent:
             # both _check_risk_exits + exit_watcher.on_price_tick can fire
             # MODEL_DOWN exits without re-running inference. Skip if no
             # position or no v4.5 result (failure isolation per invariant #17).
+            # Task #80: also stamp ts_ms so readers can detect stale caches.
             if xgb_shadow_v45 is not None and pid in self.book.positions:
                 self.book.positions[pid]["p_down"] = float(xgb_shadow_v45[0])
+                self.book.positions[pid]["p_down_ts_ms"] = int(time.time() * 1000)
 
             rsi_val            = _rsi(closes)
             _, _, macd_h       = _macd(closes)

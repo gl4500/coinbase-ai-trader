@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -193,6 +194,7 @@ class TestOnPriceTickPnLAnchored:
         book = _FakeBook()
         book.positions["ABC-USD"] = _make_pos(avg=100.0, peak=100.0, trail=0.06)
         book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05   # 0.60
+        book.positions["ABC-USD"]["p_down_ts_ms"] = int(time.time() * 1000)   # fresh (task #80)
         await on_price_tick("ABC-USD", 101.0, book)   # +1% PnL — trail wouldn't fire
         book.sell.assert_called_once()
         _args, kwargs = book.sell.call_args
@@ -206,7 +208,34 @@ class TestOnPriceTickPnLAnchored:
         book = _FakeBook()
         book.positions["ABC-USD"] = _make_pos(avg=100.0, peak=110.0, trail=0.06)
         book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD - 0.05   # 0.50
+        book.positions["ABC-USD"]["p_down_ts_ms"] = int(time.time() * 1000)   # fresh (task #80)
         # Price near peak — trail also won't fire
+        await on_price_tick("ABC-USD", 109.0, book)
+        book.sell.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_price_tick_does_not_fire_ws_model_down_when_p_down_stale(self):
+        """Task #80: cached p_down > threshold but ts > _P_DOWN_STALE_MS old → no WS_MODEL_DOWN.
+        WS path is most exposed: ticks arrive ~5-10/sec; cached p_down can age 60s between
+        scans while the market reverses. Staleness gate prevents spurious exits."""
+        from agents.exit_watcher import on_price_tick
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD, _P_DOWN_STALE_MS
+        book = _FakeBook()
+        book.positions["ABC-USD"] = _make_pos(avg=100.0, peak=110.0, trail=0.06)
+        book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05   # would fire if fresh
+        book.positions["ABC-USD"]["p_down_ts_ms"] = int(time.time() * 1000) - _P_DOWN_STALE_MS - 1000
+        # Price near peak — trail wouldn't fire either
+        await on_price_tick("ABC-USD", 109.0, book)
+        book.sell.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_price_tick_does_not_fire_ws_model_down_when_ts_missing(self):
+        """Task #80: legacy position has p_down but no p_down_ts_ms → treated as stale, no fire."""
+        from agents.exit_watcher import on_price_tick
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD
+        book = _FakeBook()
+        book.positions["ABC-USD"] = _make_pos(avg=100.0, peak=110.0, trail=0.06)
+        book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05   # no ts_ms set
         await on_price_tick("ABC-USD", 109.0, book)
         book.sell.assert_not_called()
 

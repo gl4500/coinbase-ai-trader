@@ -14,13 +14,15 @@ Spec:  docs/superpowers/specs/2026-05-23-ws-exit-checker-design.md
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 # Constants come from cnn_agent so this module and the scan-loop checker
 # stay in lockstep on thresholds. main.py already loads cnn_agent in the
 # lifespan, so importing constants here adds no new process cost.
 from agents.cnn_agent import (
-    _CNN_STOP_LOSS_PCT, _CNN_ATR_TRAIL_MIN, _P_DOWN_EXIT_THRESHOLD,
+    _CNN_STOP_LOSS_PCT, _CNN_ATR_TRAIL_MIN,
+    _P_DOWN_EXIT_THRESHOLD, _P_DOWN_STALE_MS,
 )
 from agents.exit_thresholds import _compute_exit_threshold  # task #46
 
@@ -72,7 +74,14 @@ async def on_price_tick(pid: str, price: float, book: "_CNNBook") -> None:
         )
 
         # Task #46 B2: MODEL_DOWN — cached p_down from generate_signal.
-        p_down = pos.get("p_down", 0.0)
+        # Task #80: WS path is most exposed to staleness (ticks arrive
+        # ~5-10/sec/pid; cached p_down ages up to 60s between scans).
+        # Ignore values older than _P_DOWN_STALE_MS; missing ts → no fire.
+        now_ms = int(time.time() * 1000)
+        p_down_ts = pos.get("p_down_ts_ms")
+        p_down = pos.get("p_down", 0.0) if (
+            p_down_ts is not None and (now_ms - p_down_ts) <= _P_DOWN_STALE_MS
+        ) else 0.0
 
         trigger = None
         if pct_entry <= -_CNN_STOP_LOSS_PCT:
