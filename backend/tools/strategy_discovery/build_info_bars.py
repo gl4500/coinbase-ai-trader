@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import pandas as pd
 import pyarrow.parquet as pq
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -71,7 +70,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             n_ok += 1
             print(f"  [{i:3d}/{len(pids)}] {pid:14s}  {r['n_bars']:6d} bars "
-              f"(from {r['n_1h']} 1h rows)", flush=True)
+                  f"(from {r['n_1h']} 1h rows)", flush=True)
     print(f"  ok: {n_ok}  error: {n_err}", flush=True)
     return 0 if n_err == 0 else 1
 
