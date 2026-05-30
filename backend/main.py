@@ -1492,21 +1492,25 @@ async def compare_backends():
     return {"v3": v3, "v45": v45, "delta_realized": delta}
 
 
-def _equity_curve_series(db_path: str, days: int) -> List:
+async def _equity_curve_series(db_path: str, days: int) -> List:
     """Cumulative realized PnL time series from a sqlite trades table.
-    Returns list of [closed_at_iso, cumulative_pnl] points."""
-    import sqlite3 as _sql
+    Returns list of [closed_at_iso, cumulative_pnl] points.
+
+    Task #81: aiosqlite, not sync sqlite3 — the endpoint reads two DBs
+    sequentially and would otherwise block the event loop for both connections.
+    """
+    import aiosqlite as _aiosql
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     cutoff = (_dt.now(_tz.utc) - _td(days=days)).isoformat()
     try:
-        con = _sql.connect(db_path)
-        rows = con.execute(
-            "SELECT closed_at, pnl FROM trades "
-            "WHERE closed_at IS NOT NULL AND closed_at >= ? "
-            "ORDER BY closed_at ASC",
-            (cutoff,),
-        ).fetchall()
-        con.close()
+        async with _aiosql.connect(db_path) as con:
+            cur = await con.execute(
+                "SELECT closed_at, pnl FROM trades "
+                "WHERE closed_at IS NOT NULL AND closed_at >= ? "
+                "ORDER BY closed_at ASC",
+                (cutoff,),
+            )
+            rows = await cur.fetchall()
     except Exception:
         return []
     cum = 0.0
@@ -1525,9 +1529,9 @@ async def equity_curve(days: int = 7):
     """
     import os as _os
     return {
-        "v3":  _equity_curve_series(
+        "v3":  await _equity_curve_series(
             _os.path.join(_os.path.dirname(__file__), "coinbase.db"), days),
-        "v45": _equity_curve_series(
+        "v45": await _equity_curve_series(
             _os.path.join(_os.path.dirname(__file__), "coinbase_dev.db"), days),
         "days": days,
     }
