@@ -271,7 +271,7 @@ def mine_profiles_for_pid_horizon(
     dev = torch.device(device if (device == "cpu" or torch.cuda.is_available()) else "cpu")
     labels = torch.tensor(df[label_col].to_numpy(dtype="float64"), device=dev)
     features = torch.tensor(df[list(_FEATURE_COLUMNS)].to_numpy(dtype="float64"), device=dev)
-    next_eligible = build_next_eligible(n, horizon_bars=int(horizon))
+    next_eligible = build_next_eligible(n, horizon_bars=int(horizon)).to(dev)
 
     outer = outer_folds(n, n_folds=5, embargo_bars=int(horizon))
     fold_pass_count: Dict[str, int] = defaultdict(int)

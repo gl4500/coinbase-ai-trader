@@ -36,6 +36,9 @@ def build_next_eligible(n_rows: int, horizon_bars: int) -> torch.Tensor:
     Bar-index concurrency: an entry at row i opens a position whose minimum
     next-eligible entry is row i + horizon_bars (clamped to n). No timestamp
     arithmetic, no fixed-width-bar assumption.
+
+    Returns a CPU tensor; callers using CUDA-resident labels/features must
+    move it onto the target device before passing to walk_and_sum / best_split.
     """
     n = int(n_rows)
     h = int(horizon_bars)
