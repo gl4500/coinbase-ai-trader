@@ -57,9 +57,8 @@ def test_walk_and_sum_matches_naive_python_reference():
 
 
 def test_concurrency_max_1_skips_overlapping_entry():
-    ts = torch.arange(5, dtype=torch.int64) * 3_600_000
     labels = torch.tensor([1.0, 10.0, 100.0, 2.0, 50.0], dtype=torch.float64)
-    next_eligible = build_next_eligible(ts, horizon_bars=3)
+    next_eligible = build_next_eligible(5, horizon_bars=3)
     assert next_eligible.tolist() == [3, 4, 5, 5, 5]
     subset = torch.tensor([[0, 1, 2, 3, 4]], dtype=torch.int64)
     total = walk_and_sum(subset, next_eligible, labels)
@@ -68,14 +67,13 @@ def test_concurrency_max_1_skips_overlapping_entry():
 
 def test_split_metric_picks_higher_pnl_subgroup():
     N = 100
-    ts = torch.arange(N, dtype=torch.int64) * 3_600_000
     horizon_bars = 1
     features = torch.zeros((N, 1), dtype=torch.float64)
     features[50:, 0] = 1.0
     labels = torch.zeros(N, dtype=torch.float64)
     labels[:50] = -0.02
     labels[50:] = 0.10
-    next_eligible = build_next_eligible(ts, horizon_bars=horizon_bars)
+    next_eligible = build_next_eligible(N, horizon_bars=horizon_bars)
     indices = torch.arange(N, dtype=torch.int64)
     result = best_split(features, indices, labels, next_eligible, n_thresholds=8)
     assert result is not None
@@ -86,10 +84,9 @@ def test_split_metric_picks_higher_pnl_subgroup():
 
 def test_no_profitable_split_returns_none():
     N = 30
-    ts = torch.arange(N, dtype=torch.int64) * 3_600_000
     features = torch.linspace(0.0, 1.0, N, dtype=torch.float64).unsqueeze(1)
     labels = torch.full((N,), -0.05, dtype=torch.float64)
-    next_eligible = build_next_eligible(ts, horizon_bars=1)
+    next_eligible = build_next_eligible(N, horizon_bars=1)
     indices = torch.arange(N, dtype=torch.int64)
     result = best_split(features, indices, labels, next_eligible, n_thresholds=8)
     assert result is None

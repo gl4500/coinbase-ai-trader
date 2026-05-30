@@ -14,7 +14,7 @@ from typing import Optional
 
 import torch
 
-_MS_PER_BAR: int = 3_600_000   # one 1h bar in epoch milliseconds
+# _MS_PER_BAR removed — bars are no longer assumed to be fixed-width in time.
 
 
 @dataclass
@@ -30,16 +30,16 @@ class SplitResult:
     score: float              # the split_metric value (cum_pnl of better side)
 
 
-def build_next_eligible(ts_ms: torch.Tensor, horizon_bars: int) -> torch.Tensor:
-    """Returns `next_eligible[i] = min { j : ts[j] >= ts[i] + horizon_bars * 1h }`.
+def build_next_eligible(n_rows: int, horizon_bars: int) -> torch.Tensor:
+    """Returns `next_eligible[i] = min(i + horizon_bars, n_rows)` on bar indices.
 
-    Returns `len(ts)` for any row whose horizon would extend past the end.
+    Bar-index concurrency: an entry at row i opens a position whose minimum
+    next-eligible entry is row i + horizon_bars (clamped to n). No timestamp
+    arithmetic, no fixed-width-bar assumption.
     """
-    n = ts_ms.shape[0]
-    horizon_ms = int(horizon_bars) * _MS_PER_BAR
-    target = ts_ms + horizon_ms
-    out = torch.searchsorted(ts_ms, target, right=False)
-    return out.clamp_max(n)
+    n = int(n_rows)
+    h = int(horizon_bars)
+    return (torch.arange(n) + h).clamp_max(n)
 
 
 def walk_and_sum(

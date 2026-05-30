@@ -17,10 +17,9 @@ def _max_depth(node: TreeNode, depth: int = 0) -> int:
 
 def _synthetic_data(n: int = 200, seed: int = 7):
     rng = np.random.default_rng(seed)
-    ts = torch.arange(n, dtype=torch.int64) * 3_600_000
     features = torch.from_numpy(rng.normal(0.0, 1.0, size=(n, 4)).astype("float64"))
     labels = torch.from_numpy(rng.normal(0.0, 0.05, size=n).astype("float64"))
-    next_eligible = build_next_eligible(ts, horizon_bars=1)
+    next_eligible = build_next_eligible(n, horizon_bars=1)
     return features, labels, next_eligible
 
 
@@ -41,10 +40,9 @@ def test_fit_respects_min_samples_per_leaf():
 
 def test_fit_stops_on_unprofitable_split():
     n = 200
-    ts = torch.arange(n, dtype=torch.int64) * 3_600_000
     features = torch.from_numpy(np.random.default_rng(1).normal(0.0, 1.0, size=(n, 4)).astype("float64"))
     labels = torch.full((n,), -0.05, dtype=torch.float64)
-    next_eligible = build_next_eligible(ts, horizon_bars=1)
+    next_eligible = build_next_eligible(n, horizon_bars=1)
     root = fit_tree(features, labels, next_eligible, max_depth=5, min_leaf=20)
     assert root.is_leaf
     assert root.indices is not None
