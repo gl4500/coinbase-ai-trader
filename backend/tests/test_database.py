@@ -7,6 +7,7 @@ import sys
 import asyncio
 import importlib
 import pytest
+import aiosqlite
 
 # Make backend importable
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
@@ -723,3 +724,22 @@ class TestSaveCnnScanV4_5Cols:
         assert row[0] is None
         assert row[1] is None
         assert row[2] is None
+
+
+# ── Pattern C: events schema wired into init_db (Task 8) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_init_db_creates_events_schema(tmp_db, monkeypatch):
+    import importlib
+    import database as db_mod
+    importlib.reload(db_mod)
+    db_mod.DB_PATH = tmp_db
+    await db_mod.init_db()
+    async with aiosqlite.connect(tmp_db) as conn:
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('events', 'consumer_cursors')"
+        )
+        names = {r[0] for r in await cur.fetchall()}
+    assert names == {"events", "consumer_cursors"}
