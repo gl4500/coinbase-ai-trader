@@ -6,6 +6,7 @@ NOT run during 2026-05-23 session (8001 was live). Run during next pause:
 import os
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -103,20 +104,23 @@ class TestBackfillTool:
             )
             """
         )
+        now = datetime.now(tz=timezone.utc)
+        in_window  = (now - timedelta(days=1)).isoformat()
+        out_window = (now - timedelta(days=8)).isoformat()
         # Row 1: NULL, in window
         conn.execute(
             "INSERT INTO cnn_scans VALUES (1, 'BTC-USD', ?, NULL, NULL, NULL)",
-            ("2026-05-23T20:00:00+00:00",),
+            (in_window,),
         )
         # Row 2: already populated, in window — should be skipped
         conn.execute(
             "INSERT INTO cnn_scans VALUES (2, 'ETH-USD', ?, 0.1, 0.2, 0.7)",
-            ("2026-05-23T20:00:00+00:00",),
+            (in_window,),
         )
         # Row 3: NULL, OUTSIDE window (8 days ago) — should be skipped
         conn.execute(
             "INSERT INTO cnn_scans VALUES (3, 'SOL-USD', ?, NULL, NULL, NULL)",
-            ("2026-05-15T20:00:00+00:00",),
+            (out_window,),
         )
         conn.commit()
         conn.close()
