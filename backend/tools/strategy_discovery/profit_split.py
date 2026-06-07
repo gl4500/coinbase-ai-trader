@@ -10,7 +10,7 @@ Mirrors backend/tools/xgb_v4_5_features_batch.py conventions for device handling
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
@@ -102,41 +102,72 @@ def best_split(
     next_eligible: torch.Tensor,
     n_thresholds: int = 256,
 ) -> Optional[SplitResult]:
-    """Scan all (feature, threshold) candidates; return the best SplitResult or None.
+    """Scan all (feature, threshold, side) candidates in one batched walk_and_sum.
 
-    `None` means no candidate produced strictly positive cum_pnl in either side.
+    Same semantics as a per-(feature, side) loop: returns the SplitResult with
+    the highest strictly-positive cum_pnl, or None if no candidate is positive.
+    Differences vs the prior loop appear only on exact-score ties, where this
+    implementation deterministically picks the lowest flat batch index.
     """
     n, F = features.shape
     if n < 2:
         return None
-    best: Optional[SplitResult] = None
+    dev = features.device
+    T = int(n_thresholds)
+
+    n_valid_per_f: List[int] = []
+    thr_list: List[torch.Tensor] = []
     for f in range(F):
         col = features[:, f]
-        thresholds = _quantile_thresholds(col, n_thresholds)
-        if thresholds.numel() == 0:
-            continue
-        left_mask = col.unsqueeze(0) <= thresholds.unsqueeze(1)
-        T = thresholds.numel()
-        for side_is_left in (True, False):
-            mask = left_mask if side_is_left else ~left_mask
-            counts = mask.sum(dim=1)
-            if counts.max().item() == 0:
-                continue
-            max_k = int(counts.max().item())
-            subset_idx = torch.full((T, max_k), -1, dtype=torch.int64,
-                                    device=features.device)
-            row_pos = mask.cumsum(dim=1) - 1
-            abs_idx_broadcast = indices.unsqueeze(0).expand(T, n)
-            r_t, r_n = torch.where(mask)
-            subset_idx[r_t, row_pos[r_t, r_n]] = abs_idx_broadcast[r_t, r_n]
-            scores = walk_and_sum(subset_idx, next_eligible, labels)
-            best_t = int(scores.argmax().item())
-            best_score = float(scores[best_t].item())
-            if best_score > 0.0 and (best is None or best_score > best.score):
-                best = SplitResult(
-                    feature=f,
-                    threshold=float(thresholds[best_t].item()),
-                    left_mask=(col <= thresholds[best_t]),
-                    score=best_score,
-                )
-    return best
+        thr = _quantile_thresholds(col, T)
+        n_valid_per_f.append(int(thr.numel()))
+        if thr.numel() < T:
+            pad = torch.full((T - thr.numel(),), float("inf"),
+                             device=dev, dtype=thr.dtype)
+            thr = torch.cat([thr, pad])
+        thr_list.append(thr)
+    if not thr_list:
+        return None
+    thresholds_all = torch.stack(thr_list, dim=0)                          # (F, T)
+    n_valid_t = torch.tensor(n_valid_per_f, device=dev)
+    t_range = torch.arange(T, device=dev)
+    valid_thr = t_range.unsqueeze(0) < n_valid_t.unsqueeze(1)              # (F, T)
+
+    cols = features.t().unsqueeze(1)                                       # (F, 1, n)
+    left_mask = cols <= thresholds_all.unsqueeze(-1)                       # (F, T, n)
+    masks = torch.stack([left_mask, ~left_mask], dim=1)                    # (F, 2, T, n)
+    F_, S, T_, N = masks.shape
+    B = F_ * S * T_
+    masks = masks.view(B, N)
+
+    counts = masks.sum(dim=1)                                              # (B,)
+    subset_idx = torch.full((B, N), -1, dtype=torch.int64, device=dev)
+    row_pos = masks.cumsum(dim=1, dtype=torch.int64) - 1
+    r_b, r_n = torch.where(masks)
+    abs_idx_broadcast = indices.unsqueeze(0).expand(B, n)
+    subset_idx[r_b, row_pos[r_b, r_n]] = abs_idx_broadcast[r_b, r_n]
+
+    scores = walk_and_sum(subset_idx, next_eligible, labels)               # (B,)
+
+    valid_flat = valid_thr.unsqueeze(1).expand(-1, S, -1).reshape(B)
+    nonempty = counts > 0
+    scores = scores.where(valid_flat & nonempty,
+                          torch.tensor(-float("inf"), device=dev, dtype=scores.dtype))
+
+    best_idx = int(scores.argmax().item())
+    best_score = float(scores[best_idx].item())
+    if not (best_score > 0.0):
+        return None
+
+    f = best_idx // (S * T_)
+    s = (best_idx // T_) % S
+    t = best_idx % T_
+    chosen_thr_val = float(thresholds_all[f, t].item())
+    chosen_col = features[:, f]
+    chosen_mask = (chosen_col <= chosen_thr_val) if s == 0 else (chosen_col > chosen_thr_val)
+    return SplitResult(
+        feature=int(f),
+        threshold=chosen_thr_val,
+        left_mask=chosen_mask,
+        score=best_score,
+    )
