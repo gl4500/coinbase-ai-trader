@@ -6,6 +6,7 @@ Pure functions on torch.Tensor inputs (caller loads the parquet). No filesystem.
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -223,19 +224,35 @@ def _replay_trades(indices_subset, next_eligible_np, labels_np):
 
 
 def _assign_leaves(root: TreeNode, features_subset: torch.Tensor) -> List[int]:
-    """Route each row of features_subset through the tree; return leaf index per row."""
+    """Route each row through the tree depth-by-depth; return leaf index per row.
+
+    Replaces per-row Python tree walks (one `.item()` per node) with a per-internal-node
+    batched comparison plus one `.tolist()`. For a typical 5-7 node tree this turns
+    ~n_rows * tree_depth syncs into ~n_internal_nodes syncs. Output is bit-identical
+    to the scalar reference.
+    """
     all_leaves = collect_leaves(root)
-    leaf_map: dict = {id(leaf): idx for idx, leaf in enumerate(all_leaves)}
-    n_rows = features_subset.shape[0]
-    assignments = []
-    for row_i in range(n_rows):
-        row = features_subset[row_i]
-        node = root
-        while not node.is_leaf:
-            val = float(row[node.feature].item())
-            node = node.left if val <= node.threshold else node.right
-        assignments.append(leaf_map[id(node)])
-    return assignments
+    leaf_map: Dict[int, int] = {id(leaf): idx for idx, leaf in enumerate(all_leaves)}
+    n_rows = int(features_subset.shape[0])
+    if n_rows == 0:
+        return []
+    dev = features_subset.device
+    cursor: List[TreeNode] = [root] * n_rows
+    while True:
+        nodes_to_route: Dict[int, List[int]] = defaultdict(list)
+        for row_i, node in enumerate(cursor):
+            if not node.is_leaf:
+                nodes_to_route[id(node)].append(row_i)
+        if not nodes_to_route:
+            break
+        for _node_id, row_idxs in nodes_to_route.items():
+            node = cursor[row_idxs[0]]
+            row_t = torch.tensor(row_idxs, device=dev, dtype=torch.int64)
+            vals = features_subset[row_t, node.feature]
+            go_left_list = (vals <= node.threshold).tolist()
+            for k, row_i in enumerate(row_idxs):
+                cursor[row_i] = node.left if go_left_list[k] else node.right
+    return [leaf_map[id(node)] for node in cursor]
 
 
 def mine_profiles_for_pid_horizon(

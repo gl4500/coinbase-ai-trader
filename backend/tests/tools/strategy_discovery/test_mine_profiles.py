@@ -5,8 +5,10 @@ import math
 
 import numpy as np
 import pytest
+import torch
 
 from tools.strategy_discovery.mine_profiles import (
+    _assign_leaves,
     apply_deflation,
     bootstrap_ci,
     leaf_metrics,
@@ -14,6 +16,7 @@ from tools.strategy_discovery.mine_profiles import (
     long_shot_band,
     pick_best_hyperparams,
 )
+from tools.strategy_discovery.profit_tree import TreeNode, collect_leaves
 
 
 def test_deflation_factor_applied_to_reported_profit():
@@ -130,3 +133,40 @@ def test_mine_profiles_for_pid_horizon_returns_qualifying_leaves_only(tmp_path):
     assert len(profiles) >= 1
     winners = [p for p in profiles if p.avg_win >= 0.05 and p.cumulative_profit_deflated > 0]
     assert len(winners) >= 1, f"no winners; got profiles: {[(p.avg_win, p.cumulative_profit_deflated) for p in profiles]}"
+
+
+def _make_test_tree():
+    """Tree: x[0] <= 0.5 ? (x[1] <= 0.2 ? L0 : L1) : L2  (DFS leaf order = L0, L1, L2)."""
+    leaf0 = TreeNode(indices=torch.tensor([], dtype=torch.int64), cumulative_pnl=0.0)
+    leaf1 = TreeNode(indices=torch.tensor([], dtype=torch.int64), cumulative_pnl=0.0)
+    leaf2 = TreeNode(indices=torch.tensor([], dtype=torch.int64), cumulative_pnl=0.0)
+    left  = TreeNode(feature=1, threshold=0.2, left=leaf0, right=leaf1)
+    root  = TreeNode(feature=0, threshold=0.5, left=left,  right=leaf2)
+    return root, [leaf0, leaf1, leaf2]
+
+
+def test_assign_leaves_matches_scalar_on_random_rows():
+    root, leaves = _make_test_tree()
+    g = torch.Generator().manual_seed(0)
+    rows = torch.randn(50, 2, generator=g, dtype=torch.float64)
+    out = _assign_leaves(root, rows)
+    assert len(out) == 50
+    for i, r in enumerate(rows):
+        node = root
+        while not node.is_leaf:
+            v = float(r[node.feature].item())
+            node = node.left if v <= node.threshold else node.right
+        expected = next(idx for idx, lf in enumerate(leaves) if lf is node)
+        assert out[i] == expected
+
+
+def test_assign_leaves_handles_single_leaf_tree():
+    leaf = TreeNode(indices=torch.tensor([], dtype=torch.int64), cumulative_pnl=0.0)
+    rows = torch.zeros(7, 3, dtype=torch.float64)
+    assert _assign_leaves(leaf, rows) == [0] * 7
+
+
+def test_assign_leaves_handles_empty_features():
+    root, _ = _make_test_tree()
+    rows = torch.zeros(0, 2, dtype=torch.float64)
+    assert _assign_leaves(root, rows) == []
