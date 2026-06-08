@@ -1,0 +1,1166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>16 Technical Indicators — Examples, Categories, Use</title>
+<style>
+  :root {
+    --bg:        #0b0f14;
+    --panel:     #121821;
+    --panel-2:   #1a2230;
+    --line:      #2a3445;
+    --ink:       #d9e0e8;
+    --muted:     #8a96a6;
+    --accent:    #5ce1e6;
+    --accent-2:  #9ef27a;
+    --warn:      #ffb347;
+    --bad:       #ff6363;
+    --good:      #57d97a;
+    --mono:      ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    --sans:      "Inter", ui-sans-serif, system-ui, sans-serif;
+    --serif:     "Fraunces", "Iowan Old Style", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  body { padding: 48px clamp(16px, 4vw, 64px) 96px; max-width: 1280px; margin: 0 auto; line-height: 1.5; }
+  h1 { font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4vw, 44px); letter-spacing: -0.02em; margin: 0 0 4px; }
+  h1 .accent { color: var(--accent); font-style: italic; }
+  h2 { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--accent); margin: 56px 0 16px; border-top: 1px solid var(--line); padding-top: 24px; }
+  h3 { font-family: var(--serif); font-weight: 500; font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  p { margin: 0 0 12px; color: var(--ink); }
+  .lede { color: var(--muted); max-width: 70ch; font-size: 14px; margin-bottom: 32px; }
+  .meta { display: flex; gap: 12px; font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; position: relative; overflow: hidden; }
+  .card::before { content: ""; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--accent); opacity: 0.4; }
+  .card.cat-trend::before    { background: var(--accent-2); }
+  .card.cat-momentum::before { background: var(--warn); }
+  .card.cat-vol::before      { background: var(--bad); }
+  .card.cat-volume::before   { background: var(--accent); }
+  .tag { display: inline-block; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.2em; padding: 2px 8px; border-radius: 2px; background: var(--panel-2); color: var(--muted); margin-bottom: 8px; }
+  .tag.trend    { color: var(--accent-2); border: 1px solid color-mix(in srgb, var(--accent-2) 30%, transparent); }
+  .tag.momentum { color: var(--warn);     border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent); }
+  .tag.vol      { color: var(--bad);      border: 1px solid color-mix(in srgb, var(--bad) 30%, transparent); }
+  .tag.volume   { color: var(--accent);   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+  .formula { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; margin: 12px 0; color: var(--ink); overflow-x: auto; white-space: pre; }
+  .desc { font-size: 13.5px; color: var(--ink); margin-top: 8px; }
+  .desc strong { color: var(--accent); font-weight: 500; }
+  .signal { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+  .signal b { color: var(--good); font-weight: 500; }
+  .signal i { color: var(--bad); font-style: normal; }
+  svg.chart { width: 100%; height: 120px; background: var(--panel-2); border-radius: 4px; display: block; margin: 8px 0; }
+  /* Category-summary section */
+  .cats { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 16px; }
+  .cat-box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; }
+  .cat-box h4 { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.2em; margin: 0 0 8px; }
+  .cat-box.trend    h4 { color: var(--accent-2); }
+  .cat-box.momentum h4 { color: var(--warn); }
+  .cat-box.vol      h4 { color: var(--bad); }
+  .cat-box.volume   h4 { color: var(--accent); }
+  .cat-box ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink); }
+  .cat-box ul li { margin-bottom: 4px; }
+  .cat-box .one-liner { font-size: 12.5px; color: var(--muted); font-style: italic; margin: 4px 0 8px; }
+  /* Usage table */
+  table.usage { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }
+  table.usage th, table.usage td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.usage th { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); font-weight: 400; }
+  table.usage td.combo { font-family: var(--mono); color: var(--accent); font-size: 12px; white-space: nowrap; }
+  table.usage tr:hover td { background: var(--panel-2); }
+  footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 10px; background: var(--panel-2); font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  /* Pattern examples (Section VII) */
+  .patterns { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 16px; margin-top: 16px; }
+  .pattern-card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; }
+  .pattern-header { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 8px; }
+  .pattern-num { font-family: var(--serif); font-size: 30px; color: var(--accent); line-height: 1; opacity: 0.7; min-width: 32px; }
+  .pattern-header h3 { margin: 0 0 4px; font-family: var(--serif); font-size: 17px; }
+  .pattern-combo { font-family: var(--mono); font-size: 10.5px; color: var(--accent); background: var(--panel-2); padding: 2px 8px; border-radius: 2px; display: inline-block; letter-spacing: 0.02em; }
+  .pattern-look { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+  .pattern-look b { color: var(--good); font-weight: 500; }
+  svg.chart-dual { width: 100%; height: 200px; background: var(--panel-2); border-radius: 4px; display: block; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div class="meta">
+  <span>Reference / 2026-05-31</span>
+  <span>· 16 indicators</span>
+  <span>· synthetic OHLCV demo</span>
+</div>
+<h1>Technical Indicators, <span class="accent">field guide</span></h1>
+<p class="lede">
+  Sixteen of the most common indicators, each rendered against the same 80-bar synthetic series so visual differences come from the math, not from the data. Each card shows the formula, a live SVG plot, and one-line interpretation. Categories below; combination patterns at the end.
+</p>
+
+<h2>I. Trend-following</h2>
+<div class="grid" id="grid-trend"></div>
+
+<h2>II. Momentum oscillators</h2>
+<div class="grid" id="grid-momentum"></div>
+
+<h2>III. Volatility</h2>
+<div class="grid" id="grid-vol"></div>
+
+<h2>IV. Volume-weighted</h2>
+<div class="grid" id="grid-volume"></div>
+
+<h2>V. Categories — how they relate</h2>
+<div class="cats">
+  <div class="cat-box trend">
+    <h4>◀ Trend / direction</h4>
+    <p class="one-liner">"Is there a trend and which way?"</p>
+    <ul>
+      <li><b>SMA</b> &mdash; baseline smoothing, equal weight</li>
+      <li><b>EMA</b> &mdash; faster smoothing, recent weight</li>
+      <li><b>MACD</b> &mdash; difference of two EMAs (momentum of trend)</li>
+      <li><b>ADX / DMI</b> &mdash; strength of trend, not direction</li>
+      <li><b>Parabolic SAR</b> &mdash; trailing reversal stop</li>
+      <li><b>Ichimoku</b> &mdash; trend + S/R + momentum in one cloud</li>
+    </ul>
+  </div>
+  <div class="cat-box momentum">
+    <h4>◀ Momentum / oscillator</h4>
+    <p class="one-liner">"Is the move stretched? Bounded 0–100 or zero-centered."</p>
+    <ul>
+      <li><b>RSI</b> &mdash; smoothed gain/loss ratio, bounded 0–100</li>
+      <li><b>Stoch RSI</b> &mdash; RSI inside its own range, even more reactive</li>
+      <li><b>CCI</b> &mdash; deviation from typical price, unbounded</li>
+      <li><b>Williams %R</b> &mdash; inverted Stoch, bounded -100–0</li>
+      <li><b>ROC</b> &mdash; raw % change over N bars, zero-centered</li>
+    </ul>
+  </div>
+  <div class="cat-box vol">
+    <h4>◀ Volatility</h4>
+    <p class="one-liner">"How wide is the move?"</p>
+    <ul>
+      <li><b>Bollinger Bands</b> &mdash; SMA ± k·σ envelope</li>
+      <li><b>ATR</b> &mdash; mean true range, raw $ volatility</li>
+    </ul>
+  </div>
+  <div class="cat-box volume">
+    <h4>◀ Volume confirmation</h4>
+    <p class="one-liner">"Is the move backed by participation?"</p>
+    <ul>
+      <li><b>VWAP</b> &mdash; volume-weighted average price (fair value)</li>
+      <li><b>OBV</b> &mdash; cumulative signed volume (accumulation/distribution)</li>
+      <li><b>CMF</b> &mdash; volume-weighted close position within bar</li>
+    </ul>
+  </div>
+</div>
+
+<h2>VI. How to use them — common patterns</h2>
+<table class="usage">
+  <thead>
+    <tr>
+      <th>Pattern</th>
+      <th>Combo</th>
+      <th>What it tells you</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Trend confirmation</td>
+      <td class="combo">EMA(20) + EMA(50) + ADX&nbsp;&gt;&nbsp;25</td>
+      <td>Faster EMA above slower with ADX rising = a real trend (not chop). Trade with EMA direction; ADX&nbsp;&lt;&nbsp;20 → step aside.</td>
+    </tr>
+    <tr>
+      <td>Mean-reversion entry</td>
+      <td class="combo">Bollinger lower band + RSI&nbsp;&lt;&nbsp;30</td>
+      <td>Price tags lower band AND oscillator is oversold. Higher quality than either alone — Bollinger gives the price location, RSI confirms the stretch.</td>
+    </tr>
+    <tr>
+      <td>Breakout filter</td>
+      <td class="combo">Bollinger squeeze → expansion + OBV uptick</td>
+      <td>Volatility contraction (narrow bands) followed by an expansion; OBV confirms volume is behind the breakout, not a fake-out.</td>
+    </tr>
+    <tr>
+      <td>Trend exhaustion</td>
+      <td class="combo">Price new high + RSI/MACD lower high (divergence)</td>
+      <td>Momentum is fading while price still climbs. Classic warning, not an entry — wait for a structural break to act.</td>
+    </tr>
+    <tr>
+      <td>Volatility-based stop</td>
+      <td class="combo">Entry &minus; 2·ATR&nbsp;&nbsp;(or Parabolic SAR)</td>
+      <td>Stops sized to current volatility avoid getting bumped by normal noise; ATR retunes per-bar. SAR does the same as a trailing dot.</td>
+    </tr>
+    <tr>
+      <td>Fair-value rotation</td>
+      <td class="combo">VWAP ± 1σ bands (intraday)</td>
+      <td>Institutions use VWAP as the execution benchmark. Fades back toward VWAP work in range-bound sessions; trend sessions ride one side.</td>
+    </tr>
+    <tr>
+      <td>Cloud trend filter</td>
+      <td class="combo">Price&nbsp;&gt;&nbsp;Ichimoku cloud + bullish&nbsp;Kumo</td>
+      <td>Ichimoku rolls trend + S/R + momentum into one chart object. Above cloud + green cloud ahead = bullish regime; trade longs only.</td>
+    </tr>
+    <tr>
+      <td>Volume-confirmed accumulation</td>
+      <td class="combo">CMF&nbsp;&gt;&nbsp;0 + OBV rising + price consolidating</td>
+      <td>Smart money loading the boat under a flat tape. Often precedes a breakout the other indicators only confirm afterward.</td>
+    </tr>
+    <tr>
+      <td>Oscillator stacking</td>
+      <td class="combo">RSI + Stoch RSI agreement</td>
+      <td>Stoch RSI fires far more signals than RSI; requiring RSI to corroborate cuts the false-positive rate by ~⅔.</td>
+    </tr>
+    <tr>
+      <td>Rate-of-change filter</td>
+      <td class="combo">ROC sign change + price-cross MA</td>
+      <td>ROC = momentum's first derivative. Pairs with MA crosses as a "is the cross actually accelerating?" check.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>VII. Patterns in action — see them on charts</h2>
+<p class="lede">One mini chart per row of the table above. Each uses bespoke synthetic data engineered so the pattern is actually visible. Shaded band = trigger zone &middot; orange circle = entry &middot; dashed orange lines = divergence connectors. Upper panel is price; lower panel is the indicator condition. Read them together.</p>
+<div class="patterns" id="patterns-grid"></div>
+
+<footer>
+  Rendered client-side with synthetic OHLCV (seed = 7). Indicator math is the textbook form; period lengths are typical defaults (RSI&nbsp;14, MACD&nbsp;12-26-9, BB&nbsp;20·2, ATR&nbsp;14, ADX&nbsp;14, Stoch&nbsp;RSI&nbsp;14-14-3-3, CCI&nbsp;20, Williams%R&nbsp;14, ROC&nbsp;12, CMF&nbsp;20). Modify the constants in the &lt;script&gt; tag to retune.
+</footer>
+
+<script>
+"use strict";
+
+// ──────────────────────────────────────────────────────────
+// 1. Synthetic OHLCV — seeded so plots are reproducible
+// ──────────────────────────────────────────────────────────
+function lcg(seed){ return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 0x100000000; }
+const rand = lcg(7);
+const N = 80;
+const bars = [];
+let price = 100;
+for (let i = 0; i < N; i++) {
+  // gentle uptrend with regime change midway + noise
+  const drift = (i < 30 ? 0.25 : i < 55 ? -0.12 : 0.42);
+  const vol   = 0.9 + (i > 40 && i < 50 ? 1.4 : 0);
+  const ret = drift + vol * (rand() - 0.5) * 2;
+  const open  = price;
+  const close = Math.max(1, open + ret);
+  const high  = Math.max(open, close) + Math.abs(rand() - 0.4) * vol;
+  const low   = Math.min(open, close) - Math.abs(rand() - 0.4) * vol;
+  const volv  = 800 + rand() * 600 + (Math.abs(ret) > 1.2 ? 800 : 0);
+  bars.push({ o: open, h: high, l: low, c: close, v: volv });
+  price = close;
+}
+const C = bars.map(b => b.c);
+const H = bars.map(b => b.h);
+const L = bars.map(b => b.l);
+const O = bars.map(b => b.o);
+const V = bars.map(b => b.v);
+
+// ──────────────────────────────────────────────────────────
+// 2. Indicator math
+// ──────────────────────────────────────────────────────────
+const sma = (s, p) => s.map((_, i) => i < p - 1 ? null : s.slice(i - p + 1, i + 1).reduce((a, b) => a + b, 0) / p);
+
+function ema(s, p) {
+  const k = 2 / (p + 1);
+  const out = Array(s.length).fill(null);
+  let prev = s[0];
+  out[0] = prev;
+  for (let i = 1; i < s.length; i++) { prev = s[i] * k + prev * (1 - k); out[i] = prev; }
+  return out;
+}
+
+function rsi(s, p = 14) {
+  const out = Array(s.length).fill(null);
+  let g = 0, l = 0;
+  for (let i = 1; i <= p; i++) {
+    const d = s[i] - s[i - 1];
+    if (d > 0) g += d; else l -= d;
+  }
+  g /= p; l /= p;
+  out[p] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  for (let i = p + 1; i < s.length; i++) {
+    const d = s[i] - s[i - 1];
+    g = (g * (p - 1) + (d > 0 ? d : 0)) / p;
+    l = (l * (p - 1) + (d < 0 ? -d : 0)) / p;
+    out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  }
+  return out;
+}
+
+function macd(s, fast = 12, slow = 26, sig = 9) {
+  const ef = ema(s, fast), es = ema(s, slow);
+  const line = s.map((_, i) => (ef[i] != null && es[i] != null) ? ef[i] - es[i] : null);
+  const safe = line.map(v => v == null ? 0 : v);
+  const sline = ema(safe, sig).map((v, i) => line[i] == null ? null : v);
+  const hist = line.map((v, i) => (v == null || sline[i] == null) ? null : v - sline[i]);
+  return { line, signal: sline, hist };
+}
+
+function bollinger(s, p = 20, k = 2) {
+  const m = sma(s, p);
+  const upper = [], lower = [];
+  for (let i = 0; i < s.length; i++) {
+    if (m[i] == null) { upper.push(null); lower.push(null); continue; }
+    const w = s.slice(i - p + 1, i + 1);
+    const mean = m[i];
+    const v = w.reduce((a, b) => a + (b - mean) ** 2, 0) / p;
+    const sd = Math.sqrt(v);
+    upper.push(mean + k * sd); lower.push(mean - k * sd);
+  }
+  return { upper, mid: m, lower };
+}
+
+function stochRsi(s, p = 14, smoothK = 3, smoothD = 3) {
+  const r = rsi(s, p);
+  const out = Array(s.length).fill(null);
+  for (let i = p * 2; i < s.length; i++) {
+    const w = r.slice(i - p + 1, i + 1).filter(x => x != null);
+    if (w.length < p) continue;
+    const mn = Math.min(...w), mx = Math.max(...w);
+    out[i] = mx === mn ? 0 : 100 * (r[i] - mn) / (mx - mn);
+  }
+  const safe = out.map(v => v == null ? 0 : v);
+  const kLine = sma(safe, smoothK).map((v, i) => out[i] == null ? null : v);
+  const safeK = kLine.map(v => v == null ? 0 : v);
+  const dLine = sma(safeK, smoothD).map((v, i) => kLine[i] == null ? null : v);
+  return { k: kLine, d: dLine };
+}
+
+function atr(p = 14) {
+  const tr = Array(N).fill(null);
+  tr[0] = H[0] - L[0];
+  for (let i = 1; i < N; i++) tr[i] = Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1]));
+  const out = Array(N).fill(null);
+  let prev = tr.slice(0, p).reduce((a, b) => a + b, 0) / p;
+  out[p - 1] = prev;
+  for (let i = p; i < N; i++) { prev = (prev * (p - 1) + tr[i]) / p; out[i] = prev; }
+  return out;
+}
+
+function adxDmi(p = 14) {
+  const tr = Array(N).fill(0), pdm = Array(N).fill(0), ndm = Array(N).fill(0);
+  for (let i = 1; i < N; i++) {
+    const upMove   = H[i] - H[i - 1];
+    const downMove = L[i - 1] - L[i];
+    pdm[i] = (upMove > downMove && upMove > 0) ? upMove : 0;
+    ndm[i] = (downMove > upMove && downMove > 0) ? downMove : 0;
+    tr[i]  = Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1]));
+  }
+  const wilder = (s) => {
+    const out = Array(N).fill(null);
+    let acc = s.slice(1, p + 1).reduce((a, b) => a + b, 0);
+    out[p] = acc;
+    for (let i = p + 1; i < N; i++) { acc = acc - acc / p + s[i]; out[i] = acc; }
+    return out;
+  };
+  const trW = wilder(tr), pdmW = wilder(pdm), ndmW = wilder(ndm);
+  const pdi = trW.map((t, i) => t == null || t === 0 ? null : 100 * pdmW[i] / t);
+  const ndi = trW.map((t, i) => t == null || t === 0 ? null : 100 * ndmW[i] / t);
+  const dx = pdi.map((p_, i) => (p_ == null || ndi[i] == null) ? null : 100 * Math.abs(p_ - ndi[i]) / (p_ + ndi[i] || 1));
+  const adx = Array(N).fill(null);
+  const first = dx.slice(p * 2, p * 2 + p).filter(x => x != null);
+  if (first.length === p) {
+    let prev = first.reduce((a, b) => a + b, 0) / p;
+    adx[p * 2 + p - 1] = prev;
+    for (let i = p * 2 + p; i < N; i++) { if (dx[i] != null) { prev = (prev * (p - 1) + dx[i]) / p; adx[i] = prev; } }
+  }
+  return { pdi, ndi, adx };
+}
+
+function vwap() {
+  const out = Array(N).fill(null);
+  let cumPV = 0, cumV = 0;
+  for (let i = 0; i < N; i++) {
+    const tp = (H[i] + L[i] + C[i]) / 3;
+    cumPV += tp * V[i]; cumV += V[i];
+    out[i] = cumPV / cumV;
+  }
+  return out;
+}
+
+function obv() {
+  const out = Array(N).fill(0);
+  for (let i = 1; i < N; i++) {
+    if (C[i] > C[i - 1])      out[i] = out[i - 1] + V[i];
+    else if (C[i] < C[i - 1]) out[i] = out[i - 1] - V[i];
+    else                       out[i] = out[i - 1];
+  }
+  return out;
+}
+
+function ichimoku() {
+  const range = (lo, hi, p) => Array(N).fill(null).map((_, i) => {
+    if (i < p - 1) return null;
+    const w = [];
+    for (let j = i - p + 1; j <= i; j++) w.push({ h: H[j], l: L[j] });
+    return ((Math.max(...w.map(x => x.h)) + Math.min(...w.map(x => x.l))) / 2);
+  });
+  const tenkan = range(L, H, 9);
+  const kijun  = range(L, H, 26);
+  const spanA  = tenkan.map((t, i) => (t != null && kijun[i] != null) ? (t + kijun[i]) / 2 : null);
+  const spanB  = range(L, H, 52);
+  return { tenkan, kijun, spanA, spanB };
+}
+
+function cmf(p = 20) {
+  const mfv = Array(N).fill(0);
+  for (let i = 0; i < N; i++) {
+    const rng = H[i] - L[i];
+    const mult = rng === 0 ? 0 : ((C[i] - L[i]) - (H[i] - C[i])) / rng;
+    mfv[i] = mult * V[i];
+  }
+  const out = Array(N).fill(null);
+  for (let i = p - 1; i < N; i++) {
+    const wm = mfv.slice(i - p + 1, i + 1).reduce((a, b) => a + b, 0);
+    const wv = V.slice(i - p + 1, i + 1).reduce((a, b) => a + b, 0);
+    out[i] = wv === 0 ? 0 : wm / wv;
+  }
+  return out;
+}
+
+function cci(p = 20) {
+  const tp = H.map((_, i) => (H[i] + L[i] + C[i]) / 3);
+  const m = sma(tp, p);
+  const out = Array(N).fill(null);
+  for (let i = p - 1; i < N; i++) {
+    const w = tp.slice(i - p + 1, i + 1);
+    const mean = m[i];
+    const md = w.reduce((a, b) => a + Math.abs(b - mean), 0) / p;
+    out[i] = md === 0 ? 0 : (tp[i] - mean) / (0.015 * md);
+  }
+  return out;
+}
+
+function psar(afStart = 0.02, afMax = 0.2) {
+  const sar = Array(N).fill(null);
+  let bull = true, af = afStart, ep = H[0];
+  sar[0] = L[0];
+  for (let i = 1; i < N; i++) {
+    let s = sar[i - 1] + af * (ep - sar[i - 1]);
+    if (bull) {
+      if (L[i] < s) { bull = false; s = ep; ep = L[i]; af = afStart; }
+      else { if (H[i] > ep) { ep = H[i]; af = Math.min(af + afStart, afMax); } s = Math.min(s, L[i - 1], i > 1 ? L[i - 2] : L[i - 1]); }
+    } else {
+      if (H[i] > s) { bull = true; s = ep; ep = H[i]; af = afStart; }
+      else { if (L[i] < ep) { ep = L[i]; af = Math.min(af + afStart, afMax); } s = Math.max(s, H[i - 1], i > 1 ? H[i - 2] : H[i - 1]); }
+    }
+    sar[i] = s;
+  }
+  return sar;
+}
+
+function williamsR(p = 14) {
+  const out = Array(N).fill(null);
+  for (let i = p - 1; i < N; i++) {
+    const hh = Math.max(...H.slice(i - p + 1, i + 1));
+    const ll = Math.min(...L.slice(i - p + 1, i + 1));
+    out[i] = hh === ll ? 0 : -100 * (hh - C[i]) / (hh - ll);
+  }
+  return out;
+}
+
+function roc(p = 12) {
+  const out = Array(N).fill(null);
+  for (let i = p; i < N; i++) out[i] = 100 * (C[i] - C[i - p]) / C[i - p];
+  return out;
+}
+
+// ──────────────────────────────────────────────────────────
+// 3. SVG plotting
+// ──────────────────────────────────────────────────────────
+const W = 400, HGT = 120, PAD = 6;
+function scaleY(arr, h = HGT - 2 * PAD) {
+  const f = arr.filter(v => v != null && !isNaN(v));
+  if (!f.length) return v => HGT / 2;
+  const mn = Math.min(...f), mx = Math.max(...f);
+  if (mn === mx) return v => HGT / 2;
+  return v => HGT - PAD - (v - mn) / (mx - mn) * h;
+}
+function pathOf(arr, color, dash = "") {
+  const sy = scaleY(arr);
+  const sx = i => PAD + i * (W - 2 * PAD) / (arr.length - 1);
+  let d = ""; let started = false;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] == null) { started = false; continue; }
+    d += (started ? "L" : "M") + sx(i).toFixed(2) + "," + sy(arr[i]).toFixed(2) + " ";
+    started = true;
+  }
+  return `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.4" ${dash ? `stroke-dasharray="${dash}"` : ""}/>`;
+}
+function pricePath(color = "#5ce1e6") {
+  return pathOf(C, color);
+}
+function priceCandles() {
+  const sy = scaleY([...H, ...L]);
+  const sx = i => PAD + i * (W - 2 * PAD) / (N - 1);
+  let out = "";
+  for (let i = 0; i < N; i++) {
+    const up = C[i] >= O[i];
+    const color = up ? "#57d97a" : "#ff6363";
+    const yo = sy(O[i]), yc = sy(C[i]);
+    const yh = sy(H[i]), yl = sy(L[i]);
+    out += `<line x1="${sx(i)}" y1="${yh}" x2="${sx(i)}" y2="${yl}" stroke="${color}" stroke-width="0.6"/>`;
+    out += `<rect x="${sx(i) - 1.4}" y="${Math.min(yo, yc)}" width="2.8" height="${Math.max(1, Math.abs(yo - yc))}" fill="${color}"/>`;
+  }
+  return out;
+}
+function bandFill(upper, lower, color) {
+  const sy = scaleY([...upper.filter(v => v != null), ...lower.filter(v => v != null), ...C]);
+  const sx = i => PAD + i * (W - 2 * PAD) / (N - 1);
+  let dT = "", dB = "";
+  let first = null, last = null;
+  for (let i = 0; i < N; i++) if (upper[i] != null) { if (first == null) first = i; last = i; }
+  if (first == null) return "";
+  for (let i = first; i <= last; i++) dT += (i === first ? "M" : "L") + sx(i) + "," + sy(upper[i]) + " ";
+  for (let i = last; i >= first; i--) dT += "L" + sx(i) + "," + sy(lower[i]) + " ";
+  return `<path d="${dT}Z" fill="${color}" opacity="0.18"/>` +
+         pathOf(upper, color, "2,2") + pathOf(lower, color, "2,2") + pricePath("#d9e0e8");
+}
+function hline(y, label, color = "#3a4555") {
+  return `<line x1="${PAD}" y1="${y}" x2="${W - PAD}" y2="${y}" stroke="${color}" stroke-width="0.6" stroke-dasharray="2,3"/>` +
+         (label ? `<text x="${W - PAD - 2}" y="${y - 2}" text-anchor="end" font-family="ui-monospace" font-size="9" fill="${color}">${label}</text>` : "");
+}
+function oscChart(arr, low, high, midLines = []) {
+  const sy = v => HGT - PAD - (v - low) / (high - low) * (HGT - 2 * PAD);
+  let m = "";
+  for (const ml of midLines) m += hline(sy(ml), ml.toString());
+  const sx = i => PAD + i * (W - 2 * PAD) / (N - 1);
+  let d = ""; let started = false;
+  for (let i = 0; i < N; i++) {
+    if (arr[i] == null) { started = false; continue; }
+    d += (started ? "L" : "M") + sx(i).toFixed(2) + "," + sy(arr[i]).toFixed(2) + " ";
+    started = true;
+  }
+  return `<svg class="chart" viewBox="0 0 ${W} ${HGT}">${m}<path d="${d}" fill="none" stroke="#ffb347" stroke-width="1.4"/></svg>`;
+}
+
+// ──────────────────────────────────────────────────────────
+// 4. Cards
+// ──────────────────────────────────────────────────────────
+function card(cls, tagCls, tag, title, formula, svgBody, desc, signal) {
+  return `<div class="card ${cls}">
+    <span class="tag ${tagCls}">${tag}</span>
+    <h3>${title}</h3>
+    <pre class="formula">${formula}</pre>
+    <svg class="chart" viewBox="0 0 ${W} ${HGT}">${svgBody}</svg>
+    <div class="desc">${desc}</div>
+    <div class="signal">${signal}</div>
+  </div>`;
+}
+
+// Trend cards
+const sma20 = sma(C, 20);
+const ema20 = ema(C, 20);
+const m = macd(C);
+const adxR = adxDmi();
+const sarA = psar();
+const ich = ichimoku();
+
+document.getElementById("grid-trend").innerHTML = [
+  card("cat-trend", "trend", "Trend / MA", "SMA — Simple Moving Average",
+    "SMA(n) = (P[t-n+1] + … + P[t]) / n",
+    priceCandles() + pathOf(sma20, "#9ef27a"),
+    "<strong>Equal-weight average</strong> over the last n bars. Smooths price; lags by ~n/2 bars. Slope = trend direction; price crossing it = potential trend change.",
+    "Long when <b>price &gt; SMA &amp; SMA rising</b>; exit on cross back. <i>Lag is the cost of stability.</i>"),
+
+  card("cat-trend", "trend", "Trend / MA", "EMA — Exponential Moving Average",
+    "EMA(t) = α·P[t] + (1-α)·EMA[t-1],  α = 2/(n+1)",
+    priceCandles() + pathOf(ema20, "#9ef27a"),
+    "<strong>Recency-weighted average</strong>. Reacts faster than SMA but whipsaws more in chop. Default lengths: 20/50/200.",
+    "Faster signal, more false positives. Use with ADX&nbsp;&gt;&nbsp;25 to filter the whipsaws."),
+
+  card("cat-trend", "trend", "Oscillating trend", "MACD — Moving Average Convergence/Divergence",
+    "MACD = EMA(12) − EMA(26)\nSignal = EMA(9) of MACD\nHist  = MACD − Signal",
+    pathOf(m.line, "#9ef27a") + pathOf(m.signal, "#ff6363") + hline(60, "0"),
+    "<strong>Difference of two EMAs</strong>, plus a signal line. Crossovers = trend shifts; histogram = momentum.",
+    "Buy on <b>MACD crossing above signal</b> while histogram turns positive. Divergence with price warns of exhaustion."),
+
+  card("cat-trend", "trend", "Strength", "ADX / DMI — Directional Movement Index",
+    "+DI = 100·EMA(+DM) / EMA(TR)\n−DI = 100·EMA(−DM) / EMA(TR)\nDX  = 100·|+DI − −DI| / (+DI + −DI)\nADX = EMA(DX)",
+    oscChart(adxR.adx, 0, 60, [20, 40]).slice(20, -6) + pathOf(adxR.pdi, "#57d97a") + pathOf(adxR.ndi, "#ff6363"),
+    "<strong>ADX measures trend STRENGTH</strong> (0–100), not direction. +DI vs −DI cross gives the direction. ADX&nbsp;&gt;&nbsp;25 = trend present.",
+    "Filter, not entry. <b>ADX&nbsp;&gt;&nbsp;25</b> + <b>+DI &gt; −DI</b> → trend longs only."),
+
+  card("cat-trend", "trend", "Trailing stop", "Parabolic SAR — Stop and Reverse",
+    "SAR[t] = SAR[t-1] + AF·(EP − SAR[t-1])\nAF steps 0.02 → 0.20 on each new EP",
+    priceCandles() + (() => {
+      const sy = scaleY([...H, ...L]);
+      const sx = i => PAD + i * (W - 2 * PAD) / (N - 1);
+      return sarA.map((s, i) => s == null ? "" : `<circle cx="${sx(i)}" cy="${sy(s)}" r="1.2" fill="#ffb347"/>`).join("");
+    })(),
+    "<strong>Trailing dots</strong> below price in uptrend, above in downtrend. Always in the market — flips when price crosses the dot.",
+    "Use as a <b>trailing stop</b>, not standalone entry. Tightens fast on strong moves; gets stopped by chop."),
+
+  card("cat-trend", "trend", "System", "Ichimoku Cloud",
+    "Tenkan = (H9  + L9)  / 2     [conversion]\nKijun  = (H26 + L26) / 2     [base]\nSpanA  = (Tenkan + Kijun)/2  [shifted +26]\nSpanB  = (H52 + L52)/2       [shifted +26]",
+    priceCandles() + bandFill(ich.spanA, ich.spanB, "#9ef27a").slice(`<path d="`.length) + pathOf(ich.tenkan, "#5ce1e6") + pathOf(ich.kijun, "#ffb347"),
+    "<strong>Cloud (Kumo)</strong> = future S/R + trend regime. Above cloud = bullish; below = bearish; inside = transition.",
+    "Long bias when <b>price &gt; cloud &amp; Tenkan &gt; Kijun</b>. Cloud color (SpanA vs SpanB) projects forward sentiment."),
+].join("");
+
+// Momentum cards
+const rsi14 = rsi(C, 14);
+const sr = stochRsi(C);
+const cciV = cci(C);
+const wr = williamsR();
+const rocV = roc();
+
+document.getElementById("grid-momentum").innerHTML = [
+  card("cat-momentum", "momentum", "Bounded 0–100", "RSI — Relative Strength Index",
+    "RS  = avg_gain / avg_loss     (Wilder smoothed, n=14)\nRSI = 100 − 100/(1 + RS)",
+    oscChart(rsi14, 0, 100, [30, 70]),
+    "<strong>0–100 oscillator</strong>. &gt;70 = overbought, &lt;30 = oversold. Divergence with price is the more powerful signal than absolute levels.",
+    "Mean-reversion: <b>RSI&nbsp;&lt;&nbsp;30 + bullish bar</b>. Trend: use 40/60 not 30/70 levels; price holding above 40 = trend intact."),
+
+  card("cat-momentum", "momentum", "Bounded 0–100", "Stochastic RSI",
+    "StochRSI = (RSI − min(RSI,n)) / (max(RSI,n) − min(RSI,n))\nK = SMA(StochRSI, 3),  D = SMA(K, 3)",
+    oscChart(sr.k, 0, 100, [20, 80]) + (() => "")(),
+    "<strong>Oscillator of an oscillator</strong>. Fires far more signals than raw RSI — more reactive but noisier. K/D crosses are entry triggers.",
+    "Buy when <b>K crosses above D below 20</b>; sell on K/D cross above 80. Always confirm with a slower indicator."),
+
+  card("cat-momentum", "momentum", "Unbounded", "CCI — Commodity Channel Index",
+    "TP   = (H+L+C)/3\nCCI  = (TP − SMA(TP,20)) / (0.015 · mean_dev)",
+    oscChart(cciV, -200, 200, [-100, 0, 100]),
+    "<strong>Unbounded</strong> deviation of typical price from its mean. ±100 = nominal range; ±200 = exhaustion.",
+    "Zero-line cross = trend shift. <b>&gt;+100</b> on breakout = strong; <b>&gt;+200</b> often marks exhaustion of the leg."),
+
+  card("cat-momentum", "momentum", "Bounded -100–0", "Williams %R",
+    "%R = -100 · (HH(n) − C) / (HH(n) − LL(n))    [n=14]",
+    oscChart(wr, -100, 0, [-80, -20]),
+    "<strong>Inverted Stochastic</strong>. -100 = at period low (oversold), 0 = at period high (overbought). Very fast.",
+    "Mean-reversion in ranges: buy <b>&lt;-80</b>, sell <b>&gt;-20</b>. In trends, treat -20/-80 holds as confirmation, not reversal."),
+
+  card("cat-momentum", "momentum", "Zero-centered", "ROC — Rate of Change",
+    "ROC(n) = 100 · (C[t] − C[t-n]) / C[t-n]    [n=12]",
+    oscChart(rocV, -10, 10, [0]),
+    "<strong>Raw % change</strong> over n bars — momentum's purest form. Zero-line crosses are trend-change triggers; magnitude shows velocity.",
+    "Use as a confirmation layer over MA crosses. <b>Rising ROC + price above MA</b> = real acceleration, not lag."),
+].join("");
+
+// Volatility cards
+const bb = bollinger(C, 20, 2);
+const atrV = atr(14);
+
+document.getElementById("grid-vol").innerHTML = [
+  card("cat-vol", "vol", "Envelope", "Bollinger Bands",
+    "Mid   = SMA(C, 20)\nUpper = Mid + 2·σ(C, 20)\nLower = Mid − 2·σ(C, 20)",
+    bandFill(bb.upper, bb.lower, "#ff6363"),
+    "<strong>Adaptive ±2σ envelope</strong>. Width = volatility. Squeeze (narrow bands) often precedes a breakout. Tags of bands ≠ reversal by themselves.",
+    "Range play: buy lower band + RSI confirm. Breakout play: <b>squeeze + expansion</b> in direction of break. <i>Riding the band is bullish, not overbought.</i>"),
+
+  card("cat-vol", "vol", "Magnitude", "ATR — Average True Range",
+    "TR  = max(H−L, |H−PC|, |L−PC|)\nATR = Wilder smoothed avg(TR, n=14)",
+    oscChart(atrV, Math.min(...atrV.filter(x=>x!=null)), Math.max(...atrV.filter(x=>x!=null))),
+    "<strong>Raw $ volatility</strong>, not direction. Rising ATR = volatility expansion; falling = compression.",
+    "Position sizing: <b>risk = entry − k·ATR</b> (k=1.5 to 3). Stops auto-scale to current vol — no more fixed-% misfits."),
+].join("");
+
+// Volume cards
+const vw = vwap();
+const ob = obv();
+const cm = cmf();
+
+document.getElementById("grid-volume").innerHTML = [
+  card("cat-volume", "volume", "Benchmark", "VWAP — Volume-Weighted Average Price",
+    "VWAP = Σ (TypicalPrice · Volume) / Σ Volume     (intraday cum.)",
+    priceCandles() + pathOf(vw, "#5ce1e6"),
+    "<strong>Institutional fair-value benchmark</strong> — the average price weighted by volume. Price above VWAP = bullish session; below = bearish.",
+    "Trend session: ride above/below VWAP. Range session: <b>fade extremes back to VWAP</b>. Standard-deviation bands extend the framework."),
+
+  card("cat-volume", "volume", "Cumulative", "OBV — On-Balance Volume",
+    "OBV[t] = OBV[t-1] + V[t]   if C[t] > C[t-1]\n        − V[t]   if C[t] < C[t-1]\n        + 0      if equal",
+    pathOf(ob, "#5ce1e6"),
+    "<strong>Cumulative signed volume</strong>. Tracks accumulation vs distribution. Trend = direction of volume flow.",
+    "Divergence is the killer signal: <b>price up, OBV flat or down</b> = distribution into strength. New OBV high without price confirms is bullish."),
+
+  card("cat-volume", "volume", "Oscillator", "CMF — Chaikin Money Flow",
+    "MFM = ((C−L) − (H−C)) / (H−L)\nMFV = MFM · V\nCMF = Σ MFV(n) / Σ V(n)     [n=20]",
+    oscChart(cm, -0.5, 0.5, [0]),
+    "<strong>Volume-weighted close position within the bar</strong>. CMF&nbsp;&gt;&nbsp;0 = buying pressure; &lt; 0 = selling. Bounded roughly ±1.",
+    "Confirm breakouts with <b>CMF&nbsp;&gt;&nbsp;0.1 sustained</b>. Persistent positive CMF under flat price = stealth accumulation."),
+].join("");
+
+</script>
+
+<script>
+"use strict";
+{
+// Section VII wrapped in a block so its `const PAD = 8` doesn't collide
+// with Script 1's `const PAD = 6`. All function and const declarations
+// inside this block are block-scoped.
+
+// ── Section VII: pattern examples ──────────────────────────
+// Each pattern uses its own seeded synthetic OHLCV so the
+// setup actually appears on the chart.
+
+function lcgB(seed) { return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 0x100000000; }
+
+function genBars(seed, n, driftFn, noiseFn) {
+  const r = lcgB(seed);
+  const O = [], H = [], L = [], C = [], V = [];
+  let p = 100;
+  for (let i = 0; i < n; i++) {
+    const d = driftFn(i, r);
+    const noi = noiseFn(i, r);
+    const ret = d + noi * (r() - 0.5) * 2;
+    const o = p;
+    const c = Math.max(1, p + ret);
+    const w = Math.max(0.3, noi);
+    const h = Math.max(o, c) + Math.abs(r() - 0.4) * w;
+    const l = Math.min(o, c) - Math.abs(r() - 0.4) * w;
+    O.push(o); H.push(h); L.push(l); C.push(c);
+    V.push(800 + r() * 600 + (Math.abs(ret) > 1.5 ? 1200 : 0));
+    p = c;
+  }
+  return { O, H, L, C, V, n };
+}
+
+// Math (parameterized variants)
+function SMA2(s, p) { return s.map((_, i) => i < p - 1 ? null : s.slice(i - p + 1, i + 1).reduce((a, b) => a + b, 0) / p); }
+function EMA2(s, p) { const k = 2 / (p + 1); const out = [s[0]]; for (let i = 1; i < s.length; i++) out.push(s[i] * k + out[i - 1] * (1 - k)); return out; }
+function RSI2(s, p = 14) {
+  const out = Array(s.length).fill(null);
+  let g = 0, l = 0;
+  for (let i = 1; i <= p; i++) { const d = s[i] - s[i - 1]; if (d > 0) g += d; else l -= d; }
+  g /= p; l /= p; out[p] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  for (let i = p + 1; i < s.length; i++) {
+    const d = s[i] - s[i - 1];
+    g = (g * (p - 1) + (d > 0 ? d : 0)) / p;
+    l = (l * (p - 1) + (d < 0 ? -d : 0)) / p;
+    out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+  }
+  return out;
+}
+function BB2(s, p = 20, k = 2) {
+  const m = SMA2(s, p), upper = [], lower = [];
+  for (let i = 0; i < s.length; i++) {
+    if (m[i] == null) { upper.push(null); lower.push(null); continue; }
+    const w = s.slice(i - p + 1, i + 1), mean = m[i];
+    const sd = Math.sqrt(w.reduce((a, b) => a + (b - mean) ** 2, 0) / p);
+    upper.push(mean + k * sd); lower.push(mean - k * sd);
+  }
+  return { upper, mid: m, lower };
+}
+function StochRSI2(s, p = 14, sk = 3) {
+  const r = RSI2(s, p);
+  const sr = Array(s.length).fill(null);
+  for (let i = p * 2; i < s.length; i++) {
+    const w = r.slice(i - p + 1, i + 1).filter(x => x != null);
+    if (w.length < p) continue;
+    const mn = Math.min(...w), mx = Math.max(...w);
+    sr[i] = mx === mn ? 0 : 100 * (r[i] - mn) / (mx - mn);
+  }
+  const safe = sr.map(v => v == null ? 0 : v);
+  const k = SMA2(safe, sk).map((v, i) => sr[i] == null ? null : v);
+  return { k };
+}
+function ROC2(s, p = 12) { return s.map((_, i) => i < p ? null : 100 * (s[i] - s[i - p]) / s[i - p]); }
+function ATR2(b, p = 14) {
+  const tr = [b.H[0] - b.L[0]];
+  for (let i = 1; i < b.n; i++) tr.push(Math.max(b.H[i] - b.L[i], Math.abs(b.H[i] - b.C[i - 1]), Math.abs(b.L[i] - b.C[i - 1])));
+  const out = Array(b.n).fill(null);
+  let prev = tr.slice(0, p).reduce((a, b) => a + b, 0) / p; out[p - 1] = prev;
+  for (let i = p; i < b.n; i++) { prev = (prev * (p - 1) + tr[i]) / p; out[i] = prev; }
+  return out;
+}
+function ADX2(b, p = 14) {
+  const tr = Array(b.n).fill(0), pdm = Array(b.n).fill(0), ndm = Array(b.n).fill(0);
+  for (let i = 1; i < b.n; i++) {
+    const um = b.H[i] - b.H[i - 1], dm = b.L[i - 1] - b.L[i];
+    pdm[i] = (um > dm && um > 0) ? um : 0;
+    ndm[i] = (dm > um && dm > 0) ? dm : 0;
+    tr[i] = Math.max(b.H[i] - b.L[i], Math.abs(b.H[i] - b.C[i - 1]), Math.abs(b.L[i] - b.C[i - 1]));
+  }
+  const wilder = s => {
+    const o = Array(b.n).fill(null);
+    let acc = s.slice(1, p + 1).reduce((a, b) => a + b, 0); o[p] = acc;
+    for (let i = p + 1; i < b.n; i++) { acc = acc - acc / p + s[i]; o[i] = acc; }
+    return o;
+  };
+  const trW = wilder(tr), pW = wilder(pdm), nW = wilder(ndm);
+  const pdi = trW.map((t, i) => t == null || t === 0 ? null : 100 * pW[i] / t);
+  const ndi = trW.map((t, i) => t == null || t === 0 ? null : 100 * nW[i] / t);
+  const dx = pdi.map((pp, i) => (pp == null || ndi[i] == null || pp + ndi[i] === 0) ? null : 100 * Math.abs(pp - ndi[i]) / (pp + ndi[i]));
+  const adx = Array(b.n).fill(null);
+  const first = dx.slice(p * 2, p * 2 + p).filter(x => x != null);
+  if (first.length === p) {
+    let prev = first.reduce((a, b) => a + b, 0) / p;
+    adx[p * 2 + p - 1] = prev;
+    for (let i = p * 2 + p; i < b.n; i++) { if (dx[i] != null) { prev = (prev * (p - 1) + dx[i]) / p; adx[i] = prev; } }
+  }
+  return { pdi, ndi, adx };
+}
+function VWAPBands2(b, k = 1) {
+  let cpv = 0, cv = 0; const vw = [];
+  for (let i = 0; i < b.n; i++) {
+    const tp = (b.H[i] + b.L[i] + b.C[i]) / 3;
+    cpv += tp * b.V[i]; cv += b.V[i];
+    vw.push(cpv / cv);
+  }
+  let cum2 = 0; const upper = [], lower = [];
+  for (let i = 0; i < b.n; i++) {
+    const tp = (b.H[i] + b.L[i] + b.C[i]) / 3;
+    cum2 += (tp - vw[i]) ** 2;
+    const sd = Math.sqrt(cum2 / (i + 1));
+    upper.push(vw[i] + k * sd);
+    lower.push(vw[i] - k * sd);
+  }
+  return { vwap: vw, upper, lower };
+}
+function OBV2(b) {
+  const out = [0];
+  for (let i = 1; i < b.n; i++) {
+    if (b.C[i] > b.C[i - 1]) out.push(out[i - 1] + b.V[i]);
+    else if (b.C[i] < b.C[i - 1]) out.push(out[i - 1] - b.V[i]);
+    else out.push(out[i - 1]);
+  }
+  return out;
+}
+function Ichi2(b) {
+  const range = (p) => b.H.map((_, i) => i < p - 1 ? null : (Math.max(...b.H.slice(i - p + 1, i + 1)) + Math.min(...b.L.slice(i - p + 1, i + 1))) / 2);
+  const t = range(9), k = range(26);
+  const a = t.map((v, i) => (v != null && k[i] != null) ? (v + k[i]) / 2 : null);
+  return { tenkan: t, kijun: k, spanA: a, spanB: range(52) };
+}
+
+// SVG render helpers
+const PW = 400, PHU = 130, PHL = 65, GAP = 5, PHT = 200, PAD = 8;
+
+function syRange(arr, top, bot) {
+  const f = arr.filter(v => v != null && !isNaN(v));
+  if (!f.length) return _ => (top + bot) / 2;
+  let mn = Math.min(...f), mx = Math.max(...f);
+  if (mn === mx) { mn -= 1; mx += 1; }
+  return v => bot - (v - mn) / (mx - mn) * (bot - top);
+}
+function syFixed(top, bot, lo, hi) { return v => bot - (v - lo) / (hi - lo) * (bot - top); }
+function sX(i, n) { return PAD + i * (PW - 2 * PAD) / (n - 1); }
+
+function pathLine(arr, sy, n, color, dash = "", w = 1.4) {
+  let d = "", st = false;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] == null) { st = false; continue; }
+    d += (st ? "L" : "M") + sX(i, n).toFixed(1) + "," + sy(arr[i]).toFixed(1) + " ";
+    st = true;
+  }
+  return `<path d="${d}" fill="none" stroke="${color}" stroke-width="${w}" ${dash ? `stroke-dasharray="${dash}"` : ""}/>`;
+}
+
+function drawCandles(b, sy) {
+  let out = "";
+  for (let i = 0; i < b.n; i++) {
+    const up = b.C[i] >= b.O[i];
+    const color = up ? "#57d97a" : "#ff6363";
+    const x = sX(i, b.n);
+    const yo = sy(b.O[i]), yc = sy(b.C[i]), yh = sy(b.H[i]), yl = sy(b.L[i]);
+    out += `<line x1="${x.toFixed(1)}" y1="${yh.toFixed(1)}" x2="${x.toFixed(1)}" y2="${yl.toFixed(1)}" stroke="${color}" stroke-width="0.6"/>`;
+    out += `<rect x="${(x - 1.4).toFixed(1)}" y="${Math.min(yo, yc).toFixed(1)}" width="2.8" height="${Math.max(1, Math.abs(yo - yc)).toFixed(1)}" fill="${color}"/>`;
+  }
+  return out;
+}
+
+function band(startI, endI, n, color = "#5ce1e6", op = 0.10) {
+  const x1 = sX(startI, n), x2 = sX(endI, n);
+  return `<rect x="${x1.toFixed(1)}" y="0" width="${(x2 - x1).toFixed(1)}" height="${PHT}" fill="${color}" opacity="${op}"/>`;
+}
+
+function marker(i, n, sy, val, label, color = "#ffb347") {
+  const x = sX(i, n), y = sy(val);
+  return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="none" stroke="${color}" stroke-width="1.5"/>` +
+         `<text x="${(x + 7).toFixed(1)}" y="${(y - 6).toFixed(1)}" font-family="ui-monospace" font-size="9" fill="${color}">${label}</text>`;
+}
+
+function divider(label) {
+  return `<line x1="0" y1="${(PHU + GAP / 2).toFixed(1)}" x2="${PW}" y2="${(PHU + GAP / 2).toFixed(1)}" stroke="#2a3445"/>` +
+         `<text x="6" y="${(PHU + GAP + 10).toFixed(1)}" font-family="ui-monospace" font-size="9" fill="#8a96a6">${label}</text>`;
+}
+
+function hLine(yPos, label, color = "#3a4555") {
+  return `<line x1="${PAD}" y1="${yPos.toFixed(1)}" x2="${PW - PAD}" y2="${yPos.toFixed(1)}" stroke="${color}" stroke-width="0.6" stroke-dasharray="2,3"/>` +
+         (label != null ? `<text x="${PW - PAD - 2}" y="${(yPos - 2).toFixed(1)}" text-anchor="end" font-family="ui-monospace" font-size="9" fill="${color}">${label}</text>` : "");
+}
+
+function svgWrap(content) { return `<svg class="chart-dual" viewBox="0 0 ${PW} ${PHT}">${content}</svg>`; }
+
+function cardP(num, title, combo, body, look) {
+  return `<div class="pattern-card"><div class="pattern-header"><span class="pattern-num">${num}</span><div><h3>${title}</h3><code class="pattern-combo">${combo}</code></div></div>${body}<p class="pattern-look">▼ Look for: ${look}</p></div>`;
+}
+
+// ── Pattern generators ─────────────────────────────────────
+
+function p1() { // EMA20 + EMA50 + ADX > 25
+  const n = 60;
+  const b = genBars(101, n, i => i < 8 ? -0.05 : (i < 22 ? 0.22 : 0.50), () => 0.7);
+  const e20 = EMA2(b.C, 20), e50 = EMA2(b.C, 50);
+  const ad = ADX2(b, 14);
+  const syU = syRange([...b.H, ...b.L, ...e20, ...e50], PAD, PHU);
+  const syL = syFixed(PHU + GAP + PAD, PHT - PAD, 0, 60);
+  let t = -1;
+  for (let i = 14; i < n; i++) {
+    if (ad.adx[i] != null && ad.adx[i] > 25 && e20[i] > e50[i]) { t = i; break; }
+  }
+  return svgWrap(
+    (t > 0 ? band(t, n - 1, n, "#9ef27a") : "") +
+    drawCandles(b, syU) +
+    pathLine(e20, syU, n, "#9ef27a") +
+    pathLine(e50, syU, n, "#5ce1e6") +
+    (t > 0 ? marker(t, n, syU, b.C[t], "long") : "") +
+    divider("ADX (14)") +
+    hLine(syL(25), "25") +
+    pathLine(ad.adx, syL, n, "#ffb347")
+  );
+}
+
+function p2() { // BB lower + RSI < 30 + green-bar confirmation
+  const n = 60;
+  const b = genBars(202, n, i => {
+    if (i > 28 && i < 36) return -0.7;
+    if (i > 36 && i < 42) return 0.35;
+    return Math.sin(i / 5) * 0.1;
+  }, () => 0.55);
+  const bb = BB2(b.C, 20, 2);
+  const rs = RSI2(b.C, 14);
+  const syU = syRange([...b.H, ...b.L, ...bb.upper, ...bb.lower], PAD, PHU);
+  const syL = syFixed(PHU + GAP + PAD, PHT - PAD, 0, 100);
+  // Step 1: setup = first bar where BB-lower touched AND RSI < 35
+  let setup = -1;
+  for (let i = 20; i < n; i++) {
+    if (rs[i] != null && bb.lower[i] != null && b.C[i] <= bb.lower[i] && rs[i] < 35) { setup = i; break; }
+  }
+  // Step 2: entry = first GREEN candle (C > O) at or after the setup bar
+  let entry = -1;
+  if (setup > 0) {
+    for (let i = setup; i < n; i++) {
+      if (b.C[i] > b.O[i]) { entry = i; break; }
+    }
+  }
+  // Grey "setup" marker — label below-left so it doesn't collide with the orange "buy" label
+  const setupMark = setup > 0
+    ? `<circle cx="${sX(setup, n).toFixed(1)}" cy="${syU(b.C[setup]).toFixed(1)}" r="3.2" fill="none" stroke="#8a96a6" stroke-width="1.2" stroke-dasharray="2,1"/>` +
+      `<text x="${(sX(setup, n) - 6).toFixed(1)}" y="${(syU(b.C[setup]) + 14).toFixed(1)}" text-anchor="end" font-family="ui-monospace" font-size="9" fill="#8a96a6">setup</text>`
+    : "";
+  return svgWrap(
+    (entry > 0 ? band(setup, entry + 1, n, "#9ef27a", 0.10) : (setup > 0 ? band(setup - 1, setup + 2, n, "#ff6363") : "")) +
+    pathLine(bb.upper, syU, n, "#ff6363", "2,2") +
+    pathLine(bb.mid,   syU, n, "#8a96a6") +
+    pathLine(bb.lower, syU, n, "#ff6363", "2,2") +
+    drawCandles(b, syU) +
+    setupMark +
+    (entry > 0 ? marker(entry, n, syU, b.C[entry], "buy") : "") +
+    divider("RSI (14) — wait for first green candle after both fire") +
+    hLine(syL(30), "30") + hLine(syL(70), "70") +
+    pathLine(rs, syL, n, "#ffb347")
+  );
+}
+
+function p3() { // BB squeeze + OBV uptick
+  const n = 60;
+  const b = genBars(303, n,
+    i => i < 30 ? 0.0 : (i < 34 ? 1.3 : 0.5),
+    i => i < 30 ? 0.20 : (i < 34 ? 1.4 : 0.8)
+  );
+  const bb = BB2(b.C, 20, 2);
+  const ob = OBV2(b);
+  const syU = syRange([...b.H, ...b.L, ...bb.upper, ...bb.lower], PAD, PHU);
+  const syL = syRange(ob, PHU + GAP + PAD, PHT - PAD);
+  return svgWrap(
+    band(28, 35, n, "#5ce1e6") +
+    pathLine(bb.upper, syU, n, "#ff6363", "2,2") +
+    pathLine(bb.mid,   syU, n, "#8a96a6") +
+    pathLine(bb.lower, syU, n, "#ff6363", "2,2") +
+    drawCandles(b, syU) +
+    marker(31, n, syU, b.C[31], "breakout") +
+    divider("OBV (cumulative volume)") +
+    pathLine(ob, syL, n, "#5ce1e6")
+  );
+}
+
+function p4() { // Bearish divergence
+  const n = 70;
+  const b = genBars(404, n, i => {
+    if (i < 18) return 0.50;
+    if (i < 28) return -0.32;
+    if (i < 52) return 0.18;
+    return -0.4;
+  }, () => 0.45);
+  const rs = RSI2(b.C, 14);
+  const syU = syRange([...b.H, ...b.L], PAD, PHU);
+  const syL = syFixed(PHU + GAP + PAD, PHT - PAD, 0, 100);
+  const peakI = (a, lo, hi, getter = i => a[i]) => {
+    let bx = lo;
+    for (let i = lo; i <= hi; i++) if (getter(i) != null && (getter(bx) == null || getter(i) > getter(bx))) bx = i;
+    return bx;
+  };
+  const p1i = peakI(b.C, 12, 24);
+  const p2i = peakI(b.C, 42, 56);
+  const r1i = peakI(rs, 12, 24);
+  const r2i = peakI(rs, 42, 56);
+  const dashU = `<line x1="${sX(p1i, n).toFixed(1)}" y1="${syU(b.C[p1i]).toFixed(1)}" x2="${sX(p2i, n).toFixed(1)}" y2="${syU(b.C[p2i]).toFixed(1)}" stroke="#ffb347" stroke-width="1.3" stroke-dasharray="3,3"/>`;
+  const dashL = `<line x1="${sX(r1i, n).toFixed(1)}" y1="${syL(rs[r1i]).toFixed(1)}" x2="${sX(r2i, n).toFixed(1)}" y2="${syL(rs[r2i]).toFixed(1)}" stroke="#ffb347" stroke-width="1.3" stroke-dasharray="3,3"/>`;
+  return svgWrap(
+    drawCandles(b, syU) +
+    dashU +
+    `<circle cx="${sX(p1i, n).toFixed(1)}" cy="${syU(b.C[p1i]).toFixed(1)}" r="3" fill="#ffb347"/>` +
+    `<circle cx="${sX(p2i, n).toFixed(1)}" cy="${syU(b.C[p2i]).toFixed(1)}" r="3" fill="#ffb347"/>` +
+    `<text x="${(sX(p2i, n) + 6).toFixed(1)}" y="${(syU(b.C[p2i]) - 6).toFixed(1)}" font-family="ui-monospace" font-size="9" fill="#ffb347">higher high</text>` +
+    divider("RSI (14) — lower high under price's higher high") +
+    hLine(syL(70), "70") + hLine(syL(30), "30") +
+    pathLine(rs, syL, n, "#ffb347") +
+    dashL +
+    `<circle cx="${sX(r1i, n).toFixed(1)}" cy="${syL(rs[r1i]).toFixed(1)}" r="3" fill="#ffb347"/>` +
+    `<circle cx="${sX(r2i, n).toFixed(1)}" cy="${syL(rs[r2i]).toFixed(1)}" r="3" fill="#ffb347"/>` +
+    `<text x="${(sX(r2i, n) + 6).toFixed(1)}" y="${(syL(rs[r2i]) + 14).toFixed(1)}" font-family="ui-monospace" font-size="9" fill="#ffb347">lower high</text>`
+  );
+}
+
+function p5() { // ATR ratcheting trailing stop — single panel
+  const n = 60;
+  const b = genBars(505, n, () => 0.38, () => 0.7);
+  const a = ATR2(b, 14);
+  const entry = 16;
+  const stop = Array(n).fill(null);
+  let peak = b.C[entry];
+  for (let i = entry; i < n; i++) {
+    if (b.C[i] > peak) peak = b.C[i];
+    if (a[i] != null) {
+      const s = peak - 2 * a[i];
+      stop[i] = (stop[i - 1] != null) ? Math.max(stop[i - 1], s) : s;
+    }
+  }
+  const sy = syRange([...b.H, ...b.L, ...stop.filter(v => v != null)], PAD, PHT - PAD);
+  return `<svg class="chart-dual" viewBox="0 0 ${PW} ${PHT}">` +
+    drawCandles(b, sy) +
+    pathLine(stop, sy, n, "#ff6363", "4,2") +
+    marker(entry, n, sy, b.C[entry], "entry") +
+    `<text x="${(PW - PAD).toFixed(1)}" y="${(PHT - PAD - 4).toFixed(1)}" text-anchor="end" font-family="ui-monospace" font-size="9" fill="#ff6363">entry &minus; 2·ATR (ratcheted)</text>` +
+  `</svg>`;
+}
+
+function p6() { // VWAP ±1σ fade — single panel
+  const n = 60;
+  const b = genBars(606, n, i => Math.sin(i / 6.5) * 0.55, () => 0.35);
+  const v = VWAPBands2(b, 1);
+  const sy = syRange([...b.H, ...b.L, ...v.upper, ...v.lower], PAD, PHT - PAD);
+  const fades = [];
+  for (let i = 6; i < n; i++) {
+    if (v.upper[i] == null) continue;
+    if (b.C[i - 1] > v.upper[i - 1] && b.C[i] < v.upper[i]) fades.push({ i, side: "fade ↓", v: b.C[i], color: "#ff6363" });
+    if (b.C[i - 1] < v.lower[i - 1] && b.C[i] > v.lower[i]) fades.push({ i, side: "fade ↑", v: b.C[i], color: "#57d97a" });
+  }
+  const fadeMarks = fades.slice(0, 3).map(f => marker(f.i, n, sy, f.v, f.side, f.color)).join("");
+  return `<svg class="chart-dual" viewBox="0 0 ${PW} ${PHT}">` +
+    pathLine(v.upper, sy, n, "#5ce1e6", "2,2") +
+    pathLine(v.vwap,  sy, n, "#5ce1e6") +
+    pathLine(v.lower, sy, n, "#5ce1e6", "2,2") +
+    drawCandles(b, sy) +
+    fadeMarks +
+    `<text x="${(PW - PAD).toFixed(1)}" y="${(PHT - PAD - 4).toFixed(1)}" text-anchor="end" font-family="ui-monospace" font-size="9" fill="#5ce1e6">VWAP ± 1σ</text>` +
+  `</svg>`;
+}
+
+function p7() { // Price above bullish Kumo — single panel
+  const n = 70;
+  const b = genBars(707, n, i => i < 30 ? 0.18 : 0.40, () => 0.5);
+  const ich = Ichi2(b);
+  const sy = syRange([...b.H, ...b.L, ...ich.spanA.filter(v => v != null), ...ich.spanB.filter(v => v != null)], PAD, PHT - PAD);
+  let cloud = "";
+  let first = -1, last = -1;
+  for (let i = 0; i < n; i++) if (ich.spanA[i] != null && ich.spanB[i] != null) { if (first < 0) first = i; last = i; }
+  if (first >= 0 && last > first) {
+    let pth = "";
+    for (let i = first; i <= last; i++) pth += (i === first ? "M" : "L") + sX(i, n).toFixed(1) + "," + sy(ich.spanA[i]).toFixed(1) + " ";
+    for (let i = last; i >= first; i--) pth += "L" + sX(i, n).toFixed(1) + "," + sy(ich.spanB[i]).toFixed(1) + " ";
+    cloud = `<path d="${pth}Z" fill="#9ef27a" opacity="0.18"/>`;
+  }
+  return `<svg class="chart-dual" viewBox="0 0 ${PW} ${PHT}">` +
+    cloud +
+    pathLine(ich.spanA, sy, n, "#9ef27a", "1,2") +
+    pathLine(ich.spanB, sy, n, "#ff6363", "1,2") +
+    pathLine(ich.tenkan, sy, n, "#5ce1e6") +
+    pathLine(ich.kijun,  sy, n, "#ffb347") +
+    drawCandles(b, sy) +
+    `<text x="${(PW - PAD).toFixed(1)}" y="${(PHT - PAD - 4).toFixed(1)}" text-anchor="end" font-family="ui-monospace" font-size="9" fill="#9ef27a">price above bullish Kumo · long-only regime</text>` +
+  `</svg>`;
+}
+
+function p8() { // Sideways price + rising OBV
+  const n = 60;
+  const b = genBars(808, n, i => i < 45 ? Math.sin(i / 4) * 0.15 : 0.55, () => 0.3);
+  for (let i = 1; i < 45; i++) if (b.C[i] > b.C[i - 1]) b.V[i] *= 1.8;
+  const ob = OBV2(b);
+  const syU = syRange([...b.H, ...b.L], PAD, PHU);
+  const syL = syRange(ob, PHU + GAP + PAD, PHT - PAD);
+  return svgWrap(
+    band(15, 44, n, "#5ce1e6", 0.10) +
+    drawCandles(b, syU) +
+    marker(45, n, syU, b.C[45], "breakout") +
+    divider("OBV — climbing under flat price = stealth accumulation") +
+    pathLine(ob, syL, n, "#5ce1e6")
+  );
+}
+
+function p9() { // RSI < 30 AND StochRSI K < 20 simultaneously
+  const n = 60;
+  const b = genBars(909, n, i => i < 35 ? -0.28 : 0.42, () => 0.55);
+  const rs = RSI2(b.C, 14);
+  const sr = StochRSI2(b.C, 14);
+  let t = -1;
+  for (let i = 28; i < n; i++) {
+    if (rs[i] != null && sr.k[i] != null && rs[i] < 35 && sr.k[i] < 20) { t = i; break; }
+  }
+  const syU = syFixed(PAD, PHU, 0, 100);
+  const syL = syFixed(PHU + GAP + PAD, PHT - PAD, 0, 100);
+  return svgWrap(
+    (t > 0 ? band(t - 1, t + 2, n, "#ffb347") : "") +
+    hLine(syU(30), "30") + hLine(syU(70), "70") +
+    pathLine(rs, syU, n, "#ffb347") +
+    `<text x="6" y="14" font-family="ui-monospace" font-size="9" fill="#8a96a6">RSI (14)</text>` +
+    (t > 0 ? marker(t, n, syU, rs[t], "RSI&lt;30") : "") +
+    divider("Stoch RSI K — both oversold at the same bar = confluence") +
+    hLine(syL(20), "20") + hLine(syL(80), "80") +
+    pathLine(sr.k, syL, n, "#ffb347") +
+    (t > 0 ? marker(t, n, syL, sr.k[t], "K&lt;20") : "")
+  );
+}
+
+function p10() { // ROC sign change + price crosses SMA(20)
+  const n = 60;
+  const b = genBars(1010, n, i => i < 20 ? -0.30 : 0.45, () => 0.5);
+  const ma = SMA2(b.C, 20);
+  const rc = ROC2(b.C, 12);
+  let t = -1;
+  for (let i = 21; i < n; i++) {
+    if (ma[i] == null || ma[i - 1] == null || rc[i] == null) continue;
+    const maX = b.C[i - 1] <= ma[i - 1] && b.C[i] > ma[i];
+    const rcRecent = (rc[i] > 0) && rc.slice(Math.max(13, i - 5), i).some(v => v != null && v < 0);
+    if (maX && rcRecent) { t = i; break; }
+  }
+  const syU = syRange([...b.H, ...b.L, ...ma.filter(v => v != null)], PAD, PHU);
+  const syL = syRange(rc, PHU + GAP + PAD, PHT - PAD);
+  return svgWrap(
+    (t > 0 ? band(t - 1, t + 2, n, "#9ef27a") : "") +
+    drawCandles(b, syU) +
+    pathLine(ma, syU, n, "#5ce1e6") +
+    (t > 0 ? marker(t, n, syU, b.C[t], "long") : "") +
+    divider("ROC (12) — crossing zero in the same window") +
+    hLine(syL(0), "0") +
+    pathLine(rc, syL, n, "#ffb347")
+  );
+}
+
+// ── Inject ─────────────────────────────────────────────────
+const PATTERNS = [
+  ["1",  "Trend confirmation",         "EMA(20) + EMA(50) + ADX > 25",          p1,  "Both EMAs sloping up with EMA20 above EMA50, AND ADX crossing above 25 (green band). <b>Long entries only inside the band</b> — outside it, the trend isn't strong enough to fight chop."],
+  ["2",  "Mean-reversion entry",       "BB lower + RSI < 30 + green-bar confirm", p2, "Grey dashed circle = <b>setup</b> bar (BB-lower touched + RSI in oversold) — note it fires while bars are still red. Orange circle = <b>buy</b>, on the first GREEN candle that follows. <b>The confirmation bar is what keeps you from catching the falling knife</b>; entry is delayed 1–3 bars but lands near the actual bottom."],
+  ["3",  "Breakout filter",            "Bollinger squeeze + OBV uptick",        p3,  "Bands compress (narrow envelope = low vol), then expand on a strong bar while OBV ticks up sharply. <b>OBV confirms volume is real</b> — flat OBV through the breakout is a fakeout warning."],
+  ["4",  "Trend exhaustion (bearish)", "Price higher high + RSI lower high",    p4,  "Price's dashed line slopes up (HH); RSI's dashed line slopes down (LH) over the same swing peaks. <b>Momentum fading under price</b> — wait for a structural break (lower low) to actually short."],
+  ["5",  "Volatility-based stop",      "Entry − 2·ATR, ratcheted",              p5,  "Red dashed line trails below price and ratchets up — never down. <b>Stop auto-tunes to current volatility</b>; normal chop can't tag you out, but a real reversal will."],
+  ["6",  "Fair-value rotation",        "VWAP ± 1σ bands",                       p6,  "In a range-session, price tags ±1σ and reverses back to VWAP. <b>Only fade when VWAP itself is flat</b> — in a trend session, one side gets steamrolled."],
+  ["7",  "Cloud trend filter",         "Price above bullish Kumo",              p7,  "Price visibly above the green-shaded cloud with SpanA (green dashed) above SpanB (red dashed). <b>Long-only regime</b> — counter-trend setups disallowed until price re-enters or breaks below the cloud."],
+  ["8",  "Stealth accumulation",       "OBV rising + price consolidating",      p8,  "Price sideways inside the cyan band but OBV climbs persistently. <b>Smart money loading under a flat tape</b> — the orange-marked breakout usually follows. CMF would also read positive throughout."],
+  ["9",  "Oscillator stacking",        "RSI < 30 AND Stoch RSI K < 20",         p9,  "Both panels in their oversold zones at the same bar (orange band). <b>Either alone fires often; requiring both cuts false signals by ~⅔</b> at the cost of fewer trades."],
+  ["10", "ROC + MA cross",             "ROC > 0 + Price crosses SMA(20)",       p10, "ROC turning positive at (or within ±2 bars of) the price/SMA crossover. <b>ROC confirms acceleration</b> — without it, the MA cross is just lag mechanically catching up."]
+];
+
+document.getElementById("patterns-grid").innerHTML =
+  PATTERNS.map(([num, t, c, fn, look]) => cardP(num, t, c, fn(), look)).join("");
+
+}
+</script>
+
+</body>
+</html>
