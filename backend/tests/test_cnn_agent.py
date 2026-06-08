@@ -126,6 +126,32 @@ class TestFeatureBuilder:
         # body = (close - open) / open > 0 for bullish candles
         assert channels[3][-1] > 0, "Bullish candle body should be positive"
 
+    def test_ch17_18_19_emit_zeros_even_with_5m_data(self):
+        """Tier A: ch17/18/19 (masked per _TRAINING_CONSTANT_CHANNELS) skip
+        their builders and emit zero arrays directly from build(). Output is
+        mathematically equivalent to the prior 'compute then mask' flow since
+        the inference-side masking layer zeros these channels anyway.
+
+        Pre-Tier A: with ≥14 5m candles the builders produced non-zero
+        broadcast values (fast_rsi_val from _rsi(c5[-14:])/100.0,
+        vel_norm from price velocity, vol_z_norm from volume z-score).
+        Post-Tier A: zeros direct, no wasted compute.
+        """
+        candles = _make_candles(60)
+        # ≥14 5m candles → would trigger the OLD non-zero computation
+        candles_5m = [
+            {"open": 100.0 + i * 0.1, "high": 101.0, "low": 99.0,
+             "close": 100.5 + i * 0.1, "volume": 1000.0 + i * 10}
+            for i in range(20)
+        ]
+        channels = self.fb.build(candles, {}, candles_5m=candles_5m)
+
+        T = len(channels[0])
+        zero_arr = [0.0] * T
+        assert channels[17] == zero_arr, "ch17 (fast_rsi) must emit zeros — masked"
+        assert channels[18] == zero_arr, "ch18 (velocity) must emit zeros — masked"
+        assert channels[19] == zero_arr, "ch19 (vol_z) must emit zeros — masked"
+
 
 # ── CoinbaseCNNAgent tests ─────────────────────────────────────────────────────
 
