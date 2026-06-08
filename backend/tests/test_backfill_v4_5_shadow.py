@@ -90,6 +90,17 @@ class TestBackfillTool:
     """Backfill tool selects + writes correctly."""
 
     def _make_db(self, tmp_path):
+        # Timestamps anchored to datetime.now() so the days=7 window check
+        # stays valid as wall-clock time advances. Original hardcoded
+        # "2026-05-23T20:00:00" aged out on 2026-06-07 (15 days later) —
+        # all in-window rows fell outside the window and the four
+        # TestBackfillTool tests started failing.
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        in_window_iso  = (now - timedelta(hours=1)).isoformat()
+        out_window_iso = (now - timedelta(days=8)).isoformat()
+
         db = str(tmp_path / "test_coinbase.db")
         conn = sqlite3.connect(db)
         conn.execute(
@@ -106,17 +117,17 @@ class TestBackfillTool:
         # Row 1: NULL, in window
         conn.execute(
             "INSERT INTO cnn_scans VALUES (1, 'BTC-USD', ?, NULL, NULL, NULL)",
-            ("2026-05-23T20:00:00+00:00",),
+            (in_window_iso,),
         )
         # Row 2: already populated, in window — should be skipped
         conn.execute(
             "INSERT INTO cnn_scans VALUES (2, 'ETH-USD', ?, 0.1, 0.2, 0.7)",
-            ("2026-05-23T20:00:00+00:00",),
+            (in_window_iso,),
         )
         # Row 3: NULL, OUTSIDE window (8 days ago) — should be skipped
         conn.execute(
             "INSERT INTO cnn_scans VALUES (3, 'SOL-USD', ?, NULL, NULL, NULL)",
-            ("2026-05-15T20:00:00+00:00",),
+            (out_window_iso,),
         )
         conn.commit()
         conn.close()

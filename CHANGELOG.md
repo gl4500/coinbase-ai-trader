@@ -7,6 +7,36 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.71w — 2026-06-07 — Tier A: skip masked-channel builders (ch17/18/19)
+
+Pure compute optimization in `FeatureBuilder.build` — emit zero arrays
+directly for channels 17, 18, 19 instead of computing fast_rsi / velocity /
+volume z-score values that downstream masking would zero anyway.
+
+**Files:**
+- `backend/agents/cnn_agent.py` — replaced 33-line ch17-19 builder block
+  with 11-line direct-zero emission. The `candles_5m` parameter remains in
+  the signature for backward compatibility but is no longer consumed.
+- `backend/tests/test_cnn_agent.py` — added
+  `test_ch17_18_19_emit_zeros_even_with_5m_data`. Pre-Tier A this test
+  fails (ch17 returns 0.5 broadcast from `_rsi(c5[-14:])/100.0`); post-Tier
+  A it passes.
+- `CLAUDE.md` invariant #11 — amended with the Tier A note.
+
+**Mathematical justification:** the inference path calls
+`_mask_training_constant_channels(channels)` which zeros indexes in
+`_TRAINING_CONSTANT_CHANNELS = {17, 18, 19}`. So the builder values were
+always overwritten with zeros downstream. Skipping computation is bit-exact
+equivalent.
+
+**Provenance:** ablation work in PR #16
+(`docs/v3_per_channel_pruned_ablation.html` + `docs/proposal-v3-feature-pruning.md`)
+proved variant (iii) (drop-masked) is provably lossless via multi-seed
+multi-fold validation (25 zero deltas, max prediction diff = 0.0).
+
+**No retrain required.** The named feature list stays at 350; existing
+`xgb_model.json` loads unchanged. Live 8001 backend behavior identical.
+
 ### Session — 2026-05-25 — Strategy-discovery Phase 4: scorecard + deployment selection
 
 Implemented Phase 4 of the strategy-discovery rebuild per spec

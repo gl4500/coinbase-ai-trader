@@ -1348,39 +1348,17 @@ class FeatureBuilder:
             _, dist = _vwap(highs[:i], lows[:i], closes[:i], volumes[:i], vwap_p)
             vwap_ch[i - 1] = dist
 
-        # ── Ch 17-19: 5-minute fast channels ─────────────────────────────────
-        # Broadcast current fast-timeframe state across all hourly timesteps.
-        # CNN learns these as "context" channels representing right-now momentum.
-        c5m = candles_5m or []
-        if len(c5m) >= 14:
-            c5    = [c["close"]  for c in c5m]
-            v5    = [c["volume"] for c in c5m]
-
-            # Ch 17: Fast RSI from last 12 × 5-min bars (= 1 hour)
-            fast_rsi_val = _rsi(c5[-14:]) / 100.0
-
-            # Ch 18: Price velocity — % change per bar over last 12 bars (1 hour)
-            n_vel   = min(12, len(c5) - 1)
-            p_start = c5[-(n_vel + 1)]
-            p_end   = c5[-1]
-            vel     = (p_end - p_start) / max(p_start, 1e-9) / max(n_vel, 1)
-            # Normalise: 0.5% per 5-min bar = extreme → clip to [-1,1]
-            vel_norm = max(-1.0, min(1.0, vel / 0.005))
-
-            # Ch 19: Volume z-score — spike vs. rolling 60-bar mean
-            v5_win  = v5[-60:] if len(v5) >= 60 else v5
-            v_mean  = sum(v5_win) / len(v5_win)
-            v_std   = math.sqrt(sum((x - v_mean) ** 2 for x in v5_win) / len(v5_win))
-            v_z     = (v5[-1] - v_mean) / max(v_std, 1e-9)
-            vol_z_norm = max(-1.0, min(1.0, v_z / 3.0))   # 3 σ = 1.0
-        else:
-            fast_rsi_val = 0.5
-            vel_norm     = 0.0
-            vol_z_norm   = 0.0
-
-        fast_rsi_ch = [fast_rsi_val] * len(closes)
-        vel_ch      = [vel_norm]     * len(closes)
-        vol_z_ch    = [vol_z_norm]   * len(closes)
+        # ── Ch 17-19: 5-minute fast channels — SKIPPED (Tier A, Session 58.71w)
+        # _TRAINING_CONSTANT_CHANNELS = {17, 18, 19} masks these channels to
+        # zero before the model forward pass (per invariant #11), so the
+        # builder values were always overwritten with zeros downstream.
+        # Skipping the computation here is mathematically equivalent and
+        # avoids the wasted work each scan. The 5m candle data
+        # (candles_5m) is still accepted in the signature for backward
+        # compatibility, but is no longer consumed by the build path.
+        fast_rsi_ch = [0.0] * len(closes)
+        vel_ch      = [0.0] * len(closes)
+        vol_z_ch    = [0.0] * len(closes)
 
         # ── Ch 20: Funding rate ───────────────────────────────────────────────
         # Positive = longs pay shorts (bullish crowding); normalised to [-1,1]
