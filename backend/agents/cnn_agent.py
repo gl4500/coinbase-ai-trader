@@ -2183,11 +2183,24 @@ class CoinbaseCNNAgent:
                         f"balance=${self.book.balance:.2f}"
                     )
                 else:
-                    signal["execution"] = {"success": False, "reason": "Insufficient balance"}
-                    logger.warning(
-                        f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
-                        f"too low for kelly_frac={frac:.2f}"
-                    )
+                    # Task #73: _CNNBook.buy returns (0.0, 0.0) for BOTH
+                    # tier-suspended (already INFO-logged inside buy()) and
+                    # legitimate low-balance. Distinguish them so the caller
+                    # WARN only fires for the real low-balance case; a tier
+                    # suspension is operationally normal and shouldn't look
+                    # like a balance bug.
+                    status_row = await database.get_product_status(pid)
+                    is_suspended = bool(status_row and status_row.get("status") == "suspended")
+                    if is_suspended:
+                        signal["execution"] = {"success": False, "reason": "Tier suspended"}
+                        # _CNNBook.buy already INFO-logged the suspension —
+                        # caller WARN would be duplicate + mislabeled.
+                    else:
+                        signal["execution"] = {"success": False, "reason": "Insufficient balance"}
+                        logger.warning(
+                            f"{_backend_label()} BOOK BUY skipped {pid}: balance=${self.book.balance:.2f} "
+                            f"too low for kelly_frac={frac:.2f}"
+                        )
             elif side == "SELL" and self.book.has_position(pid):
                 pnl = await self.book.sell(pid, price, trigger="SCAN")
                 self.signals_executed += 1
