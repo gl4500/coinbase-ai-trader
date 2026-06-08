@@ -160,14 +160,16 @@ def best_split(
         return None
 
     f = best_idx // (S * T_)
-    s = (best_idx // T_) % S
     t = best_idx % T_
     chosen_thr_val = float(thresholds_all[f, t].item())
     chosen_col = features[:, f]
-    chosen_mask = (chosen_col <= chosen_thr_val) if s == 0 else (chosen_col > chosen_thr_val)
+    # left_mask is structural: always (col <= threshold). The winning side info
+    # is carried by `score` (cum_pnl of the better side). Negating left_mask on
+    # right-side winners would swap left/right children at every right-winning
+    # split, changing tree structure and downstream rule_path_summary keys.
     return SplitResult(
         feature=int(f),
         threshold=chosen_thr_val,
-        left_mask=chosen_mask,
+        left_mask=(chosen_col <= chosen_thr_val),
         score=best_score,
     )

@@ -112,7 +112,12 @@ def test_batched_best_split_score_matches_reference_implementation():
 
 
 def test_batched_best_split_handles_right_side_winner():
-    """A feature where positive labels sit on col>threshold side yields a valid split."""
+    """When the right side scores higher, left_mask must STILL be (col <= threshold).
+
+    The mask is structural (labels topology of the split, not the winning side).
+    Negating it on right-side winners would swap left/right children in the tree
+    fitter, changing tree structure for the same (feature, threshold) pair.
+    """
     n, f = 200, 3
     features = torch.zeros(n, f, dtype=torch.float64)
     features[:, 0] = torch.linspace(-1.0, 1.0, n, dtype=torch.float64)
@@ -122,7 +127,13 @@ def test_batched_best_split_handles_right_side_winner():
     out = best_split(features, indices, labels, next_eligible, n_thresholds=32)
     assert out is not None
     assert out.feature == 0
-    assert 0 < int(out.left_mask.sum().item()) < n
+    # Structural contract: left_mask is always col <= threshold
+    expected_left_mask = features[:, out.feature] <= out.threshold
+    assert torch.equal(out.left_mask, expected_left_mask), (
+        f"left_mask must be (col <= threshold) always; "
+        f"got left_count={int(out.left_mask.sum().item())} "
+        f"vs expected_left_count={int(expected_left_mask.sum().item())}"
+    )
 
 
 def test_batched_best_split_returns_none_for_zero_labels():
