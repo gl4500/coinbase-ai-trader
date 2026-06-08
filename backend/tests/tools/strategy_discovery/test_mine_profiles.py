@@ -9,6 +9,7 @@ import torch
 
 from tools.strategy_discovery.mine_profiles import (
     _assign_leaves,
+    _score_leaves_batched,
     apply_deflation,
     bootstrap_ci,
     leaf_metrics,
@@ -16,6 +17,7 @@ from tools.strategy_discovery.mine_profiles import (
     long_shot_band,
     pick_best_hyperparams,
 )
+from tools.strategy_discovery.profit_split import build_next_eligible, walk_and_sum
 from tools.strategy_discovery.profit_tree import TreeNode, collect_leaves
 
 
@@ -170,3 +172,32 @@ def test_assign_leaves_handles_empty_features():
     root, _ = _make_test_tree()
     rows = torch.zeros(0, 2, dtype=torch.float64)
     assert _assign_leaves(root, rows) == []
+
+
+def test_score_leaves_batched_matches_per_leaf_walk_and_sum():
+    n = 200
+    g = torch.Generator().manual_seed(11)
+    labels = torch.randn(n, generator=g, dtype=torch.float64) * 0.05
+    next_eligible = build_next_eligible(n, horizon_bars=4)
+    leaf_rows = [
+        [1, 5, 10, 25, 40],
+        [],
+        [3, 17, 19, 50, 100, 150],
+        [99, 101],
+    ]
+    out = _score_leaves_batched(leaf_rows, next_eligible, labels, device=torch.device("cpu"))
+    for i, rows in enumerate(leaf_rows):
+        if not rows:
+            assert out[i] == 0.0
+            continue
+        sub = torch.tensor(rows, dtype=torch.int64).unsqueeze(0)
+        ref = float(walk_and_sum(sub, next_eligible, labels)[0].item())
+        assert abs(out[i] - ref) < 1e-12
+
+
+def test_score_leaves_batched_all_empty_returns_zeros():
+    n = 50
+    labels = torch.zeros(n, dtype=torch.float64)
+    next_eligible = build_next_eligible(n, horizon_bars=2)
+    out = _score_leaves_batched([[], [], []], next_eligible, labels, device=torch.device("cpu"))
+    assert out == [0.0, 0.0, 0.0]

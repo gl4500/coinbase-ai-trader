@@ -255,6 +255,32 @@ def _assign_leaves(root: TreeNode, features_subset: torch.Tensor) -> List[int]:
     return [leaf_map[id(node)] for node in cursor]
 
 
+def _score_leaves_batched(
+    leaf_test_rows: List[List[int]],
+    next_eligible: torch.Tensor,
+    labels: torch.Tensor,
+    device: torch.device,
+) -> List[float]:
+    """One walk_and_sum call covering all non-empty leaves.
+
+    Returns a list of cumulative PnL per leaf (0.0 for empty leaves), preserving
+    leaf_id ordering. Identical to summing per-leaf walk_and_sum(B=1) results.
+    """
+    nonempty = [(i, rows) for i, rows in enumerate(leaf_test_rows) if rows]
+    out = [0.0] * len(leaf_test_rows)
+    if not nonempty:
+        return out
+    max_k = max(len(rows) for _, rows in nonempty)
+    B = len(nonempty)
+    sub = torch.full((B, max_k), -1, dtype=torch.int64, device=device)
+    for b, (_, rows) in enumerate(nonempty):
+        sub[b, :len(rows)] = torch.tensor(rows, dtype=torch.int64, device=device)
+    pnls = walk_and_sum(sub, next_eligible, labels).cpu().tolist()
+    for b, (leaf_id, _) in enumerate(nonempty):
+        out[leaf_id] = float(pnls[b])
+    return out
+
+
 def mine_profiles_for_pid_horizon(
     pid: str,
     horizon: int,
@@ -319,13 +345,8 @@ def mine_profiles_for_pid_horizon(
                     leaf_test_rows: List[List[int]] = [[] for _ in range(n_leaves)]
                     for pos, leaf_id in enumerate(assignments):
                         leaf_test_rows[leaf_id].append(int(inner_test[pos]))
-                    cum = 0.0
-                    for leaf_test in leaf_test_rows:
-                        if not leaf_test:
-                            continue
-                        sub = torch.tensor(leaf_test, dtype=torch.int64, device=dev).unsqueeze(0)
-                        cum += float(walk_and_sum(sub, next_eligible, labels)[0].item())
-                    fold_profits.append(cum)
+                    pnls = _score_leaves_batched(leaf_test_rows, next_eligible, labels, dev)
+                    fold_profits.append(float(sum(pnls)))
                 inner_scores[(depth, min_leaf)].append(float(np.mean(fold_profits)))
         inner_score_mean = {k: float(np.mean(v)) for k, v in inner_scores.items()}
         chosen_depth, chosen_min_leaf, raw_max, inner_cv_se = pick_best_hyperparams(inner_score_mean)
