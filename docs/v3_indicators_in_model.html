@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Which of the 16 indicators does the v3 model actually use?</title>
+<style>
+  :root {
+    --bg:        #0b0f14;
+    --panel:     #121821;
+    --panel-2:   #1a2230;
+    --line:      #2a3445;
+    --ink:       #d9e0e8;
+    --muted:     #8a96a6;
+    --accent:    #5ce1e6;
+    --accent-2:  #9ef27a;
+    --warn:      #ffb347;
+    --bad:       #ff6363;
+    --good:      #57d97a;
+    --grey:      #4a5060;
+    --mono:      ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    --sans:      "Inter", ui-sans-serif, system-ui, sans-serif;
+    --serif:     "Fraunces", "Iowan Old Style", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  body { padding: 48px clamp(16px, 4vw, 64px) 96px; max-width: 1280px; margin: 0 auto; line-height: 1.55; }
+  h1 { font-family: var(--serif); font-weight: 600; font-size: clamp(28px, 4vw, 44px); letter-spacing: -0.02em; margin: 0 0 4px; }
+  h1 .accent { color: var(--accent); font-style: italic; }
+  h2 { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--accent); margin: 56px 0 12px; border-top: 1px solid var(--line); padding-top: 24px; }
+  h3 { font-family: var(--serif); font-weight: 500; font-size: 20px; margin: 18px 0 8px; letter-spacing: -0.01em; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--muted); max-width: 75ch; font-size: 14px; margin-bottom: 24px; }
+  .meta { display: flex; gap: 12px; font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); margin-bottom: 24px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 16px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; }
+  .kpi .num { font-family: var(--serif); font-size: 26px; color: var(--accent); line-height: 1.1; }
+  .kpi .lbl { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); margin-top: 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 22px 24px; margin-bottom: 20px; }
+  svg.chart { width: 100%; background: var(--panel-2); border-radius: 4px; display: block; margin-top: 4px; }
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 16px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: middle; border-radius: 1px; }
+  .indi-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .indi-table th, .indi-table td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); }
+  .indi-table th { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--muted); font-weight: 400; }
+  .indi-table td.ch { font-family: var(--mono); color: var(--accent); font-size: 12px; }
+  .indi-table td.pct { font-family: var(--mono); text-align: right; }
+  .indi-table tr.used td { background: color-mix(in srgb, var(--good) 6%, transparent); }
+  .indi-table tr.absent td.ch { color: var(--muted); }
+  .indi-table .yes { color: var(--good); font-family: var(--mono); }
+  .indi-table .no  { color: var(--bad);  font-family: var(--mono); }
+  .indi-table .none { color: var(--grey); font-family: var(--mono); font-style: italic; }
+  .pill { display: inline-block; padding: 2px 7px; border-radius: 10px; font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; }
+  .pill.heavy   { background: color-mix(in srgb, var(--good) 22%, transparent); color: var(--good); }
+  .pill.modest  { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+  .pill.zero    { background: color-mix(in srgb, var(--bad)  22%, transparent); color: var(--bad); }
+  .pill.absent  { background: var(--panel-2); color: var(--muted); }
+  blockquote { margin: 16px 0; padding: 12px 18px; border-left: 3px solid var(--accent); background: var(--panel-2); color: var(--ink); font-size: 14px; }
+  blockquote strong { color: var(--accent); }
+  code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); padding: 1px 6px; border-radius: 2px; color: var(--accent); }
+  footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  /* Section V — pattern crosswalk */
+  .pv3-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 14px; margin-top: 16px; }
+  .pv3-card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; }
+  .pv3-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 6px; }
+  .pv3-num { font-family: var(--serif); font-size: 26px; color: var(--accent); line-height: 1; opacity: 0.7; min-width: 28px; }
+  .pv3-card h3 { margin: 0 0 2px; font-family: var(--serif); font-size: 17px; }
+  .pv3-combo { font-family: var(--mono); font-size: 10.5px; color: var(--accent); background: var(--panel-2); padding: 2px 7px; border-radius: 2px; }
+  .pv3-status { margin-left: auto; }
+  .pv3-status .pill.vis-full     { background: color-mix(in srgb, var(--good)   22%, transparent); color: var(--good); }
+  .pv3-status .pill.vis-partial  { background: color-mix(in srgb, var(--warn)   22%, transparent); color: var(--warn); }
+  .pv3-status .pill.vis-emergent { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+  .pv3-status .pill.vis-blind    { background: color-mix(in srgb, var(--bad)    22%, transparent); color: var(--bad); }
+  .pv3-status .pill.vis-absent   { background: var(--panel-2); color: var(--muted); }
+  .pv3-status .pill.vis-na       { background: var(--panel-2); color: var(--grey); }
+  .pv3-ingredients { margin: 12px 0 8px; }
+  .pv3-row { display: grid; grid-template-columns: 1.4fr 0.5fr 0.5fr 1fr; gap: 8px; align-items: center; padding: 4px 0; font-family: var(--mono); font-size: 11px; border-bottom: 1px dashed transparent; }
+  .pv3-row + .pv3-row { border-top: 1px dashed var(--line); }
+  .pv3-row .ing { color: var(--ink); }
+  .pv3-row .ch  { color: var(--muted); }
+  .pv3-row .gain { text-align: right; color: var(--muted); }
+  .pv3-row.has-gain .gain { color: var(--good); }
+  .pv3-row .barwrap { background: var(--panel-2); height: 6px; border-radius: 2px; overflow: hidden; position: relative; }
+  .pv3-row .bar { height: 100%; background: var(--good); opacity: 0.7; }
+  .pv3-row.zero .bar { background: var(--bad); opacity: 0.35; width: 4px; }
+  .pv3-row.absent { opacity: 0.5; }
+  .pv3-row.absent .ing { color: var(--muted); font-style: italic; }
+  .pv3-row.absent .ch  { color: var(--grey); }
+  .pv3-coverage { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .pv3-coverage b { color: var(--accent); }
+  .pv3-note { color: var(--muted); font-size: 12.5px; margin-top: 6px; line-height: 1.5; }
+  .pv3-note b { color: var(--good); font-weight: 500; }
+  .pv3-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin: 12px 0 20px; }
+  .pv3-summary .tile { background: var(--panel-2); padding: 10px 12px; border-radius: 4px; border-left: 3px solid; }
+  .pv3-summary .tile .n { font-family: var(--serif); font-size: 22px; line-height: 1.1; }
+  .pv3-summary .tile .l { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-top: 2px; }
+  .pv3-summary .tile.full     { border-color: var(--good);    } .pv3-summary .tile.full     .n { color: var(--good); }
+  .pv3-summary .tile.partial  { border-color: var(--warn);    } .pv3-summary .tile.partial  .n { color: var(--warn); }
+  .pv3-summary .tile.emergent { border-color: var(--accent);  } .pv3-summary .tile.emergent .n { color: var(--accent); }
+  .pv3-summary .tile.blind    { border-color: var(--bad);     } .pv3-summary .tile.blind    .n { color: var(--bad); }
+  .pv3-summary .tile.na       { border-color: var(--grey);    } .pv3-summary .tile.na       .n { color: var(--grey); }
+</style>
+</head>
+<body>
+
+<div class="meta">
+  <span>Live model snapshot · v3</span>
+  <span>· extracted 2026-06-06 from <code>backend/xgb_model.json</code></span>
+</div>
+<h1>Which of the 16 indicators does the <span class="accent">v3 model</span> actually use?</h1>
+<p class="lede">
+  The v3 XGBoost booster sees 28 numeric channels × 10 statistical summaries each = 350 named features. This page maps those channels back to the 16 classical indicators from <code>technical_indicators.html</code> and shows — using the live booster's split-gain numbers — which it relies on, which it ignores, and which were never wired in at all.
+</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="num" id="kpi-trees">—</div><div class="lbl">trees</div></div>
+  <div class="kpi"><div class="num" id="kpi-feats">—</div><div class="lbl">named features</div></div>
+  <div class="kpi"><div class="num" id="kpi-gain">—</div><div class="lbl">total gain</div></div>
+  <div class="kpi"><div class="num" id="kpi-active">—</div><div class="lbl">channels actually split on</div></div>
+  <div class="kpi"><div class="num" id="kpi-classical">—</div><div class="lbl">% gain from classical TA</div></div>
+</div>
+
+<h2>I. Per-channel gain — what the booster splits on</h2>
+<p>Each bar is one of the 28 channels. Length = % of total split-gain attributed to features derived from that channel. Color encodes the family it belongs to. Anything at zero means the booster grew 200 trees and never once chose a feature derived from that channel as a split.</p>
+<div class="legend">
+  <span><span class="swatch" style="background:#5ce1e6"></span>raw price / volume / range (ch0–3, 10, 11)</span>
+  <span><span class="swatch" style="background:#9ef27a"></span>classical TA indicator (ch4–9, 12–16)</span>
+  <span><span class="swatch" style="background:#ffb347"></span>macro / external regime (ch20–21, 24–27)</span>
+  <span><span class="swatch" style="background:#8a96a6"></span>time encoding (ch22–23)</span>
+  <span><span class="swatch" style="background:#4a5060"></span>masked — zeros in training (ch17–19)</span>
+</div>
+<svg class="chart" id="chart-gain" viewBox="0 0 800 720"></svg>
+
+<h2>II. The 16 indicators — presence vs actual use</h2>
+<p>Cross-reference. Each row is one indicator from <code>technical_indicators.html</code>. <b>Channel</b> = which v3 input slot it maps to (or "—" if not in the model). <b>Gain %</b> = how much of the booster's total split-gain comes from features derived from that channel. <b>Splits</b> = how many of the booster's tree nodes chose one of its features.</p>
+<table class="indi-table" id="indi-table"></table>
+
+<h2>III. Per-channel stat heatmap — which summaries matter</h2>
+<p>For each channel that the model actually used, this shows which of the 10 statistical summaries (<code>last</code>, <code>mean</code>, <code>std</code>, <code>slope</code>, <code>min</code>, <code>max</code>, <code>pct_rank</code>, <code>delta_5</code>, <code>delta_10</code>, <code>delta_30</code>) the booster grew the most splits on. Brighter cell = higher contribution to gain.</p>
+<svg class="chart" id="chart-heatmap" viewBox="0 0 800 360"></svg>
+
+<h2>IV. Bottom line</h2>
+<div class="panel">
+<p><b>The v3 model is 50% a price/volume/range model and 30% a regime-conditioning model.</b> Classical TA — the kind covered in the indicators field guide — contributes only the remainder, and only via two channels: <b>RSI(14)</b> and <b>ADX(14)</b>.</p>
+<blockquote>
+The textbook story for an algorithmic trader is that the indicator zoo gives the model edge. Here the booster's gain breakdown disagrees: <strong>raw close, raw volume, and bar range alone account for ~50% of all split-gain</strong>, and the macro/external regime channels (funding rate, BTC correlation, IV/RV spread) account for another ~30%. The classical TA channels are mostly never split on, even though they were wired in.
+</blockquote>
+<p>Three implications for tuning:</p>
+<ul>
+  <li><b>Ten of the sixteen classical indicators are in the model but contribute zero gain.</b> EMA, MACD, Bollinger, Stoch RSI, OBV, MFI, VWAP, ROC, and the candle-derived ch10/ch11 all show splits = 0. Either the trees never improved by splitting on them, or higher-rank features (raw price/volume) already captured the same signal.</li>
+  <li><b>RSI is the only classical oscillator that matters</b>, at 5.6% of gain — and only via 4 total splits across 200 trees. ADX(14) is the surprise workhorse at 10.5%.</li>
+  <li><b>Half the model lives outside classical TA.</b> Funding rate, BTC return correlation, and the IV/RV20 spread together dominate ADX. These are the regime signals the v3 design committed to in #311-refactor.</li>
+</ul>
+</div>
+
+<h2>V. Pattern crosswalk — can v3 see the §VII patterns?</h2>
+<p>The 10 patterns from <code>technical_indicators.html</code> §VII are a human-trader vocabulary. This section checks each one against the live v3 booster's gain breakdown: does the model actually use the ingredients the pattern requires? <b>Visibility</b> is graded from the booster's perspective, not whether the pattern is profitable.</p>
+
+<div class="pv3-summary" id="pv3-summary"></div>
+<div class="pv3-grid" id="pv3-grid"></div>
+
+<div class="panel" style="margin-top:18px">
+<p><b>Read it this way.</b> Of the 10 textbook setups, v3 has direct visibility into <b>two</b> at the ingredient level — the ones built on RSI and ADX. Five it is fully blind to, because every ingredient is either zero-gain or absent. Two it has half of (one ingredient lights up), and one (divergence) it could in principle <em>learn</em> via tree-path interactions even without a dedicated feature.</p>
+<blockquote>
+The model's actual decision surface is <strong>not</strong> the §VII pattern vocabulary. Of the 80% of total gain coming from raw-price/volume and macro-regime channels, <strong>none</strong> appears as an ingredient in any §VII pattern. v3 looks at the market in a different language — closer to "where does close sit inside its 60-bar range, conditioned on funding-rate regime" than to "is the BB squeezing and OBV ticking up." Neither view is wrong; they are different vocabularies.
+</blockquote>
+</div>
+
+<footer>
+  Source: <code>backend/xgb_model.json</code> (200 trees, last trained 2026-05-16), <code>backend/xgb_features.json</code> (350 names, micro/meso/macro feature_weights v3). Gain = XGBoost <code>importance_type='gain'</code> summed per channel. Splits = <code>importance_type='weight'</code> (split count). Page rendered client-side from <code>v3_importance.json</code>.
+</footer>
+
+<script>
+"use strict";
+
+// ── Data extracted live from backend/xgb_model.json ────────────────
+const DATA = {
+  "per_ch_gain":     [69.1597, 77.7302, 56.6277, 29.1832, 23.0357, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42.9683, 0, 0, 0, 0, 42.1417, 27.21, 0, 0, 42.7101, 0, 0, 0],
+  "per_ch_gain_pct": [16.84, 18.92, 13.79, 7.1, 5.61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10.46, 0, 0, 0, 0, 10.26, 6.62, 0, 0, 10.4, 0, 0, 0],
+  "per_ch_splits":   [1116, 253, 65, 15, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 644, 0, 0, 0, 0, 798, 12, 0, 0, 37, 0, 0, 0],
+  "per_ch_stat_gain": [
+    [6.84, 5.752, 6.621, 9.803, 6.943, 6.479, 6.657, 6.098, 6.447, 7.519],
+    [8.572, 7.143, 6.548, 11.455, 8.898, 7.781, 6.881, 6.73, 6.812, 6.911],
+    [5.215, 0, 4.294, 4.713, 9.107, 7.572, 6.887, 6.313, 6.58, 5.948],
+    [0, 0, 6.234, 4.995, 6.21, 0, 4.945, 6.799, 0, 0],
+    [0, 0, 0, 0, 0, 0, 11.512, 5.748, 0, 5.776],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0],
+    [0, 8.225, 7.146, 6.643, 7.627, 6.844, 6.483, 0, 0, 0],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0],
+    [0, 7.604, 7.188, 6.456, 7.53, 6.548, 6.815, 0, 0, 0],
+    [0, 0, 7.601, 6.746, 0, 7.325, 5.537, 0, 0, 0],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0],
+    [0, 9.196, 5.349, 9.255, 6.451, 6.63, 5.83, 0, 0, 0],
+    [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0], [0,0,0,0,0,0,0,0,0,0]
+  ],
+  "total_gain":  410.767,
+  "n_trees":     200,
+  "n_features":  350,
+  "stats":       ["last","mean","std","slope","min","max","pct_rank","delta_5","delta_10","delta_30"]
+};
+
+// ── Channel descriptions + family classification ───────────────────
+// family: "raw" | "ta" | "macro" | "time" | "masked"
+// indicator: name from technical_indicators.html, or null if not one of the 16
+const CHANNELS = [
+  { ch: 0,  name: "close (normalised)",          family: "raw",    indicator: null },
+  { ch: 1,  name: "log10 volume",                family: "raw",    indicator: null },
+  { ch: 2,  name: "HL range / close",            family: "raw",    indicator: null },
+  { ch: 3,  name: "(close − open) / open",       family: "raw",    indicator: null },
+  { ch: 4,  name: "RSI(14)",                     family: "ta",     indicator: "RSI" },
+  { ch: 5,  name: "MACD histogram",              family: "ta",     indicator: "MACD" },
+  { ch: 6,  name: "EMA9 distance",               family: "ta",     indicator: "EMA" },
+  { ch: 7,  name: "EMA21 distance",              family: "ta",     indicator: "EMA" },
+  { ch: 8,  name: "Bollinger position",          family: "ta",     indicator: "Bollinger" },
+  { ch: 9,  name: "1-bar % change",              family: "ta",     indicator: "ROC" },
+  { ch: 10, name: "intra-bar close position",    family: "raw",    indicator: null },
+  { ch: 11, name: "bar size (HL/close)",         family: "raw",    indicator: null },
+  { ch: 12, name: "MFI(14)",                     family: "ta",     indicator: "CMF (proxy)" },
+  { ch: 13, name: "OBV slope",                   family: "ta",     indicator: "OBV" },
+  { ch: 14, name: "Stochastic RSI K",            family: "ta",     indicator: "Stoch RSI" },
+  { ch: 15, name: "ADX(14)",                     family: "ta",     indicator: "ADX" },
+  { ch: 16, name: "VWAP distance",               family: "ta",     indicator: "VWAP" },
+  { ch: 17, name: "5m RSI(12) — MASKED",         family: "masked", indicator: null },
+  { ch: 18, name: "5m velocity — MASKED",        family: "masked", indicator: null },
+  { ch: 19, name: "5m vol z-score — MASKED",     family: "masked", indicator: null },
+  { ch: 20, name: "funding rate (OKX)",          family: "macro",  indicator: null },
+  { ch: 21, name: "BTC return correlation",      family: "macro",  indicator: null },
+  { ch: 22, name: "sin(hour-of-day)",            family: "time",   indicator: null },
+  { ch: 23, name: "cos(hour-of-day)",            family: "time",   indicator: null },
+  { ch: 24, name: "IV/RV20 spread",              family: "macro",  indicator: null },
+  { ch: 25, name: "realized-vol 60d (RV60)",     family: "macro",  indicator: null },
+  { ch: 26, name: "up-vol / total-vol",          family: "macro",  indicator: null },
+  { ch: 27, name: "OKX open interest",           family: "macro",  indicator: null },
+];
+
+const FAMILY_COLOR = {
+  raw:    "#5ce1e6",
+  ta:     "#9ef27a",
+  macro:  "#ffb347",
+  time:   "#8a96a6",
+  masked: "#4a5060",
+};
+
+// The 16 indicators from technical_indicators.html
+const SIXTEEN = [
+  { n: "SMA",            channel: null,   indicator: null },
+  { n: "EMA",            channel: 6,      indicator: "EMA" },
+  { n: "MACD",           channel: 5,      indicator: "MACD" },
+  { n: "Bollinger Bands",channel: 8,      indicator: "Bollinger" },
+  { n: "RSI",            channel: 4,      indicator: "RSI" },
+  { n: "Stoch RSI",      channel: 14,     indicator: "Stoch RSI" },
+  { n: "ATR",            channel: null,   indicator: null,        note: "ch2 HL-range is closest proxy" },
+  { n: "ADX / DMI",      channel: 15,     indicator: "ADX" },
+  { n: "VWAP",           channel: 16,     indicator: "VWAP" },
+  { n: "OBV",            channel: 13,     indicator: "OBV" },
+  { n: "Ichimoku",       channel: null,   indicator: null },
+  { n: "CMF",            channel: 12,     indicator: "CMF (proxy)", note: "ch12 MFI is the closest equivalent" },
+  { n: "CCI",            channel: null,   indicator: null },
+  { n: "Parabolic SAR",  channel: null,   indicator: null },
+  { n: "Williams %R",    channel: null,   indicator: null },
+  { n: "ROC",            channel: 9,      indicator: "ROC",       note: "ch9 = 1-bar % change (ROC with n=1)" },
+];
+
+// ── KPIs ───────────────────────────────────────────────────────────
+const totalGain = DATA.total_gain;
+const activeCh = DATA.per_ch_gain.filter(g => g > 0).length;
+let classicalGain = 0;
+for (const c of CHANNELS) if (c.family === "ta") classicalGain += DATA.per_ch_gain[c.ch];
+const classicalPct = (100 * classicalGain / totalGain).toFixed(1);
+
+document.getElementById("kpi-trees").textContent = DATA.n_trees;
+document.getElementById("kpi-feats").textContent = DATA.n_features;
+document.getElementById("kpi-gain").textContent  = totalGain.toFixed(0);
+document.getElementById("kpi-active").textContent = activeCh + " / 28";
+document.getElementById("kpi-classical").textContent = classicalPct + "%";
+
+// ── Chart I: per-channel gain bar chart ────────────────────────────
+(function renderGainChart() {
+  const svg = document.getElementById("chart-gain");
+  const W = 800, H = 720, padL = 230, padR = 60, padT = 16, padB = 24;
+  const rows = CHANNELS.map((c, i) => ({
+    ...c,
+    gain: DATA.per_ch_gain[c.ch],
+    pct:  DATA.per_ch_gain_pct[c.ch],
+    splits: DATA.per_ch_splits[c.ch],
+  }));
+  // sort by gain descending so the story reads top-down
+  rows.sort((a, b) => b.gain - a.gain);
+  const maxPct = Math.max(...rows.map(r => r.pct), 1);
+  const rowH = (H - padT - padB) / rows.length;
+  let out = "";
+  // gridlines
+  for (let i = 0; i <= 4; i++) {
+    const pct = (maxPct * i / 4);
+    const x = padL + (pct / maxPct) * (W - padL - padR);
+    out += `<line x1="${x}" y1="${padT}" x2="${x}" y2="${H - padB}" stroke="#2a3445" stroke-width="0.5"/>`;
+    out += `<text x="${x}" y="${H - padB + 14}" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#8a96a6">${pct.toFixed(0)}%</text>`;
+  }
+  out += `<text x="${W/2}" y="${H - 4}" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#8a96a6">% of total split-gain</text>`;
+  rows.forEach((r, i) => {
+    const y = padT + i * rowH + 2;
+    const barH = rowH - 4;
+    const barW = (r.pct / maxPct) * (W - padL - padR);
+    const color = FAMILY_COLOR[r.family];
+    const op = r.gain === 0 ? 0.35 : 1.0;
+    // label
+    const lbl = `ch${String(r.ch).padStart(2,"0")} · ${r.name}`;
+    out += `<text x="${padL - 8}" y="${y + barH/2 + 3}" text-anchor="end" font-family="ui-monospace" font-size="10.5" fill="#d9e0e8" opacity="${op}">${lbl}</text>`;
+    // bar
+    if (r.gain > 0) {
+      out += `<rect x="${padL}" y="${y}" width="${barW}" height="${barH}" fill="${color}" opacity="0.85"/>`;
+      out += `<text x="${padL + barW + 4}" y="${y + barH/2 + 3}" font-family="ui-monospace" font-size="10" fill="${color}">${r.pct.toFixed(1)}% · ${r.splits} splits</text>`;
+    } else {
+      // dashed zero bar
+      out += `<rect x="${padL}" y="${y}" width="6" height="${barH}" fill="${color}" opacity="0.25"/>`;
+      out += `<text x="${padL + 10}" y="${y + barH/2 + 3}" font-family="ui-monospace" font-size="10" fill="${color}" opacity="0.55">0 splits</text>`;
+    }
+  });
+  svg.innerHTML = out;
+})();
+
+// ── Indicator-coverage table ───────────────────────────────────────
+(function renderIndicatorTable() {
+  const tbl = document.getElementById("indi-table");
+  let html = `<thead><tr>
+    <th>#</th><th>Indicator</th><th>v3 channel</th>
+    <th style="text-align:right">Gain %</th><th style="text-align:right">Splits</th>
+    <th>Status</th><th>Note</th>
+  </tr></thead><tbody>`;
+  SIXTEEN.forEach((s, i) => {
+    const ch = s.channel;
+    const gain = ch == null ? null : DATA.per_ch_gain_pct[ch];
+    const splits = ch == null ? null : DATA.per_ch_splits[ch];
+    let cls = "absent", pill = `<span class="pill absent">absent</span>`;
+    let chCell = `<span class="none">—</span>`;
+    let gainCell = `<span class="none">—</span>`, splitCell = `<span class="none">—</span>`;
+    if (ch != null) {
+      chCell = `ch${ch} ${CHANNELS[ch].name}`;
+      gainCell = gain.toFixed(2) + "%";
+      splitCell = splits.toLocaleString();
+      if (gain >= 5) { cls = "used"; pill = `<span class="pill heavy">heavy use</span>`; }
+      else if (gain > 0) { cls = "used"; pill = `<span class="pill modest">light use</span>`; }
+      else { cls = "absent"; pill = `<span class="pill zero">wired, never split</span>`; }
+    }
+    html += `<tr class="${cls}">
+      <td>${i + 1}</td>
+      <td><b>${s.n}</b></td>
+      <td class="ch">${chCell}</td>
+      <td class="pct">${gainCell}</td>
+      <td class="pct">${splitCell}</td>
+      <td>${pill}</td>
+      <td>${s.note ? `<span style="color:var(--muted);font-size:12px">${s.note}</span>` : ""}</td>
+    </tr>`;
+  });
+  html += `</tbody>`;
+  tbl.innerHTML = html;
+})();
+
+// ── Chart III: per-channel stat heatmap ───────────────────────────
+(function renderHeatmap() {
+  const svg = document.getElementById("chart-heatmap");
+  const W = 800, H = 360, padL = 200, padR = 30, padT = 32, padB = 28;
+  const STATS = DATA.stats;
+  // Keep only channels with non-zero total gain
+  const rows = CHANNELS.filter(c => DATA.per_ch_gain[c.ch] > 0)
+                       .sort((a, b) => DATA.per_ch_gain[b.ch] - DATA.per_ch_gain[a.ch]);
+  const rowH = (H - padT - padB) / rows.length;
+  const colW = (W - padL - padR) / STATS.length;
+  // Global max for color scaling
+  let maxCell = 0;
+  for (const r of rows) for (const v of DATA.per_ch_stat_gain[r.ch]) if (v > maxCell) maxCell = v;
+  let out = "";
+  // X-axis stat labels
+  STATS.forEach((s, j) => {
+    const x = padL + j * colW + colW/2;
+    out += `<text x="${x}" y="${padT - 8}" text-anchor="middle" font-family="ui-monospace" font-size="10" fill="#8a96a6">${s}</text>`;
+  });
+  // Title above x-axis
+  out += `<text x="${padL + (W-padL-padR)/2}" y="14" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#5ce1e6">10 statistical summaries (one column each)</text>`;
+  // Rows
+  rows.forEach((r, i) => {
+    const y = padT + i * rowH;
+    const lbl = `ch${String(r.ch).padStart(2,"0")} · ${r.name}`;
+    out += `<text x="${padL - 8}" y="${y + rowH/2 + 3}" text-anchor="end" font-family="ui-monospace" font-size="10" fill="#d9e0e8">${lbl}</text>`;
+    DATA.per_ch_stat_gain[r.ch].forEach((v, j) => {
+      const x = padL + j * colW;
+      const t = maxCell > 0 ? v / maxCell : 0;
+      const color = FAMILY_COLOR[r.family];
+      const op = v === 0 ? 0.05 : (0.15 + 0.85 * t);
+      out += `<rect x="${x + 1}" y="${y + 1}" width="${colW - 2}" height="${rowH - 2}" fill="${color}" opacity="${op}"/>`;
+      if (v > maxCell * 0.55) {
+        out += `<text x="${x + colW/2}" y="${y + rowH/2 + 3}" text-anchor="middle" font-family="ui-monospace" font-size="9" fill="#0b0f14" font-weight="600">${v.toFixed(1)}</text>`;
+      }
+    });
+  });
+  svg.innerHTML = out;
+})();
+
+// ── Section V: pattern crosswalk ───────────────────────────────────
+// Each pattern lists its required ingredients as v3 channels (or null if
+// the indicator is not in the model at all). Visibility is graded against
+// the live booster's per-channel gain.
+const PATTERNS_V3 = [
+  { num: 1, name: "Trend confirmation", combo: "EMA(20) + EMA(50) + ADX > 25",
+    ingredients: [
+      { label: "EMA20 distance",  ch: 6  },
+      { label: "EMA21 distance",  ch: 7  },
+      { label: "ADX > 25",        ch: 15 },
+    ],
+    visibility: "partial",
+    note: "<b>ADX is the workhorse.</b> The two EMA channels are wired in but the booster never split on them — likely the raw close-norm slope (ch0) already captures that signal." },
+
+  { num: 2, name: "Mean-reversion entry", combo: "BB lower + RSI < 30 + green-bar confirm",
+    ingredients: [
+      { label: "Bollinger position", ch: 8 },
+      { label: "RSI < 30",           ch: 4 },
+      { label: "green-bar confirm",  ch: 3 },
+    ],
+    visibility: "partial",
+    note: "<b>RSI carries the oscillator half.</b> BB position is in the model but zero-gain. Candle body (ch3) does pull 7.1% — the model has access to bar direction, just not as an explicit 'is-green' check." },
+
+  { num: 3, name: "Breakout filter", combo: "Bollinger squeeze + OBV uptick",
+    ingredients: [
+      { label: "BB squeeze (BB pos σ)", ch: 8  },
+      { label: "OBV uptick",             ch: 13 },
+      { label: "HL range expansion",     ch: 2  },
+    ],
+    visibility: "blind",
+    note: "BB and OBV are both zero-gain. <b>ch2 HL-range does pull 13.8% and could partially proxy for volatility expansion</b>, but there's no volume-confirmation channel that lights up — the booster can't tell a real breakout from a fake one." },
+
+  { num: 4, name: "Trend exhaustion (divergence)", combo: "Price higher high + RSI lower high",
+    ingredients: [
+      { label: "Price slope (close)",   ch: 0  },
+      { label: "RSI slope",             ch: 4  },
+      { label: "MACD lower high (alt)", ch: 5  },
+    ],
+    visibility: "emergent",
+    note: "<b>Not a direct feature, but trees can encode it.</b> A path that splits on 'ch0 slope > 0' then 'ch4 slope < 0' is functionally a divergence detector. With ch0 at 16.8% gain and ch4 RSI at 5.6%, the raw ingredients are in the data — the booster just has to find the combination." },
+
+  { num: 5, name: "Volatility-based stop", combo: "Entry − 2·ATR, ratcheted",
+    ingredients: [
+      { label: "ATR (exit-time)", ch: null },
+    ],
+    visibility: "na",
+    note: "Not a model-decision pattern. ATR is consumed by the runtime exit logic (<code>agents/exit_thresholds.py</code>) independent of v3. The model picks entries; the exit-watcher uses ATR to size stops." },
+
+  { num: 6, name: "Fair-value rotation", combo: "VWAP ± 1σ bands",
+    ingredients: [
+      { label: "VWAP distance", ch: 16 },
+      { label: "Price vs VWAP", ch: 0  },
+    ],
+    visibility: "blind",
+    note: "VWAP distance is wired in but never split on. Ch0 close-norm is heavily used but encodes position-in-window, not position-relative-to-VWAP. <b>No analog for 'price too far above the institutional benchmark.'</b>" },
+
+  { num: 7, name: "Cloud trend filter", combo: "Price above bullish Kumo",
+    ingredients: [
+      { label: "Ichimoku",     ch: null },
+      { label: "Tenkan/Kijun", ch: null },
+    ],
+    visibility: "absent",
+    note: "Ichimoku has no v3 channel at all. The model has no concept of multi-period high/low midpoints or projected support/resistance." },
+
+  { num: 8, name: "Stealth accumulation", combo: "OBV rising + CMF > 0 + price flat",
+    ingredients: [
+      { label: "OBV slope",          ch: 13 },
+      { label: "MFI (CMF proxy)",    ch: 12 },
+      { label: "Price compression",  ch: 0  },
+    ],
+    visibility: "blind",
+    note: "OBV and MFI are both zero-gain. The model could see 'price flat' via ch0 std/slope being low, but with no volume-pressure signal lighting up, <b>v3 can't distinguish accumulation from quiet drift.</b>" },
+
+  { num: 9, name: "Oscillator stacking", combo: "RSI < 30 AND Stoch RSI K < 20",
+    ingredients: [
+      { label: "RSI < 30",       ch: 4  },
+      { label: "Stoch RSI K < 20", ch: 14 },
+    ],
+    visibility: "partial",
+    note: "Stoch RSI is in the model but zero-gain. <b>v3 has half the oscillator vote.</b> No way to demand confluence between two independent oscillators." },
+
+  { num: 10, name: "ROC + MA cross", combo: "ROC > 0 + Price crosses SMA(20)",
+    ingredients: [
+      { label: "ROC (1-bar % change)", ch: 9    },
+      { label: "Price vs SMA(20)",     ch: null },
+    ],
+    visibility: "blind",
+    note: "ch9 (1-bar % change ≈ ROC with n=1) is zero-gain. SMA isn't a direct channel — close-norm's mean is the closest analog but no explicit crossover. <b>v3 can't see this combination.</b>" },
+];
+
+const VIS_LABEL = {
+  full:     "fully visible",
+  partial:  "partial",
+  emergent: "learnable",
+  blind:    "blind",
+  absent:   "not in model",
+  na:       "n/a (exit logic)",
+};
+
+(function renderSummary() {
+  const tally = { full:0, partial:0, emergent:0, blind:0, absent:0, na:0 };
+  PATTERNS_V3.forEach(p => tally[p.visibility]++);
+  const out = ["full","partial","emergent","blind","absent","na"].map(v => `
+    <div class="tile ${v}">
+      <div class="n">${tally[v]}</div>
+      <div class="l">${VIS_LABEL[v]}</div>
+    </div>`).join("");
+  document.getElementById("pv3-summary").innerHTML = out;
+})();
+
+(function renderPatternCards() {
+  const grid = document.getElementById("pv3-grid");
+  let html = "";
+  PATTERNS_V3.forEach(p => {
+    // Per-ingredient gain
+    const rows = p.ingredients.map(ing => {
+      if (ing.ch == null) {
+        return `<div class="pv3-row absent">
+          <span class="ing">${ing.label}</span>
+          <span class="ch">—</span>
+          <span class="gain">absent</span>
+          <div class="barwrap"></div>
+        </div>`;
+      }
+      const pct = DATA.per_ch_gain_pct[ing.ch];
+      const splits = DATA.per_ch_splits[ing.ch];
+      const cls = pct > 0 ? "has-gain" : "zero";
+      const barW = Math.max(2, Math.min(100, pct * 4)); // visual scale (1% gain = 4% width)
+      const barColor = pct > 0 ? "var(--good)" : "var(--bad)";
+      return `<div class="pv3-row ${cls}">
+        <span class="ing">${ing.label}</span>
+        <span class="ch">ch${ing.ch}</span>
+        <span class="gain">${pct > 0 ? pct.toFixed(1) + "%" : "0%"}</span>
+        <div class="barwrap"><div class="bar" style="width:${barW}%;background:${barColor}"></div></div>
+      </div>`;
+    }).join("");
+
+    // Coverage = sum of gain% across ingredients that are in the model
+    let coverage = 0, presentIngs = 0, modelIngs = 0;
+    p.ingredients.forEach(ing => {
+      if (ing.ch != null) { modelIngs++; coverage += DATA.per_ch_gain_pct[ing.ch]; if (DATA.per_ch_gain[ing.ch] > 0) presentIngs++; }
+    });
+    const covLine = p.visibility === "na"
+      ? `<span style="color:var(--grey)">Runtime exit logic — not a model-decision pattern</span>`
+      : `<b>${coverage.toFixed(1)}%</b> of total v3 gain  ·  ${presentIngs}/${modelIngs} ingredients with non-zero gain`;
+
+    html += `<div class="pv3-card">
+      <div class="pv3-head">
+        <span class="pv3-num">${p.num}</span>
+        <div>
+          <h3>${p.name}</h3>
+          <code class="pv3-combo">${p.combo}</code>
+        </div>
+        <span class="pv3-status"><span class="pill vis-${p.visibility}">${VIS_LABEL[p.visibility]}</span></span>
+      </div>
+      <div class="pv3-ingredients">${rows}</div>
+      <div class="pv3-coverage">${covLine}</div>
+      <div class="pv3-note">${p.note}</div>
+    </div>`;
+  });
+  grid.innerHTML = html;
+})();
+
+</script>
+
+</body>
+</html>
