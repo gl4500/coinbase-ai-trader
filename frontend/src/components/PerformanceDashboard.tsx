@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import EquityCurve from './EquityCurve'
 
 // Module-level cache — survives tab switches, cleared on manual refresh.
 // #111: 30s TTL aligns with AgentsDashboard's 15s polling so closed CNN
@@ -89,8 +90,13 @@ interface Decision {
   created_at: string
 }
 
-type AgentFilter = 'ALL' | 'TECH' | 'CNN'
+type AgentFilter = 'ALL' | 'CNN'
 type TradeView   = 'ALL' | 'OPEN' | 'CLOSED'
+type TimeWindow  = 'ALL' | '1h' | '24h' | '7d'
+
+const WINDOW_HOURS: Record<TimeWindow, number | null> = {
+  ALL: null, '1h': 1, '24h': 24, '7d': 24 * 7,
+}
 
 const agentLabel = (name: string): string => (name === 'CNN' ? 'XGB' : name)
 
@@ -110,12 +116,10 @@ function fmtTime(iso: string): string {
 
 const AGENT_COLORS: Record<string, string> = {
   CNN:  'text-blue-400',
-  TECH: 'text-green-400',
 }
 
 const AGENT_BADGES: Record<string, string> = {
   CNN:  'bg-blue-900/40 text-blue-300',
-  TECH: 'bg-green-900/40 text-green-300',
 }
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
@@ -182,6 +186,9 @@ export default function PerformanceDashboard() {
   // Filter state
   const [tradeAgent,    setTradeAgent]    = useState<AgentFilter>('ALL')
   const [tradeView,     setTradeView]     = useState<TradeView>('CLOSED')
+  const [tradePid,      setTradePid]      = useState<string>('')
+  const [tradeTrigger,  setTradeTrigger]  = useState<string>('ALL')
+  const [tradeWindow,   setTradeWindow]   = useState<TimeWindow>('ALL')
   const [decisionAgent, setDecisionAgent] = useState<AgentFilter>('ALL')
 
   const load = async (force = false) => {
@@ -234,20 +241,42 @@ export default function PerformanceDashboard() {
 
   const pnlColor = (v: number) => v >= 0 ? 'text-green-400' : 'text-red-400'
 
-  // Filtered trades
+  // Derived: unique triggers across the currently-loaded trades, so the
+  // dropdown reflects whatever the backend has actually emitted (no hard-
+  // coded list to drift from WS_MODEL_DOWN / WS_TRAIL_STOP / STOP_LOSS / etc).
+  const availableTriggers = Array.from(
+    new Set(trades.map(t => t.trigger_close ?? t.trigger_open).filter(Boolean))
+  ).sort()
+
+  const windowHrs = WINDOW_HOURS[tradeWindow]
+  const windowCutoffMs = windowHrs !== null ? Date.now() - windowHrs * 3600 * 1000 : null
+  const pidQuery = tradePid.trim().toUpperCase()
+
+  // Filtered trades — TECH agent retired 2026-05-16; its historical rows
+  // are excluded from every view (no longer a selectable agent filter).
   const filteredTrades = trades.filter(t => {
+    if (t.agent === 'TECH') return false
     if (tradeAgent !== 'ALL' && t.agent !== tradeAgent) return false
     if (tradeView === 'OPEN'   && t.closed_at !== null)  return false
     if (tradeView === 'CLOSED' && t.closed_at === null)  return false
+    if (pidQuery && !t.product_id.toUpperCase().includes(pidQuery)) return false
+    if (tradeTrigger !== 'ALL' && (t.trigger_close ?? t.trigger_open) !== tradeTrigger) return false
+    if (windowCutoffMs !== null) {
+      const ts = new Date(t.closed_at ?? t.opened_at).getTime()
+      if (ts < windowCutoffMs) return false
+    }
     return true
   })
 
-  // Filtered decisions
+  const filtersActive =
+    tradePid !== '' || tradeTrigger !== 'ALL' || tradeWindow !== 'ALL'
+
+  // Filtered decisions — TECH agent retired 2026-05-16; excluded.
   const filteredDecisions = decisions.filter(d =>
-    decisionAgent === 'ALL' || d.agent === decisionAgent
+    d.agent !== 'TECH' && (decisionAgent === 'ALL' || d.agent === decisionAgent)
   )
 
-  const AGENTS: AgentFilter[] = ['ALL', 'CNN', 'TECH']
+  const AGENTS: AgentFilter[] = ['ALL', 'CNN']
 
   return (
     <div className="space-y-6">
@@ -262,6 +291,10 @@ export default function PerformanceDashboard() {
         </div>
         <button onClick={() => load(true)} className="btn-secondary text-xs py-1.5 px-3">Refresh</button>
       </div>
+
+      {/* Shadow-week equity curve (#54): 8001 v3 vs 8002 v4.5 cumulative PnL */}
+      <EquityCurve days={7} />
+
 
       {/* Top stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -347,11 +380,48 @@ export default function PerformanceDashboard() {
           </div>
         </SectionHeader>
 
+        {/* Secondary filter row: PID search, trigger dropdown, time-window */}
+        <div className="flex items-center gap-2 flex-wrap mb-3 px-1">
+          <input
+            type="text"
+            value={tradePid}
+            onChange={e => setTradePid(e.target.value)}
+            placeholder="Filter PID (e.g. BTC, ETH-USD)…"
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono text-gray-100 w-44 placeholder:text-gray-600"
+          />
+          <select
+            value={tradeTrigger}
+            onChange={e => setTradeTrigger(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs font-mono text-gray-100"
+            title="Filter by trigger (close trigger if set, else open trigger)"
+          >
+            <option value="ALL">All triggers</option>
+            {availableTriggers.map(tr => (
+              <option key={tr} value={tr}>{tr}</option>
+            ))}
+          </select>
+          <div className="flex gap-1">
+            {(['1h', '24h', '7d', 'ALL'] as TimeWindow[]).map(w => (
+              <Pill key={w} active={tradeWindow === w} onClick={() => setTradeWindow(w)}>{w}</Pill>
+            ))}
+          </div>
+          {filtersActive && (
+            <button
+              onClick={() => { setTradePid(''); setTradeTrigger('ALL'); setTradeWindow('ALL') }}
+              className="text-xs px-2 py-1 rounded border bg-transparent border-gray-700 text-gray-500 hover:text-gray-300"
+              title="Clear PID / trigger / time-window filters"
+            >
+              clear
+            </button>
+          )}
+        </div>
+
         {filteredTrades.length === 0 ? (
           <div className="text-gray-500 text-xs py-6 text-center">No trades match the current filter.</div>
         ) : (
+          <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-gray-900 z-10">
               <tr className="text-gray-400 border-b border-gray-700">
                 <th className="text-left py-1.5 pr-3">Agent</th>
                 <th className="text-left pr-3">Product</th>
@@ -362,7 +432,8 @@ export default function PerformanceDashboard() {
                 <th className="text-right pr-3">P&L %</th>
                 <th className="text-right pr-3">Hold</th>
                 <th className="text-right pr-3">Trigger</th>
-                <th className="text-right">Opened</th>
+                <th className="text-right pr-3">Opened</th>
+                <th className="text-right">Closed</th>
               </tr>
             </thead>
             <tbody>
@@ -389,11 +460,15 @@ export default function PerformanceDashboard() {
                   <td className="text-right pr-3 text-gray-400 font-mono text-xs">
                     {t.trigger_close ?? t.trigger_open}
                   </td>
-                  <td className="text-right text-gray-500">{fmtTime(t.opened_at)}</td>
+                  <td className="text-right pr-3 text-gray-500">{fmtTime(t.opened_at)}</td>
+                  <td className="text-right text-gray-500">
+                    {t.closed_at ? fmtTime(t.closed_at) : <span className="text-yellow-500/60">—</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -410,8 +485,9 @@ export default function PerformanceDashboard() {
         {filteredDecisions.length === 0 ? (
           <div className="text-gray-500 text-xs py-6 text-center">No decisions found.</div>
         ) : (
+          <div className="max-h-64 overflow-y-auto">
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-gray-900 z-10">
               <tr className="text-gray-400 border-b border-gray-700">
                 <th className="text-left py-1.5 pr-3">Agent</th>
                 <th className="text-left pr-3">Product</th>
@@ -450,6 +526,7 @@ export default function PerformanceDashboard() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

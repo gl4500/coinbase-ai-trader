@@ -4046,3 +4046,44 @@ class TestCNNBookSellLock:
         assert "BTC-USD" not in book.positions
         # Loser returns 0.0; winner returns pnl = (90-100)*1.0 = -10.0
         assert sorted(results) == [-10.0, 0.0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Task #46 — PnL-anchored trail: state migration
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCNNBookPnLMigration:
+    """_CNNBook._migrate_position_state adds peak_pnl_pct + position_dollars
+    to legacy position dicts loaded from agent_state.positions_json."""
+
+    def test_migration_computes_peak_pnl_from_peak_price_and_avg(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        legacy = {
+            "size": 1.0, "avg_price": 100.0, "peak_price": 110.0,
+            "entry_time": 1700000000.0, "trail_pct": 0.06,
+        }
+        migrated = book._migrate_position_state(legacy)
+        assert "peak_pnl_pct" in migrated
+        assert migrated["peak_pnl_pct"] == pytest.approx(0.10)  # (110-100)/100
+        assert "position_dollars" in migrated
+        assert migrated["position_dollars"] == pytest.approx(100.0)  # size * avg
+
+    def test_migration_preserves_existing_pnl_pct(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        pos = {
+            "size": 1.0, "avg_price": 100.0, "peak_price": 110.0,
+            "peak_pnl_pct": 0.15, "position_dollars": 105.0,
+        }
+        migrated = book._migrate_position_state(pos)
+        assert migrated["peak_pnl_pct"] == 0.15
+        assert migrated["position_dollars"] == 105.0
+
+    def test_migration_handles_zero_avg_price(self):
+        from agents.cnn_agent import _CNNBook
+        book = _CNNBook()
+        pos = {"size": 1.0, "avg_price": 0.0, "peak_price": 0.0}
+        migrated = book._migrate_position_state(pos)
+        assert migrated["peak_pnl_pct"] == 0.0
+        assert migrated["position_dollars"] == 0.0
