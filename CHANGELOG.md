@@ -7,6 +7,35 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session — 2026-06-08 — GPU-saturate Phase 3 mining + dollar-bar verdict
+
+Per spec/plan `docs/superpowers/specs/2026-05-29-dollar-bar-strategy-discovery-design.md`
+and `docs/superpowers/plans/2026-06-07-gpu-saturate-mining.md`.
+
+**Performance:**
+- Drop-in batched `best_split` in `profit_split.py`: single `walk_and_sum` call over all `(feature × threshold × side)` candidates (B=15,360 instead of 256) eliminates per-(f, side) Python loop + 300 `.item()` syncs per call. Benchmark: 76.8 → 1.28 s per call at h=24 (59.7×), 69.9 → 1.20 s at h=72 (58.1×), 64.7 → 1.22 s at h=168 (52.8×).
+- Vectorised `_assign_leaves` in `mine_profiles.py`: depth-by-depth tensor routing replaces per-row Python tree walk; cuts ~n_rows × tree_depth syncs to ~n_internal_nodes (typically 5–7).
+- Batched per-leaf walk-and-sum via new `_score_leaves_batched` helper: one call with B=n_nonempty_leaves replaces n_leaves × walk_and_sum(B=1).
+- Critical bug fix `8b41b24`: kept `SplitResult.left_mask` structural (`col <= threshold`) regardless of which side scored higher. Pre-fix the batched version negated the mask on right-side winners, swapping left/right children at every right-winning split → entire mining produced 0 profiles on real data. Diagnosed via side-by-side comparison vs the pre-Phase-A reference on real ETH-USD h=168 (identical scores at every node, differing `left_count` — fix-up restored exact match against killed-run partial output).
+
+End-to-end wall: ~7 days (pre-optimisation, killed mid-AAVE) → **13 hr** (full 50-pid universe sweep on RTX 2060).
+
+**Mining output:** 11 profile leaves across 50 pids × 3 horizons; 6 deflation-positive at the per-leaf level:
+- h=168: GNO +0.662, ETH +0.267, LINK +0.204, ETH +0.094
+- h=72: TREE +0.549, SUI +0.488
+- h=24: 0 profiles
+
+**Phase 4 portfolio verdict: ABORT at every cap (n=3, 4, 5).** Knapsack search evaluated K=269–489 candidate portfolios; deflation factor 1.75–2.52 flipped raw profits (+0.66 / +0.53 / +0.39) deeply negative (-1.085 / -1.519 / -2.125). Same conclusion as the 1h-bar baseline — bar definition is not the binding constraint, the portfolio-level selection bias is.
+
+**Files:**
+- New: `backend/tools/strategy_discovery/_bench_best_split.py` (scratch, not committed) — synthetic-bench harness for the batched implementation.
+- New: `backend/tools/strategy_discovery/_diag_old_vs_new_best_split.py` (scratch, not committed) — side-by-side validator against the reference implementation on real data.
+- Output: `backend/data/phase3_dbar/profiles_h{72,168}.parquet` (11 rows), `backend/data/phase4_dbar/scorecard.md`, `deployment_n{3,4,5}.json`, `portfolio_telemetry_n{3,4,5}.parquet`.
+
+**Next path (per `xgb_post_scorecard_roadmap`):** #20 CUSUM event filters — shrink N at source to reduce the K-deflation factor at every downstream layer.
+
+---
+
 ### Session — 2026-05-25 — Strategy-discovery Phase 4: scorecard + deployment selection
 
 Implemented Phase 4 of the strategy-discovery rebuild per spec
