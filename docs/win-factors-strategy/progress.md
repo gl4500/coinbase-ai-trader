@@ -86,6 +86,8 @@
 
 - **2026-06-13:** Loop structure chosen = **Approach A** (standardized gauntlet + persistent ledger), **with meta-labeling as the first test subject**. B (meta-labeling factory) and C (full automation) deferred until A's gauntlet proves it calibrates well. Rationale: A is the foundation B/C both need; lowest risk; mostly wires together existing components (scorecard, probe_selection_bias, shadow infra).
 
+- **2026-06-14:** Continuous-improvement loop started (operator `/loop`, self-paced). Scope = read-only ideation + documentation only; no code / live-trading / heavy compute without approval. Iteration 1 produced the forward-looking [`candidate-backlog.md`](candidate-backlog.md) (C1–C6). Candidates that mature to "build it" exit the loop into the full brainstorm → spec → approval → plan gate.
+
 ---
 
 ## Operating philosophy (operator directive 2026-06-13)
