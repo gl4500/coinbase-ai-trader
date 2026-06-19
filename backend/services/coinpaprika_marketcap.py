@@ -1,25 +1,26 @@
-"""CoinPaprika historical marketcap fetcher (#293) — free-tier sibling of
-services/coingecko_marketcap (#260) that does NOT require an API key.
+"""CoinPaprika historical marketcap fetcher (#293).
 
-Why a second source: CoinGecko's free tier began returning 401 on its
-historical market_chart/range endpoint (probe #260d/e/f, 2026-05-09).
-CoinPaprika offers the same shape of data (one daily row per coin with a
-market_cap field) at 25,000 requests/day with no key.
+Originally written as a free-tier sibling of services/coingecko_marketcap
+(#260); since CoinPaprika moved the `/v1/tickers/*` endpoints behind their
+paid tier (2026-05-25), authentication is now also supported.
+
+Auth modes:
+  - Free tier (no key): hits `https://api.coinpaprika.com/v1` directly.
+    Both supply (`/v1/tickers/{cp_id}`) and history (`/v1/tickers/{cp_id}/historical`)
+    return HTTP 402 since the policy change — kept for back-compat only.
+  - Pro tier (key set): set `COINPAPRIKA_API_KEY` in the environment. Requests
+    go to `https://api-pro.coinpaprika.com/v1` with `Authorization: <key>` header.
 
 Public API mirrors coingecko_marketcap so the probe harness can swap providers
 without changing downstream code:
 
     await fetch_marketcap_history(pid: str, start_ms: int, end_ms: int)
-        -> list[(ts_ms, market_cap)] sorted ascending
+        -> list[(ts_ms, market_cap, volume_24h)] sorted ascending
+
+    await fetch_supply_snapshot(pid: str)
+        -> Optional[(circ_supply, total_supply, max_supply_or_None)]
 
     _coinbase_to_cp_id(pid)   -> Optional[str]    ("BTC-USD" -> "btc-bitcoin")
-
-Endpoint (free tier — `coins/{id}/ohlcv/historical` is paywalled, this one
-isn't):
-    GET https://api.coinpaprika.com/v1/tickers/{cp_id}/historical
-        ?start=YYYY-MM-DD&interval=1d
-    Returns one row per UTC day with: timestamp, price, volume_24h, market_cap.
-    Free tier window is rolling ~12 months; older starts return HTTP 402.
 
 Strict causality: same EOD-UTC stamping as CoinGecko, so the same 1-day lag
 applies at align time. This module returns raw rows; alignment lives in the
@@ -32,17 +33,31 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-_BASE = "https://api.coinpaprika.com/v1"
-_HISTORY_URL = f"{_BASE}/tickers/{{cp_id}}/historical"
-_TICKER_URL  = f"{_BASE}/tickers/{{cp_id}}"
+_BASE_FREE = "https://api.coinpaprika.com/v1"
+_BASE_PRO  = "https://api-pro.coinpaprika.com/v1"
 
 _SCHEMA_VERSION = 1
+
+
+def _api_key() -> Optional[str]:
+    """Read COINPAPRIKA_API_KEY from env each call (test-friendly)."""
+    v = os.environ.get("COINPAPRIKA_API_KEY", "").strip()
+    return v or None
+
+
+def _base_url() -> str:
+    return _BASE_PRO if _api_key() else _BASE_FREE
+
+
+def _auth_headers() -> Dict[str, str]:
+    k = _api_key()
+    return {"Authorization": k} if k else {}
 
 
 # ── Coinbase product → CoinPaprika id mapping ───────────────────────────────
@@ -277,58 +292,33 @@ def _iso_to_ms(iso: str) -> Optional[int]:
         return None
 
 
-async def fetch_marketcap_history(
-    product_id: str, start_ms: int, end_ms: int
-) -> List[Tuple[int, float, float]]:
-    """Daily marketcap timeseries for one Coinbase pid.
+_MAX_PAGES = 10            # safety bound on paginated calls per fetch
+_RESPONSE_ROW_CAP = 1000   # CoinPaprika returns at most 1000 rows per call
 
-    Returns list of (ts_ms, market_cap, volume_24h) sorted ascending. Skips
-    rows with a missing or non-positive market_cap. Empty list when:
-      - pid is unmapped
-      - COINPAPRIKA_DISABLED=1
-      - HTTP non-200 or transport error
-      - response shape unexpected
 
-    Step A (2026-05-16): return tuple shape extended to carry volume_24h
-    parsed from the response's `volume_24h` field. Missing -> 0.0 fill.
-    """
-    if _is_disabled():
-        return []
-
-    cp_id = _coinbase_to_cp_id(product_id)
-    if cp_id is None:
-        return []
-
+async def _fetch_marketcap_page(
+    cp_id: str, start_ms: int,
+) -> Tuple[int, List[Tuple[int, float, float]]]:
+    """Single API call. Returns (status_code, rows). On any failure → (status, [])."""
     params = {
         "start":    _ms_to_iso_date(start_ms),
         "interval": "1d",
     }
-    url = _HISTORY_URL.format(cp_id=cp_id)
-
+    url = f"{_base_url()}/tickers/{cp_id}/historical"
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=_auth_headers())
     except Exception as e:
-        logger.warning(
-            "coinpaprika_marketcap history HTTP error pid=%s: %r", product_id, e
-        )
-        return []
-
+        logger.warning("coinpaprika_marketcap history HTTP error cp_id=%s: %r", cp_id, e)
+        return 0, []
     if resp.status_code != 200:
-        logger.warning(
-            "coinpaprika_marketcap history non-200 pid=%s status=%d",
-            product_id, resp.status_code,
-        )
-        return []
-
+        return resp.status_code, []
     try:
         body = resp.json()
     except Exception:
-        return []
-
+        return resp.status_code, []
     if not isinstance(body, list):
-        return []
-
+        return resp.status_code, []
     rows: List[Tuple[int, float, float]] = []
     for entry in body:
         if not isinstance(entry, dict):
@@ -351,7 +341,199 @@ async def fetch_marketcap_history(
             vol_f = 0.0
         rows.append((ts_ms, mc_f, vol_f))
     rows.sort(key=lambda r: r[0])
+    return resp.status_code, rows
+
+
+async def fetch_marketcap_history(
+    product_id: str, start_ms: int, end_ms: int
+) -> List[Tuple[int, float, float]]:
+    """Daily marketcap timeseries for one Coinbase pid.
+
+    Returns list of (ts_ms, market_cap, volume_24h) sorted ascending. Skips
+    rows with a missing or non-positive market_cap. Empty list when:
+      - pid is unmapped
+      - COINPAPRIKA_DISABLED=1
+      - HTTP non-200 or transport error on FIRST page
+      - response shape unexpected
+
+    Pagination (added 2026-05-25 after CoinPaprika Pro tier cap discovery):
+    CoinPaprika returns at most 1000 rows per call (~2.74 years of daily data).
+    For longer windows, this function makes multiple calls with a shifting
+    `start` date until either (a) a page returns < 1000 rows, (b) the next page
+    would extend past `end_ms`, or (c) `_MAX_PAGES` safety bound is hit.
+
+    Subsequent pages that fail with non-200 status are treated as "no more
+    data available" rather than a hard error (the partial result is returned).
+    """
+    if _is_disabled():
+        return []
+
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return []
+
+    all_rows: List[Tuple[int, float, float]] = []
+    cur_start = int(start_ms)
+
+    for page_idx in range(_MAX_PAGES):
+        status, rows = await _fetch_marketcap_page(cp_id, cur_start)
+        if not rows:
+            if page_idx == 0 and status != 200:
+                # First-page hard failure: log once, return empty.
+                logger.warning(
+                    "coinpaprika_marketcap history non-200 pid=%s status=%d",
+                    product_id, status,
+                )
+            break
+        all_rows.extend(rows)
+        last_ts = rows[-1][0]
+        if len(rows) < _RESPONSE_ROW_CAP:
+            break               # got everything available from this start
+        if last_ts >= int(end_ms):
+            break               # past our window
+        cur_start = last_ts + 86_400_000   # next page: day after last row
+
+    # Dedupe by timestamp (pages can overlap on the seam day).
+    seen: set = set()
+    deduped: List[Tuple[int, float, float]] = []
+    for r in all_rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            deduped.append(r)
+    deduped.sort(key=lambda r: r[0])
+    return deduped
+
+
+async def _fetch_marketcap_page_priced(
+    cp_id: str, start_ms: int,
+) -> List[Tuple[int, float, float, float]]:
+    """Single API call returning 4-tuples (ts_ms, price, market_cap, volume_24h).
+
+    Mirrors _fetch_marketcap_page but keeps the `price` field from each row.
+    """
+    params = {"start": _ms_to_iso_date(start_ms), "interval": "1d"}
+    url = f"{_base_url()}/tickers/{cp_id}/historical"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, params=params, headers=_auth_headers())
+    except Exception:
+        return []
+    if resp.status_code != 200:
+        return []
+    try:
+        body = resp.json()
+    except Exception:
+        return []
+    if not isinstance(body, list):
+        return []
+    rows: List[Tuple[int, float, float, float]] = []
+    for entry in body:
+        if not isinstance(entry, dict):
+            continue
+        mc = entry.get("market_cap")
+        if mc is None:
+            continue
+        try:
+            mc_f = float(mc)
+        except (TypeError, ValueError):
+            continue
+        if mc_f <= 0.0:
+            continue
+        ts_ms = _iso_to_ms(entry.get("timestamp"))
+        if ts_ms is None:
+            continue
+        try:
+            vol_f = float(entry.get("volume_24h") or 0.0)
+        except (TypeError, ValueError):
+            vol_f = 0.0
+        try:
+            price_f = float(entry.get("price") or 0.0)
+        except (TypeError, ValueError):
+            price_f = 0.0
+        rows.append((ts_ms, price_f, mc_f, vol_f))
+    rows.sort(key=lambda r: r[0])
     return rows
+
+
+async def fetch_marketcap_history_full(
+    product_id: str, start_ms: int, end_ms: int
+) -> List[Tuple[int, float, float, float]]:
+    """Like fetch_marketcap_history but returns 4-tuples (ts_ms, price, market_cap, volume_24h).
+
+    Captures the `price` field from CoinPaprika's /v1/tickers/{id}/historical
+    response (which fetch_marketcap_history drops for back-compat). Use this
+    when persisting a complete bronze parquet — strategy-discovery Phase 2's
+    tokenomic_stamp doesn't need `price` (Coinbase OHLCV is the price source),
+    but downstream analyses may want it for cross-reference.
+    """
+    if _is_disabled():
+        return []
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return []
+    all_rows: List[Tuple[int, float, float, float]] = []
+    cur_start = int(start_ms)
+    for page_idx in range(_MAX_PAGES):
+        rows = await _fetch_marketcap_page_priced(cp_id, cur_start)
+        if not rows:
+            break
+        all_rows.extend(rows)
+        last_ts = rows[-1][0]
+        if len(rows) < _RESPONSE_ROW_CAP:
+            break
+        if last_ts >= int(end_ms):
+            break
+        cur_start = last_ts + 86_400_000
+    seen: set = set()
+    deduped: List[Tuple[int, float, float, float]] = []
+    for r in all_rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            deduped.append(r)
+    deduped.sort(key=lambda r: r[0])
+    return deduped
+
+
+async def fetch_ticker_snapshot_full(
+    product_id: str,
+) -> Optional[dict]:
+    """Full ticker snapshot — every field CoinPaprika returns.
+
+    Endpoint: GET /v1/tickers/{cp_id}. Returns the raw response dict (id, name,
+    symbol, rank, supply fields, beta_value, first_data_at, last_updated, plus
+    nested quotes.USD with price, volume_24h, percent_change_15m..1y, ath_*,
+    market_cap_change_24h, etc.) or None on any failure.
+
+    Sibling of fetch_supply_snapshot which returns only (circ, total, max).
+    Use this when persisting the full bronze ticker parquet.
+    """
+    if _is_disabled():
+        return None
+    cp_id = _coinbase_to_cp_id(product_id)
+    if cp_id is None:
+        return None
+    url = f"{_base_url()}/tickers/{cp_id}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, headers=_auth_headers())
+    except Exception as e:
+        logger.warning(
+            "coinpaprika_marketcap ticker HTTP error pid=%s: %r", product_id, e
+        )
+        return None
+    if resp.status_code != 200:
+        logger.warning(
+            "coinpaprika_marketcap ticker non-200 pid=%s status=%d",
+            product_id, resp.status_code,
+        )
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    return body
 
 
 async def fetch_supply_snapshot(
@@ -375,11 +557,11 @@ async def fetch_supply_snapshot(
     if cp_id is None:
         return None
 
-    url = _TICKER_URL.format(cp_id=cp_id)
+    url = f"{_base_url()}/tickers/{cp_id}"
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=_auth_headers())
     except Exception as e:
         logger.warning(
             "coinpaprika_marketcap ticker HTTP error pid=%s: %r", product_id, e
