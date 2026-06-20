@@ -17,7 +17,8 @@ this file records *future* candidates queued for the gauntlet. Governed by the o
 
 | # | Candidate | Type | Blocked? | Cheap probe | Falsifiable gate |
 |---|---|---|---|---|---|
-| C1 | **Maker / post-only execution** | rule | ⛔ operator approval (live-trading) | done — ledger #3/#4 (+$169 fill-aware) | live 8002 shadow: real blended fee ≤ ~0.5% **and** net > taker baseline |
+| C1a | **Maker execution — entry leg** | rule | ✅ **SHIPPED** `c262efc` (default-off flag) | done — ledger #3/#4 (+$169 fill-aware) | live 8002 shadow: real maker **fill rate** + blended fee ≤ ~0.5% on entries |
+| C1b | **Maker execution — profit-target exit leg** | rule | ⛔ gated on C1a shadow proving entries fill | n/a — depends on C1a shadow telemetry | live 8002 shadow: blended round-trip fee ≤ ~0.5% **and** net > taker baseline |
 | C2 | **Time-gated / vol-aware stop** | rule | ✅ unblocked | done — ledger #2 (time-gate −$414 best of the stop sweep) | re-sim **with maker fees layered**: net-of-fee expectancy > current flat −8% stop, purged-WF |
 | C3 | **Selectivity / meta-labeling** | signal | ✅ unblocked | Phase-0 pulse: triple-barrier labels over **all** primary signals (taken+skipped), quick meta-labeler P(win) on regime/vol/RSI/ADX/model_prob | OOS AUC clears 0.5 by a meaningful margin under purged-WF; **else REJECT** (acceptable, informative) |
 | C4 | **CUSUM event filter** (roadmap #20) | sampling | ✅ unblocked | build CUSUM event series on top-20 pids; count events; estimate K-deflation reduction | deflation factor at event-sampled N materially below time-bar N at equal coverage |
@@ -28,13 +29,27 @@ this file records *future* candidates queued for the gauntlet. Governed by the o
 
 ## Why this ordering
 
-- **C1 is highest-value but blocked** on operator approval + a live shadow — it cannot run inside an autonomous read-only loop, so it sits at the head as the *known DEPLOY-grade* candidate awaiting the human gate, not as loop work.
+- **C1a (entry leg) is shipped and now awaits the operator's 8002 shadow** — fills are a live property, not backtestable, so the next gate is measurement, not more code. **C1b (exit leg) is deliberately sequenced *after* the entry-leg shadow proves entries fill** — building the net-new exit-side routing before knowing entry fill rates would be premature (if maker entries miss badly, the whole maker thesis weakens and C1b's design changes). Fail-fast: validate the cheap shipped thing before building the next thing.
 - **C2 and C3 are the live worklist** for the loop's ideation: both have cheap, read-only probes and attack the two quantified levers behind C1 (stop bleed; trade-count selectivity). C2 most directly tightens the +$169 number by pairing the best stop with maker fees; C3 is the decaying-edge insurance (its real job is to *cut trade count*, not predict direction).
 - **C4–C6 attack the deflation gate at its source** — the wall that ABORTed strategy-discovery twice. They are research-grade, lower-confidence, and queued behind C2/C3.
+
+## C1a entry-leg — 8002 shadow validation checklist (the next gate, operator-run)
+
+Launch: `USE_MAKER_EXECUTION=true PORT=8002 python main.py` from `backend/` (8001 stays the taker baseline). Then, over a shadow window, decide from telemetry — **not** from backtest:
+
+| Metric | Where | PASS signal |
+|---|---|---|
+| **Maker fill rate** | `orders` rows with `fill_mode="MAKER"` vs `"TAKER_FALLBACK"` | high enough that the blended entry fee lands near 0.2–0.5%, not creeping back to 0.6% taker |
+| **Missed-entry selection** | entries that fell to `TAKER_FALLBACK` after the 30s poll | fallbacks are not concentrated on the fast movers (which would selectively drop the winners) |
+| **Blended entry fee** | realized fee on filled entries | ≤ ~0.5% (the modeled maker-entry assumption) |
+| **No 8001 disruption** | 8001 scan loop + telemetry unaffected | default-off flag holds; 8001 behavior byte-for-byte unchanged |
+
+If entries fill well → green-light **C1b** (profit-target maker exits, keep disaster stops taker). If fills are poor or adversely selected → the maker thesis weakens; pivot to **C2** (stop) / **C3** (selectivity) instead.
 
 ## Loop log (iteration → artifact)
 
 - **2026-06-14 · iteration 1:** created this backlog from the design-doc factor hierarchy (§3) + the post-scorecard roadmap. No probes executed (read-only/docs-only). Next iteration: deepen **C2** — draft the maker-fee-layered stop re-sim *design* (method, data, gate, expected result), still documentation-only; execution stays operator-gated.
+- **2026-06-15 · iteration 2:** operator approved active building (run pytest+commit alongside live 8001). **C1a entry leg SHIPPED** via TDD on `feat/maker-execution-shadow` (`c262efc`, full suite 1284 passed) — gated `USE_MAKER_EXECUTION` flag, sources bid/ask, routes to `execute_maker_signal`. Split C1 → C1a (shipped) / C1b (exit, gated on the entry-leg shadow). Added the 8002 shadow validation checklist above as the next gate. **Deliberately did NOT pre-build the C1b exit design** — premature before the entry-leg shadow measures real fills. Next: when the operator runs the shadow, read its telemetry → green-light C1b or pivot to C2/C3.
 
 ## See also
 - [`progress.md`](progress.md) — the factor ledger (past attempts #1–#4) + decisions log
