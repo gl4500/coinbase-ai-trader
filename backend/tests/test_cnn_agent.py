@@ -4087,3 +4087,54 @@ class TestCNNBookPnLMigration:
         migrated = book._migrate_position_state(pos)
         assert migrated["peak_pnl_pct"] == 0.0
         assert migrated["position_dollars"] == 0.0
+
+
+class TestMakerExecutionRouting:
+    """_execute_live_order routes through maker (post-only) or taker execution
+    per the use_maker_execution config flag, populating bid/ask only on the
+    maker path so the default taker path stays byte-for-byte unchanged."""
+
+    def _buy_signal(self):
+        return {
+            "product_id":  "BTC-USD",
+            "side":        "BUY",
+            "price":       95_000.0,
+            "quote_size":  100.0,
+            "atr":         12.0,
+            "signal_type": "CNN_LONG",
+            "id":          7,
+        }
+
+    @pytest.mark.asyncio
+    async def test_taker_path_when_flag_off(self, agent):
+        signal   = self._buy_signal()
+        executor = AsyncMock()
+        executor.execute_signal.return_value = {"success": True, "fill_mode": "TAKER"}
+        with patch.object(_cnn_mod.config, "use_maker_execution", False, create=True), \
+             patch.object(_cnn_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock()) as mock_bba:
+            result = await agent._execute_live_order(executor, signal)
+
+        executor.execute_signal.assert_awaited_once_with(signal)
+        executor.execute_maker_signal.assert_not_called()
+        mock_bba.assert_not_called()
+        assert "bid" not in signal and "ask" not in signal
+        assert result == {"success": True, "fill_mode": "TAKER"}
+
+    @pytest.mark.asyncio
+    async def test_maker_path_populates_quotes_and_routes(self, agent):
+        signal   = self._buy_signal()
+        executor = AsyncMock()
+        executor.execute_maker_signal.return_value = {"success": True, "fill_mode": "MAKER"}
+        quotes = {"BTC-USD": {"bid": 94_990.0, "ask": 95_010.0, "price": 95_000.0}}
+        with patch.object(_cnn_mod.config, "use_maker_execution", True, create=True), \
+             patch.object(_cnn_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock(return_value=quotes)) as mock_bba:
+            result = await agent._execute_live_order(executor, signal)
+
+        mock_bba.assert_awaited_once_with(["BTC-USD"])
+        assert signal["bid"] == 94_990.0
+        assert signal["ask"] == 95_010.0
+        executor.execute_maker_signal.assert_awaited_once_with(signal)
+        executor.execute_signal.assert_not_called()
+        assert result == {"success": True, "fill_mode": "MAKER"}

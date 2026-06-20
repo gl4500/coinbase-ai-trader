@@ -2203,10 +2203,27 @@ class CoinbaseCNNAgent:
 
             # Live order execution (only when order_executor provided and not dry-run)
             if order_executor and not order_executor.dry_run and quote_size >= 1.0:
-                result = await order_executor.execute_signal(signal)
+                result = await self._execute_live_order(order_executor, signal)
                 signal["live_execution"] = result
 
         return signal
+
+    async def _execute_live_order(self, order_executor, signal: Dict) -> Dict:
+        """Route a live order through the maker (post-only) or taker path.
+
+        Under ``config.use_maker_execution`` the entry is posted as a maker
+        LIMIT (cheaper fee; fills are not guaranteed — ``execute_maker_signal``
+        owns the market fallback). The best bid/ask are sourced from the live
+        book and attached to ``signal`` only on this path, so the default taker
+        path stays byte-for-byte unchanged.
+        """
+        if config.use_maker_execution:
+            quotes = await coinbase_client.get_best_bid_ask([signal["product_id"]])
+            quote  = quotes.get(signal["product_id"], {})
+            signal["bid"] = quote.get("bid") or 0.0
+            signal["ask"] = quote.get("ask") or 0.0
+            return await order_executor.execute_maker_signal(signal)
+        return await order_executor.execute_signal(signal)
 
     async def scan_all(self, execute: bool = False,
                        order_executor=None) -> List[Dict]:

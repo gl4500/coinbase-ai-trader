@@ -7,6 +7,28 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.72 — 2026-06-15 — Maker-execution routing (entry leg, shadow-gated)
+
+Opt-in maker (post-only LIMIT) routing for live BUY entries, gated behind a
+new `USE_MAKER_EXECUTION` env flag (default false → byte-for-byte unchanged
+taker behavior). Intended for the 8002 shadow per port discipline; promote to
+8001 only after the shadow confirms real maker fill rates. Backtest
+expectation (read-only sims, `docs/win-factors-strategy/`): maker execution
+flips full-history paper PnL from −$414 (taker) to +$169.
+
+**Files:**
+- `backend/config.py` — new `use_maker_execution` field (env `USE_MAKER_EXECUTION`, default false).
+- `backend/agents/cnn_agent.py` — extracted `_execute_live_order(order_executor, signal)`;
+  flag on → sources best bid/ask via `coinbase_client.get_best_bid_ask`, attaches them to the
+  signal, routes to `order_executor.execute_maker_signal` (which owns the 30s poll + market
+  fallback). Flag off → existing `execute_signal` taker path, no bid/ask fetch.
+- `backend/tests/test_cnn_agent.py` — `TestMakerExecutionRouting` (2 tests): taker path when
+  flag off (byte-for-byte, no quote fetch); maker path populates bid/ask + routes to maker.
+
+**Why:** `execute_maker_signal` existed and was tested but unwired — the live path called the
+taker `execute_signal`, and the signal dict lacked the bid/ask the maker path requires. Sourcing
+those quotes is the actual entry-leg work. Profit-target maker exits are the next (separate) piece.
+
 ### Session 58.71w — 2026-06-07 — Tier A: skip masked-channel builders (ch17/18/19)
 
 Pure compute optimization in `FeatureBuilder.build` — emit zero arrays
