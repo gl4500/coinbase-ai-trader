@@ -422,7 +422,8 @@ async def lifespan(app: FastAPI):
     # WS-driven exit checker: fires WS_TRAIL_STOP / WS_STOP_LOSS on every
     # held position without waiting for the 60s scan cycle.
     # Spec: docs/superpowers/specs/2026-05-23-ws-exit-checker-design.md
-    attach_exit_watcher(app_state.ws_subscriber, app_state.cnn_agent.book)
+    attach_exit_watcher(app_state.ws_subscriber, app_state.cnn_agent.book,
+                        app_state.order_executor)
     logger.info("WS exit watcher attached")
 
     # Background scan — refreshes product list without blocking startup

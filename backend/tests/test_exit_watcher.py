@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -252,3 +252,109 @@ class TestOnPriceTickPnLAnchored:
         await on_price_tick("DASH-USD", 48.0, book)
         expected_pnl = (48.0 - 42.97) / 42.97
         assert book.positions["DASH-USD"]["peak_pnl_pct"] == pytest.approx(expected_pnl)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Maker-execution exit leg — WS live routing
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestOnPriceTickLiveRouting:
+    """on_price_tick places a live exit after the paper close, routed
+    maker/taker by trigger, only when USE_MAKER_EXECUTION is on + executor live."""
+
+    def _live_executor(self):
+        ex = AsyncMock()
+        ex.dry_run = False
+        ex.execute_maker_signal.return_value = {"success": True, "fill_mode": "MAKER"}
+        ex.execute_signal.return_value = {"success": True, "fill_mode": "TAKER"}
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_ws_trail_stop_routes_maker(self):
+        import agents.exit_execution as exit_mod
+        from agents.exit_watcher import on_price_tick
+        book = _FakeBook()
+        book.positions["BTC-USD"] = _make_pos(avg=100.0, peak=120.0, trail=0.06, size=2.0)
+        ex = self._live_executor()
+        quotes = {"BTC-USD": {"bid": 104.0, "ask": 106.0}}
+        with patch.object(exit_mod.config, "use_maker_execution", True, create=True), \
+             patch.object(exit_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock(return_value=quotes)):
+            await on_price_tick("BTC-USD", 105.0, book, ex)   # +5% << trail thr
+        book.sell.assert_called_once_with("BTC-USD", 105.0, trigger="WS_TRAIL_STOP")
+        ex.execute_maker_signal.assert_awaited_once()
+        sig = ex.execute_maker_signal.call_args.args[0]
+        assert sig["side"] == "SELL" and sig["signal_type"] == "WS_TRAIL_STOP"
+        assert sig["quote_size"] == round(2.0 * 106.0, 2)
+
+    @pytest.mark.asyncio
+    async def test_ws_stop_loss_routes_taker(self):
+        import agents.exit_execution as exit_mod
+        from agents.exit_watcher import on_price_tick
+        book = _FakeBook()
+        book.positions["ETH-USD"] = _make_pos(avg=100.0, peak=100.0, trail=0.06, size=2.0)
+        ex = self._live_executor()
+        with patch.object(exit_mod.config, "use_maker_execution", True, create=True), \
+             patch.object(exit_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock()) as mock_bba:
+            await on_price_tick("ETH-USD", 91.0, book, ex)    # -9% -> WS_STOP_LOSS
+        book.sell.assert_called_once_with("ETH-USD", 91.0, trigger="WS_STOP_LOSS")
+        mock_bba.assert_not_called()
+        ex.execute_signal.assert_awaited_once()
+        ex.execute_maker_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ws_model_down_routes_maker(self):
+        import time as _t
+        import agents.exit_execution as exit_mod
+        from agents.exit_watcher import on_price_tick
+        from agents.cnn_agent import _P_DOWN_EXIT_THRESHOLD
+        book = _FakeBook()
+        book.positions["ABC-USD"] = _make_pos(avg=100.0, peak=100.0, trail=0.06, size=2.0)
+        book.positions["ABC-USD"]["p_down"] = _P_DOWN_EXIT_THRESHOLD + 0.05
+        book.positions["ABC-USD"]["p_down_ts_ms"] = int(_t.time() * 1000)
+        ex = self._live_executor()
+        quotes = {"ABC-USD": {"bid": 100.5, "ask": 101.5}}
+        with patch.object(exit_mod.config, "use_maker_execution", True, create=True), \
+             patch.object(exit_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock(return_value=quotes)):
+            await on_price_tick("ABC-USD", 101.0, book, ex)   # +1% -> WS_MODEL_DOWN
+        book.sell.assert_called_once_with("ABC-USD", 101.0, trigger="WS_MODEL_DOWN")
+        ex.execute_maker_signal.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_flag_off_stays_paper_only(self):
+        import agents.exit_execution as exit_mod
+        from agents.exit_watcher import on_price_tick
+        book = _FakeBook()
+        book.positions["BTC-USD"] = _make_pos(avg=100.0, peak=120.0, trail=0.06, size=2.0)
+        ex = self._live_executor()
+        with patch.object(exit_mod.config, "use_maker_execution", False, create=True), \
+             patch.object(exit_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock()) as mock_bba:
+            await on_price_tick("BTC-USD", 105.0, book, ex)
+        book.sell.assert_called_once()
+        mock_bba.assert_not_called()
+        ex.execute_maker_signal.assert_not_called()
+        ex.execute_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_attach_forwards_order_executor(self):
+        import agents.exit_execution as exit_mod
+        from services.ws_subscriber import CoinbaseWSSubscriber
+        from agents.exit_watcher import attach
+        ws = CoinbaseWSSubscriber(broadcast_fn=AsyncMock())
+        book = _FakeBook()
+        book.positions["BTC-USD"] = _make_pos(avg=100.0, peak=120.0, trail=0.06, size=2.0)
+        ex = self._live_executor()
+        quotes = {"BTC-USD": {"bid": 104.0, "ask": 106.0}}
+        with patch.object(exit_mod.config, "use_maker_execution", True, create=True), \
+             patch.object(exit_mod.coinbase_client, "get_best_bid_ask",
+                          new=AsyncMock(return_value=quotes)):
+            attach(ws, book, ex)
+            await ws._handle({
+                "channel": "ticker",
+                "events": [{"tickers": [{"product_id": "BTC-USD", "price": "105.0"}]}],
+            })
+            await asyncio.sleep(0.05)
+        ex.execute_maker_signal.assert_awaited_once()
