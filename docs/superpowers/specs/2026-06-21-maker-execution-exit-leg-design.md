@@ -74,39 +74,43 @@ async def execute_live_exit(
     price: float,
     size: float,
     trigger: str,
-    bid: float = 0.0,
-    ask: float = 0.0,
 ) -> Optional[Dict]:
     """Place a live SELL liquidating `size` of `pid`, routed maker/taker by trigger.
 
-    Builds a SELL signal with NO `atr` key so order_executor sizes from `quote_size`.
-    Sets quote_size so order_executor's `base_size = quote_size / fill_price` rounds
-    back to the exact held `size`:
-      - maker SELL fills at ask  -> quote_size = size * ask
-      - taker SELL fills at price -> quote_size = size * price
-    Returns the executor result dict, or None if quotes are missing for a maker exit.
+    Owns the whole gate + quote-fetch so both call sites are one unconditional
+    line (DRY; keeps config/coinbase_client coupling in this one module). No-ops
+    (returns None) unless USE_MAKER_EXECUTION is on AND the executor is live
+    (not dry-run). Builds a SELL signal with NO `atr` key so order_executor sizes
+    from `quote_size`; sets quote_size so the executor's
+    `base_size = quote_size / fill_price` recovers the held `size`:
+      - maker SELL fills at ask   -> quote_size = size * ask
+      - taker SELL fills at price  -> quote_size = size * price
     """
 ```
 
-- For a maker trigger: requires `bid > 0 and ask > 0`; attaches them to the signal and
-  calls `order_executor.execute_maker_signal(signal)`.
-- For a taker trigger: calls `order_executor.execute_signal(signal)`.
+- **Gate (inside the function):** return `None` if `order_executor is None`,
+  `order_executor.dry_run`, or `not config.use_maker_execution`. This is the
+  refinement over the call-sites-gate idea: putting the gate here keeps flag-off
+  byte-for-byte unchanged (no fetch, no order) without `exit_watcher` importing
+  `config`.
+- For a maker trigger: fetch quotes via `coinbase_client.get_best_bid_ask([pid])`;
+  if `bid <= 0 or ask <= 0`, log a warning and return `None`; else attach
+  `bid`/`ask` + `quote_size = size*ask` and call `execute_maker_signal(signal)`.
+- For a taker trigger: set `quote_size = size*price` and call `execute_signal(signal)`
+  (no quote fetch).
 - `signal_type` is set to the trigger string for order-row traceability.
 
 ### 2. Scan path — `cnn_agent._check_risk_exits`
 
-After computing `trigger` and before/at the existing `book.sell` call:
+After computing `trigger` and at the existing `book.sell` call:
 
 1. Capture `size = pos["size"]` **before** `book.sell` pops the position.
 2. `pnl = await self.book.sell(pid, price, trigger=trigger)` (unchanged — paper book is
    the source of truth, mirrors entry-leg ordering: paper first, then live).
-3. If `order_executor and not order_executor.dry_run and config.use_maker_execution`:
-   - If `exit_execution.is_maker_exit(trigger)`: fetch `bid/ask` via
-     `coinbase_client.get_best_bid_ask([pid])`.
-   - `await exit_execution.execute_live_exit(order_executor, pid=pid, price=price,
-     size=size, trigger=trigger, bid=bid, ask=ask)`.
-   - Wrap in try/except + log (a live-order failure must not crash the scan loop or
-     poison subsequent positions).
+3. `await exit_execution.execute_live_exit(order_executor, pid=pid, price=price,
+   size=size, trigger=trigger)` — one unconditional line; the function owns the
+   flag/dry-run gate and the quote fetch. Wrap in try/except + log (a live-order
+   failure must not crash the scan loop or poison subsequent positions).
 
 `run_loop` already holds `order_executor`; forward it: `_check_risk_exits(order_executor)`.
 Default `order_executor=None` keeps the method callable without live execution (tests,
@@ -119,8 +123,10 @@ paused trading).
 - `on_price_tick(pid, price, book, order_executor=None)` — after the existing
   `book.sell(pid, price, trigger=trigger)`:
   - capture `size` from `pos` before the sell;
-  - same gated `execute_live_exit` call, inside the existing `try/except` that already
-    guards the handler (invariant #18).
+  - one unconditional `await exit_execution.execute_live_exit(order_executor, pid=pid,
+    price=price, size=size, trigger=trigger)` call, inside the existing `try/except`
+    that already guards the handler (invariant #18). No `config`/`coinbase_client`
+    import needed in `exit_watcher` — the gate + fetch live in `exit_execution`.
 
 ### 4. `main.py`
 
