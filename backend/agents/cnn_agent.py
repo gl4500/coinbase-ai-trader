@@ -56,6 +56,7 @@ import httpx
 import database
 from clients import coinbase_client
 from agents.exit_thresholds import _compute_exit_threshold  # task #46
+from agents import exit_execution
 from agents.signal_generator import (
     _rsi, _ema, _macd, _bollinger, _ema_cross,
     _atr, _adx, _mfi, _obv_slope, _stoch_rsi, _vwap,
@@ -1695,7 +1696,7 @@ class CoinbaseCNNAgent:
                 return p
         return fallback
 
-    async def _check_risk_exits(self) -> None:
+    async def _check_risk_exits(self, order_executor=None) -> None:
         """Check all open CNN positions for stop-loss, trailing stop, or max hold time.
 
         Runs at the top of every scan loop iteration so exits happen every 15 min
@@ -1796,7 +1797,17 @@ class CoinbaseCNNAgent:
                 trigger = "MAX_HOLD" if entry_time else "LEGACY_EXIT"
 
             if trigger:
-                pnl = await self.book.sell(pid, price, trigger=trigger)
+                size = pos["size"]
+                pnl  = await self.book.sell(pid, price, trigger=trigger)
+                try:
+                    await exit_execution.execute_live_exit(
+                        order_executor, pid=pid, price=price,
+                        size=size, trigger=trigger,
+                    )
+                except Exception:
+                    logger.exception(
+                        "live exit execution failed for %s (%s)", pid, trigger,
+                    )
                 logger.info(
                     f"CNN RISK EXIT {pid} @{price:.6f} | {trigger} | "
                     f"entry={pct_entry*100:+.2f}% peak={peak_price:.6f} "
@@ -2285,7 +2296,7 @@ class CoinbaseCNNAgent:
                 # MAX_HOLD) run every loop regardless of is_trading gate —
                 # stops must fire even when scanning is paused — but only
                 # close positions CNN did not already exit via SCAN above.
-                await self._check_risk_exits()
+                await self._check_risk_exits(order_executor)
                 self.scan_count  += 1
                 self.next_scan_at = time.time() + interval
 
