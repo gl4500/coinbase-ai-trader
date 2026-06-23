@@ -7,6 +7,42 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.73 — 2026-06-21 — Maker-execution routing (exit leg, shadow-gated)
+
+Opt-in maker (post-only LIMIT) routing for live profit-target EXITS, completing
+the piece deferred by the entry leg (58.72). Reuses the same `USE_MAKER_EXECUTION`
+flag (default false → byte-for-byte paper-only). Trail + model-down exits post as
+maker (can wait for a fill; 30s market fallback in `execute_maker_signal`); hard
+stop-loss + forced time exits cross as taker (capital protection). Both exit paths
+(scan loop + WS) covered. Asymmetric with the entry leg by design: exits place NO
+live order today, so the WHOLE exit live-order path is gated behind the flag.
+
+Zero effect on tracked 8001 paper PnL (paper book models no fees); purely a
+live-execution-path change for the 8002 shadow. Promote to 8001 only after the
+shadow confirms real maker fill rates.
+
+**Files:**
+- `backend/agents/exit_execution.py` (new) — single source of truth for exit
+  routing: `is_maker_exit(trigger)` classification + `execute_live_exit(order_executor,
+  *, pid, price, size, trigger)`. Owns the flag/dry-run gate, the bid/ask fetch
+  (maker only), and the `order_executor` call. SELL signal carries no `atr` key →
+  sizes from `quote_size = size*ask` (maker) / `size*price` (taker). No-ops (returns
+  None) when gated off or quotes missing.
+- `backend/agents/cnn_agent.py` — `_check_risk_exits(self, order_executor=None)`;
+  after the paper `book.sell`, calls `exit_execution.execute_live_exit` in a
+  try/except (never re-raises into the scan loop); `run_loop` forwards `order_executor`.
+- `backend/agents/exit_watcher.py` — `on_price_tick(..., order_executor=None)` +
+  `attach(..., order_executor=None)`; live-exit call sits inside the existing
+  handler try/except (invariant #18).
+- `backend/main.py` — `attach_exit_watcher` now passes `app_state.order_executor`.
+- `backend/tests/test_exit_execution.py` (new, 8 tests) — classification, gate
+  (none/flag-off/dry-run), maker routing + sizing + missing-quote no-op, taker routing.
+- `backend/tests/test_cnn_risk_exits.py` — `TestCheckRiskExitsLiveRouting` (5 tests):
+  trail→maker, stop→taker, flag-off paper-only, no-executor paper-only, exception swallowed.
+- `backend/tests/test_exit_watcher.py` — `TestOnPriceTickLiveRouting` (5 tests):
+  WS trail→maker, WS stop→taker, WS model-down→maker, flag-off paper-only, attach forwards executor.
+- `CLAUDE.md` — invariant #21 amended with the exit-leg contract.
+
 ### Session 58.72 — 2026-06-15 — Maker-execution routing (entry leg, shadow-gated)
 
 Opt-in maker (post-only LIMIT) routing for live BUY entries, gated behind a
