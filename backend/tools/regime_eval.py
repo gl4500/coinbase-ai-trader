@@ -12,6 +12,7 @@ default — the trained-on first-seen normalised close from FeatureBuilder).
 Run:
     python tools/regime_eval.py [--snapshot-ts auto|<int>] [--n-pids 20] [--n-folds 5]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,10 +34,10 @@ from tools.walk_forward import purged_walk_forward_splits  # noqa: E402
 from tools.xgb_features import extract_features  # noqa: E402
 
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
-_LO_PCT = 100.0 / 3.0   # 33.33
-_HI_PCT = 200.0 / 3.0   # 66.67
-_VOL_LOOKBACK = 24      # last 24 bars of the 60-bar window
-_VOL_CHANNEL = 0        # norm_close
+_LO_PCT = 100.0 / 3.0  # 33.33
+_HI_PCT = 200.0 / 3.0  # 66.67
+_VOL_LOOKBACK = 24  # last 24 bars of the 60-bar window
+_VOL_CHANNEL = 0  # norm_close
 
 
 def _classify_regimes(vols: np.ndarray) -> np.ndarray:
@@ -82,7 +83,9 @@ def _auc_or_none(y_true: np.ndarray, y_score: np.ndarray) -> Optional[float]:
 
 
 def _per_regime_metrics(
-    y_true: np.ndarray, y_score: np.ndarray, regimes: np.ndarray,
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    regimes: np.ndarray,
 ) -> dict:
     """Return {regime: {n, base_rate, auc}} for each of low/mid/high."""
     y = np.asarray(y_true, dtype=np.int64).ravel()
@@ -90,7 +93,7 @@ def _per_regime_metrics(
     r = np.asarray(regimes).ravel()
     out = {}
     for label in ("low", "mid", "high"):
-        mask = (r == label)
+        mask = r == label
         n_r = int(mask.sum())
         if n_r == 0:
             out[label] = {"n": 0, "base_rate": 0.0, "auc": None}
@@ -104,8 +107,9 @@ def _per_regime_metrics(
     return out
 
 
-def _window_vol(X: np.ndarray, lookback: int = _VOL_LOOKBACK,
-                channel: int = _VOL_CHANNEL) -> np.ndarray:
+def _window_vol(
+    X: np.ndarray, lookback: int = _VOL_LOOKBACK, channel: int = _VOL_CHANNEL
+) -> np.ndarray:
     """Per-sample realised vol = std of last `lookback` bars on `channel`."""
     arr = np.asarray(X)
     last = arr[:, channel, -lookback:]
@@ -122,7 +126,9 @@ def _parse_snapshot_ts(arg: Optional[str], prods: dict) -> Optional[int]:
 
 
 def _run_eval(
-    prods: dict, n_pids: int = 20, n_folds: int = 5,
+    prods: dict,
+    n_pids: int = 20,
+    n_folds: int = 5,
     snapshot_ts: Optional[int] = None,
 ) -> dict:
     """Run regime-stratified eval. Returns dict with overall + per-fold results.
@@ -155,20 +161,26 @@ def _run_eval(
         if len(tr_idx) == 0 or len(va_idx) == 0:
             continue
         clf = XGBClassifier(
-            n_estimators=100, max_depth=4, learning_rate=0.05,
-            tree_method="hist", n_jobs=4, verbosity=0,
+            n_estimators=100,
+            max_depth=4,
+            learning_rate=0.05,
+            tree_method="hist",
+            n_jobs=4,
+            verbosity=0,
         )
         clf.fit(feats[tr_idx], y_all[tr_idx])
         p = clf.predict_proba(feats[va_idx])[:, 1]
         regime = _classify_regimes(vols[va_idx])
         per = _per_regime_metrics(y_all[va_idx], p, regime)
-        overall["folds"].append({
-            "fold": fold_i,
-            "n_train": int(len(tr_idx)),
-            "n_val": int(len(va_idx)),
-            "auc_overall": _auc_or_none(y_all[va_idx], p),
-            "per_regime": per,
-        })
+        overall["folds"].append(
+            {
+                "fold": fold_i,
+                "n_train": int(len(tr_idx)),
+                "n_val": int(len(va_idx)),
+                "auc_overall": _auc_or_none(y_all[va_idx], p),
+                "per_regime": per,
+            }
+        )
         all_y.append(y_all[va_idx])
         all_p.append(p)
         all_r.append(regime)
@@ -185,7 +197,8 @@ def _run_eval(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--snapshot-ts", default=None,
+        "--snapshot-ts",
+        default=None,
         help="Survivorship-aware top-N cutoff (#163). 'auto' or Unix-seconds int.",
     )
     parser.add_argument("--n-pids", type=int, default=20)
@@ -200,10 +213,13 @@ def main():
         print(f"  snapshot_ts: {snapshot_ts}", flush=True)
 
     res = _run_eval(
-        prods, n_pids=args.n_pids, n_folds=args.n_folds, snapshot_ts=snapshot_ts,
+        prods,
+        n_pids=args.n_pids,
+        n_folds=args.n_folds,
+        snapshot_ts=snapshot_ts,
     )
 
-    print(f"\nFold-by-fold AUC (overall + per-regime):", flush=True)
+    print("\nFold-by-fold AUC (overall + per-regime):", flush=True)
     print(
         f"{'fold':>4} {'n_val':>8} {'AUC':>7} "
         f"{'low(n,auc)':>16} {'mid(n,auc)':>16} {'high(n,auc)':>16}",
@@ -212,9 +228,11 @@ def main():
     print("-" * 72, flush=True)
     for f in res["folds"]:
         per = f["per_regime"]
+
         def _fmt(d):
             a = d["auc"]
             return f"({d['n']:>5},{a:>5.3f})" if a is not None else f"({d['n']:>5}, n/a )"
+
         auc = f["auc_overall"]
         auc_s = f"{auc:.3f}" if auc is not None else "n/a"
         print(

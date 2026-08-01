@@ -3,6 +3,7 @@
 Bins samples by realised-volatility terciles and reports per-regime AUC
 inside the existing purged walk-forward folds. Pure-numpy first pass.
 """
+
 from __future__ import annotations
 
 import os
@@ -17,9 +18,9 @@ if BACKEND not in sys.path:
 
 
 class TestClassifyRegimes:
-
     def test_terciles_split_evenly(self):
         from tools.regime_eval import _classify_regimes
+
         vols = np.arange(300, dtype=np.float64)
         labels = _classify_regimes(vols)
         assert (labels == "low").sum() == 100
@@ -28,6 +29,7 @@ class TestClassifyRegimes:
 
     def test_low_assigned_to_smallest(self):
         from tools.regime_eval import _classify_regimes
+
         vols = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
         labels = _classify_regimes(vols)
         assert labels[0] == "low"
@@ -35,6 +37,7 @@ class TestClassifyRegimes:
 
     def test_constant_vol_does_not_crash(self):
         from tools.regime_eval import _classify_regimes
+
         vols = np.full(50, 0.5, dtype=np.float64)
         labels = _classify_regimes(vols)
         assert len(labels) == 50
@@ -42,9 +45,9 @@ class TestClassifyRegimes:
 
 
 class TestPerRegimeMetrics:
-
     def test_returns_one_row_per_regime(self):
         from tools.regime_eval import _per_regime_metrics
+
         rng = np.random.default_rng(42)
         n = 300
         y_true = rng.integers(0, 2, n)
@@ -60,6 +63,7 @@ class TestPerRegimeMetrics:
 
     def test_perfect_separation_gives_auc_one(self):
         from tools.regime_eval import _per_regime_metrics
+
         n = 100
         y_true = np.array([0] * 50 + [1] * 50)
         y_score = np.linspace(0.0, 1.0, n)
@@ -70,6 +74,7 @@ class TestPerRegimeMetrics:
 
     def test_single_class_regime_returns_none_auc(self):
         from tools.regime_eval import _per_regime_metrics
+
         # All-zero labels in the "low" bucket → AUC undefined
         y_true = np.array([0, 0, 0, 0, 1, 1, 0, 1])
         y_score = np.linspace(0, 1, 8)

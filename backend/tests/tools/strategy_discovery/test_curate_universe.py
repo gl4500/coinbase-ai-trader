@@ -1,7 +1,6 @@
 """Tests for universe-curation logic."""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from tools.strategy_discovery import curate_universe as cu
 
@@ -9,9 +8,14 @@ from tools.strategy_discovery import curate_universe as cu
 def test_rank_by_market_cap_descending():
     """rank_by_market_cap returns pids sorted by descending mc."""
     candidates = {
-        "BTC-USD": {"market_cap": 1.4e12, "volume_24h": 5e10, "circulating": 19.7e6, "total": 19.7e6},
-        "DOGE-USD": {"market_cap": 2e10,  "volume_24h": 1e9,  "circulating": 140e9,  "total": 140e9},
-        "ETH-USD": {"market_cap": 4e11,  "volume_24h": 2e10, "circulating": 120e6,  "total": 120e6},
+        "BTC-USD": {
+            "market_cap": 1.4e12,
+            "volume_24h": 5e10,
+            "circulating": 19.7e6,
+            "total": 19.7e6,
+        },
+        "DOGE-USD": {"market_cap": 2e10, "volume_24h": 1e9, "circulating": 140e9, "total": 140e9},
+        "ETH-USD": {"market_cap": 4e11, "volume_24h": 2e10, "circulating": 120e6, "total": 120e6},
     }
     ranked = cu.rank_by_market_cap(candidates)
     assert ranked == ["BTC-USD", "ETH-USD", "DOGE-USD"]
@@ -20,9 +24,24 @@ def test_rank_by_market_cap_descending():
 def test_rank_by_fdv_mc_ratio_descending_excludes_already_picked():
     """rank_by_fdv_mc_ratio excludes the already-picked pids."""
     candidates = {
-        "A": {"market_cap": 1e9, "volume_24h": 1e7, "circulating": 100.0, "total": 1000.0},  # ratio 10x
-        "B": {"market_cap": 1e9, "volume_24h": 1e7, "circulating": 500.0, "total": 1000.0},  # ratio 2x
-        "C": {"market_cap": 1e9, "volume_24h": 1e7, "circulating": 200.0, "total": 1000.0},  # ratio 5x
+        "A": {
+            "market_cap": 1e9,
+            "volume_24h": 1e7,
+            "circulating": 100.0,
+            "total": 1000.0,
+        },  # ratio 10x
+        "B": {
+            "market_cap": 1e9,
+            "volume_24h": 1e7,
+            "circulating": 500.0,
+            "total": 1000.0,
+        },  # ratio 2x
+        "C": {
+            "market_cap": 1e9,
+            "volume_24h": 1e7,
+            "circulating": 200.0,
+            "total": 1000.0,
+        },  # ratio 5x
     }
     ranked = cu.rank_by_fdv_mc_ratio(candidates, exclude={"A"})
     assert ranked == ["C", "B"]
@@ -31,9 +50,24 @@ def test_rank_by_fdv_mc_ratio_descending_excludes_already_picked():
 def test_rank_by_turnover_ascending_excludes_already_picked():
     """rank_by_turnover sorts ascending (LOW turnover wins)."""
     candidates = {
-        "A": {"market_cap": 1e9, "volume_24h": 1e8, "circulating": 1.0, "total": 1.0},  # turnover 0.1
-        "B": {"market_cap": 1e9, "volume_24h": 1e6, "circulating": 1.0, "total": 1.0},  # turnover 0.001
-        "C": {"market_cap": 1e9, "volume_24h": 5e7, "circulating": 1.0, "total": 1.0},  # turnover 0.05
+        "A": {
+            "market_cap": 1e9,
+            "volume_24h": 1e8,
+            "circulating": 1.0,
+            "total": 1.0,
+        },  # turnover 0.1
+        "B": {
+            "market_cap": 1e9,
+            "volume_24h": 1e6,
+            "circulating": 1.0,
+            "total": 1.0,
+        },  # turnover 0.001
+        "C": {
+            "market_cap": 1e9,
+            "volume_24h": 5e7,
+            "circulating": 1.0,
+            "total": 1.0,
+        },  # turnover 0.05
     }
     ranked = cu.rank_by_turnover(candidates, exclude={"B"})
     assert ranked == ["C", "A"]
@@ -43,19 +77,22 @@ def test_curate_universe_picks_target_counts_with_overlap_handling():
     """End-to-end: given 100 candidates, picks 15+15+10+10 distinct pids."""
     candidates = {}
     for i in range(100):
-        mc  = (100 - i) * 1e9          # descending mc by i
-        vol = 1e6 if i < 20 else 1e8   # first 20 have unusually low turnover
-        ratio_circ = 100.0 if i >= 80 else 500.0   # last 20 have high fdv/mc ratio
+        mc = (100 - i) * 1e9  # descending mc by i
+        vol = 1e6 if i < 20 else 1e8  # first 20 have unusually low turnover
+        ratio_circ = 100.0 if i >= 80 else 500.0  # last 20 have high fdv/mc ratio
         candidates[f"P{i:03d}"] = {
             "market_cap": mc,
             "volume_24h": vol,
             "circulating": ratio_circ,
-            "total":       1000.0,
+            "total": 1000.0,
         }
 
     picked = cu.curate_universe(
         candidates,
-        n_large=15, n_mid=15, n_high_fdv_ratio=10, n_low_turnover=10,
+        n_large=15,
+        n_mid=15,
+        n_high_fdv_ratio=10,
+        n_low_turnover=10,
     )
 
     assert len(picked) == 4  # 4 cohorts
@@ -79,7 +116,11 @@ def test_curate_universe_respects_overlap_no_pid_listed_twice():
         "E": {"market_cap": 1e9, "volume_24h": 1e10, "circulating": 900.0, "total": 1000.0},
     }
     picked = cu.curate_universe(
-        candidates, n_large=1, n_mid=1, n_high_fdv_ratio=1, n_low_turnover=1,
+        candidates,
+        n_large=1,
+        n_mid=1,
+        n_high_fdv_ratio=1,
+        n_low_turnover=1,
     )
     all_picks = [p for cohort in picked.values() for p in cohort]
     assert len(all_picks) == len(set(all_picks))  # no duplicates

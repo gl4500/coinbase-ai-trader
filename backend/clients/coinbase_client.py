@@ -15,9 +15,9 @@ Supports both CDP key formats:
 
 JWT tokens expire after 2 minutes — this client regenerates them per-request.
 """
+
 import json
 import logging
-import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -36,6 +36,7 @@ _NO_BOOK: set = set()
 
 # ── JWT auth ──────────────────────────────────────────────────────────────────
 
+
 def _load_private_key(private_key_str: str):
     """
     Load a Coinbase CDP private key in either format:
@@ -44,6 +45,7 @@ def _load_private_key(private_key_str: str):
     Returns (private_key_object, algorithm_string).
     """
     import base64
+
     from cryptography.hazmat.primitives import serialization
 
     key_str = private_key_str.replace("\\n", "\n").strip()
@@ -56,22 +58,24 @@ def _load_private_key(private_key_str: str):
     # ── New format: raw base64 ────────────────────────────────────────────────
     try:
         raw = base64.b64decode(key_str)
-    except Exception:
+    except Exception as err:
         raise ValueError(
             "COINBASE_API_PRIVATE_KEY is not valid PEM or base64.\n"
             "Set it to the exact 'privateKey' value from the JSON downloaded\n"
             "at portal.cdp.coinbase.com → API Keys."
-        )
+        ) from err
 
     if len(raw) == 64:
         # Ed25519: CDP provides 64-byte key (32-byte seed + 32-byte public)
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
         private_key = Ed25519PrivateKey.from_private_bytes(raw[:32])
         return private_key, "EdDSA"
 
     if len(raw) == 32:
         # Raw EC P-256 private scalar
-        from cryptography.hazmat.primitives.asymmetric.ec import derive_private_key, SECP256R1
+        from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, derive_private_key
+
         private_key = derive_private_key(int.from_bytes(raw, "big"), SECP256R1())
         return private_key, "ES256"
 
@@ -116,15 +120,16 @@ def _auth_headers(method: str, path: str) -> Dict[str, str]:
     token = _generate_jwt(method, path)
     return {
         "Authorization": f"Bearer {token}",
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json",
     }
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+
 async def _get(path: str, params: Optional[Dict] = None) -> Any:
     full = f"/api/v3/brokerage{path}"
-    url  = f"https://api.coinbase.com{full}"
+    url = f"https://api.coinbase.com{full}"
     hdrs = _auth_headers("GET", full) if config.has_credentials else {}
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, headers=hdrs, params=params)
@@ -134,7 +139,7 @@ async def _get(path: str, params: Optional[Dict] = None) -> Any:
 
 async def _post(path: str, payload: Dict) -> Any:
     full = f"/api/v3/brokerage{path}"
-    url  = f"https://api.coinbase.com{full}"
+    url = f"https://api.coinbase.com{full}"
     body = json.dumps(payload)
     hdrs = _auth_headers("POST", full)
     async with httpx.AsyncClient(timeout=15) as client:
@@ -144,6 +149,7 @@ async def _post(path: str, payload: Dict) -> Any:
 
 
 # ── Products ──────────────────────────────────────────────────────────────────
+
 
 async def get_products(product_type: str = "SPOT") -> List[Dict]:
     """Fetch all products, paginating through every page via cursor."""
@@ -177,23 +183,23 @@ async def get_best_bid_ask(product_ids: List[str]) -> Dict[str, Dict]:
     try:
         # Coinbase accepts repeated query params
         params = [("product_ids", pid) for pid in product_ids]
-        full   = "/api/v3/brokerage/best_bid_ask"
-        url    = f"https://api.coinbase.com{full}"
-        hdrs   = _auth_headers("GET", full) if config.has_credentials else {}
+        full = "/api/v3/brokerage/best_bid_ask"
+        url = f"https://api.coinbase.com{full}"
+        hdrs = _auth_headers("GET", full) if config.has_credentials else {}
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, headers=hdrs, params=params)
             resp.raise_for_status()
             data = resp.json()
         result: Dict[str, Dict] = {}
         for entry in data.get("pricebooks", []):
-            pid  = entry.get("product_id", "")
+            pid = entry.get("product_id", "")
             bids = entry.get("bids", [])
             asks = entry.get("asks", [])
-            bid  = float(bids[0]["price"]) if bids else None
-            ask  = float(asks[0]["price"]) if asks else None
+            bid = float(bids[0]["price"]) if bids else None
+            ask = float(asks[0]["price"]) if asks else None
             result[pid] = {
-                "bid":   bid,
-                "ask":   ask,
+                "bid": bid,
+                "ask": ask,
                 "price": (bid + ask) / 2 if bid and ask else bid or ask,
             }
         return result
@@ -204,10 +210,11 @@ async def get_best_bid_ask(product_ids: List[str]) -> Dict[str, Dict]:
 
 # ── Candles ───────────────────────────────────────────────────────────────────
 
+
 async def get_candles(
-    product_id:  str,
+    product_id: str,
     granularity: str = "ONE_HOUR",
-    limit:       int = 100,
+    limit: int = 100,
 ) -> List[Dict]:
     """
     Fetch OHLCV candles.
@@ -215,10 +222,17 @@ async def get_candles(
                          ONE_HOUR TWO_HOUR SIX_HOUR ONE_DAY
     Returns list sorted oldest → newest with keys: start, open, high, low, close, volume.
     """
-    secs  = {"ONE_MINUTE": 60, "FIVE_MINUTE": 300, "FIFTEEN_MINUTE": 900,
-             "THIRTY_MINUTE": 1800, "ONE_HOUR": 3600,
-             "TWO_HOUR": 7200, "SIX_HOUR": 21600, "ONE_DAY": 86400}
-    end   = int(time.time())
+    secs = {
+        "ONE_MINUTE": 60,
+        "FIVE_MINUTE": 300,
+        "FIFTEEN_MINUTE": 900,
+        "THIRTY_MINUTE": 1800,
+        "ONE_HOUR": 3600,
+        "TWO_HOUR": 7200,
+        "SIX_HOUR": 21600,
+        "ONE_DAY": 86400,
+    }
+    end = int(time.time())
     start = end - secs.get(granularity, 3600) * min(limit, 300)
     try:
         data = await _get(
@@ -227,14 +241,16 @@ async def get_candles(
         )
         candles = []
         for c in data.get("candles", []):
-            candles.append({
-                "start":  int(c["start"]),
-                "open":   float(c["open"]),
-                "high":   float(c["high"]),
-                "low":    float(c["low"]),
-                "close":  float(c["close"]),
-                "volume": float(c["volume"]),
-            })
+            candles.append(
+                {
+                    "start": int(c["start"]),
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                    "volume": float(c["volume"]),
+                }
+            )
         return sorted(candles, key=lambda x: x["start"])
     except Exception as e:
         logger.warning(f"get_candles({product_id}): {e}")
@@ -243,17 +259,20 @@ async def get_candles(
 
 # ── Order book ────────────────────────────────────────────────────────────────
 
+
 async def get_orderbook(product_id: str, limit: int = 10) -> Dict:
     if product_id in _NO_BOOK:
         return {"bids": [], "asks": []}
     try:
         data = await _get(f"/products/{product_id}/book", {"limit": str(limit)})
-        pb   = data.get("pricebook", {})
+        pb = data.get("pricebook", {})
         return {
-            "bids": [{"price": float(b["price"]), "size": float(b["size"])}
-                     for b in pb.get("bids", [])],
-            "asks": [{"price": float(a["price"]), "size": float(a["size"])}
-                     for a in pb.get("asks", [])],
+            "bids": [
+                {"price": float(b["price"]), "size": float(b["size"])} for b in pb.get("bids", [])
+            ],
+            "asks": [
+                {"price": float(a["price"]), "size": float(a["size"])} for a in pb.get("asks", [])
+            ],
         }
     except Exception as e:
         if "404" in str(e) or "Not Found" in str(e):
@@ -266,15 +285,16 @@ async def get_orderbook(product_id: str, limit: int = 10) -> Dict:
 
 # ── Accounts ──────────────────────────────────────────────────────────────────
 
+
 async def get_accounts() -> List[Dict]:
     try:
         data = await _get("/accounts")
         return [
             {
-                "uuid":      a.get("uuid"),
-                "currency":  a.get("currency"),
+                "uuid": a.get("uuid"),
+                "currency": a.get("currency"),
                 "available": float(a.get("available_balance", {}).get("value", 0)),
-                "hold":      float(a.get("hold", {}).get("value", 0)),
+                "hold": float(a.get("hold", {}).get("value", 0)),
             }
             for a in data.get("accounts", [])
         ]
@@ -293,42 +313,49 @@ async def get_usd_balance() -> float:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
+
 async def place_limit_order(
-    product_id:  str,
-    side:        str,
-    base_size:   float,
+    product_id: str,
+    side: str,
+    base_size: float,
     limit_price: float,
-    post_only:   bool = False,
+    post_only: bool = False,
 ) -> Dict:
-    return await _post("/orders", {
-        "client_order_id": str(uuid.uuid4()),
-        "product_id":      product_id,
-        "side":            side.upper(),
-        "order_configuration": {
-            "limit_limit_gtc": {
-                "base_size":   str(round(base_size, 8)),
-                "limit_price": str(round(limit_price, 2)),
-                "post_only":   post_only,
-            }
+    return await _post(
+        "/orders",
+        {
+            "client_order_id": str(uuid.uuid4()),
+            "product_id": product_id,
+            "side": side.upper(),
+            "order_configuration": {
+                "limit_limit_gtc": {
+                    "base_size": str(round(base_size, 8)),
+                    "limit_price": str(round(limit_price, 2)),
+                    "post_only": post_only,
+                }
+            },
         },
-    })
+    )
 
 
 async def place_market_order(
     product_id: str,
-    side:       str,
+    side: str,
     quote_size: float,
 ) -> Dict:
-    return await _post("/orders", {
-        "client_order_id": str(uuid.uuid4()),
-        "product_id":      product_id,
-        "side":            side.upper(),
-        "order_configuration": {
-            "market_market_ioc": {
-                "quote_size": str(round(quote_size, 2)),
-            }
+    return await _post(
+        "/orders",
+        {
+            "client_order_id": str(uuid.uuid4()),
+            "product_id": product_id,
+            "side": side.upper(),
+            "order_configuration": {
+                "market_market_ioc": {
+                    "quote_size": str(round(quote_size, 2)),
+                }
+            },
         },
-    })
+    )
 
 
 async def cancel_orders(order_ids: List[str]) -> Dict:
@@ -336,9 +363,9 @@ async def cancel_orders(order_ids: List[str]) -> Dict:
 
 
 async def get_orders(
-    product_id:   Optional[str]       = None,
+    product_id: Optional[str] = None,
     order_status: Optional[List[str]] = None,
-    limit:        int                  = 100,
+    limit: int = 100,
 ) -> List[Dict]:
     params: Dict[str, Any] = {"limit": str(limit)}
     if product_id:

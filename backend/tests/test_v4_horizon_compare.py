@@ -1,5 +1,7 @@
 """Unit tests for backend/tools/v4_horizon_compare.py."""
+
 from __future__ import annotations
+
 import os
 import sys
 
@@ -60,9 +62,9 @@ class TestRenderHtmlReport:
         from tools.v4_horizon_compare import _render_html_report
 
         metrics = {
-            4:   {"auc": 0.512, "logloss": 0.69, "pos_frac": 0.48, "n_samples": 1000},
-            24:  {"auc": 0.534, "logloss": 0.68, "pos_frac": 0.45, "n_samples": 800},
-            72:  {"auc": 0.561, "logloss": 0.67, "pos_frac": 0.40, "n_samples": 600},
+            4: {"auc": 0.512, "logloss": 0.69, "pos_frac": 0.48, "n_samples": 1000},
+            24: {"auc": 0.534, "logloss": 0.68, "pos_frac": 0.45, "n_samples": 800},
+            72: {"auc": 0.561, "logloss": 0.67, "pos_frac": 0.40, "n_samples": 600},
             168: {"auc": 0.589, "logloss": 0.66, "pos_frac": 0.35, "n_samples": 400},
         }
         out_path = str(tmp_path / "report.html")
@@ -70,6 +72,6 @@ class TestRenderHtmlReport:
         assert os.path.exists(out_path)
         html = open(out_path).read()
         # Sanity checks on content
-        assert "0.589" in html or "0.59" in html   # h168 AUC visible
-        assert "h168" in html or "168" in html     # horizon visible
+        assert "0.589" in html or "0.59" in html  # h168 AUC visible
+        assert "h168" in html or "168" in html  # horizon visible
         assert "auc" in html.lower()

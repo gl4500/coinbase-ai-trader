@@ -4,63 +4,66 @@ Coinbase Advanced Trade — AI Trading Bot Backend
 Signals: RSI · EMA Cross · MACD · Bollinger · CNN
 Start:   uvicorn main:app --port 8001
 """
-import sys
-import os
 
-_root      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import os
+import sys
+
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _venv_site = os.path.join(_root, ".venv", "Lib", "site-packages")
 if os.path.isdir(_venv_site) and _venv_site not in sys.path:
     sys.path.insert(0, _venv_site)
 
 import asyncio
 import json
-import re as _re
-import time as _time
 import logging
+import re as _re
 import subprocess
 import threading
+import time as _time
 import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 import database
-from config import config
 from clients import coinbase_client
+from config import config
 
 try:
     import torch as _torch
+
     _TORCH_AVAILABLE = True
-    _CUDA_AVAILABLE  = _torch.cuda.is_available()
-    _TORCH_DEVICE    = "cuda" if _CUDA_AVAILABLE else "cpu"
+    _CUDA_AVAILABLE = _torch.cuda.is_available()
+    _TORCH_DEVICE = "cuda" if _CUDA_AVAILABLE else "cpu"
 except ImportError:
     _TORCH_AVAILABLE = False
-    _CUDA_AVAILABLE  = False
-    _TORCH_DEVICE    = "cpu"
-from agents.market_scanner import MarketScanner
-from agents.signal_generator import SignalGenerator
-from agents.order_executor import OrderExecutor
+    _CUDA_AVAILABLE = False
+    _TORCH_DEVICE = "cpu"
 from agents.cnn_agent import CoinbaseCNNAgent
-from services.ws_subscriber import CoinbaseWSSubscriber
 from agents.exit_watcher import attach as attach_exit_watcher
-from services.portfolio_tracker import PortfolioTracker
-from services.outcome_tracker import get_tracker
+from agents.market_scanner import MarketScanner
+from agents.order_executor import OrderExecutor
+from agents.signal_generator import SignalGenerator
 from services.history_backfill import get_backfill
+from services.outcome_tracker import get_tracker
+from services.portfolio_tracker import PortfolioTracker
+from services.ws_subscriber import CoinbaseWSSubscriber
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 _LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(_LOG_DIR, exist_ok=True)
 
-_fmt     = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                              datefmt="%Y-%m-%d %H:%M:%S")
-_level   = getattr(logging, config.log_level.upper(), logging.INFO)
+_fmt = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+_level = getattr(logging, config.log_level.upper(), logging.INFO)
 
 
 class _WinSafeRotatingFileHandler(RotatingFileHandler):
@@ -69,17 +72,18 @@ class _WinSafeRotatingFileHandler(RotatingFileHandler):
     On Windows, os.rename() fails if any handle still points to the source file.
     We close our own handle first, rename, then reopen.
     """
+
     def rotate(self, source: str, dest: str) -> None:
         if self.stream is not None:
-            self.stream.close()      # release our handle before rename
-            self.stream = None       # type: ignore[assignment]
+            self.stream.close()  # release our handle before rename
+            self.stream = None  # type: ignore[assignment]
         try:
             if os.path.exists(dest):
                 os.remove(dest)
             os.rename(source, dest)
         except PermissionError:
-            pass                     # another process holds it — skip silently
-        self.stream = self._open()   # reopen fresh log file
+            pass  # another process holds it — skip silently
+        self.stream = self._open()  # reopen fresh log file
 
 
 _console = logging.StreamHandler()
@@ -95,6 +99,7 @@ _file_err.setLevel(logging.WARNING)
 _file_err.setFormatter(_fmt)
 logging.basicConfig(level=_level, handlers=[_console, _file_all, _file_err])
 
+
 class _SuppressWinReset(logging.Filter):
     def filter(self, r: logging.LogRecord) -> bool:
         msg = r.getMessage()
@@ -105,6 +110,7 @@ class _SuppressWinReset(logging.Filter):
             if "10054" in str(r.exc_info[1]) or "ConnectionResetError" in str(r.exc_info[1]):
                 return False
         return True
+
 
 _win_reset_filter = _SuppressWinReset()
 # Apply to named loggers AND to all handlers so it never reaches the log files
@@ -120,30 +126,36 @@ logger = logging.getLogger(__name__)
 
 
 _ERRORS_LOG = os.path.join(_LOG_DIR, "errors.log")
-_ALL_LOG    = os.path.join(_LOG_DIR, "backend.log")
-_LOG_RE     = _re.compile(
-    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] ([\w.]+): (.+)$"
-)
+_ALL_LOG = os.path.join(_LOG_DIR, "backend.log")
+_LOG_RE = _re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] ([\w.]+): (.+)$")
 
 
 # ── Port cleanup ──────────────────────────────────────────────────────────────
 _TRADING_APP_PORTS = {8000, 5173}
 
+
 def _free_port(port: int) -> None:
     if port in _TRADING_APP_PORTS:
         return
     try:
-        out = subprocess.check_output(["netstat", "-ano"], text=True,
-                                      stderr=subprocess.DEVNULL, timeout=5,
-                                      creationflags=subprocess.CREATE_NO_WINDOW)
+        out = subprocess.check_output(
+            ["netstat", "-ano"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
         for line in out.splitlines():
             if f":{port}" in line and "LISTEN" in line:
                 parts = line.split()
-                pid   = parts[-1]
+                pid = parts[-1]
                 if pid.isdigit() and int(pid) != os.getpid():
-                    subprocess.run(["taskkill", "/F", "/PID", pid],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", pid],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
                     logger.info("Freed port %d (killed PID %s)", port, pid)
     except Exception:
         pass
@@ -158,7 +170,7 @@ _BRAVE_PATHS = [
     os.path.expanduser(r"~\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe"),
 ]
 
-_brave_proc: Optional[subprocess.Popen] = None   # track the launched window
+_brave_proc: Optional[subprocess.Popen] = None  # track the launched window
 
 
 def _find_brave() -> Optional[str]:
@@ -190,29 +202,30 @@ def _close_brave() -> None:
 
 # ── App State ─────────────────────────────────────────────────────────────────
 class AppState:
-    scanner:         MarketScanner         = None
-    signal_gen:      SignalGenerator       = None
-    order_executor:  OrderExecutor         = None
-    cnn_agent:       CoinbaseCNNAgent      = None
-    ws_subscriber:   CoinbaseWSSubscriber  = None
-    portfolio:       PortfolioTracker      = None
-    scanner_task:    asyncio.Task          = None
-    portfolio_task:  asyncio.Task          = None
-    cnn_task:        asyncio.Task          = None
+    scanner: MarketScanner = None
+    signal_gen: SignalGenerator = None
+    order_executor: OrderExecutor = None
+    cnn_agent: CoinbaseCNNAgent = None
+    ws_subscriber: CoinbaseWSSubscriber = None
+    portfolio: PortfolioTracker = None
+    scanner_task: asyncio.Task = None
+    portfolio_task: asyncio.Task = None
+    cnn_task: asyncio.Task = None
     # tech_task removed #311-refactor-c (TechAgent retired)
-    outcome_task:    asyncio.Task          = None
-    backfill_task:   asyncio.Task          = None
-    ws_connections:  List[WebSocket]       = []
-    is_trading:      bool                  = False
-    dry_run:         bool                  = True
-    _balance_cache:  Optional[float]       = None   # cached live USD balance
-    _balance_cache_ts: float               = 0.0    # epoch of last fetch
+    outcome_task: asyncio.Task = None
+    backfill_task: asyncio.Task = None
+    ws_connections: List[WebSocket] = []
+    is_trading: bool = False
+    dry_run: bool = True
+    _balance_cache: Optional[float] = None  # cached live USD balance
+    _balance_cache_ts: float = 0.0  # epoch of last fetch
     # ── CNN background training state ─────────────────────────────────────
-    train_status:       str                       = "idle"   # idle|running|completed|failed
-    train_started_at:   Optional[float]           = None
-    train_result:       Optional[Dict]            = None
-    train_proc:         Optional[subprocess.Popen] = None   # subprocess handle
-    train_watcher_task: Optional[asyncio.Task]    = None
+    train_status: str = "idle"  # idle|running|completed|failed
+    train_started_at: Optional[float] = None
+    train_result: Optional[Dict] = None
+    train_proc: Optional[subprocess.Popen] = None  # subprocess handle
+    train_watcher_task: Optional[asyncio.Task] = None
+
 
 app_state = AppState()
 
@@ -244,43 +257,47 @@ async def broadcast(payload: Dict) -> None:
 
 async def broadcast_state() -> None:
     positions = await database.get_positions()
-    signals   = await database.get_signals(limit=20)
-    orders    = await database.get_orders(limit=30)
-    products  = await database.get_products(tracked_only=True, limit=50)
+    signals = await database.get_signals(limit=20)
+    orders = await database.get_orders(limit=30)
+    products = await database.get_products(tracked_only=True, limit=50)
     portfolio = app_state.portfolio.summary if app_state.portfolio else {}
 
     # Enrich products with live WS prices
     for p in products:
-        live = app_state.ws_subscriber.state.get(p["product_id"]) if app_state.ws_subscriber else None
+        live = (
+            app_state.ws_subscriber.state.get(p["product_id"]) if app_state.ws_subscriber else None
+        )
         if live and live.get("price"):
             p["price"] = live["price"]
 
-    await broadcast({
-        "type":       "state",
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
-        "is_trading": app_state.is_trading,
-        "dry_run":    app_state.dry_run,
-        "portfolio":  portfolio,
-        "positions":  positions,
-        "signals":    signals[:10],
-        "orders":     orders,
-        "products":   products[:20],
-    })
+    await broadcast(
+        {
+            "type": "state",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "is_trading": app_state.is_trading,
+            "dry_run": app_state.dry_run,
+            "portfolio": portfolio,
+            "positions": positions,
+            "signals": signals[:10],
+            "orders": orders,
+            "products": products[:20],
+        }
+    )
 
 
 # ── Training subprocess progress file ────────────────────────────────────────
 _TRAIN_PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "cnn_train_progress.json")
-_TRAIN_WORKER        = os.path.join(os.path.dirname(__file__), "train_worker.py")
-_TRAIN_LOG_FILE      = os.path.join(os.path.dirname(__file__), "logs", "cnn_training.log")
+_TRAIN_WORKER = os.path.join(os.path.dirname(__file__), "train_worker.py")
+_TRAIN_LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "cnn_training.log")
 
 # Watchdog thresholds for detecting a hung training subprocess.
 # train_worker.py only writes the progress file at start and end, so its mtime
 # is useless mid-run. We watch the training log mtime instead.
-_TRAIN_STALE_START_SECS = 1800   # 30 min grace after start before staleness applies
-_TRAIN_STALE_LOG_SECS   = 3600   # #107: 1 hr without log writes = stuck. Bumped from
-                                 # 1800 after the live backend's CNN inference contended
-                                 # with glum training for the same GPU and stretched
-                                 # epochs to 5+ min, false-killing healthy runs.
+_TRAIN_STALE_START_SECS = 1800  # 30 min grace after start before staleness applies
+_TRAIN_STALE_LOG_SECS = 3600  # #107: 1 hr without log writes = stuck. Bumped from
+# 1800 after the live backend's CNN inference contended
+# with glum training for the same GPU and stretched
+# epochs to 5+ min, false-killing healthy runs.
 
 
 def _is_training_stale(data: dict, log_mtime, now: float) -> bool:
@@ -326,10 +343,14 @@ async def _train_progress_watcher() -> None:
                 if _pid:
                     try:
                         import psutil as _psutil
+
                         _pid_alive = _psutil.pid_exists(int(_pid))
                     except ImportError:
                         import subprocess as _sp
-                        _r = _sp.run(["tasklist", "/FI", f"PID eq {_pid}"], capture_output=True, text=True)
+
+                        _r = _sp.run(
+                            ["tasklist", "/FI", f"PID eq {_pid}"], capture_output=True, text=True
+                        )
                         _pid_alive = str(_pid) in _r.stdout
                 if not _pid_alive:
                     logger.warning(
@@ -342,25 +363,31 @@ async def _train_progress_watcher() -> None:
                     if app_state.cnn_agent:
                         app_state.cnn_agent.training_active = False
                 else:
-                    app_state.train_status    = "running"
+                    app_state.train_status = "running"
                     app_state.train_started_at = _data.get("started_at", _time.time())
                     if app_state.cnn_agent:
                         app_state.cnn_agent.training_active = True
 
             if _status == "running":
-                _log_mtime = os.path.getmtime(_TRAIN_LOG_FILE) if os.path.exists(_TRAIN_LOG_FILE) else None
+                _log_mtime = (
+                    os.path.getmtime(_TRAIN_LOG_FILE) if os.path.exists(_TRAIN_LOG_FILE) else None
+                )
                 if _is_training_stale(_data, _log_mtime, _time.time()):
                     _pid = _data.get("pid")
                     logger.warning(
                         f"Training PID {_pid} appears hung — "
-                        f"log unchanged for >{_TRAIN_STALE_LOG_SECS//60} min. "
+                        f"log unchanged for >{_TRAIN_STALE_LOG_SECS // 60} min. "
                         "Killing subprocess and marking failed."
                     )
                     if _pid:
                         try:
                             import subprocess as _sp
-                            _sp.run(["taskkill", "/F", "/T", "/PID", str(_pid)],
-                                    capture_output=True, text=True)
+
+                            _sp.run(
+                                ["taskkill", "/F", "/T", "/PID", str(_pid)],
+                                capture_output=True,
+                                text=True,
+                            )
                         except Exception as _ke:
                             logger.warning(f"taskkill for PID {_pid} failed: {_ke}")
                     _data["status"] = "failed"
@@ -401,19 +428,22 @@ async def lifespan(app: FastAPI):
         logger.info(f"Startup: purged {deleted} agent_decisions older than 7 days")
 
     # Instantiate all objects (no I/O, fast)
-    app_state.ws_subscriber   = CoinbaseWSSubscriber(broadcast_fn=broadcast)
-    app_state.scanner         = MarketScanner()
-    app_state.signal_gen      = SignalGenerator()
-    app_state.order_executor  = OrderExecutor(dry_run=app_state.dry_run)
-    app_state.cnn_agent       = CoinbaseCNNAgent(ws_subscriber=app_state.ws_subscriber)
-    _is_trading = lambda: app_state.is_trading
+    app_state.ws_subscriber = CoinbaseWSSubscriber(broadcast_fn=broadcast)
+    app_state.scanner = MarketScanner()
+    app_state.signal_gen = SignalGenerator()
+    app_state.order_executor = OrderExecutor(dry_run=app_state.dry_run)
+    app_state.cnn_agent = CoinbaseCNNAgent(ws_subscriber=app_state.ws_subscriber)
+
+    def _is_trading():
+        return app_state.is_trading
+
     # TechAgent retired #311-refactor-c
-    app_state.portfolio       = PortfolioTracker(ws_subscriber=app_state.ws_subscriber)
+    app_state.portfolio = PortfolioTracker(ws_subscriber=app_state.ws_subscriber)
 
     # Seed WS subscriber from DB-cached tracked products immediately —
     # don't wait for the scan; the scan will refresh this list in the background.
     cached_products = await database.get_products(tracked_only=True, limit=200)
-    cached_ids      = [p["product_id"] for p in cached_products]
+    cached_ids = [p["product_id"] for p in cached_products]
     if cached_ids:
         app_state.ws_subscriber.set_products(cached_ids)
         logger.info(f"WS seeded from DB cache: {len(cached_ids)} products")
@@ -436,10 +466,10 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_background_scan())
 
-    app_state.scanner_task   = asyncio.create_task(app_state.scanner.run_loop())
+    app_state.scanner_task = asyncio.create_task(app_state.scanner.run_loop())
     app_state.portfolio_task = asyncio.create_task(app_state.portfolio.run_loop())
-    app_state.outcome_task   = asyncio.create_task(get_tracker().run_loop())
-    app_state.backfill_task  = asyncio.create_task(get_backfill().run_loop())
+    app_state.outcome_task = asyncio.create_task(get_tracker().run_loop())
+    app_state.backfill_task = asyncio.create_task(get_backfill().run_loop())
 
     # CNN loop — starts immediately
     async def _auto_train_subprocess():
@@ -447,9 +477,9 @@ async def lifespan(app: FastAPI):
         if app_state.train_status == "running":
             logger.info("CNN auto-train skipped — training subprocess already running")
             return
-        app_state.train_status     = "running"
+        app_state.train_status = "running"
         app_state.train_started_at = _time.time()
-        app_state.train_result     = None
+        app_state.train_result = None
         try:
             proc = subprocess.Popen(
                 [sys.executable, _TRAIN_WORKER, "--epochs", "50"],
@@ -464,17 +494,17 @@ async def lifespan(app: FastAPI):
 
     app_state.cnn_task = asyncio.create_task(
         app_state.cnn_agent.run_loop(
-            interval            = config.scan_interval_secs,
-            order_executor      = app_state.order_executor,
-            is_trading_fn       = lambda: app_state.is_trading,
-            train_every_n_scans = config.cnn_train_every_n_scans,
-            broadcast_fn        = broadcast_state,
-            auto_train_fn       = _auto_train_subprocess,
+            interval=config.scan_interval_secs,
+            order_executor=app_state.order_executor,
+            is_trading_fn=lambda: app_state.is_trading,
+            train_every_n_scans=config.cnn_train_every_n_scans,
+            broadcast_fn=broadcast_state,
+            auto_train_fn=_auto_train_subprocess,
         )
     )
 
     # TechAgent retired #311-refactor-c — only CNN agent runs as a sub-agent
-    app_state.train_watcher_task  = asyncio.create_task(_train_progress_watcher())
+    app_state.train_watcher_task = asyncio.create_task(_train_progress_watcher())
 
     logger.info("Coinbase Trader ready — http://localhost:8001")
     logger.info(f"Credentials: {'OK' if config.has_credentials else 'MISSING'}")
@@ -484,9 +514,11 @@ async def lifespan(app: FastAPI):
     yield
 
     for task in [
-        app_state.scanner_task, app_state.portfolio_task,
+        app_state.scanner_task,
+        app_state.portfolio_task,
         app_state.cnn_task,
-        app_state.outcome_task, app_state.backfill_task,
+        app_state.outcome_task,
+        app_state.backfill_task,
         app_state.train_watcher_task,
     ]:
         if task:
@@ -507,11 +539,13 @@ app.add_middleware(
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
-_STATUS_BALANCE_TTL = 30.0   # refresh live balance at most every 30 s
+_STATUS_BALANCE_TTL = 30.0  # refresh live balance at most every 30 s
+
 
 @app.get("/api/status")
 async def get_status():
     import time as _time
+
     balance = None
     if config.has_credentials:
         now = _time.time()
@@ -528,17 +562,18 @@ async def get_status():
         balance = app_state._balance_cache
     dry_balance = (
         app_state.order_executor._dry_run_balance
-        if app_state.order_executor and app_state.dry_run else None
+        if app_state.order_executor and app_state.dry_run
+        else None
     )
     return {
-        "is_trading":      app_state.is_trading,
-        "dry_run":         app_state.dry_run,
-        "has_creds":       config.has_credentials,
-        "usd_balance":     balance,
+        "is_trading": app_state.is_trading,
+        "dry_run": app_state.dry_run,
+        "has_creds": config.has_credentials,
+        "usd_balance": balance,
         "dry_run_balance": dry_balance,
-        "tracked_pairs":   len(app_state.scanner.tracked_ids) if app_state.scanner else 0,
-        "timestamp":       datetime.now(timezone.utc).isoformat(),
-        "app_api_key":     config.app_api_key,   # local app — key exposed for UI use
+        "tracked_pairs": len(app_state.scanner.tracked_ids) if app_state.scanner else 0,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "app_api_key": config.app_api_key,  # local app — key exposed for UI use
     }
 
 
@@ -546,12 +581,14 @@ async def get_status():
 @app.get("/api/products")
 async def get_products(
     tracked: bool = Query(False),
-    limit: int    = Query(50, le=200),
+    limit: int = Query(50, le=200),
 ):
     products = await database.get_products(tracked_only=tracked, limit=limit)
     # Enrich with live WS price
     for p in products:
-        live = app_state.ws_subscriber.state.get(p["product_id"]) if app_state.ws_subscriber else None
+        live = (
+            app_state.ws_subscriber.state.get(p["product_id"]) if app_state.ws_subscriber else None
+        )
         if live and live.get("price"):
             p["price"] = live["price"]
     # Compute 24h high/low/pct-change from the candles table — Coinbase Advanced
@@ -575,11 +612,11 @@ async def _enrich_products_with_24h(products: List[Dict]) -> None:
             continue
         # Coinbase rows: start_time desc by default in get_candles — accept either
         highs = [c.get("high") for c in candles if c.get("high") is not None]
-        lows  = [c.get("low")  for c in candles if c.get("low")  is not None]
+        lows = [c.get("low") for c in candles if c.get("low") is not None]
         if highs:
             p["high_24h"] = max(highs)
         if lows:
-            p["low_24h"]  = min(lows)
+            p["low_24h"] = min(lows)
         # %pct change: use first vs last close in chronological order
         closes_sorted = sorted(
             [c for c in candles if c.get("close") is not None and c.get("start_time")],
@@ -587,7 +624,7 @@ async def _enrich_products_with_24h(products: List[Dict]) -> None:
         )
         if len(closes_sorted) >= 2:
             first = closes_sorted[0]["close"]
-            last  = closes_sorted[-1]["close"]
+            last = closes_sorted[-1]["close"]
             if first and first > 0:
                 p["price_pct_change_24h"] = ((last - first) / first) * 100.0
 
@@ -621,7 +658,7 @@ async def get_price(product_id: str):
     price = app_state.ws_subscriber.get_price(product_id) if app_state.ws_subscriber else None
     if price is None:
         try:
-            bba   = await coinbase_client.get_best_bid_ask([product_id])
+            bba = await coinbase_client.get_best_bid_ask([product_id])
             price = bba.get(product_id, {}).get("price")
         except Exception:
             pass
@@ -630,9 +667,9 @@ async def get_price(product_id: str):
 
 @app.get("/api/candles/{product_id}")
 async def get_candles(
-    product_id:  str,
+    product_id: str,
     granularity: str = Query("ONE_HOUR"),
-    limit:       int = Query(100, le=300),
+    limit: int = Query(100, le=300),
 ):
     candles = await database.get_candles(product_id, limit=limit)
     if not candles:
@@ -670,49 +707,47 @@ async def get_cnn_status():
     agent = app_state.cnn_agent
     dry_balance = (
         app_state.order_executor._dry_run_balance
-        if app_state.order_executor and app_state.dry_run else None
+        if app_state.order_executor and app_state.dry_run
+        else None
     )
-    dd_status = (
-        app_state.order_executor.drawdown_status
-        if app_state.order_executor else {}
-    )
+    dd_status = app_state.order_executor.drawdown_status if app_state.order_executor else {}
     return {
-        "torch_available":  _TORCH_AVAILABLE,
-        "cuda_available":   _CUDA_AVAILABLE,
-        "device":           _TORCH_DEVICE,
-        "model_loaded":     agent._exists() if agent else False,
-        "last_scan_at":     agent.last_scan_at  if agent else None,
-        "next_scan_at":     agent.next_scan_at  if agent else None,
-        "scan_count":       agent.scan_count    if agent else 0,
-        "signals_total":    agent.signals_total if agent else 0,
-        "signals_buy":      agent.signals_buy   if agent else 0,
-        "signals_sell":     agent.signals_sell  if agent else 0,
+        "torch_available": _TORCH_AVAILABLE,
+        "cuda_available": _CUDA_AVAILABLE,
+        "device": _TORCH_DEVICE,
+        "model_loaded": agent._exists() if agent else False,
+        "last_scan_at": agent.last_scan_at if agent else None,
+        "next_scan_at": agent.next_scan_at if agent else None,
+        "scan_count": agent.scan_count if agent else 0,
+        "signals_total": agent.signals_total if agent else 0,
+        "signals_buy": agent.signals_buy if agent else 0,
+        "signals_sell": agent.signals_sell if agent else 0,
         "signals_executed": agent.signals_executed if agent else 0,
-        "dry_run":          app_state.dry_run,
-        "dry_run_balance":  dry_balance,
-        "is_trading":       app_state.is_trading,
-        "drawdown":         dd_status,
-        "last_trained_at":  agent.last_trained_at if agent else None,
-        "train_count":      agent.train_count     if agent else 0,
+        "dry_run": app_state.dry_run,
+        "dry_run_balance": dry_balance,
+        "is_trading": app_state.is_trading,
+        "drawdown": dd_status,
+        "last_trained_at": agent.last_trained_at if agent else None,
+        "train_count": agent.train_count if agent else 0,
         # Win rate tracking
-        "wins":             agent.book.wins        if agent else 0,
-        "losses":           agent.book.losses      if agent else 0,
-        "win_rate":         round(agent.book.win_rate * 100, 1) if agent else 0.0,
-        "expectancy_pct":   round(agent.book.expectancy, 3)     if agent else 0.0,
+        "wins": agent.book.wins if agent else 0,
+        "losses": agent.book.losses if agent else 0,
+        "win_rate": round(agent.book.win_rate * 100, 1) if agent else 0.0,
+        "expectancy_pct": round(agent.book.expectancy, 3) if agent else 0.0,
         # LLM token usage
-        "llm_calls":           agent.llm_calls           if agent else 0,
-        "llm_prompt_tokens":   agent.llm_prompt_tokens   if agent else 0,
+        "llm_calls": agent.llm_calls if agent else 0,
+        "llm_prompt_tokens": agent.llm_prompt_tokens if agent else 0,
         "llm_response_tokens": agent.llm_response_tokens if agent else 0,
-        "llm_total_tokens":    (agent.llm_prompt_tokens + agent.llm_response_tokens) if agent else 0,
-        "training_active":     agent.training_active     if agent else False,
-        "train_status":        app_state.train_status,
+        "llm_total_tokens": (agent.llm_prompt_tokens + agent.llm_response_tokens) if agent else 0,
+        "training_active": agent.training_active if agent else False,
+        "train_status": app_state.train_status,
     }
 
 
 # ── CNN Scans (all reviewed products) ─────────────────────────────────────────
 @app.get("/api/cnn/scans")
 async def get_cnn_scans(
-    limit:      int           = Query(500, le=2000),
+    limit: int = Query(500, le=2000),
     product_id: Optional[str] = Query(None),
 ):
     return await database.get_cnn_scans(limit=limit, product_id=product_id)
@@ -721,7 +756,7 @@ async def get_cnn_scans(
 # ── Signals ───────────────────────────────────────────────────────────────────
 @app.get("/api/signals")
 async def get_signals(
-    limit:       int           = Query(50, le=500),
+    limit: int = Query(50, le=500),
     signal_type: Optional[str] = Query(None),
 ):
     return await database.get_signals(limit=limit, signal_type_prefix=signal_type)
@@ -741,14 +776,12 @@ async def trigger_cnn_scan(
     _: None = Depends(verify_api_key),
 ):
     executor = app_state.order_executor if (execute and app_state.is_trading) else None
-    signals  = await app_state.cnn_agent.scan_all(
+    signals = await app_state.cnn_agent.scan_all(
         execute=execute and app_state.is_trading,
         order_executor=executor,
     )
     await broadcast_state()
     return {"signals_generated": len(signals), "signals": signals}
-
-
 
 
 @app.post("/api/cnn/train")
@@ -766,8 +799,11 @@ async def trigger_cnn_training(
         elapsed = int(_time.time() - (app_state.train_started_at or _time.time()))
         return JSONResponse(
             status_code=409,
-            content={"status": "running", "elapsed_secs": elapsed,
-                     "detail": "Training already in progress"},
+            content={
+                "status": "running",
+                "elapsed_secs": elapsed,
+                "detail": "Training already in progress",
+            },
         )
     # Also check progress file — catches case where backend restarted mid-training
     if os.path.exists(_TRAIN_PROGRESS_FILE):
@@ -775,7 +811,7 @@ async def trigger_cnn_training(
             with open(_TRAIN_PROGRESS_FILE) as _f:
                 _pd = json.load(_f)
             if _pd.get("status") == "running":
-                app_state.train_status    = "running"
+                app_state.train_status = "running"
                 app_state.train_started_at = _pd.get("started_at", _time.time())
                 return JSONResponse(
                     status_code=409,
@@ -784,9 +820,9 @@ async def trigger_cnn_training(
         except Exception:
             pass
 
-    app_state.train_status    = "running"
+    app_state.train_status = "running"
     app_state.train_started_at = _time.time()
-    app_state.train_result    = None
+    app_state.train_result = None
 
     try:
         proc = subprocess.Popen(
@@ -800,7 +836,9 @@ async def trigger_cnn_training(
     except Exception as exc:
         app_state.train_status = "failed"
         app_state.train_result = {"error": str(exc)}
-        raise HTTPException(status_code=500, detail=f"Failed to start training worker: {exc}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start training worker: {exc}"
+        ) from exc
 
     return {"status": "started", "epochs": epochs}
 
@@ -812,9 +850,9 @@ async def cnn_train_status():
         try:
             with open(_TRAIN_PROGRESS_FILE) as _f:
                 _data = json.load(_f)
-            _status     = _data.get("status", "idle")
+            _status = _data.get("status", "idle")
             _started_at = _data.get("started_at", app_state.train_started_at)
-            _elapsed    = (
+            _elapsed = (
                 int(_time.time() - _started_at) if _started_at and _status == "running" else 0
             )
             return {"status": _status, "elapsed_secs": _elapsed, "result": _data.get("result")}
@@ -822,7 +860,11 @@ async def cnn_train_status():
             pass
     # Fallback to in-memory state (no progress file yet)
     elapsed = int(_time.time() - app_state.train_started_at) if app_state.train_started_at else 0
-    return {"status": app_state.train_status, "elapsed_secs": elapsed, "result": app_state.train_result}
+    return {
+        "status": app_state.train_status,
+        "elapsed_secs": elapsed,
+        "result": app_state.train_result,
+    }
 
 
 @app.get("/api/cnn/training-history")
@@ -854,7 +896,8 @@ async def reload_cnn_model(_: None = Depends(verify_api_key)):
         )
     if not app_state.cnn_agent:
         raise HTTPException(status_code=503, detail="CNN agent not initialised")
-    from agents.cnn_agent import _model_path_for, N_CHANNELS
+    from agents.cnn_agent import N_CHANNELS, _model_path_for
+
     model_path = _model_path_for(app_state.cnn_agent._arch)
     if not os.path.exists(model_path):
         raise HTTPException(status_code=404, detail=f"Model file not found: {model_path}")
@@ -887,6 +930,7 @@ async def reload_xgb_calibration(_: None = Depends(verify_api_key)):
       - 200 {"status": "missing", ...} if booster artifacts are absent
     """
     from agents import xgb_signal
+
     ok = xgb_signal.force_reload()
     cal_present = xgb_signal._calibration is not None
     logger.info(
@@ -926,9 +970,9 @@ async def force_lgbm_retrain(_: None = Depends(verify_api_key)):
 # ── History Backfill ──────────────────────────────────────────────────────────
 @app.post("/api/history/backfill")
 async def trigger_history_backfill(
-    days:          int           = Query(365, ge=7, le=730),
-    product_id:    Optional[str] = Query(None, description="Single product ID"),
-    all_coinbase:  bool          = Query(False, description="Backfill ALL Coinbase USD pairs"),
+    days: int = Query(365, ge=7, le=730),
+    product_id: Optional[str] = Query(None, description="Single product ID"),
+    all_coinbase: bool = Query(False, description="Backfill ALL Coinbase USD pairs"),
     _: None = Depends(verify_api_key),
 ):
     """
@@ -941,8 +985,12 @@ async def trigger_history_backfill(
 
     async def _run():
         try:
-            result = await get_backfill().run(days=days, product_ids=pids, all_coinbase=all_coinbase)
-            logger.info(f"Backfill complete: {result['total_products']} products | {result['total_new_bars']} new bars")
+            result = await get_backfill().run(
+                days=days, product_ids=pids, all_coinbase=all_coinbase
+            )
+            logger.info(
+                f"Backfill complete: {result['total_products']} products | {result['total_new_bars']} new bars"
+            )
         except Exception as e:
             logger.error(f"Backfill error: {e}")
 
@@ -955,22 +1003,26 @@ async def trigger_history_backfill(
 async def get_history_status():
     """List all products that have parquet history files and their bar counts."""
     import os
+
     from services.history_backfill import _HISTORY_DIR, load_history
+
     if not os.path.exists(_HISTORY_DIR):
         return {"files": []}
     files = []
     for fname in sorted(os.listdir(_HISTORY_DIR)):
         if not fname.endswith(".parquet"):
             continue
-        pid    = fname.replace(".parquet", "").replace("_", "-")
+        pid = fname.replace(".parquet", "").replace("_", "-")
         candles = load_history(pid)
         if candles:
-            files.append({
-                "product_id": pid,
-                "bars":       len(candles),
-                "oldest":     candles[0]["start"],
-                "newest":     candles[-1]["start"],
-            })
+            files.append(
+                {
+                    "product_id": pid,
+                    "bars": len(candles),
+                    "oldest": candles[0]["start"],
+                    "newest": candles[-1]["start"],
+                }
+            )
     return {"files": files}
 
 
@@ -978,26 +1030,28 @@ async def get_history_status():
 @app.get("/api/orders")
 async def get_orders(
     status: Optional[str] = Query(None),
-    limit:  int           = Query(100, le=500),
+    limit: int = Query(100, le=500),
 ):
     return await database.get_orders(status=status, limit=limit)
 
 
 class SideEnum(str, Enum):
-    BUY  = "BUY"
+    BUY = "BUY"
     SELL = "SELL"
 
+
 class OrderTypeEnum(str, Enum):
-    LIMIT  = "LIMIT"
+    LIMIT = "LIMIT"
     MARKET = "MARKET"
+
 
 class PlaceOrderRequest(BaseModel):
     product_id: str
-    side:       SideEnum
+    side: SideEnum
     order_type: OrderTypeEnum
-    price:      Optional[float] = None   # required for LIMIT
-    quote_size: float           = 100.0  # USD to spend
-    strategy:   str             = "MANUAL"
+    price: Optional[float] = None  # required for LIMIT
+    quote_size: float = 100.0  # USD to spend
+    strategy: str = "MANUAL"
 
     @field_validator("quote_size")
     @classmethod
@@ -1023,10 +1077,10 @@ async def place_order(req: PlaceOrderRequest, _: None = Depends(verify_api_key))
         )
     else:
         signal = {
-            "product_id":  req.product_id,
-            "side":        req.side.value,
-            "price":       price,
-            "quote_size":  req.quote_size,
+            "product_id": req.product_id,
+            "side": req.side.value,
+            "price": price,
+            "quote_size": req.quote_size,
             "signal_type": req.strategy,
         }
         result = await app_state.order_executor.execute_signal(signal)
@@ -1044,7 +1098,7 @@ async def cancel_order(order_id: str, _: None = Depends(verify_api_key)):
 @app.post("/api/trading/enable")
 async def enable_trading(_: None = Depends(verify_api_key)):
     dry_run = config.dry_run
-    app_state.dry_run    = dry_run
+    app_state.dry_run = dry_run
     app_state.is_trading = True
     app_state.order_executor = OrderExecutor(dry_run=dry_run)
     await broadcast({"type": "trading_status", "is_trading": True, "dry_run": dry_run})
@@ -1077,6 +1131,7 @@ async def get_balance():
         return {"usd_balance": None, "message": "No credentials configured"}
     try:
         import time as _time
+
         accounts = await coinbase_client.get_accounts()
         # Derive USD balance from already-fetched accounts — avoids a second get_accounts() call
         usd = next(
@@ -1084,7 +1139,7 @@ async def get_balance():
             0.0,
         )
         # Refresh the shared status cache so /api/status doesn't need a separate call
-        app_state._balance_cache    = usd
+        app_state._balance_cache = usd
         app_state._balance_cache_ts = _time.time()
         return {"accounts": accounts, "usd_balance": usd}
     except Exception as e:
@@ -1139,14 +1194,14 @@ def _read_log_file(path: str, min_level: int, limit: int) -> List[Dict]:
             entries.append(current)
     except Exception as e:
         logger.warning(f"Log file read error: {e}")
-    entries.reverse()   # newest first
+    entries.reverse()  # newest first
     return entries[:limit]
 
 
 @app.get("/api/logs")
 async def get_logs(
-    level:  str = Query("WARNING", description="Minimum level: WARNING or ERROR"),
-    limit:  int = Query(200, le=500),
+    level: str = Query("WARNING", description="Minimum level: WARNING or ERROR"),
+    limit: int = Query(200, le=500),
 ):
     min_level = logging.ERROR if level.upper() == "ERROR" else logging.WARNING
     # errors.log already contains WARNING+ so use it for WARNING filter;
@@ -1168,6 +1223,7 @@ async def clear_logs(_: None = Depends(verify_api_key)):
 
 # ── Sub-agent status & decisions ─────────────────────────────────────────────
 
+
 @app.get("/api/agents/status")
 async def get_agent_status():
     # TechAgent retired #311-refactor-c — tech_status kept as empty dict for
@@ -1180,15 +1236,15 @@ async def get_agent_status():
     if cnn_book:
         cnn_agent = app_state.cnn_agent
         cnn_status = {
-            "agent":          "CNN",
-            "balance":        round(cnn_book.balance, 2),
-            "realized_pnl":   round(cnn_book.realized_pnl, 2),
+            "agent": "CNN",
+            "balance": round(cnn_book.balance, 2),
+            "realized_pnl": round(cnn_book.realized_pnl, 2),
             "open_positions": len(cnn_book.positions),
-            "scan_count":     cnn_agent.scan_count     if cnn_agent else 0,
-            "last_scan_at":   cnn_agent.last_scan_at   if cnn_agent else None,
-            "signals_buy":    cnn_agent.signals_buy     if cnn_agent else 0,
-            "signals_sell":   cnn_agent.signals_sell    if cnn_agent else 0,
-            "positions":      {
+            "scan_count": cnn_agent.scan_count if cnn_agent else 0,
+            "last_scan_at": cnn_agent.last_scan_at if cnn_agent else None,
+            "signals_buy": cnn_agent.signals_buy if cnn_agent else 0,
+            "signals_sell": cnn_agent.signals_sell if cnn_agent else 0,
+            "positions": {
                 pid: {"size": round(p["size"], 6), "avg_price": round(p["avg_price"], 6)}
                 for pid, p in cnn_book.positions.items()
             },
@@ -1206,27 +1262,37 @@ async def get_agent_status():
     # (catches positions opened before MIN_PRICE was raised)
     if ws and all_held_pids:
         current_subs = set(ws._products)
-        missing      = all_held_pids - current_subs
+        missing = all_held_pids - current_subs
         if missing:
             ws.set_products(list(current_subs | missing))
-            logger.info(f"WS: added {len(missing)} held-but-untracked products — reconnecting: {missing}")
+            logger.info(
+                f"WS: added {len(missing)} held-but-untracked products — reconnecting: {missing}"
+            )
             asyncio.create_task(ws.reconnect())
 
     # REST fallback: for held products with no WS price, fetch via product endpoint and seed WS state
     if ws and all_held_pids:
         no_price = [pid for pid in all_held_pids if not ws.get_price(pid)]
         if no_price:
+
             async def _fetch_price(pid: str) -> None:
                 try:
                     prod = await coinbase_client.get_product(pid)
                     price_str = prod.get("price") if prod else None
                     if price_str:
                         rest_price = float(price_str)
-                        ws.state[pid] = {"product_id": pid, "price": rest_price,
-                                         "bid": None, "ask": None, "volume_24h": 0.0, "pct_change": 0.0}
+                        ws.state[pid] = {
+                            "product_id": pid,
+                            "price": rest_price,
+                            "bid": None,
+                            "ask": None,
+                            "volume_24h": 0.0,
+                            "pct_change": 0.0,
+                        }
                         logger.debug(f"REST price fallback: {pid} = {rest_price}")
                 except Exception as _e:
                     logger.debug(f"REST price fallback failed for {pid}: {_e}")
+
             await asyncio.gather(*[_fetch_price(pid) for pid in no_price])
 
     for st in (tech_status, cnn_status):
@@ -1239,28 +1305,31 @@ async def get_agent_status():
             pos["entry_corrupt"] = entry == 0
 
             if live and entry > 0:
-                pos["current_price"]  = round(live, 6)
+                pos["current_price"] = round(live, 6)
                 pos["unrealized_pnl"] = round((live - entry) * pos["size"], 4)
-                pos["pct_pnl"]        = round((live - entry) / entry * 100, 2)
+                pos["pct_pnl"] = round((live - entry) / entry * 100, 2)
             else:
-                pos["current_price"]  = None
+                pos["current_price"] = None
                 pos["unrealized_pnl"] = None
-                pos["pct_pnl"]        = None
+                pos["pct_pnl"] = None
 
     return {"tech": tech_status, "cnn": cnn_status}
 
 
 @app.get("/api/trades")
 async def get_trades(
-    agent:       Optional[str] = Query(None),
-    product_id:  Optional[str] = Query(None),
-    open_only:   bool          = Query(False),
-    closed_only: bool          = Query(False),
-    limit:       int           = Query(100, le=1000),
+    agent: Optional[str] = Query(None),
+    product_id: Optional[str] = Query(None),
+    open_only: bool = Query(False),
+    closed_only: bool = Query(False),
+    limit: int = Query(100, le=1000),
 ):
     return await database.get_trades(
-        agent=agent, product_id=product_id,
-        open_only=open_only, closed_only=closed_only, limit=limit,
+        agent=agent,
+        product_id=product_id,
+        open_only=open_only,
+        closed_only=closed_only,
+        limit=limit,
     )
 
 
@@ -1271,7 +1340,9 @@ async def get_performance():
     Returns monthly stats, cumulative balance curve, and $50k/yr projection.
     """
     import aiosqlite
-    from database import DB_PATH, _DB_TIMEOUT
+
+    from database import _DB_TIMEOUT, DB_PATH
+
     async with aiosqlite.connect(DB_PATH, timeout=_DB_TIMEOUT) as db:
         db.row_factory = aiosqlite.Row
 
@@ -1315,12 +1386,12 @@ async def get_performance():
             t = (m["wins"] or 0) + (m["losses"] or 0)
             wr = (m["wins"] or 0) / t if t else 0.0
             m["win_rate"] = round(wr * 100, 1)
-            avg_win  = m["avg_win"]  or 0.0
+            avg_win = m["avg_win"] or 0.0
             avg_loss = m["avg_loss"] or 0.0
             # Expectancy = expected $ per trade (negative = losing system)
             m["expectancy"] = round(wr * avg_win + (1 - wr) * avg_loss, 3)
-            ob  = m["open_balance"] or 0
-            pnl = m["total_pnl"]    or 0
+            ob = m["open_balance"] or 0
+            pnl = m["total_pnl"] or 0
             m["monthly_return_pct"] = round(pnl / ob * 100, 2) if ob > 0 else 0.0
 
         # Rolling 30-day stats (last 30 days of closed trades)
@@ -1346,7 +1417,7 @@ async def get_performance():
         w30 = r30["wins"] or 0
         fb30 = r30["first_balance"] or 0
         rolling_return_pct = round((r30["total_pnl"] or 0) / fb30 * 100, 2) if fb30 > 0 else 0.0
-        rolling_win_rate   = round(w30 / t30 * 100, 1) if t30 else 0.0
+        rolling_win_rate = round(w30 / t30 * 100, 1) if t30 else 0.0
 
         # All-time stats
         cursor = await db.execute("""
@@ -1363,7 +1434,7 @@ async def get_performance():
         overall = dict(await cursor.fetchone())
 
     curr_bal = overall["current_balance"] or 0
-    first_bal = overall["first_balance"] or curr_bal or 1
+    overall["first_balance"] or curr_bal or 1
     total_t = overall["total_trades"] or 0
     total_w = overall["total_wins"] or 0
     all_time_win_rate = round(total_w / total_t * 100, 1) if total_t else 0.0
@@ -1379,37 +1450,38 @@ async def get_performance():
         # 12 * bal * (1+r)^n * r >= 50000  → solve numerically
         bal = curr_bal
         for n in range(1, 600):
-            bal *= (1 + monthly_rate)
+            bal *= 1 + monthly_rate
             if 12 * bal * monthly_rate >= annual_goal_usd:
                 projected_months = n
                 break
 
     return {
-        "months":               months,
+        "months": months,
         "rolling_30d": {
-            "trades":         t30,
-            "wins":           w30,
-            "win_rate_pct":   rolling_win_rate,
-            "return_pct":     rolling_return_pct,
-            "total_pnl":      round(r30["total_pnl"] or 0, 2),
+            "trades": t30,
+            "wins": w30,
+            "win_rate_pct": rolling_win_rate,
+            "return_pct": rolling_return_pct,
+            "total_pnl": round(r30["total_pnl"] or 0, 2),
         },
         "overall": {
-            "total_trades":   total_t,
-            "total_wins":     total_w,
-            "win_rate_pct":   all_time_win_rate,
-            "total_pnl":      round(overall["total_pnl"] or 0, 2),
+            "total_trades": total_t,
+            "total_wins": total_w,
+            "win_rate_pct": all_time_win_rate,
+            "total_pnl": round(overall["total_pnl"] or 0, 2),
             "current_balance": round(curr_bal, 2),
-            "peak_balance":    round(overall["peak_balance"] or 0, 2),
+            "peak_balance": round(overall["peak_balance"] or 0, 2),
         },
         "projection": {
-            "annual_goal_usd":    annual_goal_usd,
+            "annual_goal_usd": annual_goal_usd,
             "trailing_monthly_pct": rolling_return_pct,
-            "months_to_goal":     projected_months,
+            "months_to_goal": projected_months,
         },
     }
 
 
 # ── Shadow-week monitoring: comparison header (#52) + equity curve (#54) ────
+
 
 def _read_agent_state(db_path: str) -> Dict:
     """Read CNN agent state from a sqlite DB. DB-side fallback for tests +
@@ -1424,18 +1496,17 @@ def _read_agent_state(db_path: str) -> Dict:
     """
     import json as _json
     import sqlite3 as _sql
+
     try:
         con = _sql.connect(db_path)
         row = con.execute(
-            "SELECT balance, realized_pnl, positions_json "
-            "FROM agent_state WHERE agent='CNN'"
+            "SELECT balance, realized_pnl, positions_json FROM agent_state WHERE agent='CNN'"
         ).fetchone()
         con.close()
     except Exception:
         return None
     if not row:
-        return {"balance": 0.0, "realized_pnl": 0.0,
-                "open_positions": 0, "unrealized_pnl_est": 0.0}
+        return {"balance": 0.0, "realized_pnl": 0.0, "open_positions": 0, "unrealized_pnl_est": 0.0}
     balance, realized, positions_json = row
     positions = _json.loads(positions_json) if positions_json else {}
     return {
@@ -1454,6 +1525,7 @@ async def _fetch_live_agent_state(port: int) -> Dict:
     in memory.
     """
     import httpx as _httpx
+
     try:
         async with _httpx.AsyncClient(timeout=2.0) as c:
             r = await c.get(f"http://localhost:{port}/api/agents/status")
@@ -1463,10 +1535,7 @@ async def _fetch_live_agent_state(port: int) -> Dict:
     except Exception:
         return None
     positions = d.get("positions", {}) or {}
-    unrealized = sum(
-        float((p or {}).get("unrealized_pnl", 0.0) or 0.0)
-        for p in positions.values()
-    )
+    unrealized = sum(float((p or {}).get("unrealized_pnl", 0.0) or 0.0) for p in positions.values())
     return {
         "balance": float(d.get("balance", 0.0) or 0.0),
         "realized_pnl": float(d.get("realized_pnl", 0.0) or 0.0),
@@ -1484,7 +1553,7 @@ async def compare_backends():
     doesn't get an agent_state row until the first trade closes. If a port
     isn't reachable, that side returns null in the response.
     """
-    v3  = await _fetch_live_agent_state(8001)
+    v3 = await _fetch_live_agent_state(8001)
     v45 = await _fetch_live_agent_state(8002)
     delta = 0.0
     if v3 and v45:
@@ -1499,8 +1568,12 @@ async def _equity_curve_series(db_path: str, days: int) -> List:
     Task #81: aiosqlite, not sync sqlite3 — the endpoint reads two DBs
     sequentially and would otherwise block the event loop for both connections.
     """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+
     import aiosqlite as _aiosql
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
     cutoff = (_dt.now(_tz.utc) - _td(days=days)).isoformat()
     try:
         async with _aiosql.connect(db_path) as con:
@@ -1516,7 +1589,7 @@ async def _equity_curve_series(db_path: str, days: int) -> List:
     cum = 0.0
     out = []
     for closed_at, pnl in rows:
-        cum += (pnl or 0.0)
+        cum += pnl or 0.0
         out.append([closed_at, round(cum, 4)])
     return out
 
@@ -1528,21 +1601,24 @@ async def equity_curve(days: int = 7):
     rendered as overlay lines: v3 (8001) and v45 (8002).
     """
     import os as _os
+
     return {
-        "v3":  await _equity_curve_series(
-            _os.path.join(_os.path.dirname(__file__), "coinbase.db"), days),
+        "v3": await _equity_curve_series(
+            _os.path.join(_os.path.dirname(__file__), "coinbase.db"), days
+        ),
         "v45": await _equity_curve_series(
-            _os.path.join(_os.path.dirname(__file__), "coinbase_dev.db"), days),
+            _os.path.join(_os.path.dirname(__file__), "coinbase_dev.db"), days
+        ),
         "days": days,
     }
 
 
 @app.get("/api/agents/decisions")
 async def get_agent_decisions(
-    agent:        Optional[str] = Query(None, description="TECH or CNN"),
-    product_id:   Optional[str] = Query(None),
-    limit:        int           = Query(100, le=2000),
-    signals_only: bool          = Query(False, description="If true, exclude HOLD decisions"),
+    agent: Optional[str] = Query(None, description="TECH or CNN"),
+    product_id: Optional[str] = Query(None),
+    limit: int = Query(100, le=2000),
+    signals_only: bool = Query(False, description="If true, exclude HOLD decisions"),
 ):
     return await database.get_agent_decisions(
         product_id=product_id, agent=agent, limit=limit, signals_only=signals_only
@@ -1577,12 +1653,20 @@ async def websocket_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     import os
+
     import uvicorn
+
     # Honor PORT env so a second backend instance (e.g. Spyder dev kernel)
     # can run on a different port without conflicting with the launcher's
     # default 8001 instance. Frontend hits 8001 unchanged.
     _port = int(os.getenv("PORT", "8001"))
     _free_port(_port)
-    uvicorn.run("main:app", host="0.0.0.0", port=_port, reload=False,
-                log_level=config.log_level.lower(),
-                ws_ping_interval=20, ws_ping_timeout=20)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=_port,
+        reload=False,
+        log_level=config.log_level.lower(),
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
+    )

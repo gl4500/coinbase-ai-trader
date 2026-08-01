@@ -18,6 +18,7 @@ loaded alongside the booster (when present) and applied to raw output
 before clipping. Fixes the live U-shape calibration discovered in the
 shadow window without retraining the booster.
 """
+
 from __future__ import annotations
 
 import json
@@ -48,9 +49,9 @@ _load_attempted: bool = False
 _load_succeeded: bool = False
 
 # ── v4 shadow state (Step B.1) ────────────────────────────────────────────
-_MODEL_PATH_V4    = os.path.join(_BACKEND_DIR, "xgb_model_v4.json")
+_MODEL_PATH_V4 = os.path.join(_BACKEND_DIR, "xgb_model_v4.json")
 _FEATURES_PATH_V4 = os.path.join(_BACKEND_DIR, "xgb_features_v4.json")
-_CALIB_PATH_V4    = os.path.join(_BACKEND_DIR, "xgb_calibration_v4.pkl")
+_CALIB_PATH_V4 = os.path.join(_BACKEND_DIR, "xgb_calibration_v4.pkl")
 
 _booster_v4 = None
 _feature_names_v4: List[str] = []
@@ -59,7 +60,7 @@ _load_attempted_v4: bool = False
 _load_succeeded_v4: bool = False
 
 # ── v4.5 shadow state (Step B.1.5) ────────────────────────────────────────
-_MODEL_PATH_V45    = os.path.join(_BACKEND_DIR, "xgb_model_v4_5.json")
+_MODEL_PATH_V45 = os.path.join(_BACKEND_DIR, "xgb_model_v4_5.json")
 _FEATURES_PATH_V45 = os.path.join(_BACKEND_DIR, "xgb_features_v4_5.json")
 # No calibration path — v4.5 uses raw softmax (see spec)
 
@@ -82,11 +83,14 @@ def _try_load() -> bool:
         if not (os.path.exists(_MODEL_PATH) and os.path.exists(_FEATURES_PATH)):
             logger.info(
                 "xgb_signal: artifacts missing (model=%s features=%s) — fallback to %.2f",
-                _MODEL_PATH, _FEATURES_PATH, _NEUTRAL,
+                _MODEL_PATH,
+                _FEATURES_PATH,
+                _NEUTRAL,
             )
             return False
         try:
             import xgboost as xgb
+
             with open(_FEATURES_PATH, "r") as f:
                 meta = json.load(f)
             names = list(meta.get("feature_names", []))
@@ -97,7 +101,9 @@ def _try_load() -> bool:
             booster.load_model(_MODEL_PATH)
             _booster = booster
             _feature_names = names
-            if any(("_m060_" in str(n)) or ("_m168_" in str(n)) or ("_m336_" in str(n)) for n in names):
+            if any(
+                ("_m060_" in str(n)) or ("_m168_" in str(n)) or ("_m336_" in str(n)) for n in names
+            ):
                 _feature_set = "v3"
             elif any(str(n).startswith("xt_") for n in names):
                 _feature_set = "v2"
@@ -106,7 +112,8 @@ def _try_load() -> bool:
             _load_succeeded = True
             logger.info(
                 "xgb_signal: loaded booster (%d features, set=%s)",
-                len(names), _feature_set,
+                len(names),
+                _feature_set,
             )
             if os.path.exists(_CALIBRATION_PATH):
                 try:
@@ -126,7 +133,8 @@ def _try_load() -> bool:
                             logger.warning(
                                 "xgb_signal: calibrator feature_set=%s differs from "
                                 "booster feature_set=%s — skipping calibration",
-                                cal_set, _feature_set,
+                                cal_set,
+                                _feature_set,
                             )
                             _calibration = None
                         else:
@@ -167,11 +175,13 @@ def _try_load_v4() -> bool:
         if not (os.path.exists(_MODEL_PATH_V4) and os.path.exists(_FEATURES_PATH_V4)):
             logger.info(
                 "xgb_signal: v4 artifacts missing (model=%s features=%s) — shadow disabled",
-                _MODEL_PATH_V4, _FEATURES_PATH_V4,
+                _MODEL_PATH_V4,
+                _FEATURES_PATH_V4,
             )
             return False
         try:
             import xgboost as xgb
+
             with open(_FEATURES_PATH_V4, "r") as f:
                 meta = json.load(f)
             names = list(meta.get("feature_names", []))
@@ -198,16 +208,13 @@ def _try_load_v4() -> bool:
                             _calibration_v4 = obj["calibrator"]
                             logger.info("xgb_signal: loaded v4 isotonic calibrator")
                     else:
-                        logger.warning(
-                            "xgb_signal: v4 calibrator pkl is not dict-shape — skipping"
-                        )
+                        logger.warning("xgb_signal: v4 calibrator pkl is not dict-shape — skipping")
                         _calibration_v4 = None
                 except Exception as exc:
                     logger.exception("xgb_signal: v4 calibrator load failed: %s", exc)
                     _calibration_v4 = None
             else:
-                logger.info("xgb_signal: no v4 calibrator at %s — raw passthrough",
-                            _CALIB_PATH_V4)
+                logger.info("xgb_signal: no v4 calibrator at %s — raw passthrough", _CALIB_PATH_V4)
             _load_succeeded_v4 = True
             logger.info("xgb_signal: loaded v4 booster (%d features)", len(names))
             return True
@@ -231,11 +238,13 @@ def _try_load_v4_5() -> bool:
         if not (os.path.exists(_MODEL_PATH_V45) and os.path.exists(_FEATURES_PATH_V45)):
             logger.info(
                 "xgb_signal: v4.5 artifacts missing (model=%s features=%s) — shadow disabled",
-                _MODEL_PATH_V45, _FEATURES_PATH_V45,
+                _MODEL_PATH_V45,
+                _FEATURES_PATH_V45,
             )
             return False
         try:
             import xgboost as xgb
+
             with open(_FEATURES_PATH_V45, "r") as f:
                 meta = json.load(f)
             names = list(meta.get("feature_names", []))
@@ -268,6 +277,7 @@ def xgb_prob_v4(channels, pid: Optional[str] = None) -> float:
         return _NEUTRAL
     try:
         import xgboost as xgb
+
         from services.tiered_history import fetch_tiered
         from tools.xgb_v4_features import extract_v4
 
@@ -284,7 +294,8 @@ def xgb_prob_v4(channels, pid: Optional[str] = None) -> float:
 
 
 def xgb_prob_v4_5(
-    channels, pid: Optional[str] = None,
+    channels,
+    pid: Optional[str] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[float, float, float]:
     """v4.5 3-class probabilities (p_down, p_neutral, p_up).
@@ -307,6 +318,7 @@ def xgb_prob_v4_5(
         return _NEUTRAL_3
     try:
         import xgboost as xgb
+
         from services.tiered_history import fetch_tiered
         from tools.xgb_v4_5_features import extract_v4_5
 
@@ -321,9 +333,9 @@ def xgb_prob_v4_5(
                 raw.shape,
             )
             return _NEUTRAL_3
-        p_down    = float(np.clip(raw[0, 0], 0.01, 0.99))
+        p_down = float(np.clip(raw[0, 0], 0.01, 0.99))
         p_neutral = float(np.clip(raw[0, 1], 0.01, 0.99))
-        p_up      = float(np.clip(raw[0, 2], 0.01, 0.99))
+        p_up = float(np.clip(raw[0, 2], 0.01, 0.99))
         total = p_down + p_neutral + p_up
         if total <= 0.0:
             return _NEUTRAL_3
@@ -335,7 +347,8 @@ def xgb_prob_v4_5(
 
 
 def xgb_prob_shadow_v4_5(
-    channels, pid: Optional[str] = None,
+    channels,
+    pid: Optional[str] = None,
 ) -> Tuple[float, Optional[Tuple[float, float, float]]]:
     """Return (v3_prob, v4_5_3prob_tuple_or_None).
 
@@ -349,14 +362,16 @@ def xgb_prob_shadow_v4_5(
         prob_v45 = xgb_prob_v4_5(channels, pid=pid)
     except Exception as exc:
         logger.exception(
-            "xgb_signal.xgb_prob_shadow_v4_5: v4.5 path raised (isolated): %s", exc,
+            "xgb_signal.xgb_prob_shadow_v4_5: v4.5 path raised (isolated): %s",
+            exc,
         )
         prob_v45 = None
     return prob_v3, prob_v45
 
 
 def xgb_prob_shadow(
-    channels, pid: Optional[str] = None,
+    channels,
+    pid: Optional[str] = None,
 ) -> Tuple[float, Optional[float]]:
     """Return (v3_prob, v4_prob) with v4 fully isolated from v3.
 
@@ -413,6 +428,7 @@ def xgb_prob(channels: ChannelsLike, pid: Optional[str] = None) -> float:
             return _NEUTRAL
         try:
             import xgboost as xgb
+
             from services.tiered_history import fetch_tiered
             from tools.xgb_features import extract_features as _extract
 
@@ -425,11 +441,13 @@ def xgb_prob(channels: ChannelsLike, pid: Optional[str] = None) -> float:
             return float(np.clip(raw, 0.01, 0.99))
         except Exception as exc:
             logger.exception(
-                "xgb_signal.xgb_prob v3 path failed, returning neutral: %s", exc,
+                "xgb_signal.xgb_prob v3 path failed, returning neutral: %s",
+                exc,
             )
             return _NEUTRAL
     try:
         import xgboost as xgb
+
         from tools.xgb_features import extract_features
 
         arr = np.asarray(channels, dtype=np.float64)

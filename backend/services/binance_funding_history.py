@@ -16,6 +16,7 @@ Kill switch (#81): set env BINANCE_FUNDING_DISABLED=1 to short-circuit and
 return [] without an HTTP call. fapi.binance is geo-blocked from the US
 (HTTP 451), so the call always fails on the production host — skip it.
 """
+
 import logging
 import os
 from typing import List, Optional, Tuple
@@ -30,36 +31,40 @@ _URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 def _is_disabled() -> bool:
     """True when BINANCE_FUNDING_DISABLED env is set to a truthy value."""
     return os.environ.get("BINANCE_FUNDING_DISABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
+
 _PRODUCT_TO_BN = {
-    "BTC-USD":   "BTCUSDT",
-    "ETH-USD":   "ETHUSDT",
-    "SOL-USD":   "SOLUSDT",
-    "XRP-USD":   "XRPUSDT",
-    "BNB-USD":   "BNBUSDT",
-    "ADA-USD":   "ADAUSDT",
-    "AVAX-USD":  "AVAXUSDT",
-    "LINK-USD":  "LINKUSDT",
-    "DOT-USD":   "DOTUSDT",
+    "BTC-USD": "BTCUSDT",
+    "ETH-USD": "ETHUSDT",
+    "SOL-USD": "SOLUSDT",
+    "XRP-USD": "XRPUSDT",
+    "BNB-USD": "BNBUSDT",
+    "ADA-USD": "ADAUSDT",
+    "AVAX-USD": "AVAXUSDT",
+    "LINK-USD": "LINKUSDT",
+    "DOT-USD": "DOTUSDT",
     "MATIC-USD": "MATICUSDT",
-    "DOGE-USD":  "DOGEUSDT",
-    "LTC-USD":   "LTCUSDT",
-    "ATOM-USD":  "ATOMUSDT",
-    "FIL-USD":   "FILUSDT",
-    "NEAR-USD":  "NEARUSDT",
-    "APT-USD":   "APTUSDT",
-    "INJ-USD":   "INJUSDT",
-    "ARB-USD":   "ARBUSDT",
-    "OP-USD":    "OPUSDT",
-    "TIA-USD":   "TIAUSDT",
-    "SEI-USD":   "SEIUSDT",
-    "SUI-USD":   "SUIUSDT",
-    "RNDR-USD":  "RNDRUSDT",
-    "FET-USD":   "FETUSDT",
-    "AAVE-USD":  "AAVEUSDT",
-    "UNI-USD":   "UNIUSDT",
+    "DOGE-USD": "DOGEUSDT",
+    "LTC-USD": "LTCUSDT",
+    "ATOM-USD": "ATOMUSDT",
+    "FIL-USD": "FILUSDT",
+    "NEAR-USD": "NEARUSDT",
+    "APT-USD": "APTUSDT",
+    "INJ-USD": "INJUSDT",
+    "ARB-USD": "ARBUSDT",
+    "OP-USD": "OPUSDT",
+    "TIA-USD": "TIAUSDT",
+    "SEI-USD": "SEIUSDT",
+    "SUI-USD": "SUIUSDT",
+    "RNDR-USD": "RNDRUSDT",
+    "FET-USD": "FETUSDT",
+    "AAVE-USD": "AAVEUSDT",
+    "UNI-USD": "UNIUSDT",
 }
 
 
@@ -83,10 +88,10 @@ async def fetch_funding_history(
             resp = await client.get(
                 _URL,
                 params={
-                    "symbol":    bn_sym,
+                    "symbol": bn_sym,
                     "startTime": int(start_ms),
-                    "endTime":   int(end_ms),
-                    "limit":     1000,
+                    "endTime": int(end_ms),
+                    "limit": 1000,
                 },
             )
         if resp.status_code != 200:

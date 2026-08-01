@@ -5,6 +5,7 @@ diagnostic with no public API beyond `main()`. We extract `_pick_pids`
 as the only testable seam and verify it delegates to
 `survivorship_aware_top_n`.
 """
+
 from __future__ import annotations
 
 import os
@@ -32,12 +33,12 @@ def _entry(first_ts: int, n: int) -> dict:
 
 
 class TestPickPids:
-
     def test_legacy_passthrough_when_snapshot_none(self):
         from tools._timescale_sanity import _pick_pids
+
         prods = {
-            "OLD":      _entry(first_ts=0, n=5),
-            "OLDER":    _entry(first_ts=0, n=10),
+            "OLD": _entry(first_ts=0, n=5),
+            "OLDER": _entry(first_ts=0, n=10),
             "NEWCOMER": _entry(first_ts=20 * _BAR_SECS, n=100),
         }
         # Legacy: top-2 by len(X) → NEWCOMER (100) + OLDER (10)
@@ -47,9 +48,10 @@ class TestPickPids:
 
     def test_snapshot_excludes_newcomers(self):
         from tools._timescale_sanity import _pick_pids
+
         prods = {
-            "OLD":      _entry(first_ts=0, n=5),
-            "OLDER":    _entry(first_ts=0, n=10),
+            "OLD": _entry(first_ts=0, n=5),
+            "OLDER": _entry(first_ts=0, n=10),
             "NEWCOMER": _entry(first_ts=20 * _BAR_SECS, n=100),
         }
         pids = _pick_pids(prods, n=2, snapshot_ts=15 * _BAR_SECS)

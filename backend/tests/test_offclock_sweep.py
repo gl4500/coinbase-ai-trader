@@ -1,4 +1,3 @@
-import pytest
 from tools import offclock_sweep as sweep
 
 
@@ -13,12 +12,30 @@ def test_config_grid_is_16_configs():
 
 def test_render_results_doc_has_row_per_config():
     rows = [
-        {"substrate": "dollar", "label_variant": "direction", "horizon": 4,
-         "auc": 0.55, "n": 5000, "precision": True, "expected_return": True,
-         "paper_sharpe": False, "ece": True, "recommended_tau": 0.6},
-        {"substrate": "time", "label_variant": "direction", "horizon": 4,
-         "auc": 0.51, "n": 5000, "precision": False, "expected_return": False,
-         "paper_sharpe": False, "ece": True, "recommended_tau": float("nan")},
+        {
+            "substrate": "dollar",
+            "label_variant": "direction",
+            "horizon": 4,
+            "auc": 0.55,
+            "n": 5000,
+            "precision": True,
+            "expected_return": True,
+            "paper_sharpe": False,
+            "ece": True,
+            "recommended_tau": 0.6,
+        },
+        {
+            "substrate": "time",
+            "label_variant": "direction",
+            "horizon": 4,
+            "auc": 0.51,
+            "n": 5000,
+            "precision": False,
+            "expected_return": False,
+            "paper_sharpe": False,
+            "ece": True,
+            "recommended_tau": float("nan"),
+        },
     ]
     doc = sweep._render_results_doc(rows)
     assert "# Off-the-Clock Sweep Results" in doc

@@ -11,6 +11,7 @@ light, no I/O — call it before scoring with CNN/XGB.
 Caller (cnn_agent / xgb_signal) decides what to do with a stale
 verdict: skip the bar, warn-and-score, or fall back to neutral.
 """
+
 from __future__ import annotations
 
 from typing import Iterable, Optional

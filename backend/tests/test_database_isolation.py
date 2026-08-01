@@ -13,6 +13,7 @@ This test asserts that during any pytest session, `database.DB_PATH` does
 NOT resolve to the real production file. Enforced via an autouse fixture
 in conftest.py.
 """
+
 import os
 import sys
 
@@ -27,7 +28,6 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("OLLAMA_MODEL", "llama3.1:8b")
 
 import database  # noqa: E402
-
 
 _PROD_DB = os.path.abspath(os.path.join(BACKEND, "coinbase.db"))
 
@@ -51,6 +51,4 @@ def test_db_path_is_outside_backend_dir():
         common = os.path.commonpath([current, backend_abs])
     except ValueError:
         common = ""
-    assert common != backend_abs, (
-        f"database.DB_PATH must not be under backend/: {current}"
-    )
+    assert common != backend_abs, f"database.DB_PATH must not be under backend/: {current}"

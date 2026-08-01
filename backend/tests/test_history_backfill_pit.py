@@ -9,13 +9,13 @@ with the current time.
 
 No live API calls. `_HISTORY_DIR` is monkey-patched to a tmp path.
 """
+
 from __future__ import annotations
 
 import os
 import sys
 
 import pyarrow.parquet as pq
-import pytest
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
@@ -41,14 +41,12 @@ def _candle(start_ts: int, close: float = 100.0) -> dict:
 
 
 class TestSchemaConstant:
-
     def test_schema_version_defined_and_positive(self):
         assert isinstance(hb._SCHEMA_VERSION, int)
         assert hb._SCHEMA_VERSION >= 1
 
 
 class TestPersistedColumns:
-
     def test_new_write_emits_ingest_ts_column(self, tmp_path, monkeypatch):
         monkeypatch.setattr(hb, "_HISTORY_DIR", str(tmp_path))
         os.makedirs(os.path.join(str(tmp_path), "5m"), exist_ok=True)
@@ -73,7 +71,6 @@ class TestPersistedColumns:
 
 
 class TestPITPreservation:
-
     def test_existing_rows_keep_their_original_ingest_ts(self, tmp_path, monkeypatch):
         """Rewriting parquet must not re-stamp ingest_ts on rows that
         were already persisted. New rows added on the second write
@@ -102,9 +99,10 @@ class TestPITPreservation:
 
 
 class TestBackwardsCompat:
-
     def test_old_parquet_without_pit_columns_still_loads(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         """A parquet file written before #168 has no ingest_ts /
         schema_version columns. Loading must not crash; the returned
@@ -116,14 +114,16 @@ class TestBackwardsCompat:
         path = hb._parquet_path_5m("OLD-USD")
 
         # Write the legacy 6-column schema directly (skipping _save_to_path)
-        legacy_schema = pa.schema([
-            pa.field("start", pa.int64()),
-            pa.field("open", pa.float64()),
-            pa.field("high", pa.float64()),
-            pa.field("low", pa.float64()),
-            pa.field("close", pa.float64()),
-            pa.field("volume", pa.float64()),
-        ])
+        legacy_schema = pa.schema(
+            [
+                pa.field("start", pa.int64()),
+                pa.field("open", pa.float64()),
+                pa.field("high", pa.float64()),
+                pa.field("low", pa.float64()),
+                pa.field("close", pa.float64()),
+                pa.field("volume", pa.float64()),
+            ]
+        )
         legacy_table = pa.table(
             {
                 "start": [1, 2, 3],
@@ -143,7 +143,6 @@ class TestBackwardsCompat:
 
 
 class TestLoadHydratesPITFields:
-
     def test_loaded_candle_carries_ingest_ts(self, tmp_path, monkeypatch):
         monkeypatch.setattr(hb, "_HISTORY_DIR", str(tmp_path))
         os.makedirs(os.path.join(str(tmp_path), "5m"), exist_ok=True)

@@ -3,6 +3,7 @@
 NOT run during 2026-05-23 session (8001 was live). Run during next pause:
   cd backend && ../.venv/Scripts/python.exe -m pytest tests/test_backfill_v4_5_shadow.py -v
 """
+
 import os
 import sqlite3
 import sys
@@ -17,6 +18,7 @@ if _BACKEND not in sys.path:
 class _FakeBooster:
     def predict(self, dmat):
         import numpy as np
+
         return np.array([[0.2, 0.3, 0.5]])
 
 
@@ -39,15 +41,18 @@ class TestXgbProbV45NowTs:
             return {"micro": [], "meso": [], "macro": []}
 
         monkeypatch.setattr(
-            "services.tiered_history.fetch_tiered", _fake_fetch,
+            "services.tiered_history.fetch_tiered",
+            _fake_fetch,
         )
 
         def _fake_extract(tiers):
             import numpy as np
+
             return (np.zeros((1, 210)), [])
 
         monkeypatch.setattr(
-            "tools.xgb_v4_5_features.extract_v4_5", _fake_extract,
+            "tools.xgb_v4_5_features.extract_v4_5",
+            _fake_extract,
         )
 
         xs.xgb_prob_v4_5(channels=None, pid="BTC-USD", now_ts=1700000000.0)
@@ -70,15 +75,18 @@ class TestXgbProbV45NowTs:
             return {"micro": [], "meso": [], "macro": []}
 
         monkeypatch.setattr(
-            "services.tiered_history.fetch_tiered", _fake_fetch,
+            "services.tiered_history.fetch_tiered",
+            _fake_fetch,
         )
 
         def _fake_extract(tiers):
             import numpy as np
+
             return (np.zeros((1, 210)), [])
 
         monkeypatch.setattr(
-            "tools.xgb_v4_5_features.extract_v4_5", _fake_extract,
+            "tools.xgb_v4_5_features.extract_v4_5",
+            _fake_extract,
         )
 
         xs.xgb_prob_v4_5(channels=None, pid="BTC-USD")  # no now_ts
@@ -98,7 +106,7 @@ class TestBackfillTool:
         from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
-        in_window_iso  = (now - timedelta(hours=1)).isoformat()
+        in_window_iso = (now - timedelta(hours=1)).isoformat()
         out_window_iso = (now - timedelta(days=8)).isoformat()
 
         db = str(tmp_path / "test_coinbase.db")
@@ -135,6 +143,7 @@ class TestBackfillTool:
 
     def test_selects_only_null_in_window(self, tmp_path):
         from tools.backfill_v4_5_shadow import _select_null_rows
+
         db = self._make_db(tmp_path)
         conn = sqlite3.connect(db)
         rows = _select_null_rows(conn, days=7)
@@ -145,6 +154,7 @@ class TestBackfillTool:
 
     def test_writes_three_probs_atomically(self, tmp_path, monkeypatch):
         from tools.backfill_v4_5_shadow import backfill
+
         db = self._make_db(tmp_path)
 
         monkeypatch.setattr(
@@ -153,7 +163,10 @@ class TestBackfillTool:
         )
 
         total, processed, skipped = backfill(
-            db_path=db, days=7, batch_size=10, dry_run=False,
+            db_path=db,
+            days=7,
+            batch_size=10,
+            dry_run=False,
         )
         assert total == 1
         assert processed == 1
@@ -169,32 +182,36 @@ class TestBackfillTool:
 
     def test_handles_inference_failure(self, tmp_path, monkeypatch):
         from tools.backfill_v4_5_shadow import backfill
+
         db = self._make_db(tmp_path)
 
         def _raise(channels, pid, now_ts):
             raise RuntimeError("simulated inference failure")
 
         monkeypatch.setattr(
-            "tools.backfill_v4_5_shadow.xgb_signal.xgb_prob_v4_5", _raise,
+            "tools.backfill_v4_5_shadow.xgb_signal.xgb_prob_v4_5",
+            _raise,
         )
 
         total, processed, skipped = backfill(
-            db_path=db, days=7, batch_size=10, dry_run=False,
+            db_path=db,
+            days=7,
+            batch_size=10,
+            dry_run=False,
         )
         assert total == 1
         assert processed == 1
         assert skipped == 1
 
         conn = sqlite3.connect(db)
-        row = conn.execute(
-            "SELECT xgb_prob_v4_5_down FROM cnn_scans WHERE id=1"
-        ).fetchone()
+        row = conn.execute("SELECT xgb_prob_v4_5_down FROM cnn_scans WHERE id=1").fetchone()
         conn.close()
         assert row[0] is None  # stayed NULL
 
     def test_neutral_fallback_treated_as_failure(self, tmp_path, monkeypatch):
         """When v4.5 returns the (0.33, 0.34, 0.33) fallback, skip writing."""
         from tools.backfill_v4_5_shadow import backfill
+
         db = self._make_db(tmp_path)
 
         monkeypatch.setattr(
@@ -203,13 +220,14 @@ class TestBackfillTool:
         )
 
         total, processed, skipped = backfill(
-            db_path=db, days=7, batch_size=10, dry_run=False,
+            db_path=db,
+            days=7,
+            batch_size=10,
+            dry_run=False,
         )
         assert skipped == 1
 
         conn = sqlite3.connect(db)
-        row = conn.execute(
-            "SELECT xgb_prob_v4_5_down FROM cnn_scans WHERE id=1"
-        ).fetchone()
+        row = conn.execute("SELECT xgb_prob_v4_5_down FROM cnn_scans WHERE id=1").fetchone()
         conn.close()
         assert row[0] is None

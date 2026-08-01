@@ -5,6 +5,7 @@ for tests). Filters listed but unknown to the registry log a warning and
 are skipped. Filter exceptions are caught so one broken filter cannot kill
 the rest of the chain or the scan loop.
 """
+
 from __future__ import annotations
 
 import logging
@@ -76,6 +77,7 @@ def apply_buy_filters(
         except Exception as exc:
             logger.warning(
                 "MC filter %r raised %s — skipping its decision",
-                getattr(f, "name", "unknown"), exc,
+                getattr(f, "name", "unknown"),
+                exc,
             )
     return cur_side, telemetry

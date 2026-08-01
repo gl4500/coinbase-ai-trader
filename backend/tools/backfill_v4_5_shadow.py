@@ -11,6 +11,7 @@ USAGE
   ../.venv/Scripts/python.exe -m tools.backfill_v4_5_shadow [--days N]
        [--batch-size 100] [--db backend/coinbase.db] [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,7 +29,6 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from agents import xgb_signal  # noqa: E402
-
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _hhmm() -> str:
 def _select_null_rows(conn: sqlite3.Connection, days: int) -> List[Tuple[int, str, str]]:
     """Select (id, product_id, scanned_at) for rows missing v4.5 in the window."""
     cutoff_unix = time.time() - days * 86400.0
-    cutoff_iso  = datetime.fromtimestamp(cutoff_unix, tz=timezone.utc).isoformat()
+    cutoff_iso = datetime.fromtimestamp(cutoff_unix, tz=timezone.utc).isoformat()
     cur = conn.execute(
         """
         SELECT id, product_id, scanned_at
@@ -75,7 +75,10 @@ def _infer_one(pid: str, scanned_at: str) -> Tuple[float, float, float]:
 
 
 def backfill(
-    db_path: str, days: int, batch_size: int, dry_run: bool,
+    db_path: str,
+    days: int,
+    batch_size: int,
+    dry_run: bool,
 ) -> Tuple[int, int, int]:
     """Returns (total_scope, processed, skipped)."""
     logger.info("[%s] connecting to %s", _hhmm(), db_path)
@@ -87,8 +90,7 @@ def backfill(
     logger.info("[%s] scope: %d NULL rows in last %d days", _hhmm(), total, days)
 
     if total == 0:
-        logger.info("[%s] nothing to do — all rows in scope already populated",
-                    _hhmm())
+        logger.info("[%s] nothing to do — all rows in scope already populated", _hhmm())
         conn.close()
         return total, 0, 0
 
@@ -100,12 +102,11 @@ def backfill(
         return total, 0, 0
 
     started_at_iso = datetime.now(timezone.utc).isoformat()
-    logger.info("[%s] backfill started_at=%s  (use for rollback scope)",
-                _hhmm(), started_at_iso)
+    logger.info("[%s] backfill started_at=%s  (use for rollback scope)", _hhmm(), started_at_iso)
 
     processed = 0
-    skipped   = 0
-    t0        = time.time()
+    skipped = 0
+    t0 = time.time()
 
     for i in range(0, total, batch_size):
         batch = rows[i : i + batch_size]
@@ -114,9 +115,14 @@ def backfill(
         for row_id, pid, scanned_at in batch:
             try:
                 p_down, p_neutral, p_up = _infer_one(pid, scanned_at)
-                updates.append((
-                    round(p_down, 4), round(p_neutral, 4), round(p_up, 4), row_id,
-                ))
+                updates.append(
+                    (
+                        round(p_down, 4),
+                        round(p_neutral, 4),
+                        round(p_up, 4),
+                        row_id,
+                    )
+                )
             except Exception as e:
                 logger.debug("skip row %d (%s @ %s): %s", row_id, pid, scanned_at, e)
                 skipped += 1
@@ -136,39 +142,49 @@ def backfill(
 
         processed += len(batch)
         elapsed = time.time() - t0
-        rate    = processed / elapsed if elapsed > 0 else 0.0
-        remain  = total - processed
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        remain = total - processed
         eta_sec = remain / rate if rate > 0 else 0
-        eta_mm  = int(eta_sec // 60)
-        eta_ss  = int(eta_sec % 60)
-        pct     = 100.0 * processed / total
+        eta_mm = int(eta_sec // 60)
+        eta_ss = int(eta_sec % 60)
+        pct = 100.0 * processed / total
         logger.info(
             "[%s] progress: %d/%d (%.1f%%) rate=%.1f/s eta=%d:%02d skipped=%d",
-            _hhmm(), processed, total, pct, rate, eta_mm, eta_ss, skipped,
+            _hhmm(),
+            processed,
+            total,
+            pct,
+            rate,
+            eta_mm,
+            eta_ss,
+            skipped,
         )
 
     conn.close()
     succeeded = processed - skipped
     logger.info(
         "[%s] done. processed=%d succeeded=%d skipped=%d total_elapsed=%.1fs",
-        _hhmm(), processed, succeeded, skipped, time.time() - t0,
+        _hhmm(),
+        processed,
+        succeeded,
+        skipped,
+        time.time() - t0,
     )
     return total, processed, skipped
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill v4.5 shadow probs.")
-    parser.add_argument("--days", type=int, default=7,
-                        help="Look back N days (default 7)")
-    parser.add_argument("--batch-size", type=int, default=100,
-                        help="Rows per UPDATE transaction (default 100)")
+    parser.add_argument("--days", type=int, default=7, help="Look back N days (default 7)")
+    parser.add_argument(
+        "--batch-size", type=int, default=100, help="Rows per UPDATE transaction (default 100)"
+    )
     parser.add_argument(
         "--db",
         default=os.path.join(_BACKEND, "coinbase.db"),
         help="SQLite path (default backend/coinbase.db)",
     )
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print scope + sample, no UPDATEs")
+    parser.add_argument("--dry-run", action="store_true", help="Print scope + sample, no UPDATEs")
     args = parser.parse_args()
 
     logging.basicConfig(

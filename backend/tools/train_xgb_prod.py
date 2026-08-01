@@ -16,6 +16,7 @@ Outputs:
 Run:
     cd backend && python -m tools.train_xgb_prod
 """
+
 from __future__ import annotations
 
 import os
@@ -38,10 +39,9 @@ _BEST_PARAMS = {"max_depth": 4, "min_child_weight": 1, "subsample": 0.7}
 
 
 def _entry_to_arrays(entry: dict):
-    X = np.stack([
-        x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-        for x in entry["X"]
-    ]).astype(np.float32)
+    X = np.stack(
+        [x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x) for x in entry["X"]]
+    ).astype(np.float32)
     y = np.asarray(entry["y"], dtype=np.float32)
     first_ts = int(entry["first_ts"])
     idx = np.asarray(entry["indices"], dtype=np.int64)
@@ -86,14 +86,14 @@ def main():
     print(f"  products: {len(prods)}")
 
     X, y, ts = _pooled_top_n(prods, _TOP_N)
-    print(
-        f"\nPooled dataset: X={X.shape} y={y.shape} ts=[{ts[0]} .. {ts[-1]}]"
-    )
+    print(f"\nPooled dataset: X={X.shape} y={y.shape} ts=[{ts[0]} .. {ts[-1]}]")
     print(f"  positives: {int(y.sum()):,} / {len(y):,} = {y.mean():.4f}")
 
     print(f"\nTraining XGB booster with fixed params: {_BEST_PARAMS}")
     res = train_xgb(
-        X, y, ts,
+        X,
+        y,
+        ts,
         n_folds=5,
         embargo_hours=4,
         grid=[_BEST_PARAMS],
@@ -104,10 +104,7 @@ def main():
     )
 
     fold_str = ", ".join(f"{a:.4f}" for a in res["fold_aucs"])
-    print(
-        f"\nResult: mean_auc={res['mean_auc']:.4f} "
-        f"folds=[{fold_str}]"
-    )
+    print(f"\nResult: mean_auc={res['mean_auc']:.4f} folds=[{fold_str}]")
     print(f"  feature count: {len(res['feature_names'])}")
     print(f"  saved: {res['model_path']}")
     print(f"  saved: {res['features_path']}")
@@ -123,13 +120,16 @@ def main_v3() -> None:
     import argparse
     import json as _json
     from pathlib import Path as _Path
+
     from tools.train_xgb import train_xgb_v3
 
     p = argparse.ArgumentParser()
     p.add_argument("--parquet-dir", default="backend/data/history")
     p.add_argument("--out-dir", default="backend")
     p.add_argument(
-        "--pids", nargs="*", default=None,
+        "--pids",
+        nargs="*",
+        default=None,
         help="restrict to these pids; defaults to all parquet files",
     )
     p.add_argument("--n-estimators", type=int, default=200)
@@ -137,14 +137,18 @@ def main_v3() -> None:
     args = p.parse_args()
 
     if args.pids is None:
-        pids = [f.stem for f in _Path(args.parquet_dir).glob("*.parquet")
-                if not f.stem.startswith("__")]
+        pids = [
+            f.stem for f in _Path(args.parquet_dir).glob("*.parquet") if not f.stem.startswith("__")
+        ]
     else:
         pids = args.pids
 
     result = train_xgb_v3(
-        pids, args.parquet_dir, args.out_dir,
-        n_estimators=args.n_estimators, learning_rate=args.learning_rate,
+        pids,
+        args.parquet_dir,
+        args.out_dir,
+        n_estimators=args.n_estimators,
+        learning_rate=args.learning_rate,
     )
     print(_json.dumps(result, indent=2))
 
@@ -154,7 +158,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and "--feature-set" in sys.argv and "v3" in sys.argv:
         # consume the flag pair
         i = sys.argv.index("--feature-set")
-        del sys.argv[i:i + 2]
+        del sys.argv[i : i + 2]
         main_v3()
     else:
         main()

@@ -4,6 +4,7 @@ Per O3 resolution in design spec: each fold gets its own per-signal Sharpe and
 annualization factor sqrt(N_f) where N_f = signals/year in fold f. Aggregate
 across folds as mean +/- std for an honest variance estimate.
 """
+
 from __future__ import annotations
 
 from typing import Mapping

@@ -8,6 +8,7 @@ Gates future BUY signals: only execute when predicted win probability
 Falls back to allow_buy=True when fewer than MIN_SAMPLES trades exist
 so the CNN can still trade while accumulating training data.
 """
+
 import logging
 import os
 import pickle
@@ -19,19 +20,28 @@ _log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MIN_SAMPLES        = 50    # Minimum closed trades needed before model activates
-MIN_WINS           = 20    # Minimum wins required — avoids "block everything" when all-loss history
+MIN_SAMPLES = 50  # Minimum closed trades needed before model activates
+MIN_WINS = 20  # Minimum wins required — avoids "block everything" when all-loss history
 # Predicted win prob must exceed this to allow BUY.
 # Overridable via env LGBM_GATE_THRESHOLD (e.g. 0.35 to unblock CNN while
 # binary-label filter mis-scores asymmetric-pnl picks; see Task #39 root cause).
 LGBM_GATE_THRESHOLD = float(os.getenv("LGBM_GATE_THRESHOLD", "0.52"))
 
 _FEATURES = [
-    "cnn_prob", "rsi", "adx", "strength", "macd",
-    "mfi", "stoch_k", "hour_of_day", "day_of_week", "usd_open",
+    "cnn_prob",
+    "rsi",
+    "adx",
+    "strength",
+    "macd",
+    "mfi",
+    "stoch_k",
+    "hour_of_day",
+    "day_of_week",
+    "usd_open",
 ]
 
 # ── Model ─────────────────────────────────────────────────────────────────────
+
 
 class LGBMFilter:
     """
@@ -50,7 +60,7 @@ class LGBMFilter:
     def __init__(self) -> None:
         self._model = None
         self._n_samples: int = 0
-        self._n_wins:    int = 0
+        self._n_wins: int = 0
         # Seam for unit testing — override to inject fixed predictions
         self._model_predict = None
 
@@ -58,9 +68,9 @@ class LGBMFilter:
 
     def is_ready(self) -> bool:
         """True once trained on enough rows with meaningful win representation."""
-        return (self._model is not None
-                and self._n_samples >= MIN_SAMPLES
-                and self._n_wins >= MIN_WINS)
+        return (
+            self._model is not None and self._n_samples >= MIN_SAMPLES and self._n_wins >= MIN_WINS
+        )
 
     def train(self, rows: List[Dict]) -> Optional[Dict]:
         """
@@ -80,7 +90,8 @@ class LGBMFilter:
         if len(set(y.tolist())) < 2:
             _log.info(
                 "LGBMFilter: only one class in %d rows (all %s) — need wins AND losses to train",
-                len(rows), "wins" if y[0] == 1 else "losses",
+                len(rows),
+                "wins" if y[0] == 1 else "losses",
             )
             return None
 
@@ -101,29 +112,33 @@ class LGBMFilter:
             X_val, y_val, w_val = X_tr[:0], y_tr[:0], w_tr[:0]  # empty — disables eval_set
 
         params = {
-            "objective":       "binary",
-            "metric":          "auc",
-            "n_estimators":    100,
-            "max_depth":       4,
+            "objective": "binary",
+            "metric": "auc",
+            "n_estimators": 100,
+            "max_depth": 4,
             "min_child_samples": max(5, len(X_tr) // 20),
-            "learning_rate":   0.05,
-            "subsample":       0.8,
+            "learning_rate": 0.05,
+            "subsample": 0.8,
             "colsample_bytree": 0.8,
-            "reg_lambda":      2.0,
-            "verbose":         -1,
+            "reg_lambda": 2.0,
+            "verbose": -1,
         }
 
         clf = lgb.LGBMClassifier(**params)
-        clf.fit(X_tr, y_tr,
-                sample_weight=w_tr,
-                eval_set=[(X_val, y_val)] if len(X_val) >= 5 else None,
-                eval_sample_weight=[w_val] if len(X_val) >= 5 else None,
-                callbacks=[lgb.early_stopping(10, verbose=False),
-                           lgb.log_evaluation(-1)] if len(X_val) >= 5 else [lgb.log_evaluation(-1)])
+        clf.fit(
+            X_tr,
+            y_tr,
+            sample_weight=w_tr,
+            eval_set=[(X_val, y_val)] if len(X_val) >= 5 else None,
+            eval_sample_weight=[w_val] if len(X_val) >= 5 else None,
+            callbacks=[lgb.early_stopping(10, verbose=False), lgb.log_evaluation(-1)]
+            if len(X_val) >= 5
+            else [lgb.log_evaluation(-1)],
+        )
 
-        self._model     = clf
+        self._model = clf
         self._n_samples = len(rows)
-        self._n_wins    = int(y.sum())
+        self._n_wins = int(y.sum())
 
         # Compute AUC on validation set (or full set if too small)
         eval_X, eval_y = (X_val, y_val) if len(X_val) >= 5 else (X, y)
@@ -133,10 +148,10 @@ class LGBMFilter:
         n_wins = self._n_wins
         metrics = {
             "n_samples": len(rows),
-            "n_wins":    n_wins,
-            "n_losses":  len(rows) - n_wins,
-            "win_rate":  round(n_wins / len(rows) * 100, 1),
-            "auc":       round(auc, 3),
+            "n_wins": n_wins,
+            "n_losses": len(rows) - n_wins,
+            "win_rate": round(n_wins / len(rows) * 100, 1),
+            "auc": round(auc, 3),
         }
         _log.info("LGBMFilter trained: %s", metrics)
         return metrics
@@ -159,7 +174,10 @@ class LGBMFilter:
         if not self.is_ready():
             _log.debug(
                 "LGBMFilter pass-through (n=%d wins=%d — need %d/%d)",
-                self._n_samples, self._n_wins, MIN_SAMPLES, MIN_WINS,
+                self._n_samples,
+                self._n_wins,
+                MIN_SAMPLES,
+                MIN_WINS,
             )
             return True
         return self.predict(features) >= LGBM_GATE_THRESHOLD
@@ -167,7 +185,9 @@ class LGBMFilter:
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "wb") as f:
-            pickle.dump({"model": self._model, "n_samples": self._n_samples, "n_wins": self._n_wins}, f)
+            pickle.dump(
+                {"model": self._model, "n_samples": self._n_samples, "n_wins": self._n_wins}, f
+            )
         _log.info("LGBMFilter saved → %s", path)
 
     def load(self, path: str) -> None:
@@ -177,9 +197,9 @@ class LGBMFilter:
         try:
             with open(path, "rb") as f:
                 data = pickle.load(f)
-            self._model     = data["model"]
+            self._model = data["model"]
             self._n_samples = data["n_samples"]
-            self._n_wins    = data.get("n_wins", 0)
+            self._n_wins = data.get("n_wins", 0)
             _log.info("LGBMFilter loaded from %s (n=%d)", path, self._n_samples)
         except Exception as e:
             _log.warning("LGBMFilter load failed: %s", e)
@@ -187,10 +207,8 @@ class LGBMFilter:
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _build_xy(self, rows: List[Dict]):
-        X = np.array([[self._safe(r, k) for k in _FEATURES] for r in rows],
-                     dtype=np.float32)
-        y = np.array([1 if (r.get("pnl") or 0) > 0 else 0 for r in rows],
-                     dtype=np.int32)
+        X = np.array([[self._safe(r, k) for k in _FEATURES] for r in rows], dtype=np.float32)
+        y = np.array([1 if (r.get("pnl") or 0) > 0 else 0 for r in rows], dtype=np.int32)
         return X, y
 
     @staticmethod
@@ -205,8 +223,7 @@ class LGBMFilter:
         return w
 
     def _features_to_array(self, features: Dict):
-        return np.array([[self._safe(features, k) for k in _FEATURES]],
-                        dtype=np.float32)
+        return np.array([[self._safe(features, k) for k in _FEATURES]], dtype=np.float32)
 
     @staticmethod
     def _safe(d: Dict, key: str) -> float:
@@ -216,9 +233,9 @@ class LGBMFilter:
     @staticmethod
     def _roc_auc(y_true, y_score) -> float:
         """Simple trapezoid AUC — avoids sklearn dependency."""
-        pairs = sorted(zip(y_score, y_true), reverse=True)
+        pairs = sorted(zip(y_score, y_true, strict=False), reverse=True)
         tp = fp = 0
-        tp_prev = fp_prev = 0
+        tp_prev = 0
         auc = 0.0
         n_pos = sum(y_true)
         n_neg = len(y_true) - n_pos
@@ -231,5 +248,4 @@ class LGBMFilter:
                 fp += 1
                 auc += (tp + tp_prev) / 2 / n_pos
                 tp_prev = tp
-            fp_prev = fp
         return auc / n_neg if n_neg else 0.5

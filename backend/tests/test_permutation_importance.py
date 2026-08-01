@@ -11,7 +11,9 @@ how much val-loss changes. The two scramble modes answer different questions:
 These tests pin the primitives so the importance numbers we publish are
 defensible — a bug in the shuffle invalidates every channel's delta.
 """
+
 import math
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -39,15 +41,16 @@ class TestPermuteCrossSample:
         out = permute_channel_cross_sample(x, ch=1, generator=torch.Generator().manual_seed(7))
         # Channel 1 row-set must equal the original row-set (just reordered)
         before = {tuple(row.tolist()) for row in x[:, 1, :]}
-        after  = {tuple(row.tolist()) for row in out[:, 1, :]}
+        after = {tuple(row.tolist()) for row in out[:, 1, :]}
         assert before == after
 
     def test_other_channels_unchanged(self, x_fixture):
         x = x_fixture
         out = permute_channel_cross_sample(x, ch=1, generator=torch.Generator().manual_seed(7))
         for ch in (0, 2):
-            assert torch.equal(out[:, ch, :], x[:, ch, :]), \
+            assert torch.equal(out[:, ch, :], x[:, ch, :]), (
                 f"channel {ch} must be untouched when permuting channel 1"
+            )
 
     def test_input_not_mutated(self, x_fixture):
         x = x_fixture
@@ -72,9 +75,10 @@ class TestPermuteWithinSampleTime:
         )
         for i in range(x.shape[0]):
             before = sorted(x[i, 2, :].tolist())
-            after  = sorted(out[i, 2, :].tolist())
-            assert before == after, \
+            after = sorted(out[i, 2, :].tolist())
+            assert before == after, (
                 f"sample {i}: timestep shuffle must preserve channel value multiset"
+            )
 
     def test_other_channels_unchanged(self, x_fixture):
         x = x_fixture
@@ -98,8 +102,8 @@ class TestPermuteWithinSampleTime:
 class TestWeightedBCE:
     def test_matches_manual_for_uniform_weights(self):
         # Uniform weights → weighted mean reduces to plain mean
-        logits  = torch.tensor([[0.5], [-1.0], [2.0], [0.0]])
-        targets = torch.tensor([[1.0], [0.0],  [1.0], [0.0]])
+        logits = torch.tensor([[0.5], [-1.0], [2.0], [0.0]])
+        targets = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
         weights = torch.ones_like(targets)
 
         manual = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -110,22 +114,17 @@ class TestWeightedBCE:
 
     def test_weights_actually_reweight(self):
         # Two samples; if we down-weight the high-loss one, total drops.
-        logits  = torch.tensor([[5.0], [0.0]])      # second is high-loss vs target=1
+        logits = torch.tensor([[5.0], [0.0]])  # second is high-loss vs target=1
         targets = torch.tensor([[1.0], [1.0]])
-        equal   = weighted_bce_with_logits(logits, targets, torch.ones_like(targets))
-        skewed  = weighted_bce_with_logits(
-            logits, targets, torch.tensor([[10.0], [1.0]])
-        )
-        assert skewed < equal, \
-            "weighting the easy sample 10× should drag the weighted mean down"
+        equal = weighted_bce_with_logits(logits, targets, torch.ones_like(targets))
+        skewed = weighted_bce_with_logits(logits, targets, torch.tensor([[10.0], [1.0]]))
+        assert skewed < equal, "weighting the easy sample 10× should drag the weighted mean down"
 
     def test_zero_weight_sum_does_not_explode(self):
         # Edge case: if all weights are zero, fall back to safe small denom
-        logits  = torch.tensor([[0.0], [0.0]])
+        logits = torch.tensor([[0.0], [0.0]])
         targets = torch.tensor([[1.0], [0.0]])
-        out = weighted_bce_with_logits(
-            logits, targets, torch.zeros_like(targets)
-        )
+        out = weighted_bce_with_logits(logits, targets, torch.zeros_like(targets))
         assert math.isfinite(out), "must not return inf/nan when weights sum to 0"
 
 
@@ -140,6 +139,8 @@ class TestNoOpDelta:
         x[:, 0, :] = torch.arange(20, dtype=torch.float32).view(4, 5)
         x[:, 2, :] = torch.arange(20, 40, dtype=torch.float32).view(4, 5)
         out_s = permute_channel_cross_sample(x, ch=1, generator=torch.Generator().manual_seed(0))
-        out_t = permute_channel_within_sample_time(x, ch=1, generator=torch.Generator().manual_seed(0))
+        out_t = permute_channel_within_sample_time(
+            x, ch=1, generator=torch.Generator().manual_seed(0)
+        )
         assert torch.equal(out_s, x)
         assert torch.equal(out_t, x)

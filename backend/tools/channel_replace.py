@@ -10,6 +10,7 @@ rebuild. Otherwise don't pay the integration cost.
 Run examples (from main()):
     cd backend && python tools/channel_replace.py
 """
+
 from __future__ import annotations
 
 import os
@@ -26,7 +27,6 @@ if BACKEND not in sys.path:
 
 from tools.walk_forward import purged_walk_forward_splits  # noqa: E402
 from tools.xgb_features import extract_features  # noqa: E402
-
 
 _PARAMS = {
     "objective": "binary:logistic",

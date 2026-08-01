@@ -12,6 +12,7 @@ Currently expected RED on Ch 15 (ADX): cnn_agent.py:1306-1307 computes
 adx_val once on the full candle series and broadcasts that single value
 across all 60 timesteps, so windowed-vs-full ADX values diverge.
 """
+
 import math
 import os
 import sys
@@ -28,7 +29,7 @@ os.environ.setdefault("DRY_RUN", "true")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("OLLAMA_MODEL", "llama3.1:8b")
 
-from agents.cnn_agent import FeatureBuilder, SEQ_LEN  # noqa: E402
+from agents.cnn_agent import SEQ_LEN, FeatureBuilder  # noqa: E402
 
 
 def _sinusoidal_candles(n: int, start: float = 50_000.0) -> list:
@@ -36,14 +37,16 @@ def _sinusoidal_candles(n: int, start: float = 50_000.0) -> list:
     out = []
     for i in range(n):
         c = start + 500.0 * math.sin(i / 5.0)
-        out.append({
-            "open":   c - 50.0,
-            "high":   c + 100.0,
-            "low":    c - 100.0,
-            "close":  c,
-            "volume": 10_000.0 + i * 100.0,
-            "start":  1_700_000_000 + i * 3600,
-        })
+        out.append(
+            {
+                "open": c - 50.0,
+                "high": c + 100.0,
+                "low": c - 100.0,
+                "close": c,
+                "volume": 10_000.0 + i * 100.0,
+                "start": 1_700_000_000 + i * 3600,
+            }
+        )
     return out
 
 
@@ -57,9 +60,7 @@ def _ch_value_for_candle(channels, ch_idx: int, candle_k: int, n_total: int):
     bars (else it was padded out).
     """
     pos = SEQ_LEN - n_total + candle_k
-    assert 0 <= pos < SEQ_LEN, (
-        f"candle {candle_k} not in window for n_total={n_total} (pos={pos})"
-    )
+    assert 0 <= pos < SEQ_LEN, f"candle {candle_k} not in window for n_total={n_total} (pos={pos})"
     return channels[ch_idx][pos]
 
 
@@ -148,19 +149,17 @@ class TestAllChannelsLookahead:
     # should NOT land here without a corresponding task — see #171.
     _KNOWN_LEAKY = {
         0: "Ch 0 norm_c uses min/max(closes) over full input window — "
-           "every position's normalized value depends on the global min/max "
-           "across the entire input. Strict-causality leak. See task #171 "
-           "for the fix-vs-accept decision (per-bar expanding min/max would "
-           "change normalization scale and require retrain).",
+        "every position's normalized value depends on the global min/max "
+        "across the entire input. Strict-causality leak. See task #171 "
+        "for the fix-vs-accept decision (per-bar expanding min/max would "
+        "change normalization scale and require retrain).",
     }
 
     @pytest.mark.parametrize("ch_idx", [c for c in range(27) if c not in _LOOKAHEAD_EXEMPT])
     def test_channel_terminal_value_windowed_equality(self, ch_idx, request):
         if ch_idx in self._KNOWN_LEAKY:
             request.node.add_marker(
-                pytest.mark.xfail(
-                    reason=self._KNOWN_LEAKY[ch_idx], strict=True
-                )
+                pytest.mark.xfail(reason=self._KNOWN_LEAKY[ch_idx], strict=True)
             )
         full_val = _ch_value_for_candle(
             self.ch_full, ch_idx, candle_k=self.CANDLE_K, n_total=self.N_FULL
