@@ -7,6 +7,38 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.74 — 2026-08-01 — CI pipeline repair (track 1 of 2)
+
+Main's CI ("CI — DevSecOps Pipeline") had been failing since 2026-06-08 (every
+PR since merged red). Diagnosis: three independent, pre-existing pipeline
+failures — no product-code regressions. This is track 1 of a two-track fix: the
+infra/dependency/bug fixes that unblock the Backend-tests, Frontend-typecheck,
+and Frontend-build jobs. The bulk ruff cleanup (~585 lint + 210-file format) is
+deferred to a separate dedicated PR (track 2); the Ruff-lint and Security-gate
+jobs stay red until then.
+
+**Files:**
+- `backend/requirements.txt` — added `pandas>=2.0.0`. pandas is a real runtime
+  dependency (imported by `services/tiered_history.py` on the live v3 path) but
+  was undeclared; its absence broke CI pytest collection (ModuleNotFoundError).
+- `.github/workflows/ci.yml` — (1) test-backend job installs CPU torch
+  (`--index-url https://download.pytorch.org/whl/cpu`) so collection of the 17
+  torch/pandas-importing test modules succeeds; (2) both frontend jobs switched
+  from `npm ci` to `npm install --ignore-scripts --no-audit --no-fund` to
+  tolerate lockfile drift (committed lock was missing the esbuild@0.28.0 subtree
+  from the vitest 4.x bump; regenerating the lock cross-platform on Windows
+  produced broken optional-platform flags, so per-runner `npm install` is the
+  robust fix).
+- `backend/agents/cnn_agent.py` — `self.model` annotation `Optional["SignalCNN"]`
+  → `Optional[Any]` (SignalCNN deleted #311-refactor-e; dead forward-ref, F821).
+- `backend/tests/test_cnn_agent.py` — `seen_oi: List` → `seen_oi: list` (×2);
+  `List` was undefined (F821).
+
+**Verified locally:** ruff 0.9.0 F821-clean on both touched files; `npx tsc
+--noEmit` passes; `npm install` installs cleanly with no cpu-notsup error.
+Backend-tests collection fix confirmed via CI on push (full local pytest gated —
+8001 backend actively trading).
+
 ### Session 58.71w — 2026-06-07 — Tier A: skip masked-channel builders (ch17/18/19)
 
 Pure compute optimization in `FeatureBuilder.build` — emit zero arrays

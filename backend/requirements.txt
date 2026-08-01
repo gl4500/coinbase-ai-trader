@@ -9,6 +9,7 @@ python-multipart==0.0.12
 PyJWT>=2.8.0
 cryptography>=42.0.0
 numpy>=1.26.0
+pandas>=2.0.0
 xgboost>=2.0.0
 # PyTorch — install separately (already installed):
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
