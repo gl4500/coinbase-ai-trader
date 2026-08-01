@@ -33,6 +33,9 @@ jobs stay red until then.
   → `Optional[Any]` (SignalCNN deleted #311-refactor-e; dead forward-ref, F821).
 - `backend/tests/test_cnn_agent.py` — `seen_oi: List` → `seen_oi: list` (×2);
   `List` was undefined (F821).
+- `backend/tests/test_scorecard_cli.py` — `PYTHON` hardcoded the Windows
+  `.venv/Scripts/python.exe` path (3 FileNotFoundError failures on linux CI,
+  newly exposed once collection succeeded); now `sys.executable`.
 
 **Verified locally:** ruff 0.9.0 F821-clean on both touched files; `npx tsc
 --noEmit` passes; `npm install` installs cleanly with no cpu-notsup error.
