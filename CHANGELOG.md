@@ -30,6 +30,10 @@ more (F841 dead vars, E712, B006/B007, E731); `ruff format backend/` (211 files)
 - `per-file-ignores` E402 for `backend/main.py` (launcher `.venv` sys.path shim)
   and `backend/tests/*` (BACKEND path insert) — legitimate bootstrap-before-import;
   imports cannot move above it.
+- `.gitleaks.toml` (new): extends the default Gitleaks ruleset (`useDefault =
+  true`) and allowlists `backend/tests/conftest.py`, whose all-zero dummy EC key
+  is a pytest fixture, not a real credential. Track-2 reformatting pulled that
+  line into the last-commit diff that the Secret-scan job scans (`--log-opts=-1`).
 
 **Verified:** `ruff check backend/` + `ruff format --check backend/` both exit 0
 (228 files); targeted rename tests + full suite via pre-commit hook green.
