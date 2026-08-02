@@ -623,3 +623,129 @@ class TestCNNRiskExitsPnLAnchored:
             await agent._check_risk_exits()
 
         sell_mock.assert_not_called()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Maker-execution exit leg — _check_risk_exits live routing
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCheckRiskExitsLiveRouting:
+    """_check_risk_exits places a live exit after the paper close, routed
+    maker/taker by trigger, only when USE_MAKER_EXECUTION is on and the
+    executor is live. Flag-off / dry-run / no-executor stay paper-only."""
+
+    def _live_executor(self):
+        ex = AsyncMock()
+        ex.dry_run = False
+        ex.execute_maker_signal.return_value = {"success": True, "fill_mode": "MAKER"}
+        ex.execute_signal.return_value = {"success": True, "fill_mode": "TAKER"}
+        return ex
+
+    def _agent_with_trail_setup(self, pid="BTC-USD", price=105.0):
+        # peak=120, avg=100 -> peak_pnl 20%; price 105 (+5%) << trail threshold
+        # -> TRAIL_STOP. price 105 > stop (92) so no STOP_LOSS.
+        agent = CoinbaseCNNAgent()
+        agent.book = _book_with_position(pid, avg_price=100.0, size=2.0, peak_price=120.0)
+        ws = MagicMock()
+        ws.get_price.return_value = price
+        agent.ws = ws
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_trail_stop_routes_maker_when_flag_on(self):
+        import agents.exit_execution as exit_mod
+
+        agent = self._agent_with_trail_setup(price=105.0)
+        ex = self._live_executor()
+        quotes = {"BTC-USD": {"bid": 104.0, "ask": 106.0}}
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", new=AsyncMock(return_value=10.0)) as sell_mock,
+            patch.object(exit_mod.config, "use_maker_execution", True, create=True),
+            patch.object(
+                exit_mod.coinbase_client, "get_best_bid_ask", new=AsyncMock(return_value=quotes)
+            ),
+        ):
+            await agent._check_risk_exits(ex)
+
+        assert sell_mock.call_args.kwargs.get("trigger") == "TRAIL_STOP"
+        ex.execute_maker_signal.assert_awaited_once()
+        ex.execute_signal.assert_not_called()
+        sig = ex.execute_maker_signal.call_args.args[0]
+        assert sig["side"] == "SELL" and sig["signal_type"] == "TRAIL_STOP"
+        assert sig["quote_size"] == round(2.0 * 106.0, 2)
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_routes_taker_when_flag_on(self):
+        import agents.exit_execution as exit_mod
+
+        agent = CoinbaseCNNAgent()
+        agent.book = _book_with_position("ETH-USD", avg_price=100.0, size=2.0, peak_price=100.0)
+        ws = MagicMock()
+        ws.get_price.return_value = 91.0  # -9% -> STOP_LOSS
+        agent.ws = ws
+        ex = self._live_executor()
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", new=AsyncMock(return_value=-9.0)) as sell_mock,
+            patch.object(exit_mod.config, "use_maker_execution", True, create=True),
+            patch.object(exit_mod.coinbase_client, "get_best_bid_ask", new=AsyncMock()) as mock_bba,
+        ):
+            await agent._check_risk_exits(ex)
+
+        assert sell_mock.call_args.kwargs.get("trigger") == "STOP_LOSS"
+        mock_bba.assert_not_called()
+        ex.execute_signal.assert_awaited_once()
+        ex.execute_maker_signal.assert_not_called()
+        sig = ex.execute_signal.call_args.args[0]
+        assert sig["quote_size"] == round(2.0 * 91.0, 2)
+
+    @pytest.mark.asyncio
+    async def test_flag_off_stays_paper_only(self):
+        import agents.exit_execution as exit_mod
+
+        agent = self._agent_with_trail_setup(price=105.0)
+        ex = self._live_executor()
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", new=AsyncMock(return_value=10.0)) as sell_mock,
+            patch.object(exit_mod.config, "use_maker_execution", False, create=True),
+            patch.object(exit_mod.coinbase_client, "get_best_bid_ask", new=AsyncMock()) as mock_bba,
+        ):
+            await agent._check_risk_exits(ex)
+
+        sell_mock.assert_called_once()  # paper close still happens
+        mock_bba.assert_not_called()
+        ex.execute_maker_signal.assert_not_called()
+        ex.execute_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_executor_stays_paper_only(self):
+        agent = self._agent_with_trail_setup(price=105.0)
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", new=AsyncMock(return_value=10.0)) as sell_mock,
+        ):
+            await agent._check_risk_exits()  # default order_executor=None
+        sell_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_live_exit_exception_swallowed(self):
+        import agents.exit_execution as exit_mod
+
+        agent = self._agent_with_trail_setup(price=105.0)
+        ex = self._live_executor()
+        ex.execute_maker_signal.side_effect = RuntimeError("boom")
+        quotes = {"BTC-USD": {"bid": 104.0, "ask": 106.0}}
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=[])),
+            patch.object(agent.book, "sell", new=AsyncMock(return_value=10.0)) as sell_mock,
+            patch.object(exit_mod.config, "use_maker_execution", True, create=True),
+            patch.object(
+                exit_mod.coinbase_client, "get_best_bid_ask", new=AsyncMock(return_value=quotes)
+            ),
+        ):
+            # must NOT raise
+            await agent._check_risk_exits(ex)
+        sell_mock.assert_called_once()

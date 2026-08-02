@@ -145,6 +145,16 @@ class Config:
         default_factory=lambda: float(os.getenv("XGB_V45_THRESH_DOWN", "0.50"))
     )
 
+    # ── Execution mode ─────────────────────────────────────────────────────────
+    # When true, route live BUY entries through the maker (post-only LIMIT) path
+    # (order_executor.execute_maker_signal) instead of the taker market order.
+    # Default false → byte-for-byte unchanged taker behavior. Intended for the
+    # 8002 shadow per port discipline; promote to 8001 only after the shadow
+    # confirms real maker fill rates. See docs/win-factors-strategy/.
+    use_maker_execution: bool = field(
+        default_factory=lambda: os.getenv("USE_MAKER_EXECUTION", "false").lower() == "true"
+    )
+
     # ── History backfill schedule ──────────────────────────────────────────────
     # How many hours between automatic incremental backfill runs (0 = disabled)
     backfill_interval_hours: int = field(
