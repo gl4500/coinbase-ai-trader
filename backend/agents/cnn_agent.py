@@ -54,6 +54,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 import database
+from agents import exit_execution
 from agents.exit_thresholds import _compute_exit_threshold  # task #46
 from agents.signal_generator import (
     _adx,
@@ -1795,7 +1796,7 @@ class CoinbaseCNNAgent:
                 return p
         return fallback
 
-    async def _check_risk_exits(self) -> None:
+    async def _check_risk_exits(self, order_executor=None) -> None:
         """Check all open CNN positions for stop-loss, trailing stop, or max hold time.
 
         Runs at the top of every scan loop iteration so exits happen every 15 min
@@ -1900,7 +1901,22 @@ class CoinbaseCNNAgent:
                 trigger = "MAX_HOLD" if entry_time else "LEGACY_EXIT"
 
             if trigger:
+                size = pos["size"]
                 pnl = await self.book.sell(pid, price, trigger=trigger)
+                try:
+                    await exit_execution.execute_live_exit(
+                        order_executor,
+                        pid=pid,
+                        price=price,
+                        size=size,
+                        trigger=trigger,
+                    )
+                except Exception:
+                    logger.exception(
+                        "live exit execution failed for %s (%s)",
+                        pid,
+                        trigger,
+                    )
                 logger.info(
                     f"CNN RISK EXIT {pid} @{price:.6f} | {trigger} | "
                     f"entry={pct_entry * 100:+.2f}% peak={peak_price:.6f} "
@@ -2343,10 +2359,27 @@ class CoinbaseCNNAgent:
 
             # Live order execution (only when order_executor provided and not dry-run)
             if order_executor and not order_executor.dry_run and quote_size >= 1.0:
-                result = await order_executor.execute_signal(signal)
+                result = await self._execute_live_order(order_executor, signal)
                 signal["live_execution"] = result
 
         return signal
+
+    async def _execute_live_order(self, order_executor, signal: Dict) -> Dict:
+        """Route a live order through the maker (post-only) or taker path.
+
+        Under ``config.use_maker_execution`` the entry is posted as a maker
+        LIMIT (cheaper fee; fills are not guaranteed — ``execute_maker_signal``
+        owns the market fallback). The best bid/ask are sourced from the live
+        book and attached to ``signal`` only on this path, so the default taker
+        path stays byte-for-byte unchanged.
+        """
+        if config.use_maker_execution:
+            quotes = await coinbase_client.get_best_bid_ask([signal["product_id"]])
+            quote = quotes.get(signal["product_id"], {})
+            signal["bid"] = quote.get("bid") or 0.0
+            signal["ask"] = quote.get("ask") or 0.0
+            return await order_executor.execute_maker_signal(signal)
+        return await order_executor.execute_signal(signal)
 
     async def scan_all(self, execute: bool = False, order_executor=None) -> List[Dict]:
         products = await database.get_products(tracked_only=True)
@@ -2410,7 +2443,7 @@ class CoinbaseCNNAgent:
                 # MAX_HOLD) run every loop regardless of is_trading gate —
                 # stops must fire even when scanning is paused — but only
                 # close positions CNN did not already exit via SCAN above.
-                await self._check_risk_exits()
+                await self._check_risk_exits(order_executor)
                 self.scan_count += 1
                 self.next_scan_at = time.time() + interval
 

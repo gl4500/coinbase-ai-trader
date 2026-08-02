@@ -18,6 +18,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from agents import exit_execution
+
 # Constants come from cnn_agent so this module and the scan-loop checker
 # stay in lockstep on thresholds. main.py already loads cnn_agent in the
 # lifespan, so importing constants here adds no new process cost.
@@ -36,7 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def on_price_tick(pid: str, price: float, book: "_CNNBook") -> None:
+async def on_price_tick(pid: str, price: float, book: "_CNNBook", order_executor=None) -> None:
     """Per-tick exit checker. Idempotent. Exceptions are caught + logged
     (invariant #18 in CLAUDE.md) so a handler failure cannot crash the
     WS receive loop or poison subsequent ticks.
@@ -97,7 +99,15 @@ async def on_price_tick(pid: str, price: float, book: "_CNNBook") -> None:
             trigger = "WS_TRAIL_STOP"
 
         if trigger:
+            size = pos.get("size", 0.0)
             await book.sell(pid, price, trigger=trigger)
+            await exit_execution.execute_live_exit(
+                order_executor,
+                pid=pid,
+                price=price,
+                size=size,
+                trigger=trigger,
+            )
 
     except Exception:
         logger.exception(
@@ -107,13 +117,13 @@ async def on_price_tick(pid: str, price: float, book: "_CNNBook") -> None:
         )
 
 
-def attach(ws_subscriber: "CoinbaseWSSubscriber", book: "_CNNBook") -> None:
+def attach(ws_subscriber: "CoinbaseWSSubscriber", book: "_CNNBook", order_executor=None) -> None:
     """Register the per-tick exit handler. Call once per backend lifespan
     (in main.py after ws_subscriber.start() and after cnn_agent is built).
     """
 
     async def _handler(pid: str, price: float) -> None:
-        await on_price_tick(pid, price, book)
+        await on_price_tick(pid, price, book, order_executor)
 
     ws_subscriber.register_price_handler(_handler)
     logger.info("exit_watcher attached to ws_subscriber")
