@@ -1,4 +1,5 @@
 import numpy as np
+
 from tools._returns import realized_log_returns_per_sample
 
 
@@ -22,6 +23,7 @@ def test_realized_log_returns_zero_when_equal():
 def test_realized_log_returns_raises_on_nonpositive():
     """Non-positive prices indicate data corruption — fail loud."""
     import pytest
+
     with pytest.raises(ValueError, match="non-positive"):
         realized_log_returns_per_sample(np.array([100.0]), np.array([0.0]))
     with pytest.raises(ValueError, match="non-positive"):
@@ -31,5 +33,6 @@ def test_realized_log_returns_raises_on_nonpositive():
 def test_realized_log_returns_shape_mismatch():
     """Mismatched array lengths should fail immediately."""
     import pytest
+
     with pytest.raises(ValueError, match="shape"):
         realized_log_returns_per_sample(np.array([100.0, 101.0]), np.array([102.0]))

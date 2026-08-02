@@ -4,6 +4,7 @@ Synchronous by design — see spec docs/superpowers/specs/2026-05-16-xgb-mixed-l
 section 6.1. Lives outside the async aiosqlite stack so xgb_signal.xgb_prob
 (sync) can call it without bubbling await through _cnn_prob.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,11 +29,11 @@ def _slice_tail(candles: List[Dict], n: int) -> List[Dict]:
 
 def _candle_dict(row) -> Dict:
     return {
-        "start":  float(row["start"]),
-        "open":   float(row["open"]),
-        "high":   float(row["high"]),
-        "low":    float(row["low"]),
-        "close":  float(row["close"]),
+        "start": float(row["start"]),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
         "volume": float(row["volume"]),
     }
 
@@ -48,8 +49,7 @@ def _read_parquet(pid: str, parquet_dir: str, now_ts: Optional[float]) -> List[D
     return [_candle_dict(r) for _, r in df.iterrows()]
 
 
-def _read_sqlite(pid: str, db_path: str, now_ts: Optional[float],
-                 limit: int = 400) -> List[Dict]:
+def _read_sqlite(pid: str, db_path: str, now_ts: Optional[float], limit: int = 400) -> List[Dict]:
     """Read candle rows from SQLite. Production schema has 'start_time'
     (not 'start'); we alias to 'start' on the way out so callers and the
     parquet reader produce identical dicts. Test fixtures may use either
@@ -105,10 +105,10 @@ def fetch_tiered(
                 seen = {c["start"] for c in all_candles}
                 merged = parquet_prefix + [c for c in all_candles if c["start"] not in seen]
                 merged.sort(key=lambda c: c["start"])
-                all_candles = merged[-_TIER_WINDOWS["macro"]:]
+                all_candles = merged[-_TIER_WINDOWS["macro"] :]
 
     return {
         "micro": _slice_tail(all_candles, _TIER_WINDOWS["micro"]),
-        "meso":  _slice_tail(all_candles, _TIER_WINDOWS["meso"]),
+        "meso": _slice_tail(all_candles, _TIER_WINDOWS["meso"]),
         "macro": _slice_tail(all_candles, _TIER_WINDOWS["macro"]),
     }

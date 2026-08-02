@@ -13,7 +13,9 @@ Run (horizon sweep — operator runs 4 times, then v4_horizon_compare):
     cd backend && python -m tools.train_xgb_v4 \
       --pids BTC-USD,ETH-USD,... --forward-hours 24 --label-thresh 0.01
 """
+
 from __future__ import annotations
+
 import argparse
 import logging
 import os
@@ -29,8 +31,11 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 from tools.xgb_v4_features import (  # noqa: E402
-    extract_v4, feature_names_v4, feature_weights_v4,
-    N_FEATURES_V4, TIER_WINDOWS_V4,
+    N_FEATURES_V4,
+    TIER_WINDOWS_V4,
+    extract_v4,
+    feature_names_v4,
+    feature_weights_v4,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,9 +50,11 @@ _CAL_FRAC = 0.15
 
 # ── Pure helpers ──────────────────────────────────────────────────────────
 
+
 def _load_candles_for_pid(pid: str, history_dir: str) -> List[Dict[str, float]]:
     """Read OHLCV candles for one pid from parquet. [] if file missing."""
     import pyarrow.parquet as pq
+
     path = os.path.join(history_dir, f"{pid}.parquet")
     if not os.path.exists(path):
         return []
@@ -56,14 +63,16 @@ def _load_candles_for_pid(pid: str, history_dir: str) -> List[Dict[str, float]]:
     n = len(rows["start"])
     out: List[Dict[str, float]] = []
     for i in range(n):
-        out.append({
-            "start":  int(rows["start"][i]),
-            "open":   float(rows["open"][i]),
-            "high":   float(rows["high"][i]),
-            "low":    float(rows["low"][i]),
-            "close":  float(rows["close"][i]),
-            "volume": float(rows["volume"][i]),
-        })
+        out.append(
+            {
+                "start": int(rows["start"][i]),
+                "open": float(rows["open"][i]),
+                "high": float(rows["high"][i]),
+                "low": float(rows["low"][i]),
+                "close": float(rows["close"][i]),
+                "volume": float(rows["volume"][i]),
+            }
+        )
     out.sort(key=lambda r: r["start"])
     return out
 
@@ -116,9 +125,11 @@ def _build_samples_for_pid(
     """
     n = len(candles)
     if n < macro + forward_hours + 1:
-        return (np.zeros((0, N_FEATURES_V4), dtype=np.float64),
-                np.zeros(0, dtype=np.int8),
-                np.zeros(0, dtype=np.int64))
+        return (
+            np.zeros((0, N_FEATURES_V4), dtype=np.float64),
+            np.zeros(0, dtype=np.int8),
+            np.zeros(0, dtype=np.int64),
+        )
     closes = np.array([c["close"] for c in candles], dtype=np.float64)
     feats_list: List[np.ndarray] = []
     labels_list: List[int] = []
@@ -128,18 +139,20 @@ def _build_samples_for_pid(
         if label is None:
             continue
         tier_slices = {
-            "micro": candles[i - micro:i],
-            "meso":  candles[i - meso:i],
-            "macro": candles[i - macro:i],
+            "micro": candles[i - micro : i],
+            "meso": candles[i - meso : i],
+            "macro": candles[i - macro : i],
         }
         feats, _ = extract_v4(tier_slices)
         feats_list.append(feats[0])
         labels_list.append(label)
         ts_list.append(candles[i]["start"])
     if not feats_list:
-        return (np.zeros((0, N_FEATURES_V4), dtype=np.float64),
-                np.zeros(0, dtype=np.int8),
-                np.zeros(0, dtype=np.int64))
+        return (
+            np.zeros((0, N_FEATURES_V4), dtype=np.float64),
+            np.zeros(0, dtype=np.int8),
+            np.zeros(0, dtype=np.int64),
+        )
     X = np.stack(feats_list, axis=0)
     y = np.array(labels_list, dtype=np.int8)
     ts = np.array(ts_list, dtype=np.int64)
@@ -172,19 +185,25 @@ def _walk_forward_split(
         train_end = max(1, n - val_n - cal_n)
         embargo_bars = 0
     val_start = train_end + embargo_bars
-    val_end   = val_start + val_n
+    val_end = val_start + val_n
     cal_start = val_end + embargo_bars
-    cal_end   = cal_start + cal_n
-    X_tr = features[:train_end];           y_tr = labels[:train_end]
-    X_va = features[val_start:val_end];    y_va = labels[val_start:val_end]
-    X_ca = features[cal_start:cal_end];    y_ca = labels[cal_start:cal_end]
+    cal_end = cal_start + cal_n
+    X_tr = features[:train_end]
+    y_tr = labels[:train_end]
+    X_va = features[val_start:val_end]
+    y_va = labels[val_start:val_end]
+    X_ca = features[cal_start:cal_end]
+    y_ca = labels[cal_start:cal_end]
     return (X_tr, y_tr), (X_va, y_va), (X_ca, y_ca)
 
 
 def _train_booster(
-    X_train: np.ndarray, y_train: np.ndarray,
-    X_val: np.ndarray, y_val: np.ndarray,
-    feature_names: List[str], feature_weights: np.ndarray,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    feature_names: List[str],
+    feature_weights: np.ndarray,
 ):
     """Train one xgb.Booster. Returns booster + final val_auc."""
     import xgboost as xgb
@@ -206,16 +225,18 @@ def _train_booster(
         "seed": 0,
     }
     booster = xgb.train(
-        params, d_tr, num_boost_round=200,
-        evals=[(d_va, "val")], verbose_eval=False,
+        params,
+        d_tr,
+        num_boost_round=200,
+        evals=[(d_va, "val")],
+        verbose_eval=False,
     )
     val_pred = booster.predict(d_va)
     val_auc = float(roc_auc_score(y_val, val_pred)) if len(set(y_val)) == 2 else float("nan")
     return booster, val_auc
 
 
-def _calibrate_isotonic(booster, X_cal: np.ndarray, y_cal: np.ndarray,
-                        feature_names: List[str]):
+def _calibrate_isotonic(booster, X_cal: np.ndarray, y_cal: np.ndarray, feature_names: List[str]):
     """Fit IsotonicRegression on the booster's raw probs vs calibration labels."""
     import xgboost as xgb
     from sklearn.isotonic import IsotonicRegression
@@ -246,12 +267,12 @@ def _save_artifacts(
     os.makedirs(out_dir, exist_ok=True)
     suffix = f"_h{forward_hours}"
     model_path = os.path.join(out_dir, f"xgb_model_v4{suffix}.json")
-    feat_path  = os.path.join(out_dir, f"xgb_features_v4{suffix}.json")
-    cal_path   = os.path.join(out_dir, f"xgb_calibration_v4{suffix}.pkl")
+    feat_path = os.path.join(out_dir, f"xgb_features_v4{suffix}.json")
+    cal_path = os.path.join(out_dir, f"xgb_calibration_v4{suffix}.pkl")
 
     model_tmp = os.path.join(out_dir, f"xgb_model_v4{suffix}.tmp.json")  # .json last
-    feat_tmp  = feat_path + ".tmp"
-    cal_tmp   = cal_path + ".tmp"
+    feat_tmp = feat_path + ".tmp"
+    cal_tmp = cal_path + ".tmp"
 
     booster.save_model(model_tmp)
     os.replace(model_tmp, model_path)
@@ -269,18 +290,25 @@ def _save_artifacts(
 
 # ── Orchestrator ──────────────────────────────────────────────────────────
 
+
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--pids", required=True,
-                   help="comma-separated, e.g. BTC-USD,ETH-USD")
+    p.add_argument("--pids", required=True, help="comma-separated, e.g. BTC-USD,ETH-USD")
     p.add_argument("--history-dir", default=_DEFAULT_HISTORY_DIR)
     p.add_argument("--out-dir", default=_DEFAULT_OUT_DIR)
-    p.add_argument("--forward-hours", type=int, required=True,
-                   help="label horizon in bars (4, 24, 72, 168 per sweep)")
-    p.add_argument("--label-thresh", type=float, required=True,
-                   help="triple-barrier threshold (e.g. 0.003, 0.01, 0.02, 0.05)")
-    p.add_argument("--embargo-bars", type=int, default=0,
-                   help="defaults to forward_hours if 0")
+    p.add_argument(
+        "--forward-hours",
+        type=int,
+        required=True,
+        help="label horizon in bars (4, 24, 72, 168 per sweep)",
+    )
+    p.add_argument(
+        "--label-thresh",
+        type=float,
+        required=True,
+        help="triple-barrier threshold (e.g. 0.003, 0.01, 0.02, 0.05)",
+    )
+    p.add_argument("--embargo-bars", type=int, default=0, help="defaults to forward_hours if 0")
     return p.parse_args(argv)
 
 
@@ -288,14 +316,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv)
     pids = [p.strip() for p in args.pids.split(",") if p.strip()]
     micro = TIER_WINDOWS_V4["micro"]
-    meso  = TIER_WINDOWS_V4["meso"]
+    meso = TIER_WINDOWS_V4["meso"]
     macro = TIER_WINDOWS_V4["macro"]
     embargo = args.embargo_bars if args.embargo_bars > 0 else args.forward_hours
 
     t0 = time.time()
-    print(f"v4 train: pids={pids} forward_hours={args.forward_hours} "
-          f"label_thresh={args.label_thresh} embargo_bars={embargo} "
-          f"-> xgb_*_v4_h{args.forward_hours}.*", flush=True)
+    print(
+        f"v4 train: pids={pids} forward_hours={args.forward_hours} "
+        f"label_thresh={args.label_thresh} embargo_bars={embargo} "
+        f"-> xgb_*_v4_h{args.forward_hours}.*",
+        flush=True,
+    )
 
     all_X: List[np.ndarray] = []
     all_y: List[np.ndarray] = []
@@ -308,15 +339,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  {pid}: no parquet — skip", flush=True)
             continue
         X, y, ts = _build_samples_for_pid(
-            candles, label_thresh=args.label_thresh,
+            candles,
+            label_thresh=args.label_thresh,
             forward_hours=args.forward_hours,
-            micro=micro, meso=meso, macro=macro,
+            micro=micro,
+            meso=meso,
+            macro=macro,
         )
         if X.shape[0] == 0:
             skipped.append(pid)
             print(f"  {pid}: too few candles ({len(candles)}) — skip", flush=True)
             continue
-        all_X.append(X); all_y.append(y); all_t.append(ts)
+        all_X.append(X)
+        all_y.append(y)
+        all_t.append(ts)
         print(f"  {pid}: {X.shape[0]:,} samples, pos_frac={y.mean():.4f}", flush=True)
 
     if not all_X:
@@ -327,14 +363,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     y = np.concatenate(all_y)
     t = np.concatenate(all_t)
     order = np.argsort(t, kind="stable")
-    X = X[order]; y = y[order]; t = t[order]
+    X = X[order]
+    y = y[order]
+    t = t[order]
     print(f"\nPooled: X={X.shape} pos_frac={y.mean():.4f}", flush=True)
 
     (X_tr, y_tr), (X_va, y_va), (X_ca, y_ca) = _walk_forward_split(
-        X, y, t, embargo_bars=embargo,
+        X,
+        y,
+        t,
+        embargo_bars=embargo,
     )
-    print(f"Split: train={X_tr.shape} val={X_va.shape} cal={X_ca.shape}",
-          flush=True)
+    print(f"Split: train={X_tr.shape} val={X_va.shape} cal={X_ca.shape}", flush=True)
 
     names = feature_names_v4()
     weights = feature_weights_v4()
@@ -345,7 +385,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("Calibrated.", flush=True)
 
     paths = _save_artifacts(
-        booster, calibrator, names, args.out_dir,
+        booster,
+        calibrator,
+        names,
+        args.out_dir,
         forward_hours=args.forward_hours,
     )
     print(f"Wrote: {paths}", flush=True)

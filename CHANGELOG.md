@@ -40,6 +40,138 @@ failure branch:
 No behavior change for live trading or paper-execution — the only effect is
 the log/execution-payload labeling.
 
+### Session 58.74 — 2026-08-02 — CI: grant tag-release `contents: write`
+
+After tracks 1+2 merged, main's CI was 6/7 green — only `tag-release` (main-push
+only; hadn't run since before the pipeline broke) failed with 403 "Resource not
+accessible by integration". Creating the release tag needs `contents: write`, but
+the repo's default `GITHUB_TOKEN` is read-only. Added a job-level
+`permissions: { contents: write }` to the `tag-release` job only (least-privilege —
+repo-wide default stays read-only).
+
+### Session 58.74 — 2026-08-01 — CI pipeline repair (track 2 of 2): ruff lint + format
+
+Clears the Ruff-lint + Security-gate jobs left red by track 1. Branch
+`chore/ruff-lint-format`, stacked on `fix/ci-pipeline-green`.
+
+**Mechanical (ruff 0.9.0, CI-pinned):** `ruff check backend/ --fix` (373 safe
+auto-fixes — I001 import sort, F401 unused imports, …) + `--unsafe-fixes` for 35
+more (F841 dead vars, E712, B006/B007, E731); `ruff format backend/` (211 files).
+
+**Manual code fixes:**
+- E741 ambiguous `l` → `lo` / `labels` / `lesson` in `cnn_agent.py`,
+  `signal_generator.py`, `outcome_tracker.py`, `anomaly_flagger.py` + 5 test
+  modules (incl. `_candle`/`_ohlc`/`_bar` helper params and keyword callers).
+- B904 exception chaining: `clients/coinbase_client.py` (`from err`), `main.py`
+  (`from exc`).
+
+**Config (`pyproject.toml [tool.ruff.lint]`):**
+- Dropped `S` (flake8-bandit) from `select` — the dedicated Bandit SAST CI job is
+  the security gate, so ruff-S duplicated it. Removed now-dead `S101`/`S105`
+  ignores.
+- `per-file-ignores` E402 for `backend/main.py` (launcher `.venv` sys.path shim)
+  and `backend/tests/*` (BACKEND path insert) — legitimate bootstrap-before-import;
+  imports cannot move above it.
+- `.gitleaks.toml` (new): extends the default Gitleaks ruleset (`useDefault =
+  true`) and allowlists `backend/tests/conftest.py`, whose all-zero dummy EC key
+  is a pytest fixture, not a real credential. Track-2 reformatting pulled that
+  line into the last-commit diff that the Secret-scan job scans (`--log-opts=-1`).
+
+**Verified:** `ruff check backend/` + `ruff format --check backend/` both exit 0
+(228 files); targeted rename tests + full suite via pre-commit hook green.
+
+### Session 58.74 — 2026-08-01 — CI pipeline repair (track 1 of 2)
+
+Main's CI ("CI — DevSecOps Pipeline") had been failing since 2026-06-08 (every
+PR since merged red). Diagnosis: three independent, pre-existing pipeline
+failures — no product-code regressions. This is track 1 of a two-track fix: the
+infra/dependency/bug fixes that unblock the Backend-tests, Frontend-typecheck,
+and Frontend-build jobs. The bulk ruff cleanup (~585 lint + 210-file format) is
+deferred to a separate dedicated PR (track 2); the Ruff-lint and Security-gate
+jobs stay red until then.
+
+**Files:**
+- `backend/requirements.txt` — added `pandas>=2.0.0`. pandas is a real runtime
+  dependency (imported by `services/tiered_history.py` on the live v3 path) but
+  was undeclared; its absence broke CI pytest collection (ModuleNotFoundError).
+- `.github/workflows/ci.yml` — (1) test-backend job installs CPU torch
+  (`--index-url https://download.pytorch.org/whl/cpu`) so collection of the 17
+  torch/pandas-importing test modules succeeds; (2) both frontend jobs switched
+  from `npm ci` to `npm install --ignore-scripts --no-audit --no-fund` to
+  tolerate lockfile drift (committed lock was missing the esbuild@0.28.0 subtree
+  from the vitest 4.x bump; regenerating the lock cross-platform on Windows
+  produced broken optional-platform flags, so per-runner `npm install` is the
+  robust fix).
+- `backend/agents/cnn_agent.py` — `self.model` annotation `Optional["SignalCNN"]`
+  → `Optional[Any]` (SignalCNN deleted #311-refactor-e; dead forward-ref, F821).
+- `backend/tests/test_cnn_agent.py` — `seen_oi: List` → `seen_oi: list` (×2);
+  `List` was undefined (F821).
+- `backend/tests/test_scorecard_cli.py` — `PYTHON` hardcoded the Windows
+  `.venv/Scripts/python.exe` path (3 FileNotFoundError failures on linux CI,
+  newly exposed once collection succeeded); now `sys.executable`.
+
+**Verified locally:** ruff 0.9.0 F821-clean on both touched files; `npx tsc
+--noEmit` passes; `npm install` installs cleanly with no cpu-notsup error.
+Backend-tests collection fix confirmed via CI on push (full local pytest gated —
+8001 backend actively trading).
+
+### Session 58.73 — 2026-06-21 — Maker-execution routing (exit leg, shadow-gated)
+
+Opt-in maker (post-only LIMIT) routing for live profit-target EXITS, completing
+the piece deferred by the entry leg (58.72). Reuses the same `USE_MAKER_EXECUTION`
+flag (default false → byte-for-byte paper-only). Trail + model-down exits post as
+maker (can wait for a fill; 30s market fallback in `execute_maker_signal`); hard
+stop-loss + forced time exits cross as taker (capital protection). Both exit paths
+(scan loop + WS) covered. Asymmetric with the entry leg by design: exits place NO
+live order today, so the WHOLE exit live-order path is gated behind the flag.
+
+Zero effect on tracked 8001 paper PnL (paper book models no fees); purely a
+live-execution-path change for the 8002 shadow. Promote to 8001 only after the
+shadow confirms real maker fill rates.
+
+**Files:**
+- `backend/agents/exit_execution.py` (new) — single source of truth for exit
+  routing: `is_maker_exit(trigger)` classification + `execute_live_exit(order_executor,
+  *, pid, price, size, trigger)`. Owns the flag/dry-run gate, the bid/ask fetch
+  (maker only), and the `order_executor` call. SELL signal carries no `atr` key →
+  sizes from `quote_size = size*ask` (maker) / `size*price` (taker). No-ops (returns
+  None) when gated off or quotes missing.
+- `backend/agents/cnn_agent.py` — `_check_risk_exits(self, order_executor=None)`;
+  after the paper `book.sell`, calls `exit_execution.execute_live_exit` in a
+  try/except (never re-raises into the scan loop); `run_loop` forwards `order_executor`.
+- `backend/agents/exit_watcher.py` — `on_price_tick(..., order_executor=None)` +
+  `attach(..., order_executor=None)`; live-exit call sits inside the existing
+  handler try/except (invariant #18).
+- `backend/main.py` — `attach_exit_watcher` now passes `app_state.order_executor`.
+- `backend/tests/test_exit_execution.py` (new, 8 tests) — classification, gate
+  (none/flag-off/dry-run), maker routing + sizing + missing-quote no-op, taker routing.
+- `backend/tests/test_cnn_risk_exits.py` — `TestCheckRiskExitsLiveRouting` (5 tests):
+  trail→maker, stop→taker, flag-off paper-only, no-executor paper-only, exception swallowed.
+- `backend/tests/test_exit_watcher.py` — `TestOnPriceTickLiveRouting` (5 tests):
+  WS trail→maker, WS stop→taker, WS model-down→maker, flag-off paper-only, attach forwards executor.
+- `CLAUDE.md` — invariant #21 amended with the exit-leg contract.
+
+### Session 58.72 — 2026-06-15 — Maker-execution routing (entry leg, shadow-gated)
+
+Opt-in maker (post-only LIMIT) routing for live BUY entries, gated behind a
+new `USE_MAKER_EXECUTION` env flag (default false → byte-for-byte unchanged
+taker behavior). Intended for the 8002 shadow per port discipline; promote to
+8001 only after the shadow confirms real maker fill rates. Backtest
+expectation (read-only sims, `docs/win-factors-strategy/`): maker execution
+flips full-history paper PnL from −$414 (taker) to +$169.
+
+**Files:**
+- `backend/config.py` — new `use_maker_execution` field (env `USE_MAKER_EXECUTION`, default false).
+- `backend/agents/cnn_agent.py` — extracted `_execute_live_order(order_executor, signal)`;
+  flag on → sources best bid/ask via `coinbase_client.get_best_bid_ask`, attaches them to the
+  signal, routes to `order_executor.execute_maker_signal` (which owns the 30s poll + market
+  fallback). Flag off → existing `execute_signal` taker path, no bid/ask fetch.
+- `backend/tests/test_cnn_agent.py` — `TestMakerExecutionRouting` (2 tests): taker path when
+  flag off (byte-for-byte, no quote fetch); maker path populates bid/ask + routes to maker.
+
+**Why:** `execute_maker_signal` existed and was tested but unwired — the live path called the
+taker `execute_signal`, and the signal dict lacked the bid/ask the maker path requires. Sourcing
+those quotes is the actual entry-leg work. Profit-target maker exits are the next (separate) piece.
 ### Session 58.71w — 2026-06-07 — Tier A: skip masked-channel builders (ch17/18/19)
 
 Pure compute optimization in `FeatureBuilder.build` — emit zero arrays

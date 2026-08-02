@@ -10,6 +10,7 @@ All filtered to require >= 6 months of 1h OHLCV AND CoinPaprika supply data.
 Pure ranking logic + CLI. No HTTP calls inside the ranking functions —
 candidates are passed in pre-assembled by the CLI orchestrator.
 """
+
 from __future__ import annotations
 
 import json
@@ -64,7 +65,7 @@ def curate_universe(
     """
     by_mc = rank_by_market_cap(candidates)
     large = by_mc[:n_large]
-    mid   = by_mc[n_large:n_large + n_mid]
+    mid = by_mc[n_large : n_large + n_mid]
     picked: Set[str] = set(large) | set(mid)
 
     high_fdv = rank_by_fdv_mc_ratio(candidates, exclude=picked)[:n_high_fdv_ratio]
@@ -73,10 +74,10 @@ def curate_universe(
     low_turnover = rank_by_turnover(candidates, exclude=picked)[:n_low_turnover]
 
     return {
-        "large":          large,
-        "mid":            mid,
+        "large": large,
+        "mid": mid,
         "high_fdv_ratio": high_fdv,
-        "low_turnover":   low_turnover,
+        "low_turnover": low_turnover,
     }
 
 
@@ -94,8 +95,9 @@ def _assemble_candidates_from_local(
       - supply snapshot has the pid (so circ/total are known)
       - marketcap parquet has at least one row (for current MC + volume)
     """
-    from tools.strategy_discovery.build_supply_snapshot import load_snapshot
     import pyarrow.parquet as pq
+
+    from tools.strategy_discovery.build_supply_snapshot import load_snapshot
 
     with open(inventory_json_path, "r", encoding="utf-8") as f:
         inv = json.load(f)
@@ -118,10 +120,10 @@ def _assemble_candidates_from_local(
         if not cols["market_cap"]:
             continue
         out[pid] = {
-            "market_cap":  float(cols["market_cap"][-1]),
-            "volume_24h":  float(cols["volume_24h"][-1]),
+            "market_cap": float(cols["market_cap"][-1]),
+            "volume_24h": float(cols["volume_24h"][-1]),
             "circulating": float(supply_rows[pid]["circulating"]),
-            "total":       float(supply_rows[pid]["total"]),
+            "total": float(supply_rows[pid]["total"]),
         }
     return out
 
@@ -162,11 +164,13 @@ def _render_universe_md(picked: Dict[str, List[str]], candidates: CandidateMap) 
 def main() -> int:
     """CLI: read local inventory + supply + marketcap, curate, write outputs."""
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--inventory-json",
-        default=os.path.join(BACKEND, "..", "docs", "superpowers", "specs",
-                             "2026-05-23-data-inventory.json"),
+        default=os.path.join(
+            BACKEND, "..", "docs", "superpowers", "specs", "2026-05-23-data-inventory.json"
+        ),
     )
     parser.add_argument(
         "--supply-parquet",
@@ -178,13 +182,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--out-md",
-        default=os.path.join(BACKEND, "..", "docs", "superpowers", "specs",
-                             "2026-05-23-universe-50.md"),
+        default=os.path.join(
+            BACKEND, "..", "docs", "superpowers", "specs", "2026-05-23-universe-50.md"
+        ),
     )
     parser.add_argument(
         "--out-json",
-        default=os.path.join(BACKEND, "..", "docs", "superpowers", "specs",
-                             "2026-05-23-universe-50.json"),
+        default=os.path.join(
+            BACKEND, "..", "docs", "superpowers", "specs", "2026-05-23-universe-50.json"
+        ),
     )
     parser.add_argument("--n-large", type=int, default=15)
     parser.add_argument("--n-mid", type=int, default=15)

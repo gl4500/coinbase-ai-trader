@@ -3,10 +3,11 @@
 Composes profit_tree + purged_wf + the deflation factor + Q0 gates + bootstrap CI.
 Pure functions on torch.Tensor inputs (caller loads the parquet). No filesystem.
 """
+
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -16,14 +17,14 @@ from tools.strategy_discovery.profit_split import build_next_eligible, walk_and_
 from tools.strategy_discovery.profit_tree import TreeNode, collect_leaves, fit_tree
 from tools.strategy_discovery.purged_wf import inner_folds, outer_folds
 
-_DEPTH_GRID    = (3, 5, 7)
+_DEPTH_GRID = (3, 5, 7)
 _MIN_LEAF_GRID = (20, 50, 100)
-_RETAIL_FEE    = 0.012
-_Q0_AVG_WIN    = 0.05    # >= +5%
-_Q0_AVG_LOSS   = -0.10   # avg_loss must be >= -0.10 to pass
-_Q0_MAX_DD     = 0.30
-_Q0_MIN_FOLDS  = 4
-_BOOTSTRAP_N   = 1000
+_RETAIL_FEE = 0.012
+_Q0_AVG_WIN = 0.05  # >= +5%
+_Q0_AVG_LOSS = -0.10  # avg_loss must be >= -0.10 to pass
+_Q0_MAX_DD = 0.30
+_Q0_MIN_FOLDS = 4
+_BOOTSTRAP_N = 1000
 
 
 @dataclass
@@ -68,21 +69,26 @@ def leaf_metrics(trades_net: np.ndarray) -> dict:
     n = int(trades_net.shape[0])
     if n == 0:
         return {
-            "trade_count": 0, "win_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
-            "max_dd": 0.0, "cumulative_profit_raw": 0.0, "sortino": 0.0,
+            "trade_count": 0,
+            "win_rate": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "max_dd": 0.0,
+            "cumulative_profit_raw": 0.0,
+            "sortino": 0.0,
         }
     wins = trades_net[trades_net > 0]
     losses = trades_net[trades_net < 0]
-    avg_win  = float(wins.mean())  if wins.size  > 0 else 0.0
+    avg_win = float(wins.mean()) if wins.size > 0 else 0.0
     avg_loss = float(losses.mean()) if losses.size > 0 else 0.0
     cum = float(trades_net.sum())
     equity = np.concatenate([[0.0], np.cumsum(trades_net)])
     running_max = np.maximum.accumulate(equity)
-    drawdown    = running_max - equity
+    drawdown = running_max - equity
     max_dd = float(drawdown.max())
     mean_trade = float(trades_net.mean())
     if losses.size > 0:
-        downside_dev = float(np.sqrt(np.mean(losses ** 2)))
+        downside_dev = float(np.sqrt(np.mean(losses**2)))
     else:
         downside_dev = 0.0
     sortino = mean_trade / downside_dev if downside_dev > 0 else 0.0
@@ -138,9 +144,19 @@ def bootstrap_ci(
 
 
 _FEATURE_COLUMNS = (
-    "market_cap", "fdv", "fdv_over_mc", "circ_over_total", "vol_24h", "vol_over_mc",
-    "price_over_ema20", "price_over_ema50", "price_over_ema200",
-    "ret_1h_sign", "ret_24h_sign", "ret_7d_sign", "atr14_pct",
+    "market_cap",
+    "fdv",
+    "fdv_over_mc",
+    "circ_over_total",
+    "vol_24h",
+    "vol_over_mc",
+    "price_over_ema20",
+    "price_over_ema50",
+    "price_over_ema200",
+    "ret_1h_sign",
+    "ret_24h_sign",
+    "ret_7d_sign",
+    "atr14_pct",
 )
 
 
@@ -156,6 +172,7 @@ def _serialize_rule_summary(root: TreeNode, leaf_id: int, feature_names) -> str:
         return ""
     target = target_leaves[leaf_id]
     path_conditions = []
+
     def walk(node: TreeNode) -> bool:
         if node is target:
             return True
@@ -171,6 +188,7 @@ def _serialize_rule_summary(root: TreeNode, leaf_id: int, feature_names) -> str:
             return True
         path_conditions.pop()
         return False
+
     walk(root)
     return " AND ".join(path_conditions) if path_conditions else "(root)"
 
@@ -191,6 +209,7 @@ def _leaf_direction_key(root: TreeNode, leaf_id: int, feature_names) -> str:
     target = target_leaves[leaf_id]
     # Walk toward target, recording each step; return only the FIRST step
     path_steps: List[str] = []
+
     def walk(node: TreeNode) -> bool:
         if node is target:
             return True
@@ -205,6 +224,7 @@ def _leaf_direction_key(root: TreeNode, leaf_id: int, feature_names) -> str:
             return True
         path_steps.pop()
         return False
+
     walk(root)
     # Return only the root-level step for stable cross-fold identity
     return path_steps[0] if path_steps else "(root)"
@@ -257,8 +277,9 @@ def mine_profiles_for_pid_horizon(
       4. Apply deflation factor to the cumulative profit using inner-CV SE.
       5. Trigger bootstrap CI for low-trade-count or long-shot leaves.
     """
-    import pyarrow.parquet as _pq
     from collections import defaultdict
+
+    import pyarrow.parquet as _pq
 
     df = _pq.read_table(parquet_path).to_pandas()
     label_col = f"label_h{int(horizon)}"
@@ -312,7 +333,9 @@ def mine_profiles_for_pid_horizon(
                     fold_profits.append(cum)
                 inner_scores[(depth, min_leaf)].append(float(np.mean(fold_profits)))
         inner_score_mean = {k: float(np.mean(v)) for k, v in inner_scores.items()}
-        chosen_depth, chosen_min_leaf, raw_max, inner_cv_se = pick_best_hyperparams(inner_score_mean)
+        chosen_depth, chosen_min_leaf, raw_max, inner_cv_se = pick_best_hyperparams(
+            inner_score_mean
+        )
         tree = fit_tree(
             features=features[outer_train_idx],
             labels=labels,
@@ -337,7 +360,9 @@ def mine_profiles_for_pid_horizon(
             trades = _replay_trades(global_test_rows, next_eligible_np, labels_np)
             metrics = leaf_metrics(np.asarray(trades))
             metrics["deflated_profit"], _ = apply_deflation(
-                raw=metrics["cumulative_profit_raw"], inner_cv_se=inner_cv_se, n_combos=9,
+                raw=metrics["cumulative_profit_raw"],
+                inner_cv_se=inner_cv_se,
+                n_combos=9,
             )
             if leaf_qualifies(metrics):
                 fold_pass_count[direction_key] += 1
@@ -371,25 +396,27 @@ def mine_profiles_for_pid_horizon(
         if bootstrap_triggered and m["trade_count"] > 0:
             ci_lower, ci_upper = bootstrap_ci(trades, n_iter=_BOOTSTRAP_N, rng=rng)
         rule_summary = fold_summaries[direction_key].get("rule_summary", direction_key)
-        profiles.append(LeafProfile(
-            leaf_id=leaf_id,
-            rule_path_summary=rule_summary,
-            trade_count=m["trade_count"],
-            win_rate=m["win_rate"],
-            avg_win=m["avg_win"],
-            avg_loss=m["avg_loss"],
-            max_dd=m["max_dd"],
-            cumulative_profit_raw=m["cumulative_profit_raw"],
-            cumulative_profit_deflated=deflated,
-            deflation_pp=infl,
-            n_combos_searched=9,
-            inner_cv_se=fold_summaries[direction_key]["inner_cv_se"],
-            sortino=m["sortino"],
-            n_folds_passed_q0=n_pass,
-            bootstrap_triggered=bootstrap_triggered,
-            bootstrap_ci_lower=ci_lower,
-            bootstrap_ci_upper=ci_upper,
-            chosen_depth=fold_summaries[direction_key]["chosen_depth"],
-            chosen_min_leaf=fold_summaries[direction_key]["chosen_min_leaf"],
-        ))
+        profiles.append(
+            LeafProfile(
+                leaf_id=leaf_id,
+                rule_path_summary=rule_summary,
+                trade_count=m["trade_count"],
+                win_rate=m["win_rate"],
+                avg_win=m["avg_win"],
+                avg_loss=m["avg_loss"],
+                max_dd=m["max_dd"],
+                cumulative_profit_raw=m["cumulative_profit_raw"],
+                cumulative_profit_deflated=deflated,
+                deflation_pp=infl,
+                n_combos_searched=9,
+                inner_cv_se=fold_summaries[direction_key]["inner_cv_se"],
+                sortino=m["sortino"],
+                n_folds_passed_q0=n_pass,
+                bootstrap_triggered=bootstrap_triggered,
+                bootstrap_ci_lower=ci_lower,
+                bootstrap_ci_upper=ci_upper,
+                chosen_depth=fold_summaries[direction_key]["chosen_depth"],
+                chosen_min_leaf=fold_summaries[direction_key]["chosen_min_leaf"],
+            )
+        )
     return profiles

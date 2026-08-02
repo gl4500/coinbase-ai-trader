@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from tools._scorecard._precision import precision_at_tau
 
 

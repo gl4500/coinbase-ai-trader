@@ -1,9 +1,11 @@
 """
 Pytest fixtures shared across all test modules.
 """
+
 import asyncio
 import os
 import sys
+
 import pytest
 
 # ── Make backend importable without installing ─────────────────────────────────
@@ -12,11 +14,14 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 # ── Patch .env so tests never need real credentials ───────────────────────────
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test-org/apiKeys/test-key")
-os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABoAoGCCqGSM49\nAwEHoWQDYgAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n-----END EC PRIVATE KEY-----")
-os.environ.setdefault("APP_API_KEY",              "test-api-key-fixture")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test-org/apiKeys/test-key")
+os.environ.setdefault(
+    "COINBASE_API_PRIVATE_KEY",
+    "-----BEGIN EC PRIVATE KEY-----\nMHQCAQEEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABoAoGCCqGSM49\nAwEHoWQDYgAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n-----END EC PRIVATE KEY-----",
+)
+os.environ.setdefault("APP_API_KEY", "test-api-key-fixture")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 # ── MC filter chain — default OFF for tests ───────────────────────────────────
 # The live .env may set MC_FILTERS=ci, but tests that mock _cnn_prob and
@@ -40,10 +45,9 @@ def _redirect_cnn_dataset_cache(tmp_path_factory, monkeypatch):
     realise they touch the cache (e.g. via deep import side-effects).
     """
     import agents.cnn_agent as ca
+
     tmp_dir = tmp_path_factory.mktemp("cnn_cache_isolated")
-    monkeypatch.setattr(
-        ca, "_DATASET_CACHE_PATH", str(tmp_dir / "dataset_cache.pt")
-    )
+    monkeypatch.setattr(ca, "_DATASET_CACHE_PATH", str(tmp_dir / "dataset_cache.pt"))
     yield
 
 
@@ -64,6 +68,7 @@ def _redirect_database_path(tmp_path_factory, monkeypatch):
     own DATABASE_URL — that wins over this autouse monkeypatch.
     """
     import database
+
     tmp_dir = tmp_path_factory.mktemp("coinbase_db_isolated")
     monkeypatch.setattr(database, "DB_PATH", str(tmp_dir / "coinbase.db"))
     yield
@@ -90,7 +95,9 @@ def tmp_db(tmp_path):
 async def init_db(tmp_db):
     """Initialise the database schema in the tmp_db."""
     import importlib
+
     import database
+
     # Reload so DB_PATH picks up the tmp_db environment variable
     importlib.reload(database)
     await database.init_db()

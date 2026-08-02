@@ -3,6 +3,7 @@ Tests for services/binance_funding_history.py — historical funding rate fetche
 
 No live API calls — httpx.AsyncClient.get is mocked in every async test.
 """
+
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,10 +14,10 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from services import binance_funding_history as bfh  # noqa: E402
 
@@ -30,7 +31,6 @@ def _make_response(data, status=200):
 
 
 class TestProductSymbolMapping:
-
     def test_known_products_map_to_binance_symbols(self):
         assert bfh._coinbase_to_binance("BTC-USD") == "BTCUSDT"
         assert bfh._coinbase_to_binance("ETH-USD") == "ETHUSDT"
@@ -41,7 +41,6 @@ class TestProductSymbolMapping:
 
 
 class TestFetchFundingHistory:
-
     @pytest.mark.asyncio
     async def test_returns_sorted_tuples_of_time_and_rate(self):
         payload = [
@@ -67,9 +66,7 @@ class TestFetchFundingHistory:
 
     @pytest.mark.asyncio
     async def test_unsupported_product_returns_empty(self):
-        result = await bfh.fetch_funding_history(
-            "UNSUPPORTED-USD", start_ms=0, end_ms=1
-        )
+        result = await bfh.fetch_funding_history("UNSUPPORTED-USD", start_ms=0, end_ms=1)
         assert result == []
 
     @pytest.mark.asyncio
@@ -99,9 +96,7 @@ class TestFetchFundingHistory:
         mock_client.get = AsyncMock(side_effect=Exception("network down"))
 
         with patch("services.binance_funding_history.httpx.AsyncClient", return_value=mock_client):
-            result = await bfh.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+            result = await bfh.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
 
     @pytest.mark.asyncio
@@ -112,9 +107,7 @@ class TestFetchFundingHistory:
         mock_client.get = AsyncMock(return_value=_make_response({"err": "rate limit"}, status=418))
 
         with patch("services.binance_funding_history.httpx.AsyncClient", return_value=mock_client):
-            result = await bfh.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+            result = await bfh.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
 
     @pytest.mark.asyncio
@@ -124,9 +117,7 @@ class TestFetchFundingHistory:
         # returns []. Verifies AsyncClient is never constructed.
         monkeypatch.setenv("BINANCE_FUNDING_DISABLED", "1")
         with patch("services.binance_funding_history.httpx.AsyncClient") as MockClient:
-            result = await bfh.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+            result = await bfh.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
         MockClient.assert_not_called()
 

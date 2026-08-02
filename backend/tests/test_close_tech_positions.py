@@ -5,13 +5,12 @@ Three cases:
 2. No-op when agent_state.positions_json is empty dict.
 3. Writes one trade row per open position; zeros positions_json.
 """
+
 import asyncio
 import json
 import os
 import sqlite3
 import sys
-
-import pytest
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
@@ -38,12 +37,14 @@ def _make_trade_schema(db_path):
             agent TEXT, balance REAL, realized_pnl REAL,
             positions_json TEXT, high_water_json TEXT
         )""")
-    c.commit(); c.close()
+    c.commit()
+    c.close()
 
 
 class TestCloseTechPositions:
     def test_no_op_when_no_tech_agent_state_row(self, tmp_path):
         from tools.close_tech_positions import close_tech_positions
+
         db = tmp_path / "test.db"
         _make_trade_schema(db)
         result = asyncio.run(close_tech_positions(db_path=str(db)))
@@ -55,6 +56,7 @@ class TestCloseTechPositions:
 
     def test_no_op_when_positions_json_empty(self, tmp_path):
         from tools.close_tech_positions import close_tech_positions
+
         db = tmp_path / "test.db"
         _make_trade_schema(db)
         c = sqlite3.connect(db)
@@ -63,7 +65,8 @@ class TestCloseTechPositions:
             "VALUES ('TECH', 1000.0, 0.0, ?)",
             ("{}",),
         )
-        c.commit(); c.close()
+        c.commit()
+        c.close()
         result = asyncio.run(close_tech_positions(db_path=str(db)))
         assert result["n_closed"] == 0
         c = sqlite3.connect(db)
@@ -71,16 +74,15 @@ class TestCloseTechPositions:
         c.close()
         assert n_trades == 0
 
-    def test_writes_trade_row_per_position_and_zeros_state(
-        self, tmp_path, monkeypatch
-    ):
+    def test_writes_trade_row_per_position_and_zeros_state(self, tmp_path, monkeypatch):
         from tools.close_tech_positions import close_tech_positions
+
         db = tmp_path / "test.db"
         _make_trade_schema(db)
         positions = {
             "BTC-USD": {"size": 0.001, "avg_price": 50000.0},
-            "ETH-USD": {"size": 0.5,    "avg_price": 3000.0},
-            "SOL-USD": {"size": 10.0,   "avg_price": 100.0},
+            "ETH-USD": {"size": 0.5, "avg_price": 3000.0},
+            "SOL-USD": {"size": 10.0, "avg_price": 100.0},
         }
         c = sqlite3.connect(db)
         c.execute(
@@ -88,15 +90,15 @@ class TestCloseTechPositions:
             "VALUES ('TECH', 100.0, -50.0, ?)",
             (json.dumps(positions),),
         )
-        c.commit(); c.close()
+        c.commit()
+        c.close()
 
         # Stub the live-price fetch so the test doesn't hit Coinbase
         async def _fake_get_product(pid):
-            return {"price": {"BTC-USD": "55000.0",
-                              "ETH-USD": "3300.0",
-                              "SOL-USD": "110.0"}[pid]}
+            return {"price": {"BTC-USD": "55000.0", "ETH-USD": "3300.0", "SOL-USD": "110.0"}[pid]}
 
         import clients.coinbase_client as cb
+
         monkeypatch.setattr(cb, "get_product", _fake_get_product)
 
         result = asyncio.run(close_tech_positions(db_path=str(db)))

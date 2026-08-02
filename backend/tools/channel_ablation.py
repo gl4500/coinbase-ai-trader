@@ -13,6 +13,7 @@ their ablation row should report ~0 delta and acts as a sanity check.
 Run:
     cd backend && python tools/channel_ablation.py
 """
+
 from __future__ import annotations
 
 import os
@@ -32,7 +33,6 @@ import torch  # noqa: E402
 from tools.feature_set_compare import _pooled_top_n  # noqa: E402
 from tools.walk_forward import purged_walk_forward_splits  # noqa: E402
 from tools.xgb_features import extract_features  # noqa: E402
-
 
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _PARAMS = {
@@ -105,15 +105,33 @@ def run_ablation(
 def _channel_label(c: int) -> str:
     """Map channel index to short human-readable name."""
     labels = {
-        0: "log_ret_1h", 1: "log_ret_4h", 2: "log_ret_24h",
-        3: "vol_z", 4: "atr_pct", 5: "rsi14", 6: "rsi_macro",
-        7: "macd_hist", 8: "bb_width", 9: "ema_cross",
-        10: "L1_bid", 11: "L1_ask", 12: "spread_bps",
-        13: "vwap_dev", 14: "obv", 15: "adx",
-        16: "stoch_k", 17: "MASKED_iv", 18: "MASKED_rv_iv",
-        19: "MASKED_skew", 20: "funding", 21: "btc_corr",
-        22: "rv20", 23: "rv60", 24: "MASKED?",
-        25: "MASKED?", 26: "MASKED?",
+        0: "log_ret_1h",
+        1: "log_ret_4h",
+        2: "log_ret_24h",
+        3: "vol_z",
+        4: "atr_pct",
+        5: "rsi14",
+        6: "rsi_macro",
+        7: "macd_hist",
+        8: "bb_width",
+        9: "ema_cross",
+        10: "L1_bid",
+        11: "L1_ask",
+        12: "spread_bps",
+        13: "vwap_dev",
+        14: "obv",
+        15: "adx",
+        16: "stoch_k",
+        17: "MASKED_iv",
+        18: "MASKED_rv_iv",
+        19: "MASKED_skew",
+        20: "funding",
+        21: "btc_corr",
+        22: "rv20",
+        23: "rv60",
+        24: "MASKED?",
+        25: "MASKED?",
+        26: "MASKED?",
     }
     return labels.get(c, f"ch{c}")
 
@@ -136,9 +154,7 @@ def main():
         c = r["channel"]
         d = r["delta"]
         m = r["mean_auc"]
-        marker = "  *load-bearing*" if d <= -0.005 else (
-            "  dead?" if abs(d) < 0.001 else ""
-        )
+        marker = "  *load-bearing*" if d <= -0.005 else ("  dead?" if abs(d) < 0.001 else "")
         print(f"{rank:>4} {c:>4} {_channel_label(c):<14} {m:>10.4f} {d:>+9.4f}{marker}")
 
 

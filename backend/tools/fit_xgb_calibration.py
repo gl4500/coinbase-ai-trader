@@ -24,6 +24,7 @@ Usage (from backend/):
     # new — refit on cache val split (recommended; #187)
     ../.venv/Scripts/python.exe -m tools.fit_xgb_calibration --source cache
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,9 +38,7 @@ from typing import Tuple
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +104,7 @@ def _detect_calibration_target_feature_set() -> str:
     write into the calibrator pickle. Defaults to 'v1' if metadata missing
     or unreadable. (#311f)"""
     import json
+
     try:
         meta = json.load(open(_DEFAULT_FEATURES_PATH))
         if isinstance(meta, dict):
@@ -134,15 +134,17 @@ def _load_cache_pairs(
     Returns (raw_probs, labels) as float64 numpy arrays.
     """
     import json
+
     import torch
     import xgboost as xgb
+
     from agents.cnn_agent import (
         _DATASET_CACHE_PATH,
+        _TRAINING_CONSTANT_CHANNELS,
+        N_CHANNELS,
+        SEQ_LEN,
         _dataset_schema,
         _load_pp_cache,
-        _TRAINING_CONSTANT_CHANNELS,
-        SEQ_LEN,
-        N_CHANNELS,
     )
     from tools.xgb_features import extract_features
 
@@ -154,8 +156,7 @@ def _load_cache_pairs(
     cache = _load_pp_cache(cache_to_load, schema)
     if not cache:
         raise RuntimeError(
-            f"No matching dataset cache at {cache_to_load} (schema "
-            f"version {schema['version']})"
+            f"No matching dataset cache at {cache_to_load} (schema version {schema['version']})"
         )
 
     X_list: list = []
@@ -173,10 +174,9 @@ def _load_cache_pairs(
             f"(need >= {_MIN_CACHE_SAMPLES})"
         )
 
-    X_all = torch.stack([
-        x if isinstance(x, torch.Tensor) else torch.tensor(x, dtype=torch.float32)
-        for x in X_list
-    ])
+    X_all = torch.stack(
+        [x if isinstance(x, torch.Tensor) else torch.tensor(x, dtype=torch.float32) for x in X_list]
+    )
     for ch in _TRAINING_CONSTANT_CHANNELS:
         X_all[:, ch, :] = 0.0
     y_all = np.array(y_list, dtype=np.float64)
@@ -199,7 +199,7 @@ def _load_cache_pairs(
 
 def _bucket_table(probs: np.ndarray, wins: np.ndarray, edges: np.ndarray) -> list:
     rows = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
+    for lo, hi in zip(edges[:-1], edges[1:], strict=False):
         mask = (probs >= lo) & (probs < hi)
         n = int(mask.sum())
         if n == 0:
@@ -239,8 +239,7 @@ def fit_calibration(
     n = len(probs)
     if n < min_required:
         raise RuntimeError(
-            f"refusing to fit calibrator: only {n} samples from {source} "
-            f"(need >= {min_required})"
+            f"refusing to fit calibrator: only {n} samples from {source} (need >= {min_required})"
         )
     log.info("loaded %d (raw_prob, label) pairs from %s", n, src_desc)
 
@@ -248,7 +247,7 @@ def fit_calibration(
     pre_table = _bucket_table(probs, wins, edges)
     log.info("PRE-calibration win rate by raw bucket:")
     for lo, hi, k, wr in pre_table:
-        wr_str = f"{100*wr:5.1f}%" if not np.isnan(wr) else "  n/a"
+        wr_str = f"{100 * wr:5.1f}%" if not np.isnan(wr) else "  n/a"
         log.info("  [%.2f, %.2f)  n=%4d  win=%s", lo, hi, k, wr_str)
 
     iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
@@ -258,13 +257,13 @@ def fit_calibration(
     post_table = _bucket_table(calibrated, wins, edges)
     log.info("POST-calibration win rate by calibrated bucket:")
     for lo, hi, k, wr in post_table:
-        wr_str = f"{100*wr:5.1f}%" if not np.isnan(wr) else "  n/a"
+        wr_str = f"{100 * wr:5.1f}%" if not np.isnan(wr) else "  n/a"
         log.info("  [%.2f, %.2f)  n=%4d  win=%s", lo, hi, k, wr_str)
 
     grid = np.linspace(0.0, 1.0, 11)
     grid_cal = iso.transform(grid)
     log.info("Calibration grid (raw -> calibrated):")
-    for r, c in zip(grid, grid_cal):
+    for r, c in zip(grid, grid_cal, strict=False):
         log.info("  %.2f -> %.4f", r, c)
 
     feature_set = _detect_calibration_target_feature_set()
@@ -275,7 +274,7 @@ def fit_calibration(
         "n_samples": n,
         "pre_table": pre_table,
         "post_table": post_table,
-        "grid": list(zip(grid.tolist(), grid_cal.tolist())),
+        "grid": list(zip(grid.tolist(), grid_cal.tolist(), strict=False)),
         "out_path": out_path,
     }
 

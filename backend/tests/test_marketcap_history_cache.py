@@ -12,9 +12,11 @@ Cache semantics:
   * public coroutine returns list[(ts_ms, market_cap)] sorted ascending, to
     match coingecko_marketcap.fetch_marketcap_history.
 """
+
 import os
 import sys
 import time
+
 import pytest
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
@@ -24,19 +26,21 @@ if BACKEND not in sys.path:
 
 # ── Public API surface ─────────────────────────────────────────────────────
 
-class TestPublicApi:
 
+class TestPublicApi:
     def test_module_exposes_async_get(self):
         from services import marketcap_history_cache as mhc
+
         assert hasattr(mhc, "fetch_marketcap_history_cached")
         import inspect
+
         assert inspect.iscoroutinefunction(mhc.fetch_marketcap_history_cached)
 
 
 # ── Cache miss falls through to underlying fetcher ─────────────────────────
 
-class TestCacheMiss:
 
+class TestCacheMiss:
     @pytest.mark.asyncio
     async def test_miss_calls_underlying_fetcher(self, tmp_path, monkeypatch):
         from services import marketcap_history_cache as mhc
@@ -61,11 +65,10 @@ class TestCacheMiss:
         assert rows[0][1] == pytest.approx(1.0e12)
 
     @pytest.mark.asyncio
-    async def test_miss_writes_parquet_with_pit_columns(
-        self, tmp_path, monkeypatch
-    ):
-        from services import marketcap_history_cache as mhc
+    async def test_miss_writes_parquet_with_pit_columns(self, tmp_path, monkeypatch):
         import pyarrow.parquet as pq
+
+        from services import marketcap_history_cache as mhc
 
         async def _stub(pid, start_ms, end_ms):
             return [(1735689600000, 1.0e12, 0.0)]
@@ -83,9 +86,7 @@ class TestCacheMiss:
         assert os.path.exists(path)
         tbl = pq.read_table(path)
         names = [f.name for f in tbl.schema]
-        assert names == [
-            "start", "market_cap", "fdv", "volume_24h", "ingest_ts", "schema_version"
-        ]
+        assert names == ["start", "market_cap", "fdv", "volume_24h", "ingest_ts", "schema_version"]
         d = tbl.to_pydict()
         assert d["ingest_ts"][0] == 1778500000
         assert d["schema_version"][0] == 2
@@ -93,31 +94,44 @@ class TestCacheMiss:
 
 # ── Cache hit short-circuits API ───────────────────────────────────────────
 
-class TestCacheHit:
 
+class TestCacheHit:
     @pytest.mark.asyncio
     async def test_hit_skips_underlying_fetcher(self, tmp_path, monkeypatch):
         from services import marketcap_history_cache as mhc
 
         # Seed parquet with two rows covering [start, end] and FRESH ingest_ts
         from tools.build_marketcap_parquet import _save_marketcap_history
+
         path = os.path.join(str(tmp_path), "BTC-USD.parquet")
         now_ts = 1778500000
         _save_marketcap_history(
             path,
             [
-                {"start": 1735689600, "market_cap": 1.0e12, "fdv": 1.0e12,
-                 "ingest_ts": now_ts, "schema_version": 2},
-                {"start": 1735776000, "market_cap": 1.01e12, "fdv": 1.01e12,
-                 "ingest_ts": now_ts, "schema_version": 2},
+                {
+                    "start": 1735689600,
+                    "market_cap": 1.0e12,
+                    "fdv": 1.0e12,
+                    "ingest_ts": now_ts,
+                    "schema_version": 2,
+                },
+                {
+                    "start": 1735776000,
+                    "market_cap": 1.01e12,
+                    "fdv": 1.01e12,
+                    "ingest_ts": now_ts,
+                    "schema_version": 2,
+                },
             ],
             now_ts=now_ts,
         )
 
         called = {"n": 0}
+
         async def _stub(pid, start_ms, end_ms):
             called["n"] += 1
             return []
+
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: float(now_ts + 60))
 
@@ -136,12 +150,10 @@ class TestCacheHit:
 
 # ── Refresh window: stale parquet forces re-fetch ──────────────────────────
 
-class TestRefreshWindow:
 
+class TestRefreshWindow:
     @pytest.mark.asyncio
-    async def test_stale_ingest_ts_triggers_refetch(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_stale_ingest_ts_triggers_refetch(self, tmp_path, monkeypatch):
         from services import marketcap_history_cache as mhc
         from tools.build_marketcap_parquet import _save_marketcap_history
 
@@ -149,15 +161,24 @@ class TestRefreshWindow:
         stale_ts = 1700000000  # > 24h before now_ts below
         _save_marketcap_history(
             path,
-            [{"start": 1735689600, "market_cap": 1.0e12, "fdv": 1.0e12,
-              "ingest_ts": stale_ts, "schema_version": 1}],
+            [
+                {
+                    "start": 1735689600,
+                    "market_cap": 1.0e12,
+                    "fdv": 1.0e12,
+                    "ingest_ts": stale_ts,
+                    "schema_version": 1,
+                }
+            ],
             now_ts=stale_ts,
         )
 
         called = {"n": 0}
+
         async def _stub(pid, start_ms, end_ms):
             called["n"] += 1
             return [(1735689600000, 1.0e12, 0.0)]
+
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: 1778500000.0)
 
@@ -173,12 +194,10 @@ class TestRefreshWindow:
 
 # ── Range coverage: missing rows trigger refetch even if fresh ─────────────
 
-class TestRangeCoverage:
 
+class TestRangeCoverage:
     @pytest.mark.asyncio
-    async def test_partial_coverage_triggers_refetch(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_partial_coverage_triggers_refetch(self, tmp_path, monkeypatch):
         """Parquet has fresh rows but the requested range extends past the
         newest cached `start`. Must re-fetch to fill the gap."""
         from services import marketcap_history_cache as mhc
@@ -188,15 +207,24 @@ class TestRangeCoverage:
         now_ts = 1778500000
         _save_marketcap_history(
             path,
-            [{"start": 1735689600, "market_cap": 1.0e12, "fdv": 1.0e12,
-              "ingest_ts": now_ts, "schema_version": 1}],
+            [
+                {
+                    "start": 1735689600,
+                    "market_cap": 1.0e12,
+                    "fdv": 1.0e12,
+                    "ingest_ts": now_ts,
+                    "schema_version": 1,
+                }
+            ],
             now_ts=now_ts,
         )
 
         called = {"n": 0}
+
         async def _stub(pid, start_ms, end_ms):
             called["n"] += 1
             return [(1735776000000, 1.01e12, 0.0)]
+
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: float(now_ts + 60))
 
@@ -215,12 +243,10 @@ class TestRangeCoverage:
 
 # ── Output range filter ────────────────────────────────────────────────────
 
-class TestRangeFilter:
 
+class TestRangeFilter:
     @pytest.mark.asyncio
-    async def test_returned_rows_filtered_to_requested_range(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_returned_rows_filtered_to_requested_range(self, tmp_path, monkeypatch):
         from services import marketcap_history_cache as mhc
         from tools.build_marketcap_parquet import _save_marketcap_history
 
@@ -229,18 +255,34 @@ class TestRangeFilter:
         _save_marketcap_history(
             path,
             [
-                {"start": 1735603200, "market_cap": 0.99e12, "fdv": 0.99e12,
-                 "ingest_ts": now_ts, "schema_version": 1},
-                {"start": 1735689600, "market_cap": 1.0e12, "fdv": 1.0e12,
-                 "ingest_ts": now_ts, "schema_version": 1},
-                {"start": 1735776000, "market_cap": 1.01e12, "fdv": 1.01e12,
-                 "ingest_ts": now_ts, "schema_version": 1},
+                {
+                    "start": 1735603200,
+                    "market_cap": 0.99e12,
+                    "fdv": 0.99e12,
+                    "ingest_ts": now_ts,
+                    "schema_version": 1,
+                },
+                {
+                    "start": 1735689600,
+                    "market_cap": 1.0e12,
+                    "fdv": 1.0e12,
+                    "ingest_ts": now_ts,
+                    "schema_version": 1,
+                },
+                {
+                    "start": 1735776000,
+                    "market_cap": 1.01e12,
+                    "fdv": 1.01e12,
+                    "ingest_ts": now_ts,
+                    "schema_version": 1,
+                },
             ],
             now_ts=now_ts,
         )
 
         async def _stub(pid, start_ms, end_ms):
             return []
+
         monkeypatch.setattr(mhc, "fetch_marketcap_history", _stub)
         monkeypatch.setattr(mhc.time, "time", lambda: float(now_ts + 60))
 
@@ -259,20 +301,17 @@ class TestRangeFilter:
 
 
 class TestSchemaV1AutoUpgrade:
-
     @pytest.mark.asyncio
-    async def test_cache_v1_parquet_triggers_full_refetch(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_cache_v1_parquet_triggers_full_refetch(self, tmp_path, monkeypatch):
         """A parquet on disk with schema_version=1 must trigger a full refetch
         even if its ingest_ts is fresh — because v1 lacks the new volume_24h
         column required by downstream consumers."""
-        from tools.build_marketcap_parquet import (
-            _save_marketcap_history,
-            _load_marketcap_history,
-            _SCHEMA_VERSION,
-        )
         from services import marketcap_history_cache as mhc
+        from tools.build_marketcap_parquet import (
+            _SCHEMA_VERSION,
+            _load_marketcap_history,
+            _save_marketcap_history,
+        )
 
         assert _SCHEMA_VERSION >= 2, (
             "Plan requires _SCHEMA_VERSION bumped to 2 before this test passes"
@@ -283,13 +322,15 @@ class TestSchemaV1AutoUpgrade:
         # Pre-seed parquet with explicit schema_version=1 to simulate stale state
         _save_marketcap_history(
             path,
-            [{
-                "start": 1746921600,
-                "market_cap": 1.0e9,
-                "fdv": 1.0e9,
-                "ingest_ts": now_ts,     # fresh — would normally hit cache
-                "schema_version": 1,     # but v1 → must refetch
-            }],
+            [
+                {
+                    "start": 1746921600,
+                    "market_cap": 1.0e9,
+                    "fdv": 1.0e9,
+                    "ingest_ts": now_ts,  # fresh — would normally hit cache
+                    "schema_version": 1,  # but v1 → must refetch
+                }
+            ],
             now_ts=now_ts,
         )
 
@@ -302,7 +343,7 @@ class TestSchemaV1AutoUpgrade:
 
         monkeypatch.setattr(mhc, "fetch_marketcap_history", fake_fetch)
 
-        out = await mhc.fetch_marketcap_history_cached(
+        await mhc.fetch_marketcap_history_cached(
             "BTC-USD",
             start_ms=1746921600000,
             end_ms=1747008000000,
