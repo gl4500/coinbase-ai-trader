@@ -81,7 +81,7 @@ jobs:
           name: bandit-report
           path: backend/bandit-report.json
 
-  # ── 3. Backend tests (pytest — fast tests only, no torch/integration) ─────────
+  # ── 3. Backend tests (pytest — fast tests only; CPU torch for test collection) ─
   test-backend:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -97,6 +97,7 @@ jobs:
           pip install --upgrade pip
           pip install -r backend/requirements.txt
           pip install pyarrow hmmlearn lightgbm scikit-learn
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run test suite
         env:
           COINBASE_API_KEY_NAME:    "organizations/ci-test/apiKeys/ci-test-key"
@@ -133,7 +134,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci --ignore-scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
       - name: TypeScript compile check
         working-directory: frontend
         run: npx tsc --noEmit
@@ -152,7 +153,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci --ignore-scripts
+        run: npm install --ignore-scripts --no-audit --no-fund
       - name: Vite build
         working-directory: frontend
         run: npm run build
@@ -214,6 +215,8 @@ jobs:
   tag-release:
     name: Tag release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release tag ref (repo default token is read-only)
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [test-backend, sast-python, frontend-build, lint-python]
     steps:

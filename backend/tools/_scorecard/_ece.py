@@ -1,4 +1,5 @@
 """Expected calibration error with equal-width bins on [0, 1]."""
+
 from __future__ import annotations
 
 import numpy as np

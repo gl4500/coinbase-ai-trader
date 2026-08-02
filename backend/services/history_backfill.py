@@ -15,11 +15,12 @@ Usage:
 Incremental: if a parquet file already exists, only fetches bars newer
 than the last stored timestamp — safe to re-run at any time.
 """
+
 import asyncio
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -30,27 +31,29 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-_HISTORY_DIR  = os.path.join(os.path.dirname(__file__), "..", "data", "history")
-_GRANULARITY  = "ONE_HOUR"
-_BAR_SECS     = 3600          # seconds per hourly bar
+_HISTORY_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "history")
+_GRANULARITY = "ONE_HOUR"
+_BAR_SECS = 3600  # seconds per hourly bar
 _FIVE_MINUTE_GRANULARITY = "FIVE_MINUTE"
-_FIVE_MINUTE_BAR_SECS    = 300          # seconds per 5-minute bar
+_FIVE_MINUTE_BAR_SECS = 300  # seconds per 5-minute bar
 _ONE_MINUTE_GRANULARITY = "ONE_MINUTE"
-_ONE_MINUTE_BAR_SECS    = 60           # seconds per 1-minute bar
-_MAX_PER_REQ  = 300           # Coinbase max bars per request
-_REQ_DELAY    = 0.35          # seconds between requests (rate-limit friendly)
+_ONE_MINUTE_BAR_SECS = 60  # seconds per 1-minute bar
+_MAX_PER_REQ = 300  # Coinbase max bars per request
+_REQ_DELAY = 0.35  # seconds between requests (rate-limit friendly)
 
 _SCHEMA_VERSION = 1  # bronze schema version (#168) — bump on column changes
-_SCHEMA = pa.schema([
-    pa.field("start",          pa.int64()),
-    pa.field("open",            pa.float64()),
-    pa.field("high",            pa.float64()),
-    pa.field("low",             pa.float64()),
-    pa.field("close",           pa.float64()),
-    pa.field("volume",          pa.float64()),
-    pa.field("ingest_ts",       pa.int64()),   # PIT (#168)
-    pa.field("schema_version",  pa.int32()),   # PIT (#168)
-])
+_SCHEMA = pa.schema(
+    [
+        pa.field("start", pa.int64()),
+        pa.field("open", pa.float64()),
+        pa.field("high", pa.float64()),
+        pa.field("low", pa.float64()),
+        pa.field("close", pa.float64()),
+        pa.field("volume", pa.float64()),
+        pa.field("ingest_ts", pa.int64()),  # PIT (#168)
+        pa.field("schema_version", pa.int32()),  # PIT (#168)
+    ]
+)
 
 
 def _parquet_path(product_id: str) -> str:
@@ -80,18 +83,18 @@ def _load_from_path(path: str) -> List[Dict]:
     if not os.path.exists(path):
         return []
     table = pq.read_table(path)
-    rows  = table.to_pydict()
-    n     = len(rows["start"])
+    rows = table.to_pydict()
+    n = len(rows["start"])
     has_ingest = "ingest_ts" in rows
     has_sv = "schema_version" in rows
     candles: List[Dict] = []
     for i in range(n):
         c = {
-            "start":  rows["start"][i],
-            "open":   rows["open"][i],
-            "high":   rows["high"][i],
-            "low":    rows["low"][i],
-            "close":  rows["close"][i],
+            "start": rows["start"][i],
+            "open": rows["open"][i],
+            "high": rows["high"][i],
+            "low": rows["low"][i],
+            "close": rows["close"][i],
             "volume": rows["volume"][i],
         }
         if has_ingest and rows["ingest_ts"][i] is not None:
@@ -138,14 +141,17 @@ def _save_to_path(
     ordered = sorted(seen.values(), key=lambda c: c["start"])
     table = pa.table(
         {
-            "start":           [c["start"]  for c in ordered],
-            "open":            [c["open"]   for c in ordered],
-            "high":            [c["high"]   for c in ordered],
-            "low":             [c["low"]    for c in ordered],
-            "close":           [c["close"]  for c in ordered],
-            "volume":          [c["volume"] for c in ordered],
-            "ingest_ts":       [int(c["ingest_ts"]) if "ingest_ts" in c else now_ts for c in ordered],
-            "schema_version":  [int(c["schema_version"]) if "schema_version" in c else _SCHEMA_VERSION for c in ordered],
+            "start": [c["start"] for c in ordered],
+            "open": [c["open"] for c in ordered],
+            "high": [c["high"] for c in ordered],
+            "low": [c["low"] for c in ordered],
+            "close": [c["close"] for c in ordered],
+            "volume": [c["volume"] for c in ordered],
+            "ingest_ts": [int(c["ingest_ts"]) if "ingest_ts" in c else now_ts for c in ordered],
+            "schema_version": [
+                int(c["schema_version"]) if "schema_version" in c else _SCHEMA_VERSION
+                for c in ordered
+            ],
         },
         schema=_SCHEMA,
     )
@@ -185,31 +191,37 @@ async def _fetch_range(
     """Fetch one page (≤300 bars) between start_ts and end_ts from Coinbase."""
     try:
         import httpx
-        from config import config
-        from clients.coinbase_client import _auth_headers, _BASE  # noqa: PLC2701
 
-        url    = f"{_BASE}/products/{product_id}/candles"
+        from clients.coinbase_client import _BASE, _auth_headers  # noqa: PLC2701
+        from config import config
+
+        url = f"{_BASE}/products/{product_id}/candles"
         params = {
-            "start":       str(start_ts),
-            "end":         str(end_ts),
+            "start": str(start_ts),
+            "end": str(end_ts),
             "granularity": granularity,
         }
-        hdrs = _auth_headers("GET", f"/api/v3/brokerage/products/{product_id}/candles") \
-               if config.has_credentials else {}
+        hdrs = (
+            _auth_headers("GET", f"/api/v3/brokerage/products/{product_id}/candles")
+            if config.has_credentials
+            else {}
+        )
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, headers=hdrs, params=params)
             resp.raise_for_status()
             data = resp.json()
         candles = []
         for c in data.get("candles", []):
-            candles.append({
-                "start":  int(c["start"]),
-                "open":   float(c["open"]),
-                "high":   float(c["high"]),
-                "low":    float(c["low"]),
-                "close":  float(c["close"]),
-                "volume": float(c["volume"]),
-            })
+            candles.append(
+                {
+                    "start": int(c["start"]),
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                    "volume": float(c["volume"]),
+                }
+            )
         return candles
     except Exception as e:
         logger.warning(f"history fetch {product_id} [{start_ts}→{end_ts}]: {e}")
@@ -224,12 +236,12 @@ async def _backfill_to_path(
     path: str,
 ) -> Dict:
     """Core backfill loop — granularity/path agnostic (#55)."""
-    existing  = _load_from_path(path)
+    existing = _load_from_path(path)
     known_set = {c["start"] for c in existing}
 
-    now        = int(time.time())
+    now = int(time.time())
     target_start = now - days * 86400
-    fetch_end  = now
+    fetch_end = now
     fetch_start = target_start if not known_set else max(target_start, max(known_set))
 
     all_new: List[Dict] = []
@@ -238,7 +250,7 @@ async def _backfill_to_path(
     while window_end > fetch_start:
         window_start = max(fetch_start, window_end - _MAX_PER_REQ * bar_secs)
         page = await _fetch_range(product_id, window_start, window_end, granularity=granularity)
-        new  = [c for c in page if c["start"] not in known_set]
+        new = [c for c in page if c["start"] not in known_set]
         all_new.extend(new)
         known_set.update(c["start"] for c in new)
 
@@ -250,7 +262,7 @@ async def _backfill_to_path(
     if all_new:
         merged = existing + all_new
         _save_to_path(path, merged)
-        total  = len({c["start"] for c in merged})
+        total = len({c["start"] for c in merged})
     else:
         total = len(existing)
 
@@ -261,9 +273,9 @@ async def _backfill_to_path(
     )
     return {
         "product_id": product_id,
-        "new_bars":   len(all_new),
+        "new_bars": len(all_new),
         "total_bars": total,
-        "oldest_ts":  oldest,
+        "oldest_ts": oldest,
     }
 
 
@@ -290,7 +302,10 @@ async def backfill_product_5m(
     Default days=30 (~8640 bars, ~29 paged requests). Callers scale up as needed.
     """
     return await _backfill_to_path(
-        product_id, days, _FIVE_MINUTE_GRANULARITY, _FIVE_MINUTE_BAR_SECS,
+        product_id,
+        days,
+        _FIVE_MINUTE_GRANULARITY,
+        _FIVE_MINUTE_BAR_SECS,
         _parquet_path_5m(product_id),
     )
 
@@ -305,7 +320,10 @@ async def backfill_product_1m(
     history is many paged requests — callers pass `days` explicitly.
     """
     return await _backfill_to_path(
-        product_id, days, _ONE_MINUTE_GRANULARITY, _ONE_MINUTE_BAR_SECS,
+        product_id,
+        days,
+        _ONE_MINUTE_GRANULARITY,
+        _ONE_MINUTE_BAR_SECS,
         _parquet_path_1m(product_id),
     )
 
@@ -320,7 +338,8 @@ class HistoryBackfill:
         try:
             all_products = await coinbase_client.get_products()
             pids = [
-                p["product_id"] for p in all_products
+                p["product_id"]
+                for p in all_products
                 if p.get("quote_currency_id") == "USD"
                 and p.get("status") == "online"
                 and not p.get("trading_disabled", False)
@@ -333,9 +352,9 @@ class HistoryBackfill:
 
     async def run(
         self,
-        days:          int                  = 365,
-        product_ids:   Optional[List[str]]  = None,
-        all_coinbase:  bool                 = False,
+        days: int = 365,
+        product_ids: Optional[List[str]] = None,
+        all_coinbase: bool = False,
     ) -> Dict:
         """
         Backfill products and write parquet files.
@@ -347,10 +366,10 @@ class HistoryBackfill:
         if all_coinbase:
             product_ids = await self.get_all_coinbase_usd_pairs()
         elif product_ids is None:
-            products    = await database.get_products(tracked_only=True, limit=500)
+            products = await database.get_products(tracked_only=True, limit=500)
             product_ids = [p["product_id"] for p in products]
 
-        results   = []
+        results = []
         total_new = 0
         for i, pid in enumerate(product_ids, 1):
             logger.info(f"Backfill [{i}/{len(product_ids)}] {pid}")
@@ -358,12 +377,9 @@ class HistoryBackfill:
             results.append(result)
             total_new += result["new_bars"]
 
-        logger.info(
-            f"Backfill complete: {len(product_ids)} products | "
-            f"+{total_new} total new bars"
-        )
+        logger.info(f"Backfill complete: {len(product_ids)} products | +{total_new} total new bars")
         return {
-            "products":       results,
+            "products": results,
             "total_new_bars": total_new,
             "total_products": len(product_ids),
         }
@@ -399,7 +415,7 @@ class HistoryBackfill:
 
         while True:
             try:
-                products    = await database.get_products(tracked_only=True, limit=500)
+                products = await database.get_products(tracked_only=True, limit=500)
                 all_tracked = [p["product_id"] for p in products]
 
                 # ── Phase 1: full backfill for products with no history yet ────
@@ -411,7 +427,9 @@ class HistoryBackfill:
                     )
                     for pid in new_products:
                         try:
-                            result = await backfill_product(pid, days=config.backfill_new_product_days)
+                            result = await backfill_product(
+                                pid, days=config.backfill_new_product_days
+                            )
                             logger.info(
                                 f"New-product backfill {pid}: "
                                 f"+{result['new_bars']} bars | {result['total_bars']} total"
@@ -426,11 +444,15 @@ class HistoryBackfill:
                     total_new = 0
                     for pid in existing:
                         try:
-                            result  = await backfill_product(pid, days=config.backfill_new_product_days)
+                            result = await backfill_product(
+                                pid, days=config.backfill_new_product_days
+                            )
                             total_new += result["new_bars"]
                         except Exception as e:
                             logger.warning(f"Incremental backfill failed for {pid}: {e}")
-                    logger.info(f"Backfill top-up complete: +{total_new} new bars across {len(existing)} products")
+                    logger.info(
+                        f"Backfill top-up complete: +{total_new} new bars across {len(existing)} products"
+                    )
 
             except asyncio.CancelledError:
                 logger.info("Backfill loop cancelled")

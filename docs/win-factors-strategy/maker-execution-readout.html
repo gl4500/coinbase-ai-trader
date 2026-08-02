@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maker Execution — The #1 Lever · Win-Factors Readout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;400;500;700&family=Archivo:wght@400;500;600;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0b0e;
+    --panel:#101319;
+    --panel-2:#0d1015;
+    --ink:#e9e7e0;
+    --muted:#7f858f;
+    --faint:#4a4f59;
+    --maker:#2fe39a;       /* profit / maker / resting */
+    --maker-dim:#1f3a30;
+    --taker:#ff5a4d;       /* loss / taker / crossing */
+    --taker-dim:#3a201d;
+    --warn:#f5b13c;        /* decay / caveat */
+    --line:#1d222b;
+    --grid:#161a22;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+    --serif:'Instrument Serif',Georgia,serif;
+    --ui:'Archivo',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--ui);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  /* grain overlay */
+  body::after{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:999;opacity:.035;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 28px}
+
+  /* ---------- ticker bar ---------- */
+  .ticker{
+    border-bottom:1px solid var(--line);
+    font-family:var(--mono);font-size:12px;letter-spacing:.04em;
+    color:var(--muted);overflow:hidden;white-space:nowrap;background:var(--panel-2);
+  }
+  .ticker .row{display:inline-block;padding:9px 0;animation:scroll 38s linear infinite}
+  .ticker span{padding:0 22px;border-right:1px solid var(--line)}
+  .ticker b{color:var(--maker);font-weight:500}
+  .ticker .dn{color:var(--taker)}
+  @keyframes scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+
+  /* ---------- hero ---------- */
+  header{padding:78px 0 54px;border-bottom:1px solid var(--line);position:relative}
+  header::before{
+    content:"";position:absolute;inset:0;z-index:-1;
+    background:
+      radial-gradient(900px 380px at 78% -8%, rgba(47,227,154,.10), transparent 60%),
+      radial-gradient(700px 320px at 5% 120%, rgba(255,90,77,.07), transparent 60%);
+  }
+  .kicker{font-family:var(--mono);font-size:12.5px;letter-spacing:.32em;text-transform:uppercase;color:var(--maker);margin-bottom:26px}
+  .kicker .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--maker);margin-right:11px;vertical-align:middle;box-shadow:0 0 12px var(--maker);animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  h1{font-family:var(--serif);font-weight:400;font-size:clamp(44px,7.5vw,92px);line-height:.98;letter-spacing:-.01em;margin-bottom:30px}
+  h1 em{font-style:italic;color:var(--muted)}
+  .swing{display:flex;align-items:baseline;gap:20px;flex-wrap:wrap;font-family:var(--mono);margin-bottom:18px}
+  .swing .from{font-size:clamp(30px,5vw,52px);color:var(--taker);font-weight:500;text-decoration:line-through;text-decoration-thickness:2px;opacity:.85}
+  .swing .arrow{font-size:28px;color:var(--faint)}
+  .swing .to{font-size:clamp(40px,7vw,72px);color:var(--maker);font-weight:700;text-shadow:0 0 30px rgba(47,227,154,.25)}
+  .sub{max-width:680px;color:var(--muted);font-size:17px;line-height:1.6}
+  .sub b{color:var(--ink);font-weight:600}
+
+  /* ---------- section scaffolding ---------- */
+  section{padding:64px 0;border-bottom:1px solid var(--line)}
+  .tag{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--faint);margin-bottom:14px;display:flex;align-items:center;gap:12px}
+  .tag::before{content:"";width:26px;height:1px;background:var(--maker)}
+  h2{font-family:var(--serif);font-weight:400;font-size:clamp(30px,4.4vw,46px);line-height:1.05;letter-spacing:-.01em;margin-bottom:18px}
+  .lead{max-width:720px;color:var(--muted);font-size:16.5px;margin-bottom:38px}
+  .lead b{color:var(--ink);font-weight:600}
+
+  /* ---------- maker vs taker cards ---------- */
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px;position:relative;overflow:hidden}
+  .card.taker{border-color:var(--taker-dim)}
+  .card.maker{border-color:var(--maker-dim)}
+  .card .ribbon{position:absolute;top:0;left:0;right:0;height:3px}
+  .card.taker .ribbon{background:linear-gradient(90deg,var(--taker),transparent)}
+  .card.maker .ribbon{background:linear-gradient(90deg,var(--maker),transparent)}
+  .card h3{font-family:var(--mono);font-size:13px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
+  .card.taker h3{color:var(--taker)}
+  .card.maker h3{color:var(--maker)}
+  .card .fee{font-family:var(--serif);font-size:46px;line-height:1;margin:8px 0 4px}
+  .card .feenote{font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:20px}
+  .card p{font-size:14.5px;color:var(--muted);line-height:1.55}
+  .card p b{color:var(--ink);font-weight:600}
+  /* mini orderbook */
+  .book{margin-top:20px;font-family:var(--mono);font-size:11px;border-top:1px solid var(--line);padding-top:16px}
+  .book .lvl{display:flex;justify-content:space-between;padding:2px 0;color:var(--faint)}
+  .book .ask{color:var(--taker)}
+  .book .bid{color:var(--maker)}
+  .book .you{position:relative}
+  .book .you .pin{font-weight:700}
+  .card.taker .book .cross{color:var(--taker);font-weight:700;background:var(--taker-dim);padding:2px 6px;border-radius:4px}
+  .card.maker .book .rest{color:var(--maker);font-weight:700;background:var(--maker-dim);padding:2px 6px;border-radius:4px}
+
+  /* ---------- diverging fee chart ---------- */
+  .chart{margin-top:10px}
+  .axis{position:relative;height:22px;margin-bottom:6px;font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .axis .zero{position:absolute;left:46%;top:0;bottom:0;border-left:1px dashed var(--faint)}
+  .axis .zlab{position:absolute;left:46%;transform:translateX(-50%);top:2px;color:var(--muted)}
+  .axis .lneg{position:absolute;left:0;top:2px}.axis .lpos{position:absolute;right:0;top:2px}
+  .barrow{display:grid;grid-template-columns:200px 1fr 86px;align-items:center;gap:16px;padding:11px 0;border-top:1px solid var(--grid)}
+  .barrow .name{font-family:var(--mono);font-size:13px;color:var(--ink)}
+  .barrow .name small{display:block;color:var(--muted);font-size:11px;letter-spacing:.02em;margin-top:2px}
+  .track{position:relative;height:30px;background:
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px) 46% 0/0 0,
+      transparent;}
+  .track::before{content:"";position:absolute;left:46%;top:-4px;bottom:-4px;border-left:1px dashed var(--faint);opacity:.6}
+  .bar{position:absolute;top:5px;height:20px;border-radius:3px;width:0;transition:width 1.1s cubic-bezier(.2,.8,.2,1)}
+  .bar.neg{background:linear-gradient(90deg,var(--taker),var(--taker-dim));right:54%}
+  .bar.pos{background:linear-gradient(90deg,var(--maker-dim),var(--maker));left:46%}
+  .barrow .val{font-family:var(--mono);font-size:15px;font-weight:700;text-align:right}
+  .val.neg{color:var(--taker)}.val.pos{color:var(--maker)}
+  .barrow.hl .name{color:var(--maker)}
+  .barrow.hl{background:linear-gradient(90deg,rgba(47,227,154,.05),transparent)}
+  .ceil{opacity:.55}
+
+  /* ---------- decay ---------- */
+  .decay{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:8px}
+  .half{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px;text-align:center}
+  .half .when{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+  .half .big{font-family:var(--serif);font-size:54px;line-height:1}
+  .half.up .big{color:var(--maker)}.half.dn .big{color:var(--taker)}
+  .half .g{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:8px}
+  .warnbox{margin-top:22px;border-left:3px solid var(--warn);background:rgba(245,177,60,.06);padding:16px 20px;border-radius:0 10px 10px 0;font-size:14.5px;color:var(--ink)}
+  .warnbox b{color:var(--warn)}
+
+  /* ---------- build status ---------- */
+  .status-list{display:flex;flex-direction:column;gap:14px}
+  .item{display:grid;grid-template-columns:128px 1fr;gap:20px;align-items:start;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px}
+  .badge{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:6px 10px;border-radius:6px;text-align:center;height:fit-content}
+  .badge.done{color:var(--maker);background:var(--maker-dim);border:1px solid var(--maker)}
+  .badge.todo{color:var(--warn);background:rgba(245,177,60,.1);border:1px solid var(--warn)}
+  .badge.new{color:var(--taker);background:var(--taker-dim);border:1px solid var(--taker)}
+  .item h4{font-family:var(--mono);font-size:15px;margin-bottom:6px;font-weight:500}
+  .item p{font-size:14px;color:var(--muted);line-height:1.55}
+  .item code{font-family:var(--mono);font-size:12.5px;color:var(--maker);background:var(--panel-2);padding:1px 6px;border-radius:4px}
+
+  /* ---------- order flow ---------- */
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin-top:8px}
+  .node{flex:1;min-width:150px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;position:relative}
+  .node .n{font-family:var(--mono);font-size:11px;color:var(--faint);margin-bottom:8px}
+  .node .t{font-family:var(--mono);font-size:14px;font-weight:500;line-height:1.3}
+  .node .d{font-size:12.5px;color:var(--muted);margin-top:6px}
+  .node.maker{border-color:var(--maker-dim)} .node.maker .t{color:var(--maker)}
+  .node.taker{border-color:var(--taker-dim)} .node.taker .t{color:var(--taker)}
+  .conn{display:flex;align-items:center;justify-content:center;width:46px;font-family:var(--mono);color:var(--faint);font-size:18px}
+  .conn small{font-size:9px;writing-mode:vertical-rl;letter-spacing:.1em}
+
+  /* ---------- shadow gate ---------- */
+  .gate{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .port{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px;position:relative;overflow:hidden}
+  .port .num{font-family:var(--serif);font-size:64px;line-height:.9;letter-spacing:-.02em}
+  .port.live{border-color:var(--taker-dim)} .port.live .num{color:var(--taker)}
+  .port.shadow{border-color:var(--maker-dim)} .port.shadow .num{color:var(--maker)}
+  .port .role{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:10px 0 14px}
+  .port ul{list-style:none;font-size:13.5px;color:var(--muted)}
+  .port li{padding:5px 0 5px 18px;position:relative}
+  .port li::before{content:"▸";position:absolute;left:0;color:var(--faint)}
+  .verdict{margin-top:22px;text-align:center;font-family:var(--mono);font-size:14px;color:var(--muted);border:1px dashed var(--line);border-radius:12px;padding:20px}
+  .verdict b{color:var(--ink)} .verdict .g{color:var(--maker)} .verdict .r{color:var(--taker)}
+
+  /* ---------- footer ---------- */
+  footer{padding:54px 0 80px}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--faint);line-height:1.9}
+  .meta b{color:var(--muted)}
+  .caveats{margin-top:24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+  .cav{border:1px solid var(--line);border-radius:10px;padding:16px;font-size:13px;color:var(--muted)}
+  .cav h5{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--warn);margin-bottom:8px}
+
+  /* reveal */
+  .reveal{opacity:0;transform:translateY(22px);transition:opacity .7s ease,transform .7s ease}
+  .reveal.in{opacity:1;transform:none}
+
+  @media(max-width:760px){
+    .duo,.decay,.gate{grid-template-columns:1fr}
+    .barrow{grid-template-columns:120px 1fr 64px;gap:8px}
+    .barrow .name small{display:none}
+    .item{grid-template-columns:1fr;gap:12px}
+    .flow{flex-direction:column}.conn{width:100%;height:30px}.conn small{writing-mode:horizontal-tb}
+  }
+</style>
+</head>
+<body>
+
+<!-- ticker -->
+<div class="ticker"><div class="row">
+  <span>GROSS EDGE <b>+0.60%/trade</b></span><span>GREEN GROSS <b>67.2%</b></span>
+  <span>TAKER NET <span class="dn">−$414</span></span><span>MAKER NET <b>+$169</b></span>
+  <span>TAKER RT FEE <span class="dn">1.20%</span></span><span>MAKER RT FEE <b>~0.40%</b></span>
+  <span>SAMPLE <b>n=1,932 entries</b></span><span>STATUS <b>SHADOW-PENDING</b></span>
+  <span>GROSS EDGE <b>+0.60%/trade</b></span><span>GREEN GROSS <b>67.2%</b></span>
+  <span>TAKER NET <span class="dn">−$414</span></span><span>MAKER NET <b>+$169</b></span>
+  <span>TAKER RT FEE <span class="dn">1.20%</span></span><span>MAKER RT FEE <b>~0.40%</b></span>
+  <span>SAMPLE <b>n=1,932 entries</b></span><span>STATUS <b>SHADOW-PENDING</b></span>
+</div></div>
+
+<!-- hero -->
+<header><div class="wrap">
+  <div class="kicker"><span class="dot"></span>Win-Factors Readout · The #1 Lever</div>
+  <h1>The edge exists.<br><em>The fees eat it.</em></h1>
+  <div class="swing">
+    <span class="from">−$414</span>
+    <span class="arrow">→</span>
+    <span class="to">+$169</span>
+  </div>
+  <p class="sub">Across <b>1,932 paper entries</b> the strategy is <b>+0.60% profitable per trade before fees</b> — 67% of trades close green gross. The <b>1.2% taker round-trip</b> is bigger than that edge, so it gets donated to the exchange. Pay the lower <b>maker fee</b> instead and the same trades flip from a $414 loss to a $169 gain. The signal was never the problem. The toll booth is.</p>
+</div></header>
+
+<!-- maker vs taker -->
+<section class="reveal"><div class="wrap">
+  <div class="tag">Mechanics</div>
+  <h2>Two ways to fill an order</h2>
+  <p class="lead">Every trade pays a fee on the way in <i>and</i> the way out. Which fee depends on <b>how</b> you fill — not what you trade.</p>
+  <div class="duo">
+    <div class="card taker"><div class="ribbon"></div>
+      <h3>◤ Taker — crossing</h3>
+      <div class="fee">~0.60%<span style="font-size:18px;color:var(--muted)">/side</span></div>
+      <div class="feenote">1.20% round-trip · what runs live today</div>
+      <p>A <b>market order</b> reaches across the spread and fills <b>instantly</b> against a resting order. Certain, immediate — and expensive. This is what <code style="font-family:var(--mono);font-size:12px;color:var(--taker)">execute_signal</code> does on every entry right now.</p>
+      <div class="book">
+        <div class="lvl ask">ASK 100.06 <span>·</span> 1.4</div>
+        <div class="lvl ask you"><span class="cross">YOU BUY → cross ↑</span></div>
+        <div class="lvl">— spread —</div>
+        <div class="lvl bid">BID 100.00 <span>·</span> 2.1</div>
+      </div>
+    </div>
+    <div class="card maker"><div class="ribbon"></div>
+      <h3>◢ Maker — resting</h3>
+      <div class="fee">~0.20%<span style="font-size:18px;color:var(--muted)">/side</span></div>
+      <div class="feenote">0.40% round-trip · 3× cheaper</div>
+      <p>A <b>post-only limit</b> sits on the book at the bid (buy) / ask (sell) and waits for someone to fill <b>you</b>. Cheaper by 3× — but the fill isn't guaranteed; price can walk away first. This is <code style="font-family:var(--mono);font-size:12px">execute_maker_signal</code>.</p>
+      <div class="book">
+        <div class="lvl ask">ASK 100.06 <span>·</span> 1.4</div>
+        <div class="lvl">— spread —</div>
+        <div class="lvl bid you"><span class="rest">YOU BID 100.00 — rest &amp; wait</span></div>
+        <div class="lvl bid" style="opacity:.5">BID 99.98 <span>·</span> 3.0</div>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- fee chart -->
+<section class="reveal"><div class="wrap">
+  <div class="tag">The Evidence · n=1,932</div>
+  <h2>Same trades. Different toll.</h2>
+  <p class="lead">Hold the entries and exits fixed; vary <b>only</b> the fee tier. The whole P&amp;L pivots on execution cost — nothing about the signal changes.</p>
+  <div class="chart" id="chart">
+    <div class="axis">
+      <span class="lneg">− loss</span>
+      <span class="zlab">$0</span>
+      <span class="lpos">profit +</span>
+    </div>
+
+    <div class="barrow" data-v="-414">
+      <div class="name">Taker both <small>1.2% RT · live today · 41.6% win</small></div>
+      <div class="track"><div class="bar neg" data-w="35.7"></div></div>
+      <div class="val neg">−$414</div>
+    </div>
+    <div class="barrow" data-v="-91">
+      <div class="name">Maker entry only <small>0.8% RT · 49.3% win</small></div>
+      <div class="track"><div class="bar neg" data-w="7.9"></div></div>
+      <div class="val neg">−$91</div>
+    </div>
+    <div class="barrow hl" data-v="169">
+      <div class="name">Fill-aware maker <small>~0.4–0.6% blended · 56.8% win · the realistic target</small></div>
+      <div class="track"><div class="bar pos" data-w="14.6"></div></div>
+      <div class="val pos">+$169</div>
+    </div>
+    <div class="barrow" data-v="233">
+      <div class="name">Maker both <small>0.4% RT · 57.0% win · idealized</small></div>
+      <div class="track"><div class="bar pos" data-w="20.1"></div></div>
+      <div class="val pos">+$233</div>
+    </div>
+    <div class="barrow ceil" data-v="556">
+      <div class="name">Zero-fee ceiling <small>0.0% · 67.2% win · the gross edge, unreachable</small></div>
+      <div class="track"><div class="bar pos" data-w="48"></div></div>
+      <div class="val pos">+$556</div>
+    </div>
+  </div>
+  <p class="lead" style="margin-top:30px">The <b style="color:var(--maker)">fill-aware</b> row is the honest one: maker entries (0.2%), profit exits as resting limits (0.2%), but <b>disaster stops still pay taker</b> (0.6%) — a stop <i>must</i> cross to guarantee it fills while the position bleeds. Exit mix behind it: <b>1,541 trail-exits · 245 stops · 146 max-hold</b>. Robust to micro-caps too (price ≥ 1¢: +$153 of the $169).</p>
+</div></section>
+
+<!-- decay -->
+<section class="reveal"><div class="wrap">
+  <div class="tag">The Asterisk</div>
+  <h2>Necessary — but not sufficient</h2>
+  <p class="lead">Split the history in half. Maker execution helps in <b>both</b> halves, but the underlying gross drift is <b>fading</b>.</p>
+  <div class="decay">
+    <div class="half up"><div class="when">First half</div><div class="big">+$184</div><div class="g">gross drift +0.92% · maker net</div></div>
+    <div class="half dn"><div class="when">Second half</div><div class="big">−$16</div><div class="g">gross drift +0.27% · maker net</div></div>
+  </div>
+  <div class="warnbox"><b>Read this carefully:</b> maker execution is the right lever, but recent performance is break-even even <i>with</i> it. So the plan pairs it with <b>selectivity</b> (meta-labeling, to cut trade count and raise average drift) as a later candidate — and demands live monitoring of the backtest-vs-live delta. Maker buys headroom; it doesn't manufacture edge.</div>
+</div></section>
+
+<!-- build status -->
+<section class="reveal"><div class="wrap">
+  <div class="tag">Reality Check · the code</div>
+  <h2>What's built vs. what isn't</h2>
+  <p class="lead">Reading the actual source corrected the easy story. The maker function is real — but it's unwired and entry-only.</p>
+  <div class="status-list">
+    <div class="item">
+      <span class="badge done">✓ Built</span>
+      <div><h4>execute_maker_signal()</h4><p>Real &amp; tested at <code>order_executor.py:285</code>. Posts a post-only LIMIT at bid/ask, polls 30s for a fill, and <b>market-falls-back if it doesn't fill</b> so the entry is never lost. <code>test_order_executor_maker.py</code> covers it.</p></div>
+    </div>
+    <div class="item">
+      <span class="badge todo">⚠ Unwired</span>
+      <div><h4>The live path still calls the taker</h4><p>Both <code>cnn_agent.py:2206</code> and <code>main.py:1032</code> call <code style="color:var(--taker)">execute_signal</code> (taker/market). The maker function's own docstring: <i>"Purely additive — no caller is migrated until the user opts in."</i> Step one is flipping the caller — on the shadow backend only.</p></div>
+    </div>
+    <div class="item">
+      <span class="badge new">+ New work</span>
+      <div><h4>Maker-routed profit exits</h4><p><code>execute_maker_signal</code> is <b>entry-only</b>. The exit paths (<code>exit_watcher</code>, <code>_check_risk_exits</code>) fire their own sells. Routing <b>profit-target exits</b> through maker while keeping <b>disaster stops</b> on taker is genuinely new wiring — the bigger half of the job.</p></div>
+    </div>
+  </div>
+</div></section>
+
+<!-- order flow -->
+<section class="reveal"><div class="wrap">
+  <div class="tag">Entry Logic</div>
+  <h2>How a maker entry actually fires</h2>
+  <p class="lead">The fallback is what makes it safe to try: you reach for the cheap fill, but you never miss the trade.</p>
+  <div class="flow">
+    <div class="node"><div class="n">01 · signal</div><div class="t">BUY signal</div><div class="d">pid, side, bid, ask, ATR size</div></div>
+    <div class="conn">→</div>
+    <div class="node maker"><div class="n">02 · post-only</div><div class="t">LIMIT @ bid</div><div class="d">rests on the book · 0.2%</div></div>
+    <div class="conn"><small>poll 30s</small></div>
+    <div class="node maker"><div class="n">03a · filled</div><div class="t">MAKER ✓</div><div class="d">cheap fill captured</div></div>
+  </div>
+  <div class="flow" style="margin-top:14px;justify-content:flex-end">
+    <div class="conn"><small>timeout</small></div>
+    <div class="node taker"><div class="n">03b · no fill in 30s</div><div class="t">cancel → MARKET</div><div class="d">taker fallback · 0.6% · entry preserved, not lost</div></div>
+  </div>
+</div></section>
+
+<!-- shadow gate -->
+<section class="reveal"><div class="wrap">
+  <div class="tag">Why it needs your go-ahead</div>
+  <h2>Fill rates are a live property — they can't be backtested</h2>
+  <p class="lead">The +$169 <b>assumes</b> maker orders fill. In reality an entry may miss (selectively, on fast movers) and a resting profit-limit may not fill in a sharp move. The only way to learn the real numbers is to run it and measure — on a shadow port, never on live.</p>
+  <div class="gate">
+    <div class="port live"><div class="num">8001</div><div class="role">Live baseline · taker</div>
+      <ul><li>Untouched production path</li><li>Pays 1.2% round-trip</li><li>The control group</li></ul>
+    </div>
+    <div class="port shadow"><div class="num">8002</div><div class="role">Shadow · maker</div>
+      <ul><li>Maker entries + profit exits</li><li>Measures <b>actual</b> fill rate</li><li>Measures <b>actual</b> blended fee</li><li>Captures missed-entry selection</li></ul>
+    </div>
+  </div>
+  <div class="verdict">After a shadow window → <b>operator decides.</b>
+    <span class="g">PROMOTE</span> if real blended fee lands near 0.4–0.5% and net stays positive　·
+    <span class="r">REJECT</span> if fills miss or the blend creeps back toward taker.
+    <br><span style="color:var(--faint)">No promotion to 8001 without that evidence. Gated by TDD + port discipline + your explicit approval.</span>
+  </div>
+</div></section>
+
+<!-- footer -->
+<footer><div class="wrap">
+  <div class="tag">Provenance</div>
+  <div class="meta">
+    <b>Source:</b> win-factors improvement-loop research · factor ledger entries #1–#4 (2026-06-13, all read-only sims)<br>
+    <b>Spec:</b> docs/superpowers/specs/2026-06-13-win-factors-improvement-loop-design.md · committed <b>fa161a4</b><br>
+    <b>Tracker:</b> docs/win-factors-strategy/progress.md<br>
+    <b>Sample:</b> 1,932 paper entries · simulated PnL · no real capital at risk<br>
+    <b>Status:</b> research phase COMPLETE · maker-execution shadow = next step, pending operator approval
+  </div>
+  <div class="caveats">
+    <div class="cav"><h5>Paper data</h5>All PnL is simulated — no real slippage or fill realism until live shadow.</div>
+    <div class="cav"><h5>Edge decay</h5>Gross drift halved across the two history halves; maker is necessary, not sufficient.</div>
+    <div class="cav"><h5>Fill assumption</h5>+$169 assumes maker entries fill (neutral on misses) — the shadow must measure the real selection effect.</div>
+    <div class="cav"><h5>Intrabar pessimism</h5>Sims assume stop-first on both-touched candles; real fills could differ either way.</div>
+  </div>
+</div></footer>
+
+<script>
+  // staggered reveal + bar fill on scroll
+  const io = new IntersectionObserver((entries)=>{
+    entries.forEach(e=>{
+      if(e.isIntersecting){
+        e.target.classList.add('in');
+        e.target.querySelectorAll('.bar').forEach((b,i)=>{
+          setTimeout(()=>{ b.style.width = b.dataset.w + '%'; }, 120 + i*120);
+        });
+        io.unobserve(e.target);
+      }
+    });
+  },{threshold:.18});
+  document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+  // fire the chart immediately if already in view on load
+  window.addEventListener('load',()=>{
+    const c=document.getElementById('chart');
+    const r=c.getBoundingClientRect();
+    if(r.top < window.innerHeight){
+      c.querySelectorAll('.bar').forEach((b,i)=>setTimeout(()=>b.style.width=b.dataset.w+'%',200+i*120));
+    }
+  });
+</script>
+</body>
+</html>

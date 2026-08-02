@@ -33,6 +33,7 @@ OKX details:
 Kill switch: set env OKX_LS_DISABLED=1 to short-circuit and return []
 without an HTTP call.
 """
+
 import logging
 import os
 from typing import List, Optional, Tuple
@@ -52,7 +53,10 @@ _MAX_PAGES = 60
 def _is_disabled() -> bool:
     """True when OKX_LS_DISABLED env is set to a truthy value."""
     return os.environ.get("OKX_LS_DISABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -97,7 +101,7 @@ async def fetch_long_short_ratio_history(
         return []
 
     collected: List[Tuple[int, float]] = []
-    cursor = int(end_ms)   # OKX `after=` returns records OLDER than this ts
+    cursor = int(end_ms)  # OKX `after=` returns records OLDER than this ts
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -107,8 +111,8 @@ async def fetch_long_short_ratio_history(
                     params={
                         "instId": inst_id,
                         "period": bar,
-                        "after":  cursor,
-                        "limit":  _PAGE_SIZE,
+                        "after": cursor,
+                        "limit": _PAGE_SIZE,
                     },
                 )
                 if resp.status_code != 200:

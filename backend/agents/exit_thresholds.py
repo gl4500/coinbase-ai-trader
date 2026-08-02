@@ -25,18 +25,19 @@ Design (#46, B2 — operator chose gain-proportional + model-driven):
 
 Position exits when current_pnl_pct < _compute_exit_threshold(...).
 """
-from __future__ import annotations
-from typing import Optional
 
+from __future__ import annotations
+
+from typing import Optional
 
 # ── Configuration constants ────────────────────────────────────────────────
 
-FEE_RATE: float                  = 0.006   # Coinbase taker (round-trip basis = 2 * 0.006 = 1.2%)
-GIVEBACK_FRAC: float             = 0.10    # give back 10% of peak gain (gain-proportional trail)
-LARGE_POSITION_FRAC: float       = 0.05    # 5% of capital = "large" position
-LARGE_POSITION_FLOOR: float      = 200.0   # USD; absolute floor for small-capital regime
-MAX_DOLLAR_GIVEBACK_FRAC: float  = 0.02    # 2% of position $ for large positions
-MAX_LOSS_FRAC_OF_CAPITAL: float  = 0.005   # 0.5% of total capital per trail-fire
+FEE_RATE: float = 0.006  # Coinbase taker (round-trip basis = 2 * 0.006 = 1.2%)
+GIVEBACK_FRAC: float = 0.10  # give back 10% of peak gain (gain-proportional trail)
+LARGE_POSITION_FRAC: float = 0.05  # 5% of capital = "large" position
+LARGE_POSITION_FLOOR: float = 200.0  # USD; absolute floor for small-capital regime
+MAX_DOLLAR_GIVEBACK_FRAC: float = 0.02  # 2% of position $ for large positions
+MAX_LOSS_FRAC_OF_CAPITAL: float = 0.005  # 0.5% of total capital per trail-fire
 
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
 
 
 # ── Layer 1: gain-proportional trail with fee floor ────────────────────────
+
 
 def _proportional_giveback(peak_pnl_pct: float) -> float:
     """Giveback in PnL percent terms — proportional to peak gain, with fee floor.
@@ -75,6 +77,7 @@ def _proportional_giveback(peak_pnl_pct: float) -> float:
 
 
 # ── Layer 2: Capital-relative dollar-cap on large positions ─────────────────
+
 
 def _large_position_threshold(total_capital: float) -> float:
     """Capital-relative cutoff for the dollar-cap layer.
@@ -111,10 +114,11 @@ def _dollar_cap_floor(
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
+
 def _compute_exit_threshold(
     *,
     peak_pnl_pct: float,
-    atr_pct: float = 0.06,   # accepted for back-compat; not used in B2 design
+    atr_pct: float = 0.06,  # accepted for back-compat; not used in B2 design
     position_dollars: Optional[float] = None,
     total_capital: Optional[float] = None,
 ) -> float:
@@ -140,7 +144,9 @@ def _compute_exit_threshold(
 
     if position_dollars and total_capital:
         dollar_floor = _dollar_cap_floor(
-            peak_pnl_pct, position_dollars, total_capital,
+            peak_pnl_pct,
+            position_dollars,
+            total_capital,
         )
         if dollar_floor is not None:
             threshold = max(threshold, dollar_floor)

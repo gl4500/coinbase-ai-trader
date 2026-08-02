@@ -28,6 +28,7 @@ leak future close into a feature read at t.
 
 Kill switch: env COINGECKO_DISABLED=1 short-circuits without an HTTP call.
 """
+
 from __future__ import annotations
 
 import logging
@@ -52,34 +53,34 @@ _SCHEMA_VERSION = 1
 # slugs; if a probe fails for a single pid, re-check the slug at
 # https://www.coingecko.com/en/coins/<slug>.
 _PRODUCT_TO_CG_ID: Dict[str, str] = {
-    "BTC-USD":     "bitcoin",
-    "ETH-USD":     "ethereum",
-    "SOL-USD":     "solana",
-    "XRP-USD":     "ripple",
-    "BNB-USD":     "binancecoin",
-    "ADA-USD":     "cardano",
-    "AVAX-USD":    "avalanche-2",
-    "LINK-USD":    "chainlink",
-    "DOT-USD":     "polkadot",
-    "DOGE-USD":    "dogecoin",
-    "ARB-USD":     "arbitrum",
-    "ALGO-USD":    "algorand",
-    "ONDO-USD":    "ondo-finance",
-    "FET-USD":     "fetch-ai",
-    "PEPE-USD":    "pepe",
-    "BONK-USD":    "bonk",
-    "POPCAT-USD":  "popcat",
-    "JTO-USD":     "jito-governance-token",
-    "PENGU-USD":   "pudgy-penguins",
-    "ZK-USD":      "zksync",
-    "TRU-USD":     "truefi",
-    "SKL-USD":     "skale",
-    "JASMY-USD":   "jasmycoin",
-    "NKN-USD":     "nkn",
-    "AIOZ-USD":    "aioz-network",
+    "BTC-USD": "bitcoin",
+    "ETH-USD": "ethereum",
+    "SOL-USD": "solana",
+    "XRP-USD": "ripple",
+    "BNB-USD": "binancecoin",
+    "ADA-USD": "cardano",
+    "AVAX-USD": "avalanche-2",
+    "LINK-USD": "chainlink",
+    "DOT-USD": "polkadot",
+    "DOGE-USD": "dogecoin",
+    "ARB-USD": "arbitrum",
+    "ALGO-USD": "algorand",
+    "ONDO-USD": "ondo-finance",
+    "FET-USD": "fetch-ai",
+    "PEPE-USD": "pepe",
+    "BONK-USD": "bonk",
+    "POPCAT-USD": "popcat",
+    "JTO-USD": "jito-governance-token",
+    "PENGU-USD": "pudgy-penguins",
+    "ZK-USD": "zksync",
+    "TRU-USD": "truefi",
+    "SKL-USD": "skale",
+    "JASMY-USD": "jasmycoin",
+    "NKN-USD": "nkn",
+    "AIOZ-USD": "aioz-network",
     "MOODENG-USD": "moo-deng",
-    "LRDS-USD":    "lordlabs",
-    "XCN-USD":     "onyxcoin",
+    "LRDS-USD": "lordlabs",
+    "XCN-USD": "onyxcoin",
 }
 
 
@@ -93,7 +94,10 @@ def _coinbase_to_cg_id(product_id: str) -> Optional[str]:
 def _is_disabled() -> bool:
     """True when COINGECKO_DISABLED env is set to a truthy value."""
     return os.environ.get("COINGECKO_DISABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -119,11 +123,12 @@ class MarketcapRow:
     fdv: float
     circ_supply: float
     total_supply: float
-    ingest_ts: int           # PIT column per #164b
-    schema_version: int      # PIT column per #164b
+    ingest_ts: int  # PIT column per #164b
+    schema_version: int  # PIT column per #164b
 
 
 # ── Current snapshot ────────────────────────────────────────────────────────
+
 
 async def fetch_marketcap_snapshot(pids: Iterable[str]) -> Dict[str, MarketcapRow]:
     """One-shot snapshot of marketcap + FDV for the given Coinbase pids.
@@ -151,17 +156,13 @@ async def fetch_marketcap_snapshot(pids: Iterable[str]) -> Dict[str, MarketcapRo
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                _MARKETS_URL, params=params, headers=_demo_key_headers()
-            )
+            resp = await client.get(_MARKETS_URL, params=params, headers=_demo_key_headers())
     except Exception as e:
         logger.warning("coingecko_marketcap snapshot HTTP error: %r", e)
         return {}
 
     if resp.status_code != 200:
-        logger.warning(
-            "coingecko_marketcap snapshot non-200: status=%d", resp.status_code
-        )
+        logger.warning("coingecko_marketcap snapshot non-200: status=%d", resp.status_code)
         return {}
 
     try:
@@ -202,6 +203,7 @@ async def fetch_marketcap_snapshot(pids: Iterable[str]) -> Dict[str, MarketcapRo
 
 # ── Historical timeseries ───────────────────────────────────────────────────
 
+
 async def fetch_marketcap_history(
     product_id: str, start_ms: int, end_ms: int
 ) -> List[Tuple[int, float, float]]:
@@ -229,24 +231,21 @@ async def fetch_marketcap_history(
     params = {
         "vs_currency": "usd",
         "from": str(int(start_ms / 1000)),
-        "to":   str(int(end_ms / 1000)),
+        "to": str(int(end_ms / 1000)),
     }
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(
-                url, params=params, headers=_demo_key_headers()
-            )
+            resp = await client.get(url, params=params, headers=_demo_key_headers())
     except Exception as e:
-        logger.warning(
-            "coingecko_marketcap history HTTP error pid=%s: %r", product_id, e
-        )
+        logger.warning("coingecko_marketcap history HTTP error pid=%s: %r", product_id, e)
         return []
 
     if resp.status_code != 200:
         logger.warning(
             "coingecko_marketcap history non-200 pid=%s status=%d",
-            product_id, resp.status_code,
+            product_id,
+            resp.status_code,
         )
         return []
 
@@ -257,7 +256,7 @@ async def fetch_marketcap_history(
 
     if not isinstance(body, dict):
         return []
-    mc_raw  = body.get("market_caps")
+    mc_raw = body.get("market_caps")
     vol_raw = body.get("total_volumes")
     if not isinstance(mc_raw, list) or not mc_raw:
         return []
@@ -296,6 +295,7 @@ async def fetch_marketcap_history(
 
 
 # ── Forward-fill alignment with strict causality ────────────────────────────
+
 
 def align_to_hourly(
     rows: List[Tuple[int, float]],

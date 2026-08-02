@@ -12,6 +12,7 @@ Two roles:
 Lessons are injected into the CNN's Ollama prompt so the LLM sees a track record
 of what actually happened to previous signals on this product.
 """
+
 import asyncio
 import json
 import logging
@@ -27,38 +28,40 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL       = "http://localhost:11434"
-_WIN_THRESHOLD   = 0.005   # +0.5% = WIN for a BUY
-_LOSS_THRESHOLD  = 0.005   # -0.5% adverse = LOSS
-_CHECK_HORIZON   = 4 * 3600   # check 4 hours after signal
+OLLAMA_URL = "http://localhost:11434"
+_WIN_THRESHOLD = 0.005  # +0.5% = WIN for a BUY
+_LOSS_THRESHOLD = 0.005  # -0.5% adverse = LOSS
+_CHECK_HORIZON = 4 * 3600  # check 4 hours after signal
 
 
 # ── Outcome Tracker ────────────────────────────────────────────────────────────
 
-class OutcomeTracker:
 
+class OutcomeTracker:
     # ── Record a pending outcome ───────────────────────────────────────────────
 
     async def record(
         self,
-        source:     str,    # CNN (TECH/MOMENTUM retired; historical rows remain)
+        source: str,  # CNN (TECH/MOMENTUM retired; historical rows remain)
         product_id: str,
-        side:       str,    # BUY | SELL
+        side: str,  # BUY | SELL
         confidence: float,
-        price:      float,
+        price: float,
         indicators: Dict,
     ) -> None:
         """Save a pending signal. Outcome checked 4 h later by check_pending()."""
         try:
-            await database.insert_signal_outcome({
-                "source":          source,
-                "product_id":      product_id,
-                "side":            side,
-                "confidence":      round(confidence, 4),
-                "entry_price":     round(price, 6),
-                "indicators_json": json.dumps(indicators),
-                "check_after":     time.time() + _CHECK_HORIZON,
-            })
+            await database.insert_signal_outcome(
+                {
+                    "source": source,
+                    "product_id": product_id,
+                    "side": side,
+                    "confidence": round(confidence, 4),
+                    "entry_price": round(price, 6),
+                    "indicators_json": json.dumps(indicators),
+                    "check_after": time.time() + _CHECK_HORIZON,
+                }
+            )
             logger.debug(f"OutcomeTracker recorded {source} {side} {product_id} @ ${price:.4f}")
         except Exception as e:
             logger.warning(f"OutcomeTracker.record failed: {e}")
@@ -67,11 +70,11 @@ class OutcomeTracker:
 
     async def validate_with_ollama(
         self,
-        source:     str,
+        source: str,
         product_id: str,
-        side:       str,
+        side: str,
         confidence: float,
-        price:      float,
+        price: float,
         indicators: Dict,
     ) -> Optional[float]:
         """
@@ -87,14 +90,13 @@ class OutcomeTracker:
 
         lesson_block = ""
         if lessons:
-            lesson_block = (
-                "\n\nPast 4-hour outcomes for this asset:\n"
-                + "\n".join(f"  • {l}" for l in lessons)
+            lesson_block = "\n\nPast 4-hour outcomes for this asset:\n" + "\n".join(
+                f"  • {lesson}" for lesson in lessons
             )
         else:
             lesson_block = "\n\nNo past outcomes recorded yet for this asset."
 
-        model  = config.ollama_model
+        model = config.ollama_model
         prompt = (
             f"{source} agent just signaled {side} for {product_id} "
             f"at ${price:,.4f}\n"
@@ -111,21 +113,23 @@ class OutcomeTracker:
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.post(
                     f"{OLLAMA_URL}/api/generate",
-                    json={"model": model, "prompt": prompt,
-                          "stream": False, "format": "json"},
+                    json={"model": model, "prompt": prompt, "stream": False, "format": "json"},
                 )
                 resp.raise_for_status()
                 text = resp.json().get("response", "")
             _elapsed = time.perf_counter() - _t0
             if _elapsed > 15:
-                logger.warning(f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s (SLOW)")
+                logger.warning(
+                    f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s (SLOW)"
+                )
             else:
-                logger.info(f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s")
+                logger.info(
+                    f"[OLLAMA_LATENCY] app=polymarket caller=validate_with_ollama model={model} elapsed={_elapsed:.2f}s"
+                )
             prob = float(json.loads(text).get("probability", -1))
             if 0 <= prob <= 1:
                 logger.info(
-                    f"OutcomeTracker Ollama validation {source} {side} "
-                    f"{product_id}: p={prob:.3f}"
+                    f"OutcomeTracker Ollama validation {source} {side} {product_id}: p={prob:.3f}"
                 )
                 return prob
         except Exception:
@@ -148,10 +152,10 @@ class OutcomeTracker:
         rows = await database.get_pending_outcomes()
         resolved = 0
         for row in rows:
-            pid        = row["product_id"]
-            side       = row["side"]
-            entry      = row["entry_price"]
-            source     = row["source"]
+            pid = row["product_id"]
+            side = row["side"]
+            entry = row["entry_price"]
+            source = row["source"]
             confidence = row["confidence"]
 
             # Get current price — prefer fresh candle close, fallback to DB
@@ -167,13 +171,13 @@ class OutcomeTracker:
                 if product:
                     exit_price = product.get("price")
             if not exit_price:
-                continue   # can't resolve — skip until next run
+                continue  # can't resolve — skip until next run
 
             # pct_change from the signal's perspective:
             # BUY: positive = good, SELL: negative entry→exit = good
             raw_chg = (exit_price - entry) / max(entry, 1e-9)
             if side == "SELL":
-                pct_change = -raw_chg   # SELL wins when price drops
+                pct_change = -raw_chg  # SELL wins when price drops
             else:
                 pct_change = raw_chg
 
@@ -196,11 +200,11 @@ class OutcomeTracker:
             )
 
             await database.resolve_signal_outcome(
-                row_id      = row["id"],
-                exit_price  = round(exit_price, 6),
-                pct_change  = round(pct_change, 6),
-                outcome     = outcome,
-                lesson_text = lesson_text,
+                row_id=row["id"],
+                exit_price=round(exit_price, 6),
+                pct_change=round(pct_change, 6),
+                outcome=outcome,
+                lesson_text=lesson_text,
             )
             resolved += 1
             logger.info(f"Outcome resolved: {lesson_text}")
@@ -231,21 +235,29 @@ class OutcomeTracker:
 
 # ── Indicator summary helpers ─────────────────────────────────────────────────
 
+
 def _format_indicators(source: str, ind: Dict) -> str:
     # TECH branch removed #311-refactor-c (TechAgent retired). Historical
     # source='TECH' rows remain in signal_outcomes but are never re-formatted.
     if source == "MOMENTUM":
         parts = []
-        if "mom_s"       in ind: parts.append(f"mom5d={ind['mom_s']*100:+.1f}%")
-        if "mom_m"       in ind: parts.append(f"mom10d={ind['mom_m']*100:+.1f}%")
-        if "consistency" in ind: parts.append(f"trend={ind['consistency']*100:.0f}%")
+        if "mom_s" in ind:
+            parts.append(f"mom5d={ind['mom_s'] * 100:+.1f}%")
+        if "mom_m" in ind:
+            parts.append(f"mom10d={ind['mom_m'] * 100:+.1f}%")
+        if "consistency" in ind:
+            parts.append(f"trend={ind['consistency'] * 100:.0f}%")
         return " ".join(parts)
     elif source == "CNN":
         parts = []
-        if "cnn_prob" in ind: parts.append(f"cnn={ind['cnn_prob']:.2f}")
-        if "adx"      in ind: parts.append(f"ADX={ind['adx']:.0f}")
-        if "regime"   in ind: parts.append(f"regime={ind['regime']}")
-        if "rsi"      in ind: parts.append(f"RSI={ind['rsi']:.0f}")
+        if "cnn_prob" in ind:
+            parts.append(f"cnn={ind['cnn_prob']:.2f}")
+        if "adx" in ind:
+            parts.append(f"ADX={ind['adx']:.0f}")
+        if "regime" in ind:
+            parts.append(f"regime={ind['regime']}")
+        if "rsi" in ind:
+            parts.append(f"RSI={ind['rsi']:.0f}")
         return " ".join(parts)
     return ""
 

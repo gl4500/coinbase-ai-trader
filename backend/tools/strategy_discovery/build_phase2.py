@@ -9,6 +9,7 @@ Run:
     cd backend && python -m tools.strategy_discovery.build_phase2 \\
         --universe ../docs/superpowers/specs/2026-05-23-universe-50.json
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,6 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 from tools.strategy_discovery.features import (  # noqa: E402
-    _TREND_COLUMNS,
     add_trend_features,
     first_valid_index,
 )
@@ -36,15 +36,14 @@ from tools.strategy_discovery.labels import (  # noqa: E402
 )
 from tools.strategy_discovery.tokenomic_stamp import (  # noqa: E402
     SupplySnapshot,
-    _TOKENOMIC_COLUMNS,
     stamp_tokenomic,
 )
 
 _SCHEMA_VERSION = 1
-_DEFAULT_HISTORY_DIR  = Path(BACKEND) / "data" / "history"
+_DEFAULT_HISTORY_DIR = Path(BACKEND) / "data" / "history"
 _DEFAULT_MARKETCAP_DIR = Path(BACKEND) / "data" / "marketcap"
-_DEFAULT_SUPPLY_PATH  = Path(BACKEND) / "data" / "supply" / "snapshot.parquet"
-_DEFAULT_OUTPUT_DIR   = Path(BACKEND) / "data" / "phase2"
+_DEFAULT_SUPPLY_PATH = Path(BACKEND) / "data" / "supply" / "snapshot.parquet"
+_DEFAULT_OUTPUT_DIR = Path(BACKEND) / "data" / "phase2"
 
 
 @dataclass
@@ -98,7 +97,7 @@ def build_phase2_for_pid(
     output_dir: Path,
 ) -> BuildResult:
     """End-to-end Phase 2 build for one pid. Writes output_dir/{pid}.parquet."""
-    history_path   = Path(history_dir)   / f"{pid}.parquet"
+    history_path = Path(history_dir) / f"{pid}.parquet"
     marketcap_path = Path(marketcap_dir) / f"{pid}.parquet"
     if not history_path.exists():
         return BuildResult(pid=pid, error=f"missing history: {history_path}")
@@ -125,8 +124,7 @@ def build_phase2_for_pid(
     df_labeled["pid"] = pid
     df_labeled["schema_version"] = _SCHEMA_VERSION
     nan_counts = {
-        f"label_h{h}": int(df_labeled[f"label_h{h}"].isna().sum())
-        for h in _DEFAULT_HORIZONS
+        f"label_h{h}": int(df_labeled[f"label_h{h}"].isna().sum()) for h in _DEFAULT_HORIZONS
     }
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -158,42 +156,50 @@ def build_phase2_for_universe(
     output_dir: Optional[Path] = None,
 ) -> List[BuildResult]:
     """Iterate every pid in the universe JSON; collect per-pid BuildResults."""
-    history_dir   = Path(history_dir)   if history_dir   else _DEFAULT_HISTORY_DIR
+    history_dir = Path(history_dir) if history_dir else _DEFAULT_HISTORY_DIR
     marketcap_dir = Path(marketcap_dir) if marketcap_dir else _DEFAULT_MARKETCAP_DIR
-    supply_path   = Path(supply_path)   if supply_path   else _DEFAULT_SUPPLY_PATH
-    output_dir    = Path(output_dir)    if output_dir    else _DEFAULT_OUTPUT_DIR
+    supply_path = Path(supply_path) if supply_path else _DEFAULT_SUPPLY_PATH
+    output_dir = Path(output_dir) if output_dir else _DEFAULT_OUTPUT_DIR
     pids = _pids_from_universe_json(Path(universe_path))
     results: List[BuildResult] = []
     for pid in pids:
-        results.append(build_phase2_for_pid(
-            pid, history_dir, marketcap_dir, supply_path, output_dir,
-        ))
+        results.append(
+            build_phase2_for_pid(
+                pid,
+                history_dir,
+                marketcap_dir,
+                supply_path,
+                output_dir,
+            )
+        )
     return results
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entrypoint — build Phase 2 parquet for an entire universe."""
     import argparse
+
     parser = argparse.ArgumentParser(description="Build Phase 2 features+labels for a universe.")
     parser.add_argument(
         "--universe",
-        default=os.path.join(BACKEND, "..", "docs", "superpowers", "specs",
-                             "2026-05-23-universe-50.json"),
+        default=os.path.join(
+            BACKEND, "..", "docs", "superpowers", "specs", "2026-05-23-universe-50.json"
+        ),
     )
-    parser.add_argument("--history-dir",   default=None)
+    parser.add_argument("--history-dir", default=None)
     parser.add_argument("--marketcap-dir", default=None)
-    parser.add_argument("--supply",        default=None)
-    parser.add_argument("--output-dir",    default=None)
+    parser.add_argument("--supply", default=None)
+    parser.add_argument("--output-dir", default=None)
     args = parser.parse_args(argv)
 
     results = build_phase2_for_universe(
         Path(args.universe),
-        history_dir   = Path(args.history_dir)   if args.history_dir   else None,
-        marketcap_dir = Path(args.marketcap_dir) if args.marketcap_dir else None,
-        supply_path   = Path(args.supply)        if args.supply        else None,
-        output_dir    = Path(args.output_dir)    if args.output_dir    else None,
+        history_dir=Path(args.history_dir) if args.history_dir else None,
+        marketcap_dir=Path(args.marketcap_dir) if args.marketcap_dir else None,
+        supply_path=Path(args.supply) if args.supply else None,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
     )
-    n_ok  = sum(1 for r in results if r.error is None)
+    n_ok = sum(1 for r in results if r.error is None)
     n_err = len(results) - n_ok
     print(f"  ok:    {n_ok}", flush=True)
     print(f"  error: {n_err}", flush=True)
@@ -201,8 +207,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if r.error:
             print(f"    [ERR] {r.pid}: {r.error}", flush=True)
         else:
-            print(f"    {r.pid}: {r.rows_written:,} rows "
-                  f"(dropped {r.rows_dropped_missing_volume:,} missing-vol)", flush=True)
+            print(
+                f"    {r.pid}: {r.rows_written:,} rows "
+                f"(dropped {r.rows_dropped_missing_volume:,} missing-vol)",
+                flush=True,
+            )
     return 0 if n_err == 0 else 1
 
 

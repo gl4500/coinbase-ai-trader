@@ -5,6 +5,7 @@ and a per-trial noise scale, computes the best result a true-null search would
 still produce, and a Deflated-Sharpe-style probability that the observed edge
 exceeds that floor. See 2026-05-22-probe-selection-bias-design.md.
 """
+
 from __future__ import annotations
 
 import math
@@ -56,15 +57,13 @@ def expected_max_under_null(n_trials: int, se: float, center: float) -> float:
     """
     if n_trials < 2:
         raise ValueError(f"n_trials must be >= 2, got {n_trials}")
-    e_max_z = (
-        (1.0 - _EULER_GAMMA) * _NORM.inv_cdf(1.0 - 1.0 / n_trials)
-        + _EULER_GAMMA * _NORM.inv_cdf(1.0 - 1.0 / (n_trials * math.e))
-    )
+    e_max_z = (1.0 - _EULER_GAMMA) * _NORM.inv_cdf(
+        1.0 - 1.0 / n_trials
+    ) + _EULER_GAMMA * _NORM.inv_cdf(1.0 - 1.0 / (n_trials * math.e))
     return center + se * e_max_z
 
 
-def deflated_probability(observed: float, n_trials: int, se: float,
-                         center: float) -> float:
+def deflated_probability(observed: float, n_trials: int, se: float, center: float) -> float:
     """Probability the observed result exceeds the best-of-N-trials noise floor.
 
     A Deflated-Sharpe-style statistic: `Phi((observed - expected_max) / se)`.
@@ -81,33 +80,33 @@ def deflated_probability(observed: float, n_trials: int, se: float,
 # Delta is the leak-corrected value (the +0.0852 was 100% lookahead leak).
 TRIALS: list[dict] = [
     {"name": "RSI-rank (survivorship)", "delta": +0.0124, "passed": True},
-    {"name": "RSI-rank (legacy)",       "delta": +0.0208, "passed": True},
-    {"name": "log10-vol-rank",          "delta": -0.0010, "passed": False},
-    {"name": "MFI-rank",                "delta": +0.0031, "passed": False},
-    {"name": "BTC-dominance",           "delta": +0.0077, "passed": False},
-    {"name": "OKX long/short",          "delta": +0.0014, "passed": False},
-    {"name": "sma50_1h",                "delta": +0.0007, "passed": False},
-    {"name": "sma200_1h",               "delta": +0.0007, "passed": False},
-    {"name": "sma50_d1",                "delta": -0.0002, "passed": False},
-    {"name": "sma200_d1",               "delta": +0.0004, "passed": False},
-    {"name": "golden_cross_d1",         "delta": +0.0006, "passed": False},
-    {"name": "btc_ret_lag_1",           "delta": -0.0021, "passed": False},
-    {"name": "btc_ret_lag_4",           "delta": -0.0100, "passed": False},
-    {"name": "btc_ret_lag_12",          "delta": -0.0038, "passed": False},
-    {"name": "btc_beta_60",             "delta": -0.0003, "passed": False},
-    {"name": "btc_beta_residual_60",    "delta": -0.0003, "passed": False},
-    {"name": "btc_residual_ch9",        "delta": -0.0000, "passed": False},
+    {"name": "RSI-rank (legacy)", "delta": +0.0208, "passed": True},
+    {"name": "log10-vol-rank", "delta": -0.0010, "passed": False},
+    {"name": "MFI-rank", "delta": +0.0031, "passed": False},
+    {"name": "BTC-dominance", "delta": +0.0077, "passed": False},
+    {"name": "OKX long/short", "delta": +0.0014, "passed": False},
+    {"name": "sma50_1h", "delta": +0.0007, "passed": False},
+    {"name": "sma200_1h", "delta": +0.0007, "passed": False},
+    {"name": "sma50_d1", "delta": -0.0002, "passed": False},
+    {"name": "sma200_d1", "delta": +0.0004, "passed": False},
+    {"name": "golden_cross_d1", "delta": +0.0006, "passed": False},
+    {"name": "btc_ret_lag_1", "delta": -0.0021, "passed": False},
+    {"name": "btc_ret_lag_4", "delta": -0.0100, "passed": False},
+    {"name": "btc_ret_lag_12", "delta": -0.0038, "passed": False},
+    {"name": "btc_beta_60", "delta": -0.0003, "passed": False},
+    {"name": "btc_beta_residual_60", "delta": -0.0003, "passed": False},
+    {"name": "btc_residual_ch9", "delta": -0.0000, "passed": False},
 ]
 
 # Documented constants (from xgb_feature_optimization_findings.md / the
 # scorecard baseline / xgb_probe_results_log.md).
-N_SAMPLES = 167933          # pooled top-20, 28-channel cache
-POS_RATE = 0.488            # label balance
-V3_BEST_AUC = 0.5284        # best documented config (top-40, tuned)
-V3_OOF_AUC = 0.512          # scorecard 5-fold purged-WF OOF AUC
-BEST_LIFT_DELTA = 0.0124    # RSI-rank survivorship-aware — the only confirmed PASS
+N_SAMPLES = 167933  # pooled top-20, 28-channel cache
+POS_RATE = 0.488  # label balance
+V3_BEST_AUC = 0.5284  # best documented config (top-40, tuned)
+V3_OOF_AUC = 0.512  # scorecard 5-fold purged-WF OOF AUC
+BEST_LIFT_DELTA = 0.0124  # RSI-rank survivorship-aware — the only confirmed PASS
 BASELINE_FOLD_AUCS = [0.516, 0.507, 0.527, 0.523, 0.529]  # logged purged-WF folds
-N_TIERS = (17, 100, 200)    # channel candidates / full search / conservative
+N_TIERS = (17, 100, 200)  # channel candidates / full search / conservative
 
 
 def analyze() -> list[dict]:
@@ -125,28 +124,38 @@ def analyze() -> list[dict]:
     )
 
     rows: list[dict] = []
-    track_a = (("v3 best documented AUC", V3_BEST_AUC),
-               ("v3 scorecard OOF AUC", V3_OOF_AUC))
+    track_a = (("v3 best documented AUC", V3_BEST_AUC), ("v3 scorecard OOF AUC", V3_OOF_AUC))
     for label, observed in track_a:
         for n in N_TIERS:
             for noise_label, se in noise_scales:
-                rows.append({
-                    "track": "A: base AUC edge",
-                    "observed_label": label, "observed": observed,
-                    "n_trials": n, "noise": noise_label, "se": se,
-                    "center": 0.5,
-                    "expected_max": expected_max_under_null(n, se, 0.5),
-                    "deflated_prob": deflated_probability(observed, n, se, 0.5),
-                })
+                rows.append(
+                    {
+                        "track": "A: base AUC edge",
+                        "observed_label": label,
+                        "observed": observed,
+                        "n_trials": n,
+                        "noise": noise_label,
+                        "se": se,
+                        "center": 0.5,
+                        "expected_max": expected_max_under_null(n, se, 0.5),
+                        "deflated_prob": deflated_probability(observed, n, se, 0.5),
+                    }
+                )
     for n in N_TIERS:
         for noise_label, se in noise_scales:
-            rows.append({
-                "track": "B: best channel lift",
-                "observed_label": "RSI-rank Delta", "observed": BEST_LIFT_DELTA,
-                "n_trials": n, "noise": noise_label, "se": se, "center": 0.0,
-                "expected_max": expected_max_under_null(n, se, 0.0),
-                "deflated_prob": deflated_probability(BEST_LIFT_DELTA, n, se, 0.0),
-            })
+            rows.append(
+                {
+                    "track": "B: best channel lift",
+                    "observed_label": "RSI-rank Delta",
+                    "observed": BEST_LIFT_DELTA,
+                    "n_trials": n,
+                    "noise": noise_label,
+                    "se": se,
+                    "center": 0.0,
+                    "expected_max": expected_max_under_null(n, se, 0.0),
+                    "deflated_prob": deflated_probability(BEST_LIFT_DELTA, n, se, 0.0),
+                }
+            )
     return rows
 
 
@@ -156,22 +165,32 @@ def verdict_line(headline_prob: float) -> str:
     headline = Track A, best documented AUC, fold-level noise, N=100.
     """
     if headline_prob >= 0.95:
-        return (f"VERDICT: real edge — deflated probability {headline_prob:.2f} "
-                "clears the 0.95 bar; feature work on this cache is justified.")
+        return (
+            f"VERDICT: real edge — deflated probability {headline_prob:.2f} "
+            "clears the 0.95 bar; feature work on this cache is justified."
+        )
     if headline_prob <= 0.50:
-        return (f"VERDICT: indistinguishable from noise — deflated probability "
-                f"{headline_prob:.2f} sits at/below the best-of-N noise floor; "
-                "further single-add feature work on this cache is not justified.")
-    return (f"VERDICT: marginal — deflated probability {headline_prob:.2f} is "
-            "above the noise floor but short of the 0.95 bar; the edge is weak "
-            "and selection-fragile.")
+        return (
+            f"VERDICT: indistinguishable from noise — deflated probability "
+            f"{headline_prob:.2f} sits at/below the best-of-N noise floor; "
+            "further single-add feature work on this cache is not justified."
+        )
+    return (
+        f"VERDICT: marginal — deflated probability {headline_prob:.2f} is "
+        "above the noise floor but short of the 0.95 bar; the edge is weak "
+        "and selection-fragile."
+    )
 
 
 def _headline_prob(rows: list[dict]) -> float:
     """Track A, best documented AUC, fold noise, N=100 — the headline cell."""
     for r in rows:
-        if (r["track"].startswith("A") and r["n_trials"] == 100
-                and r["noise"] == "fold" and "best" in r["observed_label"]):
+        if (
+            r["track"].startswith("A")
+            and r["n_trials"] == 100
+            and r["noise"] == "fold"
+            and "best" in r["observed_label"]
+        ):
             return r["deflated_prob"]
     raise RuntimeError("headline cell not found in analysis rows")
 

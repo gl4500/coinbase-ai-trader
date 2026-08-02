@@ -13,6 +13,7 @@ Covers:
 
 All external HTTP calls are mocked.
 """
+
 import os
 import sys
 import time
@@ -24,24 +25,24 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from services.macro_signals import (
-    MacroContext,
-    MacroSignalService,
+    _COINBASE_PREMIUM_BEARISH,
     _FUNDING_OVERHEATED,
     _FUNDING_OVERSOLD,
     _LS_RATIO_LONG_HEAVY,
     _LS_RATIO_SHORT_HEAVY,
-    _COINBASE_PREMIUM_BEARISH,
+    MacroContext,
+    MacroSignalService,
     get_macro_service,
 )
 
-
 # ── helpers ────────────────────────────────────────────────────────────────────
+
 
 def _mock_http(json_data: dict) -> MagicMock:
     resp = MagicMock()
@@ -53,12 +54,12 @@ def _mock_http(json_data: dict) -> MagicMock:
 def _neutral_context() -> MacroContext:
     """A MacroContext with all signals at neutral values."""
     return MacroContext(
-        funding_rate=0.0001,       # 0.01% — healthy
-        ls_ratio=1.0,              # balanced
+        funding_rate=0.0001,  # 0.01% — healthy
+        ls_ratio=1.0,  # balanced
         oi_usd=10_000_000_000,
-        oi_trend=0.0,              # flat
-        btc_dominance=52.0,        # typical
-        coinbase_premium=0.0,      # parity
+        oi_trend=0.0,  # flat
+        btc_dominance=52.0,  # typical
+        coinbase_premium=0.0,  # parity
         fetch_ok=True,
     )
 
@@ -66,10 +67,10 @@ def _neutral_context() -> MacroContext:
 def _extreme_long_context() -> MacroContext:
     """Over-leveraged longs — classic before-crash setup."""
     return MacroContext(
-        funding_rate=0.0015,       # 0.15% per 8h → very hot
-        ls_ratio=2.5,              # 71% long
+        funding_rate=0.0015,  # 0.15% per 8h → very hot
+        ls_ratio=2.5,  # 71% long
         oi_usd=15_000_000_000,
-        oi_trend=0.25,             # OI rising
+        oi_trend=0.25,  # OI rising
         btc_dominance=52.0,
         coinbase_premium=0.05,
         fetch_ok=True,
@@ -79,8 +80,8 @@ def _extreme_long_context() -> MacroContext:
 def _extreme_short_context() -> MacroContext:
     """Short squeeze setup — shorts massively crowded."""
     return MacroContext(
-        funding_rate=-0.0012,      # -0.12% per 8h → very negative
-        ls_ratio=0.65,             # 39% long (61% short)
+        funding_rate=-0.0012,  # -0.12% per 8h → very negative
+        ls_ratio=0.65,  # 39% long (61% short)
         oi_usd=12_000_000_000,
         oi_trend=0.1,
         btc_dominance=52.0,
@@ -91,8 +92,8 @@ def _extreme_short_context() -> MacroContext:
 
 # ── MacroContext.buy_gate_multiplier ───────────────────────────────────────────
 
-class TestBuyGateMultiplier:
 
+class TestBuyGateMultiplier:
     def test_neutral_context_multiplier_is_one(self):
         ctx = _neutral_context()
         assert ctx.buy_gate_multiplier() == pytest.approx(1.0, abs=0.01)
@@ -147,8 +148,8 @@ class TestBuyGateMultiplier:
     def test_multiplier_never_negative(self):
         """Gate multiplier must be ≥ 0 in all circumstances."""
         ctx = _extreme_long_context()
-        ctx.funding_rate = 0.005       # absurdly high
-        ctx.ls_ratio     = 5.0
+        ctx.funding_rate = 0.005  # absurdly high
+        ctx.ls_ratio = 5.0
         ctx.coinbase_premium = -0.01
         assert ctx.buy_gate_multiplier() >= 0.0
 
@@ -160,7 +161,6 @@ class TestBuyGateMultiplier:
 
 
 class TestSellGateMultiplier:
-
     def test_neutral_sell_multiplier_is_one(self):
         ctx = _neutral_context()
         assert ctx.sell_gate_multiplier() == pytest.approx(1.0, abs=0.01)
@@ -183,8 +183,8 @@ class TestSellGateMultiplier:
 
 # ── MacroContext.regime_label ──────────────────────────────────────────────────
 
-class TestRegimeLabel:
 
+class TestRegimeLabel:
     def test_neutral_label(self):
         ctx = _neutral_context()
         label = ctx.regime_label()
@@ -208,8 +208,8 @@ class TestRegimeLabel:
 
 # ── MacroSignalService fetch methods ───────────────────────────────────────────
 
-class TestFundingRateFetch:
 
+class TestFundingRateFetch:
     @pytest.mark.asyncio
     async def test_fetch_returns_float(self):
         svc = MacroSignalService()
@@ -260,12 +260,14 @@ class TestFundingRateFetch:
     async def test_fetch_btc_dominance(self):
         svc = MacroSignalService()
         # Binance futures ticker list: BTC vol=500, ETH=200, BNB=100 → BTC dom ≈ 62.5%
-        mock_resp = _mock_http([
-            {"symbol": "BTCUSDT",  "quoteVolume": "500000000"},
-            {"symbol": "BTCBUSD",  "quoteVolume": "0"},
-            {"symbol": "ETHUSDT",  "quoteVolume": "200000000"},
-            {"symbol": "BNBUSDT",  "quoteVolume": "100000000"},
-        ])
+        mock_resp = _mock_http(
+            [
+                {"symbol": "BTCUSDT", "quoteVolume": "500000000"},
+                {"symbol": "BTCBUSD", "quoteVolume": "0"},
+                {"symbol": "ETHUSDT", "quoteVolume": "200000000"},
+                {"symbol": "BNBUSDT", "quoteVolume": "100000000"},
+            ]
+        )
 
         with patch("services.macro_signals.httpx.AsyncClient") as mc:
             mc.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
@@ -300,8 +302,8 @@ class TestFundingRateFetch:
 
 # ── Caching ────────────────────────────────────────────────────────────────────
 
-class TestMacroSignalCache:
 
+class TestMacroSignalCache:
     @pytest.mark.asyncio
     async def test_second_call_within_ttl_uses_cache(self):
         """get_macro_context() should only make one set of HTTP calls within TTL."""
@@ -323,8 +325,8 @@ class TestMacroSignalCache:
         svc = MacroSignalService(cache_ttl=0)  # always expired
 
         with (
-            patch.object(svc, "_fetch_funding_rate",  new=AsyncMock(return_value=0.0002)),
-            patch.object(svc, "_fetch_ls_ratio",      new=AsyncMock(return_value=1.1)),
+            patch.object(svc, "_fetch_funding_rate", new=AsyncMock(return_value=0.0002)),
+            patch.object(svc, "_fetch_ls_ratio", new=AsyncMock(return_value=1.1)),
             patch.object(svc, "_fetch_open_interest", new=AsyncMock(return_value=1e10)),
             patch.object(svc, "_fetch_btc_dominance", new=AsyncMock(return_value=51.0)),
             patch.object(svc, "_fetch_coinbase_premium", new=AsyncMock(return_value=0.01)),
@@ -337,8 +339,8 @@ class TestMacroSignalCache:
 
 # ── Constants sanity ───────────────────────────────────────────────────────────
 
-class TestMacroConstants:
 
+class TestMacroConstants:
     def test_funding_overheated_is_positive(self):
         assert _FUNDING_OVERHEATED > 0
 
@@ -361,8 +363,8 @@ class TestMacroConstants:
 
 # ── get_macro_service singleton ────────────────────────────────────────────────
 
-class TestGetMacroService:
 
+class TestGetMacroService:
     def test_returns_same_instance(self):
         s1 = get_macro_service()
         s2 = get_macro_service()

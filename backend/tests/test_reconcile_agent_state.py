@@ -10,6 +10,7 @@ updated agent_state BEFORE close_trade — a close_trade failure left
 agent_state with the gain captured but no closed trade row, so on restart
 the reconcile path force-closed the orphan with pnl=0.
 """
+
 import importlib
 import os
 import sys
@@ -31,6 +32,7 @@ async def init_db(tmp_path):
     Patching `database.DB_PATH` directly after reload is the working pattern
     (used in tests/test_database.py)."""
     import database
+
     importlib.reload(database)
     database.DB_PATH = str(tmp_path / "test.db")
     await database.init_db()
@@ -45,18 +47,31 @@ async def test_reconcile_closes_orphan_open_trades(init_db):
 
     # TECH agent has 2 open trades — only 1 is in saved positions
     await database.open_trade(
-        agent="TECH", product_id="XRP-USD", entry_price=1.30,
-        size=100.0, usd_open=130.0, trigger_open="SCAN", balance_after=870.0,
+        agent="TECH",
+        product_id="XRP-USD",
+        entry_price=1.30,
+        size=100.0,
+        usd_open=130.0,
+        trigger_open="SCAN",
+        balance_after=870.0,
     )
     orphan_id = await database.open_trade(
-        agent="TECH", product_id="BIO-USD", entry_price=0.50,
-        size=200.0, usd_open=100.0, trigger_open="SCAN", balance_after=770.0,
+        agent="TECH",
+        product_id="BIO-USD",
+        entry_price=0.50,
+        size=200.0,
+        usd_open=100.0,
+        trigger_open="SCAN",
+        balance_after=770.0,
     )
 
     await database.save_agent_state(
-        "TECH", balance=770.0, realized_pnl=0.0,
-        positions={"XRP-USD": {"size": 100.0, "avg_price": 1.30,
-                               "entry_time": 0.0, "peak_price": 1.30}},
+        "TECH",
+        balance=770.0,
+        realized_pnl=0.0,
+        positions={
+            "XRP-USD": {"size": 100.0, "avg_price": 1.30, "entry_time": 0.0, "peak_price": 1.30}
+        },
         high_water={},
     )
 
@@ -80,27 +95,50 @@ async def test_reconcile_rewrites_realized_pnl_to_match_trade_sum(init_db):
     from tools.reconcile_agent_state import reconcile
 
     # Open + close two CNN trades with different pnl
-    tid1 = await database.open_trade(
-        agent="CNN", product_id="XRP-USD", entry_price=1.00,
-        size=100.0, usd_open=100.0, trigger_open="SCAN", balance_after=900.0,
+    await database.open_trade(
+        agent="CNN",
+        product_id="XRP-USD",
+        entry_price=1.00,
+        size=100.0,
+        usd_open=100.0,
+        trigger_open="SCAN",
+        balance_after=900.0,
     )
     await database.close_trade(
-        agent="CNN", product_id="XRP-USD", exit_price=1.10,
-        size=100.0, pnl=10.0, trigger_close="SCAN", balance_after=1010.0,
+        agent="CNN",
+        product_id="XRP-USD",
+        exit_price=1.10,
+        size=100.0,
+        pnl=10.0,
+        trigger_close="SCAN",
+        balance_after=1010.0,
     )
-    tid2 = await database.open_trade(
-        agent="CNN", product_id="XRP-USD", entry_price=1.20,
-        size=50.0, usd_open=60.0, trigger_open="SCAN", balance_after=950.0,
+    await database.open_trade(
+        agent="CNN",
+        product_id="XRP-USD",
+        entry_price=1.20,
+        size=50.0,
+        usd_open=60.0,
+        trigger_open="SCAN",
+        balance_after=950.0,
     )
     await database.close_trade(
-        agent="CNN", product_id="XRP-USD", exit_price=1.10,
-        size=50.0, pnl=-5.0, trigger_close="SCAN", balance_after=1005.0,
+        agent="CNN",
+        product_id="XRP-USD",
+        exit_price=1.10,
+        size=50.0,
+        pnl=-5.0,
+        trigger_close="SCAN",
+        balance_after=1005.0,
     )
 
     # agent_state has a wrong, divergent realized_pnl value
     await database.save_agent_state(
-        "CNN", balance=1005.0, realized_pnl=999.99,
-        positions={}, high_water={},
+        "CNN",
+        balance=1005.0,
+        realized_pnl=999.99,
+        positions={},
+        high_water={},
     )
 
     summary = await reconcile(dry_run=False)
@@ -118,12 +156,20 @@ async def test_reconcile_dry_run_makes_no_changes(init_db):
     from tools.reconcile_agent_state import reconcile
 
     orphan_id = await database.open_trade(
-        agent="TECH", product_id="BIO-USD", entry_price=0.50,
-        size=100.0, usd_open=50.0, trigger_open="SCAN", balance_after=950.0,
+        agent="TECH",
+        product_id="BIO-USD",
+        entry_price=0.50,
+        size=100.0,
+        usd_open=50.0,
+        trigger_open="SCAN",
+        balance_after=950.0,
     )
     await database.save_agent_state(
-        "TECH", balance=950.0, realized_pnl=42.0,
-        positions={}, high_water={},
+        "TECH",
+        balance=950.0,
+        realized_pnl=42.0,
+        positions={},
+        high_water={},
     )
 
     summary = await reconcile(dry_run=True)
@@ -140,7 +186,6 @@ async def test_reconcile_dry_run_makes_no_changes(init_db):
 @pytest.mark.asyncio
 async def test_reconcile_handles_agent_with_no_state_row(init_db):
     """Agents without a saved agent_state row are skipped without error."""
-    import database
     from tools.reconcile_agent_state import reconcile
 
     summary = await reconcile(dry_run=False)

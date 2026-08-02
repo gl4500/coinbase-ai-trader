@@ -5,6 +5,7 @@ Discovers and tracks crypto trading pairs from Coinbase.
 Fetches live prices, volume, and candle data for all tracked products.
 Runs on startup and then every scan_interval seconds.
 """
+
 import asyncio
 import logging
 from typing import Dict, List, Set
@@ -49,11 +50,12 @@ class MarketScanner:
             all_products = []
 
         # Filter to online, tradeable USD pairs with sufficient volume and price
-        max_tracked   = getattr(config, "max_tracked_products", 100)
-        min_volume    = getattr(config, "min_volume_24h", 1_000_000)
-        min_price     = getattr(config, "min_price", MIN_PRICE)
+        max_tracked = getattr(config, "max_tracked_products", 100)
+        min_volume = getattr(config, "min_volume_24h", 1_000_000)
+        min_price = getattr(config, "min_price", MIN_PRICE)
         eligible = [
-            p for p in all_products
+            p
+            for p in all_products
             if p.get("quote_currency_id") == "USD"
             and p.get("status") == "online"
             and not p.get("trading_disabled", False)
@@ -69,17 +71,21 @@ class MarketScanner:
         if eligible:
             logger.info(f"Discovered {len(self.tracked_ids)} USD spot pairs (top by volume)")
         else:
-            logger.warning("No eligible USD spot pairs found — check credentials / volume threshold")
+            logger.warning(
+                "No eligible USD spot pairs found — check credentials / volume threshold"
+            )
 
         # Untrack any products already in DB that no longer meet the criteria
         # (catches stale rows from before MIN_PRICE was raised or volume dropped)
         try:
             all_db = await database.get_products(tracked_only=True, limit=500)
-            stale  = [p["product_id"] for p in all_db if p["product_id"] not in self.tracked_ids]
+            stale = [p["product_id"] for p in all_db if p["product_id"] not in self.tracked_ids]
             for pid in stale:
                 await database.set_product_tracked(pid, False)
             if stale:
-                logger.info(f"Scanner: untracked {len(stale)} products below price/volume threshold: {stale}")
+                logger.info(
+                    f"Scanner: untracked {len(stale)} products below price/volume threshold: {stale}"
+                )
         except Exception as e:
             logger.debug(f"Stale product cleanup failed: {e}")
 
@@ -101,23 +107,23 @@ class MarketScanner:
                 continue
 
             price_data = bba.get(pid, {})
-            bid   = price_data.get("bid")
-            ask   = price_data.get("ask")
+            bid = price_data.get("bid")
+            ask = price_data.get("ask")
             price = price_data.get("price") or float(raw.get("price", 0) or 0)
             spread = round(ask - bid, 4) if bid and ask else 0
 
             product = {
-                "product_id":           pid,
-                "base_currency":        raw.get("base_currency_id",  pid.split("-")[0]),
-                "quote_currency":       raw.get("quote_currency_id", "USD"),
-                "display_name":         raw.get("display_name",      pid),
-                "price":                price,
+                "product_id": pid,
+                "base_currency": raw.get("base_currency_id", pid.split("-")[0]),
+                "quote_currency": raw.get("quote_currency_id", "USD"),
+                "display_name": raw.get("display_name", pid),
+                "price": price,
                 "price_pct_change_24h": float(raw.get("price_percentage_change_24h", 0) or 0),
-                "volume_24h":           float(raw.get("volume_24h",  0) or 0),
-                "high_24h":             0.0,
-                "low_24h":              0.0,
-                "spread":               spread,
-                "is_tracked":           True,
+                "volume_24h": float(raw.get("volume_24h", 0) or 0),
+                "high_24h": 0.0,
+                "low_24h": 0.0,
+                "spread": spread,
+                "is_tracked": True,
             }
             await database.upsert_product(product)
 
@@ -127,14 +133,14 @@ class MarketScanner:
                 if candles:
                     await database.save_candles(pid, candles)
                     if candles:
-                        closes = [c["close"] for c in candles]
-                        product["high_24h"] = max(c["high"]  for c in candles[-24:])
-                        product["low_24h"]  = min(c["low"]   for c in candles[-24:])
+                        [c["close"] for c in candles]
+                        product["high_24h"] = max(c["high"] for c in candles[-24:])
+                        product["low_24h"] = min(c["low"] for c in candles[-24:])
             except Exception as e:
                 logger.debug(f"Candle fetch failed for {pid}: {e}")
 
             updated.append(product)
-            await asyncio.sleep(0.2)   # gentle rate limiting
+            await asyncio.sleep(0.2)  # gentle rate limiting
 
         logger.info(f"Scanner: updated {len(updated)} products")
         return updated
@@ -146,9 +152,7 @@ class MarketScanner:
             bba = await coinbase_client.get_best_bid_ask(tracked)
             for pid, data in bba.items():
                 if data.get("price"):
-                    await database.update_product_price(
-                        pid, data["price"], 0.0
-                    )
+                    await database.update_product_price(pid, data["price"], 0.0)
         except Exception as e:
             logger.debug(f"Price refresh failed: {e}")
 
@@ -158,9 +162,9 @@ class MarketScanner:
          - Full scan (with candles) every config.scan_interval seconds
          - Price refresh every 30 seconds between full scans
         """
-        scan_interval    = getattr(config, "scan_interval", 300)
+        scan_interval = getattr(config, "scan_interval", 300)
         refresh_interval = 30
-        elapsed          = 0
+        elapsed = 0
 
         logger.info(f"Market scanner loop started (full scan every {scan_interval}s)")
         while True:

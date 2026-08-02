@@ -19,6 +19,7 @@ Usage::
     .venv/Scripts/python.exe -m tools.reconcile_agent_state            # apply
     .venv/Scripts/python.exe -m tools.reconcile_agent_state --dry-run  # preview
 """
+
 from __future__ import annotations
 
 import argparse
@@ -83,9 +84,9 @@ async def reconcile(dry_run: bool = False) -> Dict[str, Dict]:
             )
 
         summary[agent] = {
-            "orphans_closed":      len(orphan_ids),
+            "orphans_closed": len(orphan_ids),
             "realized_pnl_before": old_pnl,
-            "realized_pnl_after":  new_pnl if not dry_run else new_pnl,
+            "realized_pnl_after": new_pnl if not dry_run else new_pnl,
         }
 
     return summary
@@ -93,8 +94,9 @@ async def reconcile(dry_run: bool = False) -> Dict[str, Dict]:
 
 async def _main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    ap.add_argument("--dry-run", action="store_true",
-                    help="report what would change without writing")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="report what would change without writing"
+    )
     args = ap.parse_args()
 
     await database.init_db()

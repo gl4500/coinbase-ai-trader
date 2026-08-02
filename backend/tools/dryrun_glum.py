@@ -2,6 +2,7 @@
 
 Usage:  cd backend && python -m tools.dryrun_glum
 """
+
 from __future__ import annotations
 
 import sys
@@ -33,8 +34,10 @@ def main() -> int:
         loss.backward()
         model.zero_grad()
         elapsed = time.perf_counter() - t0
-        print(f"[dryrun] batch={batch:>4}  out={tuple(logits.shape)}  "
-              f"loss={loss.item():.4f}  fwd+bwd={elapsed*1000:.1f}ms")
+        print(
+            f"[dryrun] batch={batch:>4}  out={tuple(logits.shape)}  "
+            f"loss={loss.item():.4f}  fwd+bwd={elapsed * 1000:.1f}ms"
+        )
 
     model.eval()
     with torch.no_grad():

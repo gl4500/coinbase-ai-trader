@@ -10,10 +10,10 @@ on the very first launcher run, default the toggle ON and remember
 the decision via a sentinel file so subsequent runs respect any
 user override.
 """
+
 import importlib
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -42,9 +42,7 @@ def test_first_run_calls_set_startup_true_and_writes_sentinel(tmp_path):
         captured["calls"].append(enabled)
         return True
 
-    changed = launcher._maybe_default_startup_to_on(
-        sentinel, set_fn=fake_set_startup
-    )
+    changed = launcher._maybe_default_startup_to_on(sentinel, set_fn=fake_set_startup)
 
     assert changed is True
     assert captured["calls"] == [True], (
@@ -65,14 +63,11 @@ def test_subsequent_runs_are_no_op(tmp_path):
         captured["calls"].append(enabled)
         return True
 
-    changed = launcher._maybe_default_startup_to_on(
-        sentinel, set_fn=fake_set_startup
-    )
+    changed = launcher._maybe_default_startup_to_on(sentinel, set_fn=fake_set_startup)
 
     assert changed is False
     assert captured["calls"] == [], (
-        "set_startup must not be called when sentinel exists "
-        "(would clobber a user opt-out)"
+        "set_startup must not be called when sentinel exists (would clobber a user opt-out)"
     )
 
 

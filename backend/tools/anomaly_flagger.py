@@ -13,6 +13,7 @@ Detectors:
 A future commit adds cross-exchange reconciliation as a separate
 detector — kept out of scope here so the primitive ships standalone.
 """
+
 from __future__ import annotations
 
 from typing import Iterable, List
@@ -24,24 +25,31 @@ def flag_ohlc_consistency(bars: Iterable[dict]) -> List[dict]:
     """Flag bars where high < low or open/close fall outside [low, high]."""
     out: List[dict] = []
     for b in bars:
-        h, l = b["high"], b["low"]
+        h, lo = b["high"], b["low"]
         o, c = b["open"], b["close"]
-        if h < l:
-            out.append({
-                "start": b["start"], "kind": "ohlc_inconsistent",
-                "detail": f"high={h} < low={l}",
-            })
+        if h < lo:
+            out.append(
+                {
+                    "start": b["start"],
+                    "kind": "ohlc_inconsistent",
+                    "detail": f"high={h} < low={lo}",
+                }
+            )
             continue
-        if not (l <= o <= h) or not (l <= c <= h):
-            out.append({
-                "start": b["start"], "kind": "ohlc_inconsistent",
-                "detail": f"open={o} close={c} outside [{l},{h}]",
-            })
+        if not (lo <= o <= h) or not (lo <= c <= h):
+            out.append(
+                {
+                    "start": b["start"],
+                    "kind": "ohlc_inconsistent",
+                    "detail": f"open={o} close={c} outside [{lo},{h}]",
+                }
+            )
     return out
 
 
 def flag_zero_volume_runs(
-    bars: Iterable[dict], min_run: int = 5,
+    bars: Iterable[dict],
+    min_run: int = 5,
 ) -> List[dict]:
     """Flag the run-of-zero-volume tail when length >= min_run."""
     bars = list(bars)
@@ -55,21 +63,29 @@ def flag_zero_volume_runs(
             run_len += 1
         else:
             if run_len >= min_run:
-                out.append({
-                    "start": run_start, "kind": "zero_volume_run",
-                    "detail": f"len={run_len}",
-                })
+                out.append(
+                    {
+                        "start": run_start,
+                        "kind": "zero_volume_run",
+                        "detail": f"len={run_len}",
+                    }
+                )
             run_start, run_len = None, 0
     if run_len >= min_run:
-        out.append({
-            "start": run_start, "kind": "zero_volume_run",
-            "detail": f"len={run_len}",
-        })
+        out.append(
+            {
+                "start": run_start,
+                "kind": "zero_volume_run",
+                "detail": f"len={run_len}",
+            }
+        )
     return out
 
 
 def flag_return_z_outliers(
-    bars: Iterable[dict], window: int = 30, k: float = 4.0,
+    bars: Iterable[dict],
+    window: int = 30,
+    k: float = 4.0,
 ) -> List[dict]:
     """Flag bars where |log-return| > k * trailing-window stdev.
 
@@ -83,37 +99,43 @@ def flag_return_z_outliers(
         return out
     log_ret = np.diff(np.log(closes))  # len = N - 1, indexed at i for bar[i+1]
     for i in range(window, len(log_ret)):
-        baseline = log_ret[i - window:i]
+        baseline = log_ret[i - window : i]
         sd = float(np.std(baseline, ddof=1))
         if sd <= 0:
             continue
         z = abs(log_ret[i]) / sd
         if z > k:
-            out.append({
-                "start": bars[i + 1]["start"],
-                "kind": "return_z_outlier",
-                "detail": f"z={z:.2f} k={k}",
-            })
+            out.append(
+                {
+                    "start": bars[i + 1]["start"],
+                    "kind": "return_z_outlier",
+                    "detail": f"z={z:.2f} k={k}",
+                }
+            )
     return out
 
 
 def flag_volume_spikes(
-    bars: Iterable[dict], window: int = 20, k: float = 10.0,
+    bars: Iterable[dict],
+    window: int = 20,
+    k: float = 10.0,
 ) -> List[dict]:
     """Flag bars where volume > k * trailing-window median."""
     bars = list(bars)
     out: List[dict] = []
     vols = np.array([b["volume"] for b in bars], dtype=np.float64)
     for i in range(window, len(vols)):
-        med = float(np.median(vols[i - window:i]))
+        med = float(np.median(vols[i - window : i]))
         if med <= 0:
             continue
         if vols[i] > k * med:
-            out.append({
-                "start": bars[i]["start"],
-                "kind": "volume_spike",
-                "detail": f"v={vols[i]:.2f} med={med:.2f} ratio={vols[i] / med:.1f}",
-            })
+            out.append(
+                {
+                    "start": bars[i]["start"],
+                    "kind": "volume_spike",
+                    "detail": f"v={vols[i]:.2f} med={med:.2f} ratio={vols[i] / med:.1f}",
+                }
+            )
     return out
 
 

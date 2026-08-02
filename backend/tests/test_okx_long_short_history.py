@@ -26,6 +26,7 @@ The fetcher mirrors the OI-history contract:
 
 No live API calls — httpx.AsyncClient.get is mocked in every async test.
 """
+
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -36,10 +37,10 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from services import okx_long_short_history as okx_ls  # noqa: E402
 
@@ -64,12 +65,12 @@ def _http(status, body=None):
 
 # ── Symbol mapping (must match okx_oi_history exactly) ──────────────────────
 
-class TestProductSymbolMapping:
 
+class TestProductSymbolMapping:
     def test_known_products_map_to_okx_swap_ids(self):
-        assert okx_ls._coinbase_to_okx("BTC-USD")  == "BTC-USDT-SWAP"
-        assert okx_ls._coinbase_to_okx("ETH-USD")  == "ETH-USDT-SWAP"
-        assert okx_ls._coinbase_to_okx("SOL-USD")  == "SOL-USDT-SWAP"
+        assert okx_ls._coinbase_to_okx("BTC-USD") == "BTC-USDT-SWAP"
+        assert okx_ls._coinbase_to_okx("ETH-USD") == "ETH-USDT-SWAP"
+        assert okx_ls._coinbase_to_okx("SOL-USD") == "SOL-USDT-SWAP"
         assert okx_ls._coinbase_to_okx("DOGE-USD") == "DOGE-USDT-SWAP"
 
     def test_unsupported_product_returns_none(self):
@@ -81,13 +82,14 @@ class TestProductSymbolMapping:
         If the two diverge, single-add probes that pair OI + L/S as Ch 27/28
         will silently coverage-mask different per-pid subsets."""
         from services import okx_oi_history as okx_oi
+
         assert okx_ls._PRODUCT_TO_OKX == okx_oi._PRODUCT_TO_OKX
 
 
 # ── Happy path: single-page fetch ────────────────────────────────────────────
 
-class TestFetchLSRatioHistorySinglePage:
 
+class TestFetchLSRatioHistorySinglePage:
     @pytest.mark.asyncio
     async def test_returns_sorted_tuples_of_ms_time_and_float_ratio(self):
         # OKX sends NEWEST first; both fields are STRINGS.
@@ -100,8 +102,7 @@ class TestFetchLSRatioHistorySinglePage:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(payload))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD",
                 start_ms=1_700_000_000_000,
@@ -121,8 +122,7 @@ class TestFetchLSRatioHistorySinglePage:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok([]))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             await okx_ls.fetch_long_short_ratio_history(
                 "ETH-USD",
                 start_ms=1_700_000_000_000,
@@ -150,11 +150,11 @@ class TestFetchLSRatioHistorySinglePage:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok([]))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD",
-                start_ms=0, end_ms=1_000,
+                start_ms=0,
+                end_ms=1_000,
                 bar="4H",
             )
 
@@ -174,8 +174,7 @@ class TestFetchLSRatioHistorySinglePage:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(payload))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD",
                 start_ms=1_700_000_000_000,
@@ -190,8 +189,8 @@ class TestFetchLSRatioHistorySinglePage:
 
 # ── Failure modes ────────────────────────────────────────────────────────────
 
-class TestFetchLSRatioHistoryFailureModes:
 
+class TestFetchLSRatioHistoryFailureModes:
     @pytest.mark.asyncio
     async def test_unsupported_product_returns_empty_no_http(self):
         with patch("services.okx_long_short_history.httpx.AsyncClient") as MockClient:
@@ -208,8 +207,7 @@ class TestFetchLSRatioHistoryFailureModes:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_http(429, {"err": "rate limit"}))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD", start_ms=0, end_ms=1_000
             )
@@ -220,11 +218,11 @@ class TestFetchLSRatioHistoryFailureModes:
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = None
-        mock_client.get = AsyncMock(return_value=_ok([], code="51001",
-                                                    msg="Instrument id does not exist"))
+        mock_client.get = AsyncMock(
+            return_value=_ok([], code="51001", msg="Instrument id does not exist")
+        )
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD", start_ms=0, end_ms=1_000
             )
@@ -237,8 +235,7 @@ class TestFetchLSRatioHistoryFailureModes:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(side_effect=Exception("dns failure"))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD", start_ms=0, end_ms=1_000
             )
@@ -248,8 +245,8 @@ class TestFetchLSRatioHistoryFailureModes:
     async def test_skips_malformed_array_rows(self):
         payload = [
             ["1700000000000", "1.42"],
-            ["abc", "1.50"],                     # bad ts
-            ["1700003600000"],                    # too short
+            ["abc", "1.50"],  # bad ts
+            ["1700003600000"],  # too short
             ["1700007200000", "1.80"],
         ]
         mock_client = AsyncMock()
@@ -257,8 +254,7 @@ class TestFetchLSRatioHistoryFailureModes:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(payload))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD",
                 start_ms=1_700_000_000_000,
@@ -273,8 +269,8 @@ class TestFetchLSRatioHistoryFailureModes:
 
 # ── Kill switch ──────────────────────────────────────────────────────────────
 
-class TestKillSwitch:
 
+class TestKillSwitch:
     @pytest.mark.asyncio
     async def test_disabled_env_var_short_circuits_without_http(self, monkeypatch):
         monkeypatch.setenv("OKX_LS_DISABLED", "1")
@@ -292,24 +288,22 @@ class TestKillSwitch:
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok([]))
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
-            await okx_ls.fetch_long_short_ratio_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
+            await okx_ls.fetch_long_short_ratio_history("BTC-USD", start_ms=0, end_ms=1_000)
         mock_client.get.assert_called()
 
 
 # ── Pagination via after= cursor ─────────────────────────────────────────────
+
 
 class TestPagination:
     """OKX caps `limit` at 100; long windows require multiple calls."""
 
     @pytest.mark.asyncio
     async def test_paginates_backward_using_after_cursor(self):
-        page1 = [["1000", "1.0"], ["999",  "0.9"]]
-        page2 = [["998",  "0.8"], ["997",  "0.7"]]
-        page3 = [["996",  "0.6"], ["995",  "0.5"]]
+        page1 = [["1000", "1.0"], ["999", "0.9"]]
+        page2 = [["998", "0.8"], ["997", "0.7"]]
+        page3 = [["996", "0.6"], ["995", "0.5"]]
         page_empty: list = []
 
         responses = [_ok(page1), _ok(page2), _ok(page3), _ok(page_empty)]
@@ -319,8 +313,7 @@ class TestPagination:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(side_effect=responses)
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD", start_ms=995, end_ms=1000
             )
@@ -342,8 +335,7 @@ class TestPagination:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(page1))
 
-        with patch("services.okx_long_short_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_long_short_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx_ls.fetch_long_short_ratio_history(
                 "BTC-USD", start_ms=4000, end_ms=5000
             )

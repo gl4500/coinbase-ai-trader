@@ -2,6 +2,7 @@
 
 Idempotent — safe to re-run.
 """
+
 import sqlite3
 from typing import Dict, List
 
@@ -13,7 +14,7 @@ def run(db_path: str) -> Dict[str, List[str]]:
     """
     new_cols = [
         ("xgb_prob_stdev", "REAL"),
-        ("mc_telemetry",   "TEXT"),
+        ("mc_telemetry", "TEXT"),
     ]
     c = sqlite3.connect(db_path)
     try:
