@@ -7,6 +7,39 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.71z — 2026-06-08 — Fix misleading "balance too low" WARN for tier-suspended (task #73)
+
+`_CNNBook.buy` returns `(0.0, 0.0)` for two distinct cases:
+
+1. **Tier-suspended** (`status == "suspended"`) — already INFO-logged inside
+   `buy()` at the suspension site.
+2. **Legitimate low-balance** (`spend < 1.0`) — no log at the `buy()` level;
+   caller emits the WARN.
+
+Pre-fix, the caller at `cnn_agent.py:2186-2190` couldn't distinguish the cases
+and emitted the same `"BOOK BUY skipped ... balance too low for kelly_frac=…"`
+WARN for both. Live logs showed e.g. `WARNING ... balance=$1000.00 too low`
+for products that were actually tier-suspended on Coinbase — wildly misleading.
+
+Post-fix, the caller queries `database.get_product_status(pid)` in the
+failure branch:
+- **Suspended** → `signal["execution"]["reason"] = "Tier suspended"`, no WARN
+  (the INFO log inside `buy()` already records it; the caller's WARN was
+  duplicate + mislabeled).
+- **Low-balance** → unchanged behavior, WARN still fires (correct for the
+  real case).
+
+**Files:**
+- `backend/agents/cnn_agent.py` — 11-line fix in the `generate_signal` BUY
+  fail-branch.
+- `backend/tests/test_cnn_agent.py` — 2 new TDD tests in
+  `TestKellySizingBug`:
+  - `test_buy_skipped_warns_for_legit_low_balance` (balance=$0.50, status=active → WARN fires)
+  - `test_buy_skipped_no_warn_for_tier_suspended` (balance=$1000, status=suspended → no WARN, reason="Tier suspended")
+
+No behavior change for live trading or paper-execution — the only effect is
+the log/execution-payload labeling.
+
 ### Session 58.74 — 2026-08-02 — CI: grant tag-release `contents: write`
 
 After tracks 1+2 merged, main's CI was 6/7 green — only `tag-release` (main-push
@@ -139,7 +172,6 @@ flips full-history paper PnL from −$414 (taker) to +$169.
 **Why:** `execute_maker_signal` existed and was tested but unwired — the live path called the
 taker `execute_signal`, and the signal dict lacked the bid/ask the maker path requires. Sourcing
 those quotes is the actual entry-leg work. Profit-target maker exits are the next (separate) piece.
-
 ### Session 58.71w — 2026-06-07 — Tier A: skip masked-channel builders (ch17/18/19)
 
 Pure compute optimization in `FeatureBuilder.build` — emit zero arrays

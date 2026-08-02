@@ -1205,6 +1205,101 @@ class TestKellySizingBug:
             "produces kelly=0 even for a valid BUY signal."
         )
 
+    # ── Task #73: distinguish tier-suspended from legitimate low-balance ──
+    # _CNNBook.buy returns (0.0, 0.0) for BOTH suspended-tier (early return at
+    # line ~261) and real low-balance (return at line ~267). Pre-fix, the
+    # caller in generate_signal emitted the same misleading
+    # "BOOK BUY skipped ... balance too low" WARNING for both cases. The
+    # suspended path is already INFO-logged inside _CNNBook.buy itself, so
+    # the caller WARN is duplicate + mislabeled noise.
+
+    @pytest.mark.asyncio
+    async def test_buy_skipped_warns_for_legit_low_balance(self, agent, product, caplog):
+        """Real low-balance case: caller WARNING fires (correct)."""
+        import logging
+
+        candles = _make_candles(80)
+        agent.book.balance = 0.50  # below the $1.00 floor in _CNNBook.buy
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
+            patch(
+                "agents.cnn_agent.database.get_product_status",
+                new=AsyncMock(return_value={"status": "active"}),
+            ),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+        ):
+            caplog.set_level(logging.WARNING, logger="agents.cnn_agent")
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None and sig["side"] == "BUY"
+        assert sig["execution"]["success"] is False
+        assert sig["execution"]["reason"] == "Insufficient balance"
+        warns = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "BOOK BUY skipped" in r.message
+        ]
+        assert len(warns) == 1, (
+            f"low-balance case must emit exactly 1 WARN; got {len(warns)}: "
+            f"{[r.message for r in warns]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_buy_skipped_no_warn_for_tier_suspended(self, agent, product, caplog):
+        """Tier-suspended case: caller skips the WARN (book.buy already INFO-logged).
+
+        Pre-fix: this test FAILS because the caller emits the same
+        "balance too low" WARN regardless of whether the underlying cause was
+        tier suspension or genuine low balance.
+        Post-fix: signal["execution"]["reason"] is "Tier suspended" and the
+        caller does not emit the misleading low-balance WARN.
+        """
+        import logging
+
+        candles = _make_candles(80)
+        agent.book.balance = 1000.0  # healthy — only reason for spent=0 is suspension
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
+            patch(
+                "agents.cnn_agent.database.get_product_status",
+                new=AsyncMock(return_value={"status": "suspended"}),
+            ),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+        ):
+            caplog.set_level(logging.WARNING, logger="agents.cnn_agent")
+            sig = await agent.generate_signal(product, execute=True)
+
+        assert sig is not None and sig["side"] == "BUY"
+        assert sig["execution"]["success"] is False
+        assert sig["execution"]["reason"] == "Tier suspended"
+        warns = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "BOOK BUY skipped" in r.message
+        ]
+        assert len(warns) == 0, (
+            f"tier-suspended must NOT emit the low-balance WARN; got {len(warns)}: "
+            f"{[r.message for r in warns]}"
+        )
+
 
 # ── Training framework tests ───────────────────────────────────────────────────
 
