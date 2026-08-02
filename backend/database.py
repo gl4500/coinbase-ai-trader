@@ -2,17 +2,19 @@
 Async SQLite database layer — Coinbase crypto trading app.
 All timestamps stored as UTC ISO strings.
 """
-import aiosqlite
+
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
+
+import aiosqlite
 
 from config import config
 
-logger  = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 DB_PATH = config.database_url
-_DB_TIMEOUT = 30   # seconds to wait for a locked DB before raising OperationalError
+_DB_TIMEOUT = 30  # seconds to wait for a locked DB before raising OperationalError
 
 
 @asynccontextmanager
@@ -34,7 +36,7 @@ async def init_db() -> None:
     async with _db() as db:
         # WAL mode: multiple readers + one writer can coexist; prevents most lock errors
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=30000")   # 30s in milliseconds
+        await db.execute("PRAGMA busy_timeout=30000")  # 30s in milliseconds
         await db.commit()
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS products (
@@ -296,7 +298,7 @@ async def init_db() -> None:
                 await db.execute(sql)
                 await db.commit()
             except Exception:
-                pass   # column already exists — safe to ignore
+                pass  # column already exists — safe to ignore
 
     logger.info("Database initialised")
 
@@ -306,6 +308,7 @@ def _now() -> str:
 
 
 # ── Products ──────────────────────────────────────────────────────────────────
+
 
 async def upsert_product(p: Dict) -> None:
     async with _db() as db:
@@ -325,12 +328,19 @@ async def upsert_product(p: Dict) -> None:
                  is_tracked=excluded.is_tracked,
                  last_updated=excluded.last_updated""",
             (
-                p["product_id"], p["base_currency"], p["quote_currency"],
+                p["product_id"],
+                p["base_currency"],
+                p["quote_currency"],
                 p.get("display_name", p["product_id"]),
-                p.get("price"), p.get("price_pct_change_24h", 0),
-                p.get("volume_24h", 0), p.get("high_24h", 0), p.get("low_24h", 0),
-                p.get("spread", 0), 1 if p.get("is_tracked") else 0, _now(),
-            )
+                p.get("price"),
+                p.get("price_pct_change_24h", 0),
+                p.get("volume_24h", 0),
+                p.get("high_24h", 0),
+                p.get("low_24h", 0),
+                p.get("spread", 0),
+                1 if p.get("is_tracked") else 0,
+                _now(),
+            ),
         )
         await db.commit()
 
@@ -341,9 +351,21 @@ async def upsert_product(p: Dict) -> None:
 # real majors out of the top-N. Without this pin the CNN trains on a
 # memecoin-dominated dataset and OKX funding fetch silently skips BTC/ETH.
 _PINNED_MAJORS = (
-    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD",
-    "AVAX-USD", "LINK-USD", "DOT-USD", "DOGE-USD", "LTC-USD", "ATOM-USD",
-    "BCH-USD", "TRX-USD", "MATIC-USD",
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "BNB-USD",
+    "XRP-USD",
+    "ADA-USD",
+    "AVAX-USD",
+    "LINK-USD",
+    "DOT-USD",
+    "DOGE-USD",
+    "LTC-USD",
+    "ATOM-USD",
+    "BCH-USD",
+    "TRX-USD",
+    "MATIC-USD",
 )
 
 
@@ -358,7 +380,7 @@ async def get_products(tracked_only: bool = False, limit: int = 100) -> List[Dic
                   CASE WHEN product_id IN ({majors_csv}) THEN 0 ELSE 1 END,
                   volume_24h DESC
                 LIMIT ?""",
-            (limit,)
+            (limit,),
         )
         return [dict(r) for r in await cursor.fetchall()]
 
@@ -366,9 +388,7 @@ async def get_products(tracked_only: bool = False, limit: int = 100) -> List[Dic
 async def get_product(product_id: str) -> Optional[Dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM products WHERE product_id = ?", (product_id,)
-        )
+        cursor = await db.execute("SELECT * FROM products WHERE product_id = ?", (product_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
 
@@ -377,23 +397,23 @@ async def set_product_tracked(product_id: str, tracked: bool) -> None:
     async with _db() as db:
         await db.execute(
             "UPDATE products SET is_tracked = ? WHERE product_id = ?",
-            (1 if tracked else 0, product_id)
+            (1 if tracked else 0, product_id),
         )
         await db.commit()
 
 
-async def update_product_price(product_id: str, price: float,
-                                pct_change: float = 0.0) -> None:
+async def update_product_price(product_id: str, price: float, pct_change: float = 0.0) -> None:
     async with _db() as db:
         await db.execute(
             "UPDATE products SET price=?, price_pct_change_24h=?, last_updated=? "
             "WHERE product_id=?",
-            (price, pct_change, _now(), product_id)
+            (price, pct_change, _now(), product_id),
         )
         await db.commit()
 
 
 # ── Candles ───────────────────────────────────────────────────────────────────
+
 
 async def save_candles(product_id: str, candles: List[Dict]) -> None:
     async with _db() as db:
@@ -401,17 +421,17 @@ async def save_candles(product_id: str, candles: List[Dict]) -> None:
             """INSERT OR IGNORE INTO candles
                (product_id, start_time, open, high, low, close, volume)
                VALUES (?,?,?,?,?,?,?)""",
-            [(product_id, c["start"], c["open"], c["high"],
-              c["low"], c["close"], c["volume"]) for c in candles]
+            [
+                (product_id, c["start"], c["open"], c["high"], c["low"], c["close"], c["volume"])
+                for c in candles
+            ],
         )
         await db.commit()
 
 
 async def candle_count(product_id: str) -> int:
     async with _db() as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM candles WHERE product_id=?", (product_id,)
-        )
+        cursor = await db.execute("SELECT COUNT(*) FROM candles WHERE product_id=?", (product_id,))
         row = await cursor.fetchone()
         return row[0] if row else 0
 
@@ -421,13 +441,14 @@ async def get_candles(product_id: str, limit: int = 100) -> List[Dict]:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM candles WHERE product_id=? ORDER BY start_time DESC LIMIT ?",
-            (product_id, limit)
+            (product_id, limit),
         )
         rows = await cursor.fetchall()
         return list(reversed([dict(r) for r in rows]))  # oldest first
 
 
 # ── Signals ───────────────────────────────────────────────────────────────────
+
 
 async def save_signal(signal: Dict) -> int:
     async with _db() as db:
@@ -437,12 +458,18 @@ async def save_signal(signal: Dict) -> int:
                 ema_cross, bb_position, reasoning, created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                signal["product_id"], signal["signal_type"], signal["side"],
-                signal["price"], signal["strength"],
-                signal.get("rsi"), signal.get("macd"),
-                signal.get("ema_cross"), signal.get("bb_position"),
-                signal.get("reasoning"), _now(),
-            )
+                signal["product_id"],
+                signal["signal_type"],
+                signal["side"],
+                signal["price"],
+                signal["strength"],
+                signal.get("rsi"),
+                signal.get("macd"),
+                signal.get("ema_cross"),
+                signal.get("bb_position"),
+                signal.get("reasoning"),
+                _now(),
+            ),
         )
         await db.commit()
         return cursor.lastrowid
@@ -450,9 +477,7 @@ async def save_signal(signal: Dict) -> int:
 
 async def mark_signal_acted(signal_id: int, order_id: str) -> None:
     async with _db() as db:
-        await db.execute(
-            "UPDATE signals SET acted=1, order_id=? WHERE id=?", (order_id, signal_id)
-        )
+        await db.execute("UPDATE signals SET acted=1, order_id=? WHERE id=?", (order_id, signal_id))
         await db.commit()
 
 
@@ -462,7 +487,7 @@ async def get_signals(limit: int = 50, signal_type_prefix: Optional[str] = None)
         if signal_type_prefix:
             cursor = await db.execute(
                 "SELECT * FROM signals WHERE signal_type LIKE ? ORDER BY created_at DESC LIMIT ?",
-                (f"{signal_type_prefix}%", limit)
+                (f"{signal_type_prefix}%", limit),
             )
         else:
             cursor = await db.execute(
@@ -473,6 +498,7 @@ async def get_signals(limit: int = 50, signal_type_prefix: Optional[str] = None)
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
+
 async def save_order(order: Dict) -> None:
     async with _db() as db:
         await db.execute(
@@ -481,23 +507,29 @@ async def save_order(order: Dict) -> None:
                 quote_size, status, strategy, created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
-                order["order_id"], order["product_id"], order["side"],
-                order["order_type"], order.get("price"), order.get("base_size"),
-                order.get("quote_size"), order.get("status", "pending"),
-                order.get("strategy"), _now(),
-            )
+                order["order_id"],
+                order["product_id"],
+                order["side"],
+                order["order_type"],
+                order.get("price"),
+                order.get("base_size"),
+                order.get("quote_size"),
+                order.get("status", "pending"),
+                order.get("strategy"),
+                _now(),
+            ),
         )
         await db.commit()
 
 
-async def update_order_status(order_id: str, status: str,
-                               filled_size: float = 0,
-                               avg_fill_price: Optional[float] = None) -> None:
+async def update_order_status(
+    order_id: str, status: str, filled_size: float = 0, avg_fill_price: Optional[float] = None
+) -> None:
     async with _db() as db:
         await db.execute(
             "UPDATE orders SET status=?, filled_size=?, avg_fill_price=?, updated_at=? "
             "WHERE order_id=?",
-            (status, filled_size, avg_fill_price, _now(), order_id)
+            (status, filled_size, avg_fill_price, _now(), order_id),
         )
         await db.commit()
 
@@ -508,7 +540,7 @@ async def get_orders(status: Optional[str] = None, limit: int = 100) -> List[Dic
         if status:
             cursor = await db.execute(
                 "SELECT * FROM orders WHERE status=? ORDER BY created_at DESC LIMIT ?",
-                (status, limit)
+                (status, limit),
             )
         else:
             cursor = await db.execute(
@@ -518,6 +550,7 @@ async def get_orders(status: Optional[str] = None, limit: int = 100) -> List[Dic
 
 
 # ── Positions ─────────────────────────────────────────────────────────────────
+
 
 async def upsert_position(pos: Dict) -> None:
     async with _db() as db:
@@ -531,11 +564,18 @@ async def upsert_position(pos: Dict) -> None:
                  current_value=excluded.current_value, cash_pnl=excluded.cash_pnl,
                  pct_pnl=excluded.pct_pnl, updated_at=excluded.updated_at""",
             (
-                pos["product_id"], pos["base_currency"], pos.get("side", "BUY"),
-                pos["size"], pos["avg_price"], pos.get("current_price"),
-                pos.get("initial_value"), pos.get("current_value"),
-                pos.get("cash_pnl"), pos.get("pct_pnl"), _now(),
-            )
+                pos["product_id"],
+                pos["base_currency"],
+                pos.get("side", "BUY"),
+                pos["size"],
+                pos["avg_price"],
+                pos.get("current_price"),
+                pos.get("initial_value"),
+                pos.get("current_value"),
+                pos.get("cash_pnl"),
+                pos.get("pct_pnl"),
+                _now(),
+            ),
         )
         await db.commit()
 
@@ -557,6 +597,7 @@ async def delete_position(product_id: str) -> None:
 
 # ── CNN Scans ─────────────────────────────────────────────────────────────────
 
+
 async def save_cnn_scan(scan: Dict) -> None:
     async with _db() as db:
         await db.execute(
@@ -569,22 +610,36 @@ async def save_cnn_scan(scan: Dict) -> None:
                 xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                scan["product_id"], scan["price"],
-                scan.get("cnn_prob"), scan.get("llm_prob"), scan["model_prob"],
-                scan.get("cnn_weight"), scan.get("llm_weight"),
-                scan["side"], scan["strength"], 1 if scan.get("signal_gen") else 0,
-                scan.get("regime"), scan.get("adx"), scan.get("rsi"),
-                scan.get("macd"), scan.get("mfi"), scan.get("stoch_k"),
-                scan.get("atr"), scan.get("vwap_dist"),
-                scan.get("fast_rsi"), scan.get("velocity"), scan.get("vol_z"),
+                scan["product_id"],
+                scan["price"],
+                scan.get("cnn_prob"),
+                scan.get("llm_prob"),
+                scan["model_prob"],
+                scan.get("cnn_weight"),
+                scan.get("llm_weight"),
+                scan["side"],
+                scan["strength"],
+                1 if scan.get("signal_gen") else 0,
+                scan.get("regime"),
+                scan.get("adx"),
+                scan.get("rsi"),
+                scan.get("macd"),
+                scan.get("mfi"),
+                scan.get("stoch_k"),
+                scan.get("atr"),
+                scan.get("vwap_dist"),
+                scan.get("fast_rsi"),
+                scan.get("velocity"),
+                scan.get("vol_z"),
                 scan.get("xgb_prob"),
                 _now(),
-                scan.get("xgb_prob_stdev"), scan.get("mc_telemetry"),
+                scan.get("xgb_prob_stdev"),
+                scan.get("mc_telemetry"),
                 scan.get("xgb_prob_v4"),
                 scan.get("xgb_prob_v4_5_down"),
                 scan.get("xgb_prob_v4_5_neutral"),
                 scan.get("xgb_prob_v4_5_up"),
-            )
+            ),
         )
         await db.commit()
 
@@ -592,25 +647,27 @@ async def save_cnn_scan(scan: Dict) -> None:
 async def get_cnn_scans(
     limit: int = 200,
     product_id: Optional[str] = None,
-    scan_run: Optional[str] = None,   # ISO prefix e.g. "2026-04-11T19"
+    scan_run: Optional[str] = None,  # ISO prefix e.g. "2026-04-11T19"
 ) -> List[Dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         clauses, params = [], []
         if product_id:
-            clauses.append("product_id = ?"); params.append(product_id)
+            clauses.append("product_id = ?")
+            params.append(product_id)
         if scan_run:
-            clauses.append("scanned_at LIKE ?"); params.append(f"{scan_run}%")
+            clauses.append("scanned_at LIKE ?")
+            params.append(f"{scan_run}%")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         cursor = await db.execute(
-            f"SELECT * FROM cnn_scans {where} ORDER BY scanned_at DESC LIMIT ?",
-            params
+            f"SELECT * FROM cnn_scans {where} ORDER BY scanned_at DESC LIMIT ?", params
         )
         return [dict(r) for r in await cursor.fetchall()]
 
 
 # ── Agent Decisions (Tech / Momentum) ────────────────────────────────────────
+
 
 async def save_agent_decision(d: Dict) -> None:
     async with _db() as db:
@@ -620,18 +677,26 @@ async def save_agent_decision(d: Dict) -> None:
                 reasoning, balance, pnl, created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
-                d["agent"], d["product_id"], d["side"],
-                d["confidence"], d["price"], d.get("score"),
-                d.get("reasoning"), d.get("balance"), d.get("pnl"),
+                d["agent"],
+                d["product_id"],
+                d["side"],
+                d["confidence"],
+                d["price"],
+                d.get("score"),
+                d.get("reasoning"),
+                d.get("balance"),
+                d.get("pnl"),
                 _now(),
-            )
+            ),
         )
         await db.commit()
 
 
-async def save_agent_state(agent: str, balance: float, realized_pnl: float,
-                            positions: Dict, high_water: Dict) -> None:
+async def save_agent_state(
+    agent: str, balance: float, realized_pnl: float, positions: Dict, high_water: Dict
+) -> None:
     import json
+
     async with _db() as db:
         await db.execute(
             """INSERT INTO agent_state
@@ -643,24 +708,22 @@ async def save_agent_state(agent: str, balance: float, realized_pnl: float,
                  positions_json=excluded.positions_json,
                  high_water_json=excluded.high_water_json,
                  updated_at=excluded.updated_at""",
-            (agent, balance, realized_pnl,
-             json.dumps(positions), json.dumps(high_water), _now())
+            (agent, balance, realized_pnl, json.dumps(positions), json.dumps(high_water), _now()),
         )
         await db.commit()
 
 
 async def load_agent_state(agent: str) -> Optional[Dict]:
     import json
+
     async with _db() as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM agent_state WHERE agent = ?", (agent,)
-        )
+        cursor = await db.execute("SELECT * FROM agent_state WHERE agent = ?", (agent,))
         row = await cursor.fetchone()
         if not row:
             return None
         d = dict(row)
-        d["positions"]  = json.loads(d.pop("positions_json",  "{}"))
+        d["positions"] = json.loads(d.pop("positions_json", "{}"))
         d["high_water"] = json.loads(d.pop("high_water_json", "{}"))
         return d
 
@@ -669,9 +732,7 @@ async def purge_old_decisions(days: int = 7) -> int:
     """Delete agent_decisions rows older than `days` days. Returns deleted count."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     async with _db() as db:
-        cur = await db.execute(
-            "DELETE FROM agent_decisions WHERE created_at < ?", (cutoff,)
-        )
+        cur = await db.execute("DELETE FROM agent_decisions WHERE created_at < ?", (cutoff,))
         await db.commit()
         return cur.rowcount
 
@@ -686,9 +747,11 @@ async def get_agent_decisions(
         db.row_factory = aiosqlite.Row
         clauses, params = [], []
         if product_id:
-            clauses.append("product_id = ?"); params.append(product_id)
+            clauses.append("product_id = ?")
+            params.append(product_id)
         if agent:
-            clauses.append("agent = ?"); params.append(agent)
+            clauses.append("agent = ?")
+            params.append(agent)
         if signals_only:
             clauses.append("side != 'HOLD'")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -702,9 +765,15 @@ async def get_agent_decisions(
 
 # ── Trade ledger ──────────────────────────────────────────────────────────────
 
+
 async def open_trade(
-    agent: str, product_id: str, entry_price: float,
-    size: float, usd_open: float, trigger_open: str, balance_after: float,
+    agent: str,
+    product_id: str,
+    entry_price: float,
+    size: float,
+    usd_open: float,
+    trigger_open: str,
+    balance_after: float,
 ) -> int:
     """Insert an open trade row. Returns the new trade id."""
     async with _db() as db:
@@ -713,21 +782,25 @@ async def open_trade(
                (agent, product_id, entry_price, size, usd_open,
                 trigger_open, balance_after, opened_at)
                VALUES (?,?,?,?,?,?,?,?)""",
-            (agent, product_id, entry_price, size, usd_open,
-             trigger_open, balance_after, _now()),
+            (agent, product_id, entry_price, size, usd_open, trigger_open, balance_after, _now()),
         )
         await db.commit()
         return cursor.lastrowid
 
 
 async def close_trade(
-    agent: str, product_id: str, exit_price: float, size: float,
-    pnl: float, trigger_close: str, balance_after: float,
+    agent: str,
+    product_id: str,
+    exit_price: float,
+    size: float,
+    pnl: float,
+    trigger_close: str,
+    balance_after: float,
 ) -> None:
     """Update the most recent open trade for (agent, product_id) with close data."""
     usd_close = exit_price * size
-    pct_pnl   = (pnl / (usd_close - pnl)) * 100 if (usd_close - pnl) > 0 else 0.0
-    now       = _now()
+    pct_pnl = (pnl / (usd_close - pnl)) * 100 if (usd_close - pnl) > 0 else 0.0
+    now = _now()
     async with _db() as db:
         # Find the most recent open trade for this agent+product
         cursor = await db.execute(
@@ -741,7 +814,8 @@ async def close_trade(
             trade_id, opened_at = row[0], row[1]
             try:
                 from datetime import datetime, timezone
-                dt_open  = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+
+                dt_open = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
                 dt_close = datetime.now(timezone.utc)
                 hold_secs = int((dt_close - dt_open).total_seconds())
             except Exception:
@@ -751,8 +825,17 @@ async def close_trade(
                    exit_price=?, usd_close=?, pnl=?, pct_pnl=?,
                    hold_secs=?, trigger_close=?, balance_after=?, closed_at=?
                    WHERE id=?""",
-                (exit_price, usd_close, round(pnl, 4), round(pct_pnl, 2),
-                 hold_secs, trigger_close, balance_after, now, trade_id),
+                (
+                    exit_price,
+                    usd_close,
+                    round(pnl, 4),
+                    round(pct_pnl, 2),
+                    hold_secs,
+                    trigger_close,
+                    balance_after,
+                    now,
+                    trade_id,
+                ),
             )
         else:
             # No open row found — insert a closed row directly (e.g. after restart)
@@ -762,16 +845,28 @@ async def close_trade(
                     usd_open, usd_close, pnl, pct_pnl, trigger_open,
                     trigger_close, balance_after, opened_at, closed_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (agent, product_id, exit_price, exit_price, size,
-                 usd_close, usd_close, round(pnl, 4), round(pct_pnl, 2),
-                 "UNKNOWN", trigger_close, balance_after, now, now),
+                (
+                    agent,
+                    product_id,
+                    exit_price,
+                    exit_price,
+                    size,
+                    usd_close,
+                    usd_close,
+                    round(pnl, 4),
+                    round(pct_pnl, 2),
+                    "UNKNOWN",
+                    trigger_close,
+                    balance_after,
+                    now,
+                    now,
+                ),
             )
         await db.commit()
 
 
 async def close_trade_by_id(trade_id: int, trigger_close: str = "RECONCILE") -> None:
     """Force-close a specific trade row by its primary key (used for reconciliation)."""
-    from datetime import datetime, timezone
     now = _now()
     async with _db() as db:
         await db.execute(
@@ -827,9 +922,11 @@ async def get_trades(
         db.row_factory = aiosqlite.Row
         clauses, params = [], []
         if agent:
-            clauses.append("agent = ?"); params.append(agent)
+            clauses.append("agent = ?")
+            params.append(agent)
         if product_id:
-            clauses.append("product_id = ?"); params.append(product_id)
+            clauses.append("product_id = ?")
+            params.append(product_id)
         if open_only:
             clauses.append("closed_at IS NULL")
         if closed_only:
@@ -845,6 +942,7 @@ async def get_trades(
 
 # ── Portfolio summary ─────────────────────────────────────────────────────────
 
+
 async def get_portfolio_summary() -> Dict:
     async with _db() as db:
         cursor = await db.execute(
@@ -856,14 +954,15 @@ async def get_portfolio_summary() -> Dict:
         pct = ((total_pnl or 0) / max(total_cost or 1, 0.01)) * 100
         return {
             "open_positions": count or 0,
-            "total_value":    round(total_value or 0, 2),
-            "total_cost":     round(total_cost  or 0, 2),
-            "total_pnl":      round(total_pnl   or 0, 2),
-            "pct_pnl":        round(pct, 2),
+            "total_value": round(total_value or 0, 2),
+            "total_cost": round(total_cost or 0, 2),
+            "total_pnl": round(total_pnl or 0, 2),
+            "pct_pnl": round(pct, 2),
         }
 
 
 # ── Signal Outcomes (Outcome Tracker) ────────────────────────────────────────
+
 
 async def insert_signal_outcome(d: Dict) -> None:
     async with _db() as db:
@@ -873,11 +972,15 @@ async def insert_signal_outcome(d: Dict) -> None:
                 indicators_json, check_after, created_at)
                VALUES (?,?,?,?,?,?,?,?)""",
             (
-                d["source"], d["product_id"], d["side"],
-                d["confidence"], d["entry_price"],
+                d["source"],
+                d["product_id"],
+                d["side"],
+                d["confidence"],
+                d["entry_price"],
                 d.get("indicators_json", "{}"),
-                d["check_after"], _now(),
-            )
+                d["check_after"],
+                _now(),
+            ),
         )
         await db.commit()
 
@@ -885,12 +988,13 @@ async def insert_signal_outcome(d: Dict) -> None:
 async def get_pending_outcomes() -> List[Dict]:
     """Return all rows whose check_after has passed and are still unresolved."""
     import time as _time
+
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM signal_outcomes WHERE outcome IS NULL AND check_after <= ? "
             "ORDER BY check_after ASC LIMIT 100",
-            (_time.time(),)
+            (_time.time(),),
         )
         return [dict(r) for r in await cursor.fetchall()]
 
@@ -908,7 +1012,7 @@ async def resolve_signal_outcome(
                SET exit_price=?, pct_change=?, outcome=?,
                    lesson_text=?, checked_at=?
                WHERE id=?""",
-            (exit_price, pct_change, outcome, lesson_text, _now(), row_id)
+            (exit_price, pct_change, outcome, lesson_text, _now(), row_id),
         )
         await db.commit()
 
@@ -930,13 +1034,14 @@ async def get_recent_lessons(
                WHERE product_id=? AND lesson_text IS NOT NULL
                  AND checked_at >= datetime('now', ?)
                ORDER BY checked_at DESC LIMIT ?""",
-            (product_id, f"-{max_age_days} days", limit)
+            (product_id, f"-{max_age_days} days", limit),
         )
         rows = await cursor.fetchall()
         return [r["lesson_text"] for r in rows]
 
 
 # ── CNN Training History ───────────────────────────────────────────────────────
+
 
 async def save_training_session(r: Dict) -> None:
     async with _db() as db:
@@ -988,6 +1093,7 @@ async def get_training_sessions(limit: int = 50) -> List[Dict]:
 
 # ── Product status (#120c — auto-blacklist tier persistence) ──────────────────
 
+
 async def get_product_status(product_id: str) -> Optional[Dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row
@@ -1030,8 +1136,7 @@ async def set_product_status(
 async def list_products_by_status(status: str) -> List[str]:
     async with _db() as db:
         cursor = await db.execute(
-            "SELECT product_id FROM product_status WHERE status = ? "
-            "ORDER BY product_id", (status,)
+            "SELECT product_id FROM product_status WHERE status = ? ORDER BY product_id", (status,)
         )
         rows = await cursor.fetchall()
         return [r[0] for r in rows]

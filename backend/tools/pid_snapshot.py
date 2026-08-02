@@ -14,6 +14,7 @@ Pair with `recommended_snapshot_ts(prods)` (median of all `first_ts` values)
 for a sensible default cutoff that excludes products joining after the
 median entry date.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -69,10 +70,7 @@ def recommended_snapshot_ts(prods: Dict[str, dict]) -> int:
     Pids whose first sample arrives after this cutoff are excluded from the
     survivorship-aware top-N — they're "newcomers" relative to the corpus.
     """
-    first_tss = [
-        int(entry["first_ts"]) for entry in prods.values()
-        if len(entry.get("X", [])) > 0
-    ]
+    first_tss = [int(entry["first_ts"]) for entry in prods.values() if len(entry.get("X", [])) > 0]
     if not first_tss:
         return 0
     return int(np.median(np.asarray(first_tss, dtype=np.int64)))

@@ -7,6 +7,37 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.74 — 2026-08-01 — CI pipeline repair (track 2 of 2): ruff lint + format
+
+Clears the Ruff-lint + Security-gate jobs left red by track 1. Branch
+`chore/ruff-lint-format`, stacked on `fix/ci-pipeline-green`.
+
+**Mechanical (ruff 0.9.0, CI-pinned):** `ruff check backend/ --fix` (373 safe
+auto-fixes — I001 import sort, F401 unused imports, …) + `--unsafe-fixes` for 35
+more (F841 dead vars, E712, B006/B007, E731); `ruff format backend/` (211 files).
+
+**Manual code fixes:**
+- E741 ambiguous `l` → `lo` / `labels` / `lesson` in `cnn_agent.py`,
+  `signal_generator.py`, `outcome_tracker.py`, `anomaly_flagger.py` + 5 test
+  modules (incl. `_candle`/`_ohlc`/`_bar` helper params and keyword callers).
+- B904 exception chaining: `clients/coinbase_client.py` (`from err`), `main.py`
+  (`from exc`).
+
+**Config (`pyproject.toml [tool.ruff.lint]`):**
+- Dropped `S` (flake8-bandit) from `select` — the dedicated Bandit SAST CI job is
+  the security gate, so ruff-S duplicated it. Removed now-dead `S101`/`S105`
+  ignores.
+- `per-file-ignores` E402 for `backend/main.py` (launcher `.venv` sys.path shim)
+  and `backend/tests/*` (BACKEND path insert) — legitimate bootstrap-before-import;
+  imports cannot move above it.
+- `.gitleaks.toml` (new): extends the default Gitleaks ruleset (`useDefault =
+  true`) and allowlists `backend/tests/conftest.py`, whose all-zero dummy EC key
+  is a pytest fixture, not a real credential. Track-2 reformatting pulled that
+  line into the last-commit diff that the Secret-scan job scans (`--log-opts=-1`).
+
+**Verified:** `ruff check backend/` + `ruff format --check backend/` both exit 0
+(228 files); targeted rename tests + full suite via pre-commit hook green.
+
 ### Session 58.74 — 2026-08-01 — CI pipeline repair (track 1 of 2)
 
 Main's CI ("CI — DevSecOps Pipeline") had been failing since 2026-06-08 (every

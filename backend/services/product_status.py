@@ -12,6 +12,7 @@ must recover to Probation before returning to Active. This guards the
 "what if a blacklisted loser becomes a winner?" case — recovery happens
 gradually under observation rather than as a coin-flip.
 """
+
 import logging
 import statistics
 from collections.abc import Sequence
@@ -91,9 +92,7 @@ async def evaluate_and_persist(
         limit=n_trades,
     )
     trades_decimal = [
-        {"pnl_pct": float(r["pct_pnl"]) / 100.0}
-        for r in rows
-        if r.get("pct_pnl") is not None
+        {"pnl_pct": float(r["pct_pnl"]) / 100.0} for r in rows if r.get("pct_pnl") is not None
     ]
 
     status_row = await database.get_product_status(product_id)
@@ -105,6 +104,9 @@ async def evaluate_and_persist(
         await database.set_product_status(product_id, new_status, reason)
         logger.info(
             "product_status %s: %s -> %s (%s)",
-            product_id, current, new_status, reason,
+            product_id,
+            current,
+            new_status,
+            reason,
         )
     return current, new_status, changed

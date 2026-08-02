@@ -17,6 +17,7 @@ Contract:
           U-shape calibration. Calibration is optional — pkl missing means
           raw passthrough (Phase 5 backwards-compat).
 """
+
 import json
 import os
 import pickle
@@ -32,6 +33,7 @@ if BACKEND not in sys.path:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _synthetic_channels(seed: int = 0) -> np.ndarray:
     """28-channel x 60-step deterministic synthetic input."""
     rng = np.random.default_rng(seed)
@@ -41,6 +43,7 @@ def _synthetic_channels(seed: int = 0) -> np.ndarray:
 def _train_tiny_xgb(out_dir, n_samples: int = 64, feature_set: str = "v1"):
     """Train a minimal XGBoost model so xgb_signal.xgb_prob has artifacts to load."""
     import xgboost as xgb
+
     from tools.xgb_features import extract_features
 
     rng = np.random.default_rng(0)
@@ -69,6 +72,7 @@ def fresh_xgb_module(monkeypatch):
     if "agents.xgb_signal" in sys.modules:
         del sys.modules["agents.xgb_signal"]
     import agents.xgb_signal as xs
+
     yield xs
     if "agents.xgb_signal" in sys.modules:
         del sys.modules["agents.xgb_signal"]
@@ -76,8 +80,8 @@ def fresh_xgb_module(monkeypatch):
 
 # ── Contract: graceful fallback when artifacts missing ────────────────────────
 
-class TestFallback:
 
+class TestFallback:
     def test_returns_neutral_when_model_file_missing(self, tmp_path, fresh_xgb_module, monkeypatch):
         """No xgb_model.json on disk → return 0.5, never raise."""
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "missing.json"))
@@ -85,7 +89,9 @@ class TestFallback:
         prob = fresh_xgb_module.xgb_prob(_synthetic_channels())
         assert prob == 0.5
 
-    def test_returns_neutral_when_features_json_missing(self, tmp_path, fresh_xgb_module, monkeypatch):
+    def test_returns_neutral_when_features_json_missing(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
         """xgb_model.json present but xgb_features.json missing → 0.5."""
         # Touch only the model file, leave features file absent
         (tmp_path / "xgb_model.json").write_text("{}")
@@ -97,8 +103,8 @@ class TestFallback:
 
 # ── Contract: live model returns calibrated prob ──────────────────────────────
 
-class TestLiveModel:
 
+class TestLiveModel:
     def test_returns_float_in_range(self, tmp_path, fresh_xgb_module, monkeypatch):
         """With a real (tiny) booster on disk, xgb_prob returns float ∈ [0.01, 0.99]."""
         model_path, features_path = _train_tiny_xgb(str(tmp_path))
@@ -152,8 +158,8 @@ class TestLiveModel:
 
 # ── Module attributes ─────────────────────────────────────────────────────────
 
-class TestModuleAttributes:
 
+class TestModuleAttributes:
     def test_has_default_paths(self, fresh_xgb_module):
         """Module exposes _MODEL_PATH and _FEATURES_PATH as monkeypatch targets."""
         assert hasattr(fresh_xgb_module, "_MODEL_PATH")
@@ -177,17 +183,16 @@ class TestModuleAttributes:
 
 # ── XGB-Step2: post-hoc isotonic calibration (#180) ───────────────────────────
 
-class TestCalibration:
 
-    def test_no_calibration_pkl_falls_back_to_raw(
-        self, tmp_path, fresh_xgb_module, monkeypatch
-    ):
+class TestCalibration:
+    def test_no_calibration_pkl_falls_back_to_raw(self, tmp_path, fresh_xgb_module, monkeypatch):
         """Missing xgb_calibration.pkl → raw booster output (no exception)."""
         model_path, features_path = _train_tiny_xgb(str(tmp_path))
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", model_path)
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", features_path)
         monkeypatch.setattr(
-            fresh_xgb_module, "_CALIBRATION_PATH",
+            fresh_xgb_module,
+            "_CALIBRATION_PATH",
             str(tmp_path / "does_not_exist.pkl"),
         )
         x = _synthetic_channels(seed=8)
@@ -202,8 +207,9 @@ class TestCalibration:
         supported. A bare pickle on disk is treated as 'unknown shape' —
         skipped with a warning. Raw passthrough remains the failure mode."""
         import logging
-        from sklearn.isotonic import IsotonicRegression
+
         import numpy as np
+        from sklearn.isotonic import IsotonicRegression
 
         _train_tiny_xgb(str(tmp_path), feature_set="v1")
         iso = IsotonicRegression(out_of_bounds="clip").fit(
@@ -212,15 +218,15 @@ class TestCalibration:
         with open(tmp_path / "xgb_calibration.pkl", "wb") as f:
             pickle.dump(iso, f)  # bare isotonic — no longer supported
 
+        monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
         monkeypatch.setattr(
-            fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json")
-        )
-        monkeypatch.setattr(
-            fresh_xgb_module, "_FEATURES_PATH",
+            fresh_xgb_module,
+            "_FEATURES_PATH",
             str(tmp_path / "xgb_features.json"),
         )
         monkeypatch.setattr(
-            fresh_xgb_module, "_CALIBRATION_PATH",
+            fresh_xgb_module,
+            "_CALIBRATION_PATH",
             str(tmp_path / "xgb_calibration.pkl"),
         )
 
@@ -228,13 +234,13 @@ class TestCalibration:
             fresh_xgb_module._try_load()
         assert fresh_xgb_module._calibration is None
         assert any(
-            "bare-isotonic" in r.message.lower()
-            or "not the canonical" in r.message.lower()
+            "bare-isotonic" in r.message.lower() or "not the canonical" in r.message.lower()
             for r in caplog.records
         )
 
 
 # ── #192: hot-reload after on-disk artifacts change ───────────────────────────
+
 
 class TestForceReload:
     """Targets the new force_reload() that #192 adds.
@@ -260,9 +266,7 @@ class TestForceReload:
         """If model files vanish between loads, force_reload returns False
         and subsequent xgb_prob falls back to the neutral 0.5."""
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "nope.json"))
-        monkeypatch.setattr(
-            fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "also_nope.json")
-        )
+        monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "also_nope.json"))
         ok = fresh_xgb_module.force_reload()
         assert ok is False
         assert fresh_xgb_module.xgb_prob(_synthetic_channels()) == 0.5
@@ -274,22 +278,47 @@ class TestForceReload:
 def _train_tiny_v3(out_dir):
     """Train a tiny v3 booster on synthetic tier inputs."""
     import xgboost as xgb
-    from tools.xgb_features import _v3_feature_names, _extract_v3
+
+    from tools.xgb_features import _extract_v3, _v3_feature_names
 
     rng = np.random.default_rng(0)
     n = 64
     feats = np.zeros((n, 350), dtype=np.float64)
     for i in range(n):
         t = {
-            "micro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
-                       "close": float(rng.standard_normal()),
-                       "volume": 1.0} for j in range(60)],
-            "meso":  [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
-                       "close": float(rng.standard_normal()),
-                       "volume": 1.0} for j in range(168)],
-            "macro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
-                       "close": float(rng.standard_normal()),
-                       "volume": 1.0} for j in range(336)],
+            "micro": [
+                {
+                    "start": j,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": float(rng.standard_normal()),
+                    "volume": 1.0,
+                }
+                for j in range(60)
+            ],
+            "meso": [
+                {
+                    "start": j,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": float(rng.standard_normal()),
+                    "volume": 1.0,
+                }
+                for j in range(168)
+            ],
+            "macro": [
+                {
+                    "start": j,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": float(rng.standard_normal()),
+                    "volume": 1.0,
+                }
+                for j in range(336)
+            ],
         }
         f, _ = _extract_v3(t)
         feats[i] = f[0]
@@ -298,7 +327,8 @@ def _train_tiny_v3(out_dir):
     dtrain = xgb.DMatrix(feats, label=labels, feature_names=names)
     booster = xgb.train(
         {"objective": "binary:logistic", "max_depth": 2, "eta": 0.3, "verbosity": 0},
-        dtrain, num_boost_round=5,
+        dtrain,
+        num_boost_round=5,
     )
     model_path = os.path.join(out_dir, "xgb_model.json")
     features_path = os.path.join(out_dir, "xgb_features.json")
@@ -310,17 +340,46 @@ def _train_tiny_v3(out_dir):
 
 def _fake_v3_tiers():
     return {
-        "micro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
-                   "close": 1.0 + j * 0.01, "volume": 1.0} for j in range(60)],
-        "meso":  [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
-                   "close": 1.0 + j * 0.01, "volume": 1.0} for j in range(168)],
-        "macro": [{"start": j, "open": 1.0, "high": 1.0, "low": 1.0,
-                   "close": 1.0 + j * 0.01, "volume": 1.0} for j in range(336)],
+        "micro": [
+            {
+                "start": j,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0 + j * 0.01,
+                "volume": 1.0,
+            }
+            for j in range(60)
+        ],
+        "meso": [
+            {
+                "start": j,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0 + j * 0.01,
+                "volume": 1.0,
+            }
+            for j in range(168)
+        ],
+        "macro": [
+            {
+                "start": j,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0 + j * 0.01,
+                "volume": 1.0,
+            }
+            for j in range(336)
+        ],
     }
 
 
 class TestV3Routing:
-    def test_v3_booster_auto_detected_from_feature_names(self, tmp_path, monkeypatch, fresh_xgb_module):
+    def test_v3_booster_auto_detected_from_feature_names(
+        self, tmp_path, monkeypatch, fresh_xgb_module
+    ):
         _train_tiny_v3(str(tmp_path))
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
@@ -336,17 +395,21 @@ class TestV3Routing:
         assert fresh_xgb_module._try_load() is True
         assert fresh_xgb_module._feature_set == "v1"
 
-    def test_v3_xgb_prob_calls_tiered_history_with_pid(self, tmp_path, monkeypatch, fresh_xgb_module):
+    def test_v3_xgb_prob_calls_tiered_history_with_pid(
+        self, tmp_path, monkeypatch, fresh_xgb_module
+    ):
         _train_tiny_v3(str(tmp_path))
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
         monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "nope.pkl"))
 
         called = {}
+
         def fake_fetch(pid, **kwargs):
             called["pid"] = pid
             called["kwargs"] = kwargs
             return _fake_v3_tiers()
+
         monkeypatch.setattr("services.tiered_history.fetch_tiered", fake_fetch)
 
         p = fresh_xgb_module.xgb_prob(_synthetic_channels(), pid="BTC-USD")
@@ -354,8 +417,11 @@ class TestV3Routing:
         assert called["pid"] == "BTC-USD"
         assert called["kwargs"].get("source") == "live"
 
-    def test_v3_xgb_prob_pid_none_returns_neutral(self, tmp_path, monkeypatch, fresh_xgb_module, caplog):
+    def test_v3_xgb_prob_pid_none_returns_neutral(
+        self, tmp_path, monkeypatch, fresh_xgb_module, caplog
+    ):
         import logging
+
         _train_tiny_v3(str(tmp_path))
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
@@ -365,7 +431,9 @@ class TestV3Routing:
         assert p == 0.5
         assert any("pid" in r.message.lower() for r in caplog.records)
 
-    def test_v3_returns_neutral_on_tiered_fetch_failure(self, tmp_path, monkeypatch, fresh_xgb_module):
+    def test_v3_returns_neutral_on_tiered_fetch_failure(
+        self, tmp_path, monkeypatch, fresh_xgb_module
+    ):
         _train_tiny_v3(str(tmp_path))
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
@@ -373,14 +441,19 @@ class TestV3Routing:
 
         def boom(pid, **kwargs):
             raise RuntimeError("simulated DB failure")
+
         monkeypatch.setattr("services.tiered_history.fetch_tiered", boom)
 
         p = fresh_xgb_module.xgb_prob(_synthetic_channels(), pid="BTC-USD")
         assert p == 0.5
 
-    def test_v3_skips_v1_calibrator_on_metadata_mismatch(self, tmp_path, monkeypatch, fresh_xgb_module, caplog):
+    def test_v3_skips_v1_calibrator_on_metadata_mismatch(
+        self, tmp_path, monkeypatch, fresh_xgb_module, caplog
+    ):
         import logging
+
         from sklearn.isotonic import IsotonicRegression
+
         _train_tiny_v3(str(tmp_path))
         iso = IsotonicRegression(out_of_bounds="clip").fit(
             np.array([0.2, 0.5, 0.8]), np.array([0.1, 0.5, 0.9])
@@ -389,10 +462,13 @@ class TestV3Routing:
             pickle.dump({"calibrator": iso, "feature_set": "v1"}, f)
         monkeypatch.setattr(fresh_xgb_module, "_MODEL_PATH", str(tmp_path / "xgb_model.json"))
         monkeypatch.setattr(fresh_xgb_module, "_FEATURES_PATH", str(tmp_path / "xgb_features.json"))
-        monkeypatch.setattr(fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "xgb_calibration.pkl"))
+        monkeypatch.setattr(
+            fresh_xgb_module, "_CALIBRATION_PATH", str(tmp_path / "xgb_calibration.pkl")
+        )
 
         def fake_fetch(pid, **kwargs):
             return _fake_v3_tiers()
+
         monkeypatch.setattr("services.tiered_history.fetch_tiered", fake_fetch)
 
         with caplog.at_level(logging.WARNING):
@@ -410,6 +486,7 @@ class TestV3Routing:
 class TestV4ShadowLoad:
     def test_try_load_v4_returns_false_when_artifacts_missing(self, monkeypatch):
         import agents.xgb_signal as xs
+
         # Force v4 artifacts to point at non-existent files
         monkeypatch.setattr(xs, "_MODEL_PATH_V4", "/nonexistent/v4_model.json")
         monkeypatch.setattr(xs, "_FEATURES_PATH_V4", "/nonexistent/v4_feat.json")
@@ -421,6 +498,7 @@ class TestV4ShadowLoad:
 class TestXgbProbV4:
     def test_returns_neutral_when_artifacts_missing(self, monkeypatch):
         import agents.xgb_signal as xs
+
         monkeypatch.setattr(xs, "_MODEL_PATH_V4", "/nonexistent/v4.json")
         monkeypatch.setattr(xs, "_FEATURES_PATH_V4", "/nonexistent/v4f.json")
         monkeypatch.setattr(xs, "_load_attempted_v4", False)
@@ -430,6 +508,7 @@ class TestXgbProbV4:
 
     def test_returns_neutral_when_pid_none(self, monkeypatch):
         import agents.xgb_signal as xs
+
         monkeypatch.setattr(xs, "_load_attempted_v4", True)
         monkeypatch.setattr(xs, "_load_succeeded_v4", True)
         out = xs.xgb_prob_v4(channels=None, pid=None)
@@ -439,11 +518,10 @@ class TestXgbProbV4:
 class TestXgbProbShadow:
     def test_shadow_returns_tuple(self, monkeypatch):
         import agents.xgb_signal as xs
+
         # Stub both v3 and v4 to known values
-        monkeypatch.setattr(xs, "xgb_prob",
-                            lambda channels, pid=None: 0.7)
-        monkeypatch.setattr(xs, "xgb_prob_v4",
-                            lambda channels, pid=None: 0.4)
+        monkeypatch.setattr(xs, "xgb_prob", lambda channels, pid=None: 0.7)
+        monkeypatch.setattr(xs, "xgb_prob_v4", lambda channels, pid=None: 0.4)
         v3, v4 = xs.xgb_prob_shadow(channels=None, pid="BTC-USD")
         assert v3 == 0.7
         assert v4 == 0.4
@@ -451,18 +529,18 @@ class TestXgbProbShadow:
     def test_shadow_v4_failure_isolated_from_v3(self, monkeypatch, caplog):
         """v4 raising MUST NOT affect v3 driver path."""
         import logging
+
         import agents.xgb_signal as xs
 
         def boom(*a, **kw):
             raise RuntimeError("v4 boom")
 
-        monkeypatch.setattr(xs, "xgb_prob",
-                            lambda channels, pid=None: 0.6)
+        monkeypatch.setattr(xs, "xgb_prob", lambda channels, pid=None: 0.6)
         monkeypatch.setattr(xs, "xgb_prob_v4", boom)
         with caplog.at_level(logging.ERROR):
             v3, v4 = xs.xgb_prob_shadow(channels=None, pid="BTC-USD")
-        assert v3 == 0.6     # driver still works
-        assert v4 is None    # shadow captured as None
+        assert v3 == 0.6  # driver still works
+        assert v4 is None  # shadow captured as None
         assert any("v4" in r.message.lower() for r in caplog.records)
 
     def test_shadow_v3_failure_propagates(self, monkeypatch):
@@ -473,8 +551,7 @@ class TestXgbProbShadow:
             raise RuntimeError("v3 boom")
 
         monkeypatch.setattr(xs, "xgb_prob", boom_v3)
-        monkeypatch.setattr(xs, "xgb_prob_v4",
-                            lambda channels, pid=None: 0.3)
+        monkeypatch.setattr(xs, "xgb_prob_v4", lambda channels, pid=None: 0.3)
         with pytest.raises(RuntimeError, match="v3 boom"):
             xs.xgb_prob_shadow(channels=None, pid="BTC-USD")
 
@@ -485,6 +562,7 @@ class TestXgbProbShadow:
 class TestV4_5ShadowLoad:
     def test_try_load_v4_5_false_when_artifacts_missing(self, monkeypatch):
         import agents.xgb_signal as xs
+
         monkeypatch.setattr(xs, "_MODEL_PATH_V45", "/nonexistent/v45.json")
         monkeypatch.setattr(xs, "_FEATURES_PATH_V45", "/nonexistent/v45f.json")
         monkeypatch.setattr(xs, "_load_attempted_v45", False)
@@ -495,6 +573,7 @@ class TestV4_5ShadowLoad:
 class TestXgbProbV4_5:
     def test_neutral_fallback_when_missing(self, monkeypatch):
         import agents.xgb_signal as xs
+
         monkeypatch.setattr(xs, "_MODEL_PATH_V45", "/nope/v45.json")
         monkeypatch.setattr(xs, "_FEATURES_PATH_V45", "/nope/v45f.json")
         monkeypatch.setattr(xs, "_load_attempted_v45", False)
@@ -507,6 +586,7 @@ class TestXgbProbV4_5:
 
     def test_returns_tuple_when_pid_none(self, monkeypatch):
         import agents.xgb_signal as xs
+
         monkeypatch.setattr(xs, "_load_attempted_v45", True)
         monkeypatch.setattr(xs, "_load_succeeded_v45", True)
         out = xs.xgb_prob_v4_5(channels=None, pid=None)
@@ -517,30 +597,30 @@ class TestXgbProbV4_5:
 class TestXgbProbShadowV4_5:
     def test_returns_tuple_shape(self, monkeypatch):
         import agents.xgb_signal as xs
-        monkeypatch.setattr(xs, "xgb_prob",
-                            lambda channels, pid=None: 0.7)
-        monkeypatch.setattr(xs, "xgb_prob_v4_5",
-                            lambda channels, pid=None: (0.2, 0.3, 0.5))
+
+        monkeypatch.setattr(xs, "xgb_prob", lambda channels, pid=None: 0.7)
+        monkeypatch.setattr(xs, "xgb_prob_v4_5", lambda channels, pid=None: (0.2, 0.3, 0.5))
         v3, v45 = xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")
         assert v3 == 0.7
         assert v45 == (0.2, 0.3, 0.5)
 
     def test_v45_failure_isolated_from_v3(self, monkeypatch, caplog):
         import logging
+
         import agents.xgb_signal as xs
 
         def boom(*a, **kw):
             raise RuntimeError("v4.5 boom")
 
-        monkeypatch.setattr(xs, "xgb_prob",
-                            lambda channels, pid=None: 0.6)
+        monkeypatch.setattr(xs, "xgb_prob", lambda channels, pid=None: 0.6)
         monkeypatch.setattr(xs, "xgb_prob_v4_5", boom)
         with caplog.at_level(logging.ERROR):
             v3, v45 = xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")
         assert v3 == 0.6
         assert v45 is None
-        assert any("v4.5" in r.message.lower() or "v4_5" in r.message.lower()
-                   for r in caplog.records)
+        assert any(
+            "v4.5" in r.message.lower() or "v4_5" in r.message.lower() for r in caplog.records
+        )
 
     def test_v3_failure_propagates(self, monkeypatch):
         import agents.xgb_signal as xs
@@ -549,7 +629,6 @@ class TestXgbProbShadowV4_5:
             raise RuntimeError("v3 boom")
 
         monkeypatch.setattr(xs, "xgb_prob", boom_v3)
-        monkeypatch.setattr(xs, "xgb_prob_v4_5",
-                            lambda channels, pid=None: (0.3, 0.3, 0.4))
+        monkeypatch.setattr(xs, "xgb_prob_v4_5", lambda channels, pid=None: (0.3, 0.3, 0.4))
         with pytest.raises(RuntimeError, match="v3 boom"):
             xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")

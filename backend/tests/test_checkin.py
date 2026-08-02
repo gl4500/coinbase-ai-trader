@@ -9,14 +9,11 @@ when the four hot tables exist but contain zero rows.
 
 import importlib.util
 import io
-import os
 import sqlite3
-import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKIN_PATH = REPO_ROOT / "tools" / "checkin.py"
@@ -78,9 +75,7 @@ def _run(checkin_module, db_path, progress_path):
     """Run checkin.main() with stdout captured, return (rc, captured_text)."""
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = checkin_module.main(
-            ["--db", db_path, "--progress", progress_path]
-        )
+        rc = checkin_module.main(["--db", db_path, "--progress", progress_path])
     return rc, buf.getvalue()
 
 

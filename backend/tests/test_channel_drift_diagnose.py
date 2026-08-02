@@ -10,6 +10,7 @@ This module decomposes that scalar into actionable pieces for any channel:
 
 No I/O, pure numpy. CLI lives in tools/channel_drift_diagnose.py.
 """
+
 from __future__ import annotations
 
 import os
@@ -24,9 +25,9 @@ if BACKEND not in sys.path:
 
 
 class TestDecomposePSI:
-
     def test_total_matches_sum_of_per_bin_contributions(self):
         from tools.channel_drift_diagnose import decompose_psi
+
         rng = np.random.default_rng(0)
         a = rng.normal(0, 1, 500)
         b = rng.normal(0.2, 1.1, 500)
@@ -37,6 +38,7 @@ class TestDecomposePSI:
 
     def test_identical_halves_give_near_zero_psi(self):
         from tools.channel_drift_diagnose import decompose_psi
+
         rng = np.random.default_rng(1)
         a = rng.normal(0, 1, 1000)
         out = decompose_psi(a, a.copy(), n_bins=10)
@@ -44,6 +46,7 @@ class TestDecomposePSI:
 
     def test_per_bin_records_have_required_keys(self):
         from tools.channel_drift_diagnose import decompose_psi
+
         a = np.linspace(-1, 1, 200)
         b = np.linspace(-0.5, 1.5, 200)
         out = decompose_psi(a, b, n_bins=5)
@@ -58,17 +61,21 @@ class TestDecomposePSI:
         doubles the mass in bin 9 (the rest remains uniform). Bins 0
         and 9 should dominate the contribution sum."""
         from tools.channel_drift_diagnose import decompose_psi
+
         a = np.linspace(0.0, 10.0, 1000, endpoint=False)
         # b drops values that fell in [0, 1) (200 of them) and adds them
         # to [9, 10): the result has 800 values in [1, 9) and 200 in
         # [9, 10), totaling 1000.
-        b = np.concatenate([
-            np.linspace(1.0, 9.0, 800, endpoint=False),
-            np.linspace(9.0, 10.0, 200, endpoint=False),
-        ])
+        b = np.concatenate(
+            [
+                np.linspace(1.0, 9.0, 800, endpoint=False),
+                np.linspace(9.0, 10.0, 200, endpoint=False),
+            ]
+        )
         out = decompose_psi(a, b, n_bins=10)
         abs_contribs = sorted(
-            (abs(r["contribution"]) for r in out["per_bin"]), reverse=True,
+            (abs(r["contribution"]) for r in out["per_bin"]),
+            reverse=True,
         )
         top2 = abs_contribs[0] + abs_contribs[1]
         total = sum(abs_contribs)
@@ -76,9 +83,9 @@ class TestDecomposePSI:
 
 
 class TestSummaryStats:
-
     def test_known_mean_and_var(self):
         from tools.channel_drift_diagnose import summary_stats
+
         s = summary_stats(np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
         assert s["n"] == 5
         assert pytest.approx(s["mean"], abs=1e-9) == 3.0
@@ -90,6 +97,7 @@ class TestSummaryStats:
     def test_includes_skew_for_asymmetric(self):
         """A right-skewed distribution should produce positive skew."""
         from tools.channel_drift_diagnose import summary_stats
+
         rng = np.random.default_rng(7)
         # exponential is right-skewed
         s = summary_stats(rng.exponential(1.0, 5000))
@@ -97,28 +105,27 @@ class TestSummaryStats:
 
     def test_handles_empty_safely(self):
         from tools.channel_drift_diagnose import summary_stats
+
         s = summary_stats(np.array([]))
         assert s["n"] == 0
         # Empty stats are NaN/0 — caller decides how to render. Just don't crash.
 
 
 class TestPerProductDrift:
-
     def test_returns_sorted_by_psi_desc(self):
         from tools.channel_drift_diagnose import per_product_drift
+
         rng = np.random.default_rng(2)
         # Three pids: pid_A drifts hard, pid_B moderate, pid_C stable
         n = 400
         ts = np.arange(n)
         prods = {
             "PID-A": {
-                "channel": np.concatenate([rng.normal(0, 1, n // 2),
-                                           rng.normal(2.5, 1, n // 2)]),
+                "channel": np.concatenate([rng.normal(0, 1, n // 2), rng.normal(2.5, 1, n // 2)]),
                 "ts": ts,
             },
             "PID-B": {
-                "channel": np.concatenate([rng.normal(0, 1, n // 2),
-                                           rng.normal(0.4, 1, n // 2)]),
+                "channel": np.concatenate([rng.normal(0, 1, n // 2), rng.normal(0.4, 1, n // 2)]),
                 "ts": ts,
             },
             "PID-C": {
@@ -137,6 +144,7 @@ class TestPerProductDrift:
 
     def test_skips_short_series_safely(self):
         from tools.channel_drift_diagnose import per_product_drift
+
         prods = {
             "TINY": {"channel": np.array([0.1, 0.2]), "ts": np.array([0, 1])},
         }
@@ -146,9 +154,9 @@ class TestPerProductDrift:
 
 
 class TestBinCountSensitivity:
-
     def test_returns_psi_per_n_bins(self):
         from tools.channel_drift_diagnose import bin_count_sensitivity
+
         rng = np.random.default_rng(3)
         a = rng.normal(0, 1, 500)
         b = rng.normal(0.3, 1, 500)
@@ -160,6 +168,7 @@ class TestBinCountSensitivity:
 
     def test_stable_for_identical_halves(self):
         from tools.channel_drift_diagnose import bin_count_sensitivity
+
         a = np.linspace(-1, 1, 800)
         result = bin_count_sensitivity(a, a.copy(), n_bins_list=(4, 10, 20))
         for v in result.values():

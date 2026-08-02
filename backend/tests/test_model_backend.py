@@ -9,6 +9,7 @@ Default behavior MUST remain unchanged (Phase 5 ships behind a default
 "cnn" so no live trading change). Phase 6 (#136) flips MODEL_BACKEND=xgb
 in shadow mode.
 """
+
 import importlib
 import os
 import sys
@@ -22,8 +23,8 @@ if BACKEND not in sys.path:
 
 # ── Config field ──────────────────────────────────────────────────────────────
 
-class TestConfigField:
 
+class TestConfigField:
     def test_model_backend_defaults_to_xgb(self, monkeypatch):
         """MODEL_BACKEND unset → config.model_backend == 'xgb' (CNN deprecated 2026-05-23).
 
@@ -34,6 +35,7 @@ class TestConfigField:
         """
         monkeypatch.delenv("MODEL_BACKEND", raising=False)
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         monkeypatch.delenv("MODEL_BACKEND", raising=False)
         fresh = cfg_mod.Config()
@@ -43,6 +45,7 @@ class TestConfigField:
         """MODEL_BACKEND=xgb propagates into config.model_backend."""
         monkeypatch.setenv("MODEL_BACKEND", "xgb")
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         assert cfg_mod.config.model_backend == "xgb"
 
@@ -50,11 +53,13 @@ class TestConfigField:
         """MODEL_BACKEND=XGB normalized to 'xgb' so comparisons are stable."""
         monkeypatch.setenv("MODEL_BACKEND", "XGB")
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         assert cfg_mod.config.model_backend == "xgb"
 
 
 # ── Scan-loop interval (#227) ─────────────────────────────────────────────────
+
 
 class TestScanIntervalConfig:
     """SCAN_INTERVAL_SECS env var drives cnn_agent.run_loop cadence so the
@@ -64,6 +69,7 @@ class TestScanIntervalConfig:
         """SCAN_INTERVAL_SECS unset → config.scan_interval_secs == 900."""
         monkeypatch.delenv("SCAN_INTERVAL_SECS", raising=False)
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         monkeypatch.delenv("SCAN_INTERVAL_SECS", raising=False)
         fresh = cfg_mod.Config()
@@ -73,6 +79,7 @@ class TestScanIntervalConfig:
         """SCAN_INTERVAL_SECS=300 propagates into config.scan_interval_secs."""
         monkeypatch.setenv("SCAN_INTERVAL_SECS", "300")
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         assert cfg_mod.config.scan_interval_secs == 300
 
@@ -80,6 +87,7 @@ class TestScanIntervalConfig:
         """Stored as int — used directly as asyncio.sleep argument."""
         monkeypatch.setenv("SCAN_INTERVAL_SECS", "180")
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         assert isinstance(cfg_mod.config.scan_interval_secs, int)
         assert cfg_mod.config.scan_interval_secs == 180
@@ -87,13 +95,14 @@ class TestScanIntervalConfig:
 
 # ── _cnn_prob branching ───────────────────────────────────────────────────────
 
-class TestCnnProbBranching:
 
+class TestCnnProbBranching:
     def _make_agent(self):
         """Build a minimal CoinbaseCNNAgent without going through __init__'s
         DB / scheduler side effects. We only need the _cnn_prob method.
         """
         from agents.cnn_agent import CoinbaseCNNAgent, FeatureBuilder
+
         agent = CoinbaseCNNAgent.__new__(CoinbaseCNNAgent)
         agent.fb = FeatureBuilder()
         agent.model = None  # forces _linear path when backend == "cnn"
@@ -106,6 +115,7 @@ class TestCnnProbBranching:
         can corrupt the config singleton for downstream tests.
         """
         import config as cfg_mod
+
         with pytest.raises(ValueError, match="MODEL_BACKEND=cnn is deprecated"):
             cfg_mod._validate_backend("cnn")
 
@@ -113,6 +123,7 @@ class TestCnnProbBranching:
         """config.model_backend == 'xgb' → _cnn_prob returns xgb_prob's value."""
         monkeypatch.setenv("MODEL_BACKEND", "xgb")
         import config as cfg_mod
+
         importlib.reload(cfg_mod)
         if "agents.cnn_agent" in sys.modules:
             importlib.reload(sys.modules["agents.cnn_agent"])
@@ -120,12 +131,12 @@ class TestCnnProbBranching:
         if "agents.xgb_signal" in sys.modules:
             del sys.modules["agents.xgb_signal"]
         import agents.xgb_signal as xs
+
         monkeypatch.setattr(xs, "xgb_prob", lambda _channels, pid=None: 0.73)
 
         # Re-import cnn_agent AFTER patching xgb_signal so the agent's
         # `from agents.xgb_signal import xgb_prob` (if it does that) sees
         # our spy. Safer: patch the symbol the agent actually uses.
-        import agents.cnn_agent as ca
         # The agent should call xgb_signal.xgb_prob via attribute lookup,
         # so monkeypatching the module attr above is the right hook.
 
@@ -151,9 +162,11 @@ class TestPidPlumbing:
     def test_cnn_prob_passes_pid_to_xgb_signal_under_xgb_backend(self, monkeypatch):
         """Under MODEL_BACKEND=xgb, _cnn_prob must forward pid= to xgb_signal.xgb_prob."""
         import config as cfg
+
         monkeypatch.setattr(cfg.config, "model_backend", "xgb")
 
         from agents import cnn_agent, xgb_signal
+
         called = {}
 
         def fake_prob(channels, pid=None):
@@ -164,6 +177,7 @@ class TestPidPlumbing:
 
         agent = cnn_agent.CoinbaseCNNAgent.__new__(cnn_agent.CoinbaseCNNAgent)
         import numpy as np
+
         channels = np.zeros((28, 60), dtype=np.float64).tolist()
         result = agent._cnn_prob(channels, pid="BTC-USD")
         assert result == 0.7
@@ -172,13 +186,16 @@ class TestPidPlumbing:
     def test_cnn_prob_raises_on_cnn_backend(self, monkeypatch):
         """_cnn_prob raises RuntimeError when model_backend is forced to 'cnn' (deprecated)."""
         import config as cfg
+
         monkeypatch.setattr(cfg.config, "model_backend", "cnn")
 
         from agents import cnn_agent
+
         agent = cnn_agent.CoinbaseCNNAgent.__new__(cnn_agent.CoinbaseCNNAgent)
         agent.model = None
         agent.fb = None
         import numpy as np
+
         channels = np.zeros((28, 60), dtype=np.float64).tolist()
         with pytest.raises(RuntimeError, match="unsupported model_backend"):
             agent._cnn_prob(channels, pid="BTC-USD")

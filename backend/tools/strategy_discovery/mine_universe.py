@@ -5,6 +5,7 @@ writes profiles_h{h}.parquet + rule_paths_h{h}.json + mining_summary.md.
 
 The ONLY module in Phase 3 that touches the filesystem.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,10 +15,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import torch
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BACKEND not in sys.path:
@@ -90,13 +89,18 @@ def mine_universe(
             continue
         for h in horizons:
             profiles = mine_profiles_for_pid_horizon(
-                pid=pid, horizon=int(h), parquet_path=parquet_path,
-                device=device, seed=seed,
+                pid=pid,
+                horizon=int(h),
+                parquet_path=parquet_path,
+                device=device,
+                seed=seed,
             )
             all_profiles[int(h)].extend(profiles)
             if profiles:
                 write_profile_parquet(
-                    profiles, pid=pid, horizon=int(h),
+                    profiles,
+                    pid=pid,
+                    horizon=int(h),
                     output_path=output_dir / f"profiles_h{int(h)}.parquet",
                 )
                 for p in profiles:
@@ -110,14 +114,17 @@ def mine_universe(
 
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
+
     parser = argparse.ArgumentParser(description="Mine Phase 3 profiles for a universe.")
     parser.add_argument(
         "--universe",
-        default=str(Path(BACKEND).parent / "docs" / "superpowers" / "specs" / "2026-05-23-universe-50.json"),
+        default=str(
+            Path(BACKEND).parent / "docs" / "superpowers" / "specs" / "2026-05-23-universe-50.json"
+        ),
     )
-    parser.add_argument("--phase2-dir",  default=str(_DEFAULT_PHASE2_DIR))
-    parser.add_argument("--output-dir",  default=str(_DEFAULT_OUTPUT_DIR))
-    parser.add_argument("--device",      default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--phase2-dir", default=str(_DEFAULT_PHASE2_DIR))
+    parser.add_argument("--output-dir", default=str(_DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
     profiles = mine_universe(

@@ -17,8 +17,9 @@ We use Quarter Kelly (25%) by default to reduce variance dramatically:
   - Full Kelly:    33% chance of halving bankroll
   - Quarter Kelly: 4%  chance of halving bankroll
 """
+
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 from config import config
 
@@ -26,15 +27,17 @@ logger = logging.getLogger(__name__)
 
 
 class PositionSizer:
-    def __init__(self,
-                 kelly_fraction: float = None,
-                 max_position_usdc: float = None,
-                 max_total_exposure: float = None,
-                 min_edge: float = None):
-        self.kelly_fraction     = kelly_fraction or config.kelly_fraction
-        self.max_position_usdc  = max_position_usdc or config.max_position_usdc
+    def __init__(
+        self,
+        kelly_fraction: float = None,
+        max_position_usdc: float = None,
+        max_total_exposure: float = None,
+        min_edge: float = None,
+    ):
+        self.kelly_fraction = kelly_fraction or config.kelly_fraction
+        self.max_position_usdc = max_position_usdc or config.max_position_usdc
         self.max_total_exposure = max_total_exposure or config.max_total_exposure
-        self.min_edge           = min_edge or config.min_edge
+        self.min_edge = min_edge or config.min_edge
 
     def kelly_size(
         self,
@@ -89,7 +92,7 @@ class PositionSizer:
             }
 
         frac_kelly = full_kelly * self.kelly_fraction
-        raw_size   = frac_kelly * bankroll
+        raw_size = frac_kelly * bankroll
 
         # Hard caps
         remaining_capacity = max(0.0, self.max_total_exposure - current_exposure)
@@ -101,10 +104,10 @@ class PositionSizer:
 
         return {
             "recommended_usdc": round(max(0.0, capped_size), 2),
-            "full_kelly_pct":   round(full_kelly, 4),
-            "frac_kelly_pct":   round(frac_kelly, 4),
-            "edge":             round(edge, 4),
-            "skip_reason":      skip_reason,
+            "full_kelly_pct": round(full_kelly, 4),
+            "frac_kelly_pct": round(frac_kelly, 4),
+            "edge": round(edge, 4),
+            "skip_reason": skip_reason,
         }
 
     def arb_size(
@@ -120,8 +123,8 @@ class PositionSizer:
         Size = min(max_position * 2, bankroll * 0.10, remaining_capacity)
         """
         sum_price = yes_price + no_price
-        discount  = 1.0 - sum_price
-        roi_pct   = (discount / sum_price) * 100 if sum_price > 0 else 0
+        discount = 1.0 - sum_price
+        roi_pct = (discount / sum_price) * 100 if sum_price > 0 else 0
 
         # For arb, use 10% of bankroll capped at 2x normal max
         aggressive_max = min(self.max_position_usdc * 2, bankroll * 0.10)
@@ -129,9 +132,9 @@ class PositionSizer:
         size = min(aggressive_max, remaining_capacity)
 
         return {
-            "recommended_usdc": round(size, 2),   # per leg (buy both YES and NO)
-            "yes_leg_usdc":     round(size * yes_price / sum_price, 2),
-            "no_leg_usdc":      round(size * no_price  / sum_price, 2),
-            "roi_pct":          round(roi_pct, 2),
-            "locked_profit":    round(discount * size, 2),
+            "recommended_usdc": round(size, 2),  # per leg (buy both YES and NO)
+            "yes_leg_usdc": round(size * yes_price / sum_price, 2),
+            "no_leg_usdc": round(size * no_price / sum_price, 2),
+            "roi_pct": round(roi_pct, 2),
+            "locked_profit": round(discount * size, 2),
         }

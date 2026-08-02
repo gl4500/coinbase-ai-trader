@@ -4,6 +4,7 @@ Tests for CoinbaseCNNAgent and FeatureBuilder.
 These tests run without real credentials, PyTorch, or a live Ollama server.
 All external calls are patched.
 """
+
 import asyncio
 import math
 import os
@@ -17,24 +18,26 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
-os.environ.setdefault("OLLAMA_MODEL",             "llama3.1:8b")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.setdefault("OLLAMA_MODEL", "llama3.1:8b")
 
+import agents.cnn_agent as _cnn_mod
 from agents.cnn_agent import (
-    CoinbaseCNNAgent,
-    FeatureBuilder,
     N_CHANNELS,
     SEQ_LEN,
+    CoinbaseCNNAgent,
+    FeatureBuilder,
 )
-import agents.cnn_agent as _cnn_mod
 
 try:
     import torch
     import torch.nn as nn
+
     from agents.cnn_agent import GatedConv1d, SignalCNN
+
     _TORCH_AVAILABLE = True
 except ImportError:
     _TORCH_AVAILABLE = False
@@ -42,30 +45,34 @@ except ImportError:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _make_candles(n: int = 80, start: float = 50000.0) -> list:
     """Sinusoidal OHLCV candles for testing."""
     candles = []
     for i in range(n):
         c = start + 500 * math.sin(i / 5.0)
-        candles.append({
-            "open":   c - 50,
-            "high":   c + 100,
-            "low":    c - 100,
-            "close":  c,
-            "volume": 10_000 + i * 100,
-            "start":  1_700_000_000 + i * 3600,
-        })
+        candles.append(
+            {
+                "open": c - 50,
+                "high": c + 100,
+                "low": c - 100,
+                "close": c,
+                "volume": 10_000 + i * 100,
+                "start": 1_700_000_000 + i * 3600,
+            }
+        )
     return candles
 
 
 # ── FeatureBuilder tests ───────────────────────────────────────────────────────
+
 
 class TestFeatureBuilder:
     def setup_method(self):
         self.fb = FeatureBuilder()
 
     def test_output_shape(self):
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         channels = self.fb.build(candles, {})
         assert len(channels) == N_CHANNELS
         for ch in channels:
@@ -73,7 +80,7 @@ class TestFeatureBuilder:
 
     def test_short_history_padded(self):
         """Fewer than SEQ_LEN bars should be left-padded."""
-        candles  = _make_candles(10)
+        candles = _make_candles(10)
         channels = self.fb.build(candles, {})
         assert len(channels[0]) == SEQ_LEN
 
@@ -84,7 +91,7 @@ class TestFeatureBuilder:
 
     def test_norm_close_bounded(self):
         """Channel 0 (normalised close) should be in [0, 1]."""
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         channels = self.fb.build(candles, {})
         assert all(0.0 <= v <= 1.0 for v in channels[0]), "Ch0 norm_close out of [0,1]"
 
@@ -113,15 +120,24 @@ class TestFeatureBuilder:
         candles = []
         for i in range(70):
             p = 100.0 + i
-            candles.append({"open": p - 0.5, "high": p + 1, "low": p - 1,
-                             "close": p, "volume": 1000, "start": i})
+            candles.append(
+                {
+                    "open": p - 0.5,
+                    "high": p + 1,
+                    "low": p - 1,
+                    "close": p,
+                    "volume": 1000,
+                    "start": i,
+                }
+            )
         channels = self.fb.build(candles, {})
         assert channels[9][-1] > 0, "Rising prices → positive 1-bar change"
 
     def test_candle_body_direction(self):
         """Bullish candle (close > open) → positive body channel value."""
-        candle = [{"open": 100.0, "high": 110.0, "low": 95.0,
-                   "close": 108.0, "volume": 500, "start": 0}]
+        candle = [
+            {"open": 100.0, "high": 110.0, "low": 95.0, "close": 108.0, "volume": 500, "start": 0}
+        ]
         channels = self.fb.build(candle * 60, {})
         # body = (close - open) / open > 0 for bullish candles
         assert channels[3][-1] > 0, "Bullish candle body should be positive"
@@ -140,8 +156,13 @@ class TestFeatureBuilder:
         candles = _make_candles(60)
         # ≥14 5m candles → would trigger the OLD non-zero computation
         candles_5m = [
-            {"open": 100.0 + i * 0.1, "high": 101.0, "low": 99.0,
-             "close": 100.5 + i * 0.1, "volume": 1000.0 + i * 10}
+            {
+                "open": 100.0 + i * 0.1,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5 + i * 0.1,
+                "volume": 1000.0 + i * 10,
+            }
             for i in range(20)
         ]
         channels = self.fb.build(candles, {}, candles_5m=candles_5m)
@@ -155,6 +176,7 @@ class TestFeatureBuilder:
 
 # ── CoinbaseCNNAgent tests ─────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def agent():
     """CNN agent with PyTorch disabled (linear fallback)."""
@@ -166,19 +188,18 @@ def agent():
 @pytest.fixture
 def product():
     return {
-        "product_id":   "BTC-USD",
+        "product_id": "BTC-USD",
         "base_currency": "BTC",
-        "price":        95_000.0,
-        "volume_24h":   500_000_000,
+        "price": 95_000.0,
+        "volume_24h": 500_000_000,
     }
 
 
 class TestCoinbaseCNNAgent:
-
     # Common patches shared by all generate_signal tests that need candles
     _common_patches = {
         "agents.cnn_agent.database.get_agent_decisions": [],
-        "agents.cnn_agent.database.save_cnn_scan":       None,
+        "agents.cnn_agent.database.save_cnn_scan": None,
     }
 
     @pytest.mark.asyncio
@@ -188,18 +209,15 @@ class TestCoinbaseCNNAgent:
         doesn't get flipped by the LLM-skip threshold check."""
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  new=AsyncMock()),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
             patch.object(agent, "_cnn_prob", return_value=0.82),
         ):
             sig = await agent.generate_signal(product)
@@ -215,18 +233,15 @@ class TestCoinbaseCNNAgent:
         """Low model_prob → SELL signal returned."""
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  new=AsyncMock()),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=2)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=2)),
             patch.object(agent, "_cnn_prob", return_value=0.15),
         ):
             sig = await agent.generate_signal(product)
@@ -241,16 +256,14 @@ class TestCoinbaseCNNAgent:
         Pin cnn_prob to 0.5 so skip_llm doesn't fire (cnn_dist=0 < threshold)."""
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  new=AsyncMock()),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
             patch.object(agent, "_cnn_prob", return_value=0.50),
         ):
             sig = await agent.generate_signal(product)
@@ -267,8 +280,9 @@ class TestCoinbaseCNNAgent:
     @pytest.mark.asyncio
     async def test_generate_signal_insufficient_candles(self, agent, product):
         """Fewer than 30 candles → returns None."""
-        with patch("agents.cnn_agent.database.get_candles",
-                   new=AsyncMock(return_value=_make_candles(5))):
+        with patch(
+            "agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=_make_candles(5))
+        ):
             sig = await agent.generate_signal(product)
         assert sig is None
 
@@ -276,16 +290,15 @@ class TestCoinbaseCNNAgent:
     async def test_cache_skips_fetch(self, agent, product):
         """Second call within TTL reuses cached CNN prob — no candle fetch."""
         import time
+
         agent._cache["BTC-USD"] = (0.75, time.time(), {})
 
         mock_get_candles = AsyncMock(return_value=_make_candles(80))
         with (
             patch("agents.cnn_agent.database.get_candles", mock_get_candles),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
             patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
             patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=3)),
         ):
             await agent.generate_signal(product)
@@ -298,15 +311,17 @@ class TestCoinbaseCNNAgent:
         assert "BTC-USD" not in agent._cache
 
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=_make_candles(80))),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.database.get_candles",
+                new=AsyncMock(return_value=_make_candles(80)),
+            ),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
             patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
             patch.object(agent, "_cnn_prob", return_value=0.75),
             patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=3)),
         ):
@@ -323,8 +338,7 @@ class TestCoinbaseCNNAgent:
     @pytest.mark.asyncio
     async def test_scan_all_empty(self, agent):
         """scan_all with no tracked products returns empty list."""
-        with patch("agents.cnn_agent.database.get_products",
-                   new=AsyncMock(return_value=[])):
+        with patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=[])):
             result = await agent.scan_all()
         assert result == []
 
@@ -336,20 +350,32 @@ class TestCoinbaseCNNAgent:
             {"product_id": "ETH-USD", "base_currency": "ETH", "price": 3000.0},
         ]
         fake_signals = [
-            {"product_id": "BTC-USD", "side": "BUY", "strength": 0.30,
-             "signal_type": "CNN_LONG", "price": 95000.0, "quote_size": 30.0},
-            {"product_id": "ETH-USD", "side": "BUY", "strength": 0.60,
-             "signal_type": "CNN_LONG", "price": 3000.0, "quote_size": 60.0},
+            {
+                "product_id": "BTC-USD",
+                "side": "BUY",
+                "strength": 0.30,
+                "signal_type": "CNN_LONG",
+                "price": 95000.0,
+                "quote_size": 30.0,
+            },
+            {
+                "product_id": "ETH-USD",
+                "side": "BUY",
+                "strength": 0.60,
+                "signal_type": "CNN_LONG",
+                "price": 3000.0,
+                "quote_size": 60.0,
+            },
         ]
         idx = [0]
+
         async def _fake_generate(p, execute=False, order_executor=None):
             s = fake_signals[idx[0]]
             idx[0] += 1
             return s
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
             patch.object(agent, "generate_signal", side_effect=_fake_generate),
         ):
             results = await agent.scan_all()
@@ -362,6 +388,7 @@ class TestCoinbaseCNNAgent:
 
 
 # ── train_on_history ───────────────────────────────────────────────────────────
+
 
 class TestTrainOnHistory:
     """train_on_history: 80/20 split, val loss, fit diagnosis."""
@@ -379,10 +406,11 @@ class TestTrainOnHistory:
         test's result and breaks len()-based assertions.
         """
         import agents.cnn_agent as ca
+
         monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
-        monkeypatch.setattr(ca, "MODEL_PATH",      str(tmp_path / "cnn_model.pt"))
+        monkeypatch.setattr(ca, "MODEL_PATH", str(tmp_path / "cnn_model.pt"))
         monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
-        monkeypatch.setattr(ca, "_CKPT_PATH",      str(tmp_path / "ckpt_resume.pt"))
+        monkeypatch.setattr(ca, "_CKPT_PATH", str(tmp_path / "ckpt_resume.pt"))
 
     def test_production_paths_are_isolated(self):
         """Guard: these tests call real train_on_history which writes the
@@ -395,6 +423,7 @@ class TestTrainOnHistory:
         synthetic-data checkpoint.
         """
         import agents.cnn_agent as ca
+
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         prod_loss = os.path.abspath(os.path.join(backend_dir, "cnn_best_loss.txt"))
         prod_ckpt = os.path.abspath(os.path.join(backend_dir, "cnn_model.pt"))
@@ -410,14 +439,16 @@ class TestTrainOnHistory:
         candles = []
         for i in range(n):
             c = start + 500 * math.sin(i / 5.0)
-            candles.append({
-                "open":       c - 50,
-                "high":       c + 100,
-                "low":        c - 100,
-                "close":      c,
-                "volume":     10_000 + i * 100,
-                "start_time": 1_700_000_000 + i * 3600,  # ← SQLite column
-            })
+            candles.append(
+                {
+                    "open": c - 50,
+                    "high": c + 100,
+                    "low": c - 100,
+                    "close": c,
+                    "volume": 10_000 + i * 100,
+                    "start_time": 1_700_000_000 + i * 3600,  # ← SQLite column
+                }
+            )
         return candles
 
     @pytest.mark.asyncio
@@ -430,13 +461,11 @@ class TestTrainOnHistory:
 
         agent = CoinbaseCNNAgent()
         products = [{"product_id": f"COIN{i}-USD"} for i in range(6)]
-        candles  = self._make_sqlite_candles(80)
+        candles = self._make_sqlite_candles(80)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
         ):
             result = await agent.train_on_history(epochs=2)
@@ -448,6 +477,7 @@ class TestTrainOnHistory:
     def trained_agent(self):
         """CNN agent with PyTorch enabled (uses real model if available, else skip)."""
         import pytest
+
         try:
             import torch  # noqa: F401
         except ImportError:
@@ -457,6 +487,7 @@ class TestTrainOnHistory:
 
     def _make_products_and_candles(self, n_products: int = 6):
         import math
+
         products = [{"product_id": f"COIN{i}-USD"} for i in range(n_products)]
         candles = []
         # Need > SEQ_LEN(60) + _FORWARD_HOURS(4) + 1 = 65 bars to generate samples.
@@ -465,23 +496,26 @@ class TestTrainOnHistory:
         # can degenerate to 0.0 in a few epochs on mock data.
         for i in range(200):
             c = 50_000.0 + 500 * math.sin(i / 5.0)
-            candles.append({
-                "open": c - 50, "high": c + 100, "low": c - 100,
-                "close": c, "volume": 10_000 + i * 100,
-                "start": 1_700_000_000 + i * 3600,
-            })
+            candles.append(
+                {
+                    "open": c - 50,
+                    "high": c + 100,
+                    "low": c - 100,
+                    "close": c,
+                    "volume": 10_000 + i * 100,
+                    "start": 1_700_000_000 + i * 3600,
+                }
+            )
         return products, candles
 
     @pytest.mark.asyncio
     async def test_returns_error_when_too_few_samples(self, trained_agent):
         """Fewer than SEQ_LEN+5 candles per product → skipped → <4 total samples → error."""
         products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
-        candles  = _make_candles(60)   # 60 < SEQ_LEN(60)+_FORWARD_HOURS(4)+1=65 → skipped
+        candles = _make_candles(60)  # 60 < SEQ_LEN(60)+_FORWARD_HOURS(4)+1=65 → skipped
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
         ):
             result = await trained_agent.train_on_history(epochs=2)
@@ -493,16 +527,23 @@ class TestTrainOnHistory:
         """With enough data, result contains all diagnostic keys."""
         products, candles = self._make_products_and_candles(6)
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
         ):
             result = await trained_agent.train_on_history(epochs=3)
 
-        for key in ("epochs", "samples", "train_samples", "val_samples",
-                    "initial_loss", "final_train_loss", "final_val_loss",
-                    "fit_status", "fit_advice", "epoch_log"):
+        for key in (
+            "epochs",
+            "samples",
+            "train_samples",
+            "val_samples",
+            "initial_loss",
+            "final_train_loss",
+            "final_val_loss",
+            "fit_status",
+            "fit_advice",
+            "epoch_log",
+        ):
             assert key in result, f"Missing key: {key}"
 
     @pytest.mark.asyncio
@@ -510,10 +551,8 @@ class TestTrainOnHistory:
         """Train samples ≈ 80% of total, val ≈ 20%."""
         products, candles = self._make_products_and_candles(10)
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
         ):
             result = await trained_agent.train_on_history(epochs=2)
 
@@ -525,10 +564,8 @@ class TestTrainOnHistory:
         """epoch_log should have one entry per epoch."""
         products, candles = self._make_products_and_candles(6)
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
         ):
             result = await trained_agent.train_on_history(epochs=5)
 
@@ -541,10 +578,8 @@ class TestTrainOnHistory:
         """fit_status must be one of the three known values."""
         products, candles = self._make_products_and_candles(6)
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
         ):
             result = await trained_agent.train_on_history(epochs=3)
 
@@ -557,12 +592,11 @@ class TestTrainOnHistory:
         round to 0.0 in fp32 even at epoch 1 — the test's real intent is
         catching NaN/Inf/huge values, not strict positivity."""
         import math
+
         products, candles = self._make_products_and_candles(6)
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
         ):
             result = await trained_agent.train_on_history(epochs=3)
 
@@ -575,6 +609,7 @@ class TestTrainOnHistory:
 
 # ── _CNNBook reconciliation ────────────────────────────────────────────────────
 
+
 class TestCNNBookReconciliation:
     """On load, ghost open trades (from prior sessions) must be closed."""
 
@@ -585,29 +620,30 @@ class TestCNNBookReconciliation:
 
         book = _CNNBook()
         saved_state = {
-            "balance":      850.0,
+            "balance": 850.0,
             "realized_pnl": -10.0,
-            "positions":    {"XRP-USD": {"size": 100, "avg_price": 1.30}},
+            "positions": {"XRP-USD": {"size": 100, "avg_price": 1.30}},
         }
         # DB has two open trades: XRP (still open) and BIO (ghost from old session)
         open_trades = [
             {"id": 1, "product_id": "XRP-USD", "entry_price": 1.30, "size": 100},
-            {"id": 2, "product_id": "BIO-USD",  "entry_price": 0.50, "size": 50},
+            {"id": 2, "product_id": "BIO-USD", "entry_price": 0.50, "size": 50},
         ]
 
         close_mock = AsyncMock()
         with (
-            patch("agents.cnn_agent.database.load_agent_state",
-                  new=AsyncMock(return_value=saved_state)),
-            patch("agents.cnn_agent.database.get_trades",
-                  new=AsyncMock(return_value=open_trades)),
+            patch(
+                "agents.cnn_agent.database.load_agent_state",
+                new=AsyncMock(return_value=saved_state),
+            ),
+            patch("agents.cnn_agent.database.get_trades", new=AsyncMock(return_value=open_trades)),
             patch("agents.cnn_agent.database.close_trade_by_id", close_mock),
         ):
             await book.load()
 
         # BIO-USD (id=2) is orphaned — should be closed; XRP-USD (id=1) is current — should not
         close_mock.assert_called_once()
-        assert close_mock.call_args.args[0] == 2       # trade_id positional
+        assert close_mock.call_args.args[0] == 2  # trade_id positional
         assert close_mock.call_args.kwargs["trigger_close"] == "STARTUP_CLEANUP"
 
     @pytest.mark.asyncio
@@ -617,7 +653,8 @@ class TestCNNBookReconciliation:
 
         book = _CNNBook()
         saved_state = {
-            "balance": 800.0, "realized_pnl": 0.0,
+            "balance": 800.0,
+            "realized_pnl": 0.0,
             "positions": {"BIO-USD": {"size": 100, "avg_price": 0.50}},
         }
         # 3 open rows for BIO-USD from 3 different sessions — only newest (id=3) should stay
@@ -629,10 +666,11 @@ class TestCNNBookReconciliation:
 
         close_mock = AsyncMock()
         with (
-            patch("agents.cnn_agent.database.load_agent_state",
-                  new=AsyncMock(return_value=saved_state)),
-            patch("agents.cnn_agent.database.get_trades",
-                  new=AsyncMock(return_value=open_trades)),
+            patch(
+                "agents.cnn_agent.database.load_agent_state",
+                new=AsyncMock(return_value=saved_state),
+            ),
+            patch("agents.cnn_agent.database.get_trades", new=AsyncMock(return_value=open_trades)),
             patch("agents.cnn_agent.database.close_trade_by_id", close_mock),
         ):
             await book.load()
@@ -649,9 +687,9 @@ class TestCNNBookReconciliation:
 
         book = _CNNBook()
         saved_state = {
-            "balance":      900.0,
+            "balance": 900.0,
             "realized_pnl": 0.0,
-            "positions":    {"XRP-USD": {"size": 100, "avg_price": 1.30}},
+            "positions": {"XRP-USD": {"size": 100, "avg_price": 1.30}},
         }
         open_trades = [
             {"id": 1, "product_id": "XRP-USD", "entry_price": 1.30, "size": 100},
@@ -659,10 +697,11 @@ class TestCNNBookReconciliation:
 
         close_mock = AsyncMock()
         with (
-            patch("agents.cnn_agent.database.load_agent_state",
-                  new=AsyncMock(return_value=saved_state)),
-            patch("agents.cnn_agent.database.get_trades",
-                  new=AsyncMock(return_value=open_trades)),
+            patch(
+                "agents.cnn_agent.database.load_agent_state",
+                new=AsyncMock(return_value=saved_state),
+            ),
+            patch("agents.cnn_agent.database.get_trades", new=AsyncMock(return_value=open_trades)),
             patch("agents.cnn_agent.database.close_trade_by_id", close_mock),
         ):
             await book.load()
@@ -676,10 +715,8 @@ class TestCNNBookReconciliation:
 
         book = _CNNBook()
         with (
-            patch("agents.cnn_agent.database.load_agent_state",
-                  new=AsyncMock(return_value=None)),
-            patch("agents.cnn_agent.database.get_trades",
-                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.load_agent_state", new=AsyncMock(return_value=None)),
+            patch("agents.cnn_agent.database.get_trades", new=AsyncMock(return_value=[])),
         ):
             await book.load()
 
@@ -688,6 +725,7 @@ class TestCNNBookReconciliation:
 
 
 # ── _CNNBook.buy() product_status branching (#125a) ────────────────────────────
+
 
 class TestCNNBookBuyProductStatus:
     """`_CNNBook.buy` must read `database.get_product_status(pid)` and adjust
@@ -705,29 +743,30 @@ class TestCNNBookBuyProductStatus:
     @pytest.mark.asyncio
     async def test_no_status_row_uses_full_frac(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         book.balance = 1000.0
         with (
-            patch("agents.cnn_agent.database.get_product_status",
-                  new=AsyncMock(return_value=None)),
+            patch("agents.cnn_agent.database.get_product_status", new=AsyncMock(return_value=None)),
             patch("agents.cnn_agent.database.open_trade", new=AsyncMock()),
             patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
         ):
             spend, size = await book.buy("BTC-USD", price=100.0, frac=0.1)
-        assert spend == 100.0, (
-            "no product_status row → default to 'active' tier (full frac)"
-        )
+        assert spend == 100.0, "no product_status row → default to 'active' tier (full frac)"
         assert size == 1.0
         assert "BTC-USD" in book.positions
 
     @pytest.mark.asyncio
     async def test_active_status_uses_full_frac(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         book.balance = 1000.0
         with (
-            patch("agents.cnn_agent.database.get_product_status",
-                  new=AsyncMock(return_value={"status": "active"})),
+            patch(
+                "agents.cnn_agent.database.get_product_status",
+                new=AsyncMock(return_value={"status": "active"}),
+            ),
             patch("agents.cnn_agent.database.open_trade", new=AsyncMock()),
             patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
         ):
@@ -738,19 +777,20 @@ class TestCNNBookBuyProductStatus:
     @pytest.mark.asyncio
     async def test_probation_halves_frac(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         book.balance = 1000.0
         open_mock = AsyncMock()
         with (
-            patch("agents.cnn_agent.database.get_product_status",
-                  new=AsyncMock(return_value={"status": "probation"})),
+            patch(
+                "agents.cnn_agent.database.get_product_status",
+                new=AsyncMock(return_value={"status": "probation"}),
+            ),
             patch("agents.cnn_agent.database.open_trade", open_mock),
             patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
         ):
             spend, size = await book.buy("DOGE-USD", price=100.0, frac=0.1)
-        assert spend == 50.0, (
-            f"probation must halve frac (1000*0.05=50.0), got {spend}"
-        )
+        assert spend == 50.0, f"probation must halve frac (1000*0.05=50.0), got {spend}"
         assert size == 0.5
         # Still a real trade — must hit DB
         open_mock.assert_called_once()
@@ -758,27 +798,29 @@ class TestCNNBookBuyProductStatus:
     @pytest.mark.asyncio
     async def test_suspended_records_no_trade(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         book.balance = 1000.0
         open_mock = AsyncMock()
         save_mock = AsyncMock()
         with (
-            patch("agents.cnn_agent.database.get_product_status",
-                  new=AsyncMock(return_value={"status": "suspended"})),
+            patch(
+                "agents.cnn_agent.database.get_product_status",
+                new=AsyncMock(return_value={"status": "suspended"}),
+            ),
             patch("agents.cnn_agent.database.open_trade", open_mock),
             patch("agents.cnn_agent.database.save_agent_state", save_mock),
         ):
             spend, size = await book.buy("XRP-USD", price=100.0, frac=0.1)
         assert spend == 0.0, "suspended must paper-trade only (no spend)"
         assert size == 0.0
-        assert "XRP-USD" not in book.positions, (
-            "suspended must NOT add a position to the book"
-        )
+        assert "XRP-USD" not in book.positions, "suspended must NOT add a position to the book"
         assert book.balance == 1000.0, "suspended must not debit balance"
         open_mock.assert_not_called()
 
 
 # ── GatedConv1d / GLU architecture tests ──────────────────────────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
 class TestGatedConv1d:
@@ -793,37 +835,37 @@ class TestGatedConv1d:
     def test_gate_suppression_at_large_negative(self):
         """When gate bias is extremely negative, output is near zero for any input."""
         layer = self._layer()
-        nn.init.constant_(layer.conv_gate.weight, 0.0)   # zero weights
-        nn.init.constant_(layer.conv_gate.bias,   -100.0) # gate = sigmoid(-100) ≈ 0
-        x   = self._batch()
+        nn.init.constant_(layer.conv_gate.weight, 0.0)  # zero weights
+        nn.init.constant_(layer.conv_gate.bias, -100.0)  # gate = sigmoid(-100) ≈ 0
+        x = self._batch()
         out = layer(x)
         assert float(out.abs().max()) < 1e-3, "Gate should suppress output to ~0"
 
     def test_gate_passthrough_at_large_positive(self):
         """When gate bias is extremely positive, output ≈ BN(conv_main(x))."""
         layer = self._layer()
-        nn.init.constant_(layer.conv_gate.weight, 0.0)   # zero weights
-        nn.init.constant_(layer.conv_gate.bias,   100.0)  # gate = sigmoid(100) ≈ 1
-        x        = self._batch()
-        out      = layer(x)
+        nn.init.constant_(layer.conv_gate.weight, 0.0)  # zero weights
+        nn.init.constant_(layer.conv_gate.bias, 100.0)  # gate = sigmoid(100) ≈ 1
+        x = self._batch()
+        out = layer(x)
         # GatedConv1d applies BatchNorm after the gate multiplication, so
         # gate≈1 → out = BN(conv_main(x) × 1) = BN(conv_main(x))
         expected = layer.bn(layer.conv_main(x))
-        assert torch.allclose(out, expected, atol=1e-3), \
+        assert torch.allclose(out, expected, atol=1e-3), (
             "Gate fully open → output should equal BN(conv_main(x))"
+        )
 
     def test_output_shape_preserved(self):
         """Output shape matches (batch, out_ch, seq_len)."""
         layer = self._layer(in_ch=4, out_ch=8)
-        x     = self._batch(in_ch=4, seq=60)
-        out   = layer(x)
+        x = self._batch(in_ch=4, seq=60)
+        out = layer(x)
         assert out.shape == (2, 8, 60)
 
     def test_signal_cnn_first_block_is_gated(self):
         """SignalCNN.c1 is a GatedConv1d, not a plain Conv1d."""
         model = SignalCNN(n_ch=N_CHANNELS)
-        assert isinstance(model.c1, GatedConv1d), \
-            "First conv block should be GatedConv1d"
+        assert isinstance(model.c1, GatedConv1d), "First conv block should be GatedConv1d"
 
     def test_signal_cnn_arch_tag(self):
         """SignalCNN carries arch='glu2' class attribute for checkpoint compat."""
@@ -831,12 +873,13 @@ class TestGatedConv1d:
 
     def test_end_to_end_train_and_predict(self):
         """Model trains one step without error and returns a probability in [0, 1]."""
-        import torch.optim as optim
         import torch.nn.functional as F
+        import torch.optim as optim
+
         model = SignalCNN(n_ch=N_CHANNELS)
-        x     = torch.randn(4, N_CHANNELS, SEQ_LEN)
-        y     = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
-        opt   = optim.AdamW(model.parameters(), lr=1e-3)
+        x = torch.randn(4, N_CHANNELS, SEQ_LEN)
+        y = torch.tensor([[1.0], [0.0], [1.0], [0.0]])
+        opt = optim.AdamW(model.parameters(), lr=1e-3)
         model.train()
         opt.zero_grad()
         # Model outputs raw logits — use BCEWithLogitsLoss (numerically stable)
@@ -849,35 +892,32 @@ class TestGatedConv1d:
     def test_save_load_roundtrip(self, tmp_path):
         """Saved checkpoint loads back with matching weights."""
         model_a = SignalCNN(n_ch=N_CHANNELS)
-        path    = str(tmp_path / "test_model.pt")
+        path = str(tmp_path / "test_model.pt")
         torch.save({"arch": model_a.arch, "state_dict": model_a.state_dict()}, path)
 
         model_b = SignalCNN(n_ch=N_CHANNELS)
-        ckpt    = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         model_b.load_state_dict(ckpt["state_dict"])
 
-        for (na, pa), (nb, pb) in zip(
-            model_a.named_parameters(), model_b.named_parameters()
-        ):
+        for (na, pa), (nb, pb) in zip(model_a.named_parameters(), model_b.named_parameters()):
             assert torch.allclose(pa, pb), f"Weight mismatch at {na}"
 
     def test_save_load_arch_tag_preserved(self, tmp_path):
         """Checkpoint arch tag is 'glu2' after save."""
         model = SignalCNN(n_ch=N_CHANNELS)
-        path  = str(tmp_path / "test_model.pt")
+        path = str(tmp_path / "test_model.pt")
         torch.save({"arch": model.arch, "state_dict": model.state_dict()}, path)
-        ckpt  = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         assert ckpt["arch"] == "glu2"
 
     def test_get_learned_weights_sums_to_one(self):
         """FeatureBuilder.get_learned_weights() must return weights that sum to 1.0."""
         model = SignalCNN(n_ch=N_CHANNELS)
-        fb    = FeatureBuilder()
+        fb = FeatureBuilder()
         # get_learned_weights reads first conv layer weights to rank channels
         weights = fb.get_learned_weights(model)
         assert weights is not None, "get_learned_weights returned None"
-        assert abs(sum(weights) - 1.0) < 1e-5, \
-            f"Weights should sum to 1.0, got {sum(weights):.6f}"
+        assert abs(sum(weights) - 1.0) < 1e-5, f"Weights should sum to 1.0, got {sum(weights):.6f}"
 
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
@@ -887,6 +927,7 @@ class TestSignalCNNGlu1:
 
     def _import(self):
         from agents.cnn_agent import SignalCNNGlu1
+
         return SignalCNNGlu1
 
     def test_class_exists_with_arch_tag(self):
@@ -894,22 +935,24 @@ class TestSignalCNNGlu1:
         assert cls.arch == "glu1"
 
     def test_forward_shape(self):
-        cls   = self._import()
+        cls = self._import()
         model = cls(n_ch=N_CHANNELS)
-        x     = torch.randn(4, N_CHANNELS, SEQ_LEN)
+        x = torch.randn(4, N_CHANNELS, SEQ_LEN)
         assert model(x).shape == (4, 1)
 
     def test_predict_returns_probability(self):
-        cls   = self._import()
+        cls = self._import()
         model = cls(n_ch=N_CHANNELS)
-        prob  = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
+        prob = model.predict(torch.randn(N_CHANNELS, SEQ_LEN))
         assert 0.0 <= prob <= 1.0
 
     # test_fewer_params_than_glu2 DELETED #311-refactor-e — SignalCNN (glu2) gone.
 
+
 # TestSignalCNNGluM, TestArchFactoryAndPaths (multi-arch lookup),
 # TestCnnAgentArchWiring (CNN_ARCH env routing) all DELETED #311-refactor-e —
 # multi-arch registry collapsed to glu1 only.
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
 class TestTrainOnHistoryNonBlocking:
@@ -929,14 +972,16 @@ class TestTrainOnHistoryNonBlocking:
         test's result and breaks len()-based assertions.
         """
         import agents.cnn_agent as ca
+
         monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
-        monkeypatch.setattr(ca, "MODEL_PATH",      str(tmp_path / "cnn_model.pt"))
+        monkeypatch.setattr(ca, "MODEL_PATH", str(tmp_path / "cnn_model.pt"))
         monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
-        monkeypatch.setattr(ca, "_CKPT_PATH",      str(tmp_path / "ckpt_resume.pt"))
+        monkeypatch.setattr(ca, "_CKPT_PATH", str(tmp_path / "ckpt_resume.pt"))
 
     def test_production_paths_are_isolated(self):
         """Guard: see TestTrainOnHistory.test_production_paths_are_isolated."""
         import agents.cnn_agent as ca
+
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         prod_loss = os.path.abspath(os.path.join(backend_dir, "cnn_best_loss.txt"))
         prod_ckpt = os.path.abspath(os.path.join(backend_dir, "cnn_model.pt"))
@@ -949,15 +994,21 @@ class TestTrainOnHistoryNonBlocking:
 
     def _make_products_and_candles(self, n_products: int = 6):
         import math
+
         products = [{"product_id": f"COIN{i}-USD"} for i in range(n_products)]
         candles = []
         for i in range(80):
             c = 50_000.0 + 500 * math.sin(i / 5.0)
-            candles.append({
-                "open": c - 50, "high": c + 100, "low": c - 100,
-                "close": c, "volume": 10_000 + i * 100,
-                "start": 1_700_000_000 + i * 3600,
-            })
+            candles.append(
+                {
+                    "open": c - 50,
+                    "high": c + 100,
+                    "low": c - 100,
+                    "close": c,
+                    "volume": 10_000 + i * 100,
+                    "start": 1_700_000_000 + i * 3600,
+                }
+            )
         return products, candles
 
     @pytest.mark.asyncio
@@ -978,10 +1029,8 @@ class TestTrainOnHistoryNonBlocking:
         products, candles = self._make_products_and_candles(6)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
         ):
             # Run training and the side task concurrently
@@ -998,28 +1047,35 @@ class TestTrainOnHistoryNonBlocking:
     @pytest.mark.asyncio
     async def test_training_result_valid_after_executor(self):
         """Result dict is intact and correct even when fit runs in a thread."""
-        agent    = CoinbaseCNNAgent()
+        agent = CoinbaseCNNAgent()
         products, candles = self._make_products_and_candles(6)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
         ):
             result = await agent.train_on_history(epochs=3)
 
         assert "error" not in result
-        for key in ("epochs", "samples", "train_samples", "val_samples",
-                    "initial_loss", "final_train_loss", "final_val_loss",
-                    "fit_status", "epoch_log"):
+        for key in (
+            "epochs",
+            "samples",
+            "train_samples",
+            "val_samples",
+            "initial_loss",
+            "final_train_loss",
+            "final_val_loss",
+            "fit_status",
+            "epoch_log",
+        ):
             assert key in result, f"Missing key after executor refactor: {key}"
         assert result["epochs"] == 3
         assert len(result["epoch_log"]) == 3
 
 
 # ── Kelly sizing bug regression tests ─────────────────────────────────────────
+
 
 class TestKellySizingBug:
     """
@@ -1037,12 +1093,16 @@ class TestKellySizingBug:
     def _make_tracker_mock():
         """Return a MagicMock with async get_lessons and record methods."""
         from unittest.mock import MagicMock
+
         t = MagicMock()
         t.get_lessons = AsyncMock(return_value=[])
-        t.record      = AsyncMock()
+        t.record = AsyncMock()
         return t
 
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); model_prob 0.62 below gate", strict=False)
+    @pytest.mark.xfail(
+        reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); model_prob 0.62 below gate",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_buy_frac_nonzero_at_model_prob_0_62(self, agent, product):
         """model_prob=0.62 → kelly_frac must be > 0 so book.buy() actually spends.
@@ -1050,23 +1110,23 @@ class TestKellySizingBug:
         Before fix: _kelly_fraction(strength=0.24) = 0 → frac passed to buy = 0.
         After fix:  _kelly_fraction(model_prob=0.62) = 0.24 → frac > 0 → trade executes.
         """
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         buy_mock = AsyncMock(return_value=(50.0, 1))
-        tracker  = self._make_tracker_mock()
+        tracker = self._make_tracker_mock()
 
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
             patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
             patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
-            patch("agents.cnn_agent.get_tracker",   return_value=tracker),
-            patch.object(agent, "_cnn_prob",  return_value=0.62),
-            patch.object(agent.book, "buy",   buy_mock),
+            patch("agents.cnn_agent.get_tracker", return_value=tracker),
+            patch.object(agent, "_cnn_prob", return_value=0.62),
+            patch.object(agent.book, "buy", buy_mock),
             patch.object(agent.book, "has_position", return_value=False),
         ):
             sig = await agent.generate_signal(product, execute=True)
@@ -1081,10 +1141,12 @@ class TestKellySizingBug:
             f"strength instead of model_prob. Expected 0.15 (=min(2*0.62-1, _CNN_MAX_FRAC))."
         )
         # _CNN_MAX_FRAC=0.15 caps kelly(0.62)=0.24 to 0.15
-        assert abs(frac_passed - 0.15) < 0.01, \
-            f"Expected frac≈0.15 (capped), got {frac_passed:.4f}"
+        assert abs(frac_passed - 0.15) < 0.01, f"Expected frac≈0.15 (capped), got {frac_passed:.4f}"
 
-    @pytest.mark.xfail(reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); model_prob 0.65 below gate", strict=False)
+    @pytest.mark.xfail(
+        reason="CNN sidelined per #127 (CNN_BUY_THRESHOLD=0.99 in .env); model_prob 0.65 below gate",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_buy_frac_nonzero_at_model_prob_0_65(self, agent, product):
         """model_prob=0.65 (above 0.60 threshold) → frac must be > 0.
@@ -1092,23 +1154,23 @@ class TestKellySizingBug:
         Before fix: strength=(0.65-0.5)*2=0.30 → kelly=max(0, 2*0.30-1)=0 → skipped.
         After fix:  kelly=max(0, 2*0.65-1)=0.30 → trade executes.
         """
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         buy_mock = AsyncMock(return_value=(65.0, 2))
-        tracker  = self._make_tracker_mock()
+        tracker = self._make_tracker_mock()
 
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",   new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
             patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
             patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=2)),
-            patch("agents.cnn_agent.get_tracker",   return_value=tracker),
-            patch.object(agent, "_cnn_prob",  return_value=0.65),
-            patch.object(agent.book, "buy",   buy_mock),
+            patch("agents.cnn_agent.get_tracker", return_value=tracker),
+            patch.object(agent, "_cnn_prob", return_value=0.65),
+            patch.object(agent.book, "buy", buy_mock),
             patch.object(agent.book, "has_position", return_value=False),
         ):
             sig = await agent.generate_signal(product, execute=True)
@@ -1124,6 +1186,7 @@ class TestKellySizingBug:
     def test_kelly_with_model_prob_gives_nonzero_at_0_62(self):
         """Direct unit test: _kelly_fraction(0.62) must be > 0."""
         from agents.signal_generator import _kelly_fraction
+
         frac = _kelly_fraction(0.62)
         assert frac > 0, (
             f"_kelly_fraction(0.62) = {frac} — should be 0.24 (=2*0.62-1). "
@@ -1134,7 +1197,8 @@ class TestKellySizingBug:
     def test_kelly_with_strength_gives_zero_at_0_24(self):
         """Shows the OLD (broken) behaviour: strength=0.24 → kelly=0."""
         from agents.signal_generator import _kelly_fraction
-        strength_for_0_62 = (0.62 - 0.5) * 2   # = 0.24
+
+        strength_for_0_62 = (0.62 - 0.5) * 2  # = 0.24
         frac = _kelly_fraction(strength_for_0_62)
         assert frac == pytest.approx(0.0, abs=0.001), (
             "This test documents the bug: passing strength instead of model_prob "
@@ -1143,6 +1207,7 @@ class TestKellySizingBug:
 
 
 # ── Training framework tests ───────────────────────────────────────────────────
+
 
 class TestTrainingFramework:
     """
@@ -1154,7 +1219,8 @@ class TestTrainingFramework:
     def test_needs_retrain_flag_set_on_channel_mismatch(self, tmp_path, monkeypatch):
         """Loading a checkpoint with wrong n_channels sets _needs_retrain=True."""
         import torch
-        from agents.cnn_agent import SignalCNN, N_CHANNELS, _EARLY_STOP_PATIENCE
+
+        from agents.cnn_agent import N_CHANNELS, SignalCNN
 
         # Force glu2 so _model_path_for(self._arch) resolves to the unsuffixed
         # MODEL_PATH constant the test overrides below. Without this, env-driven
@@ -1167,12 +1233,12 @@ class TestTrainingFramework:
         wrong_channels = N_CHANNELS + 5
         ckpt_path = str(tmp_path / "bad_ckpt.pt")
         torch.save(
-            {"arch": "glu", "n_channels": wrong_channels,
-             "state_dict": SignalCNN().state_dict()},
+            {"arch": "glu", "n_channels": wrong_channels, "state_dict": SignalCNN().state_dict()},
             ckpt_path,
         )
 
         import agents.cnn_agent as ca
+
         orig = ca.MODEL_PATH
         ca.MODEL_PATH = ckpt_path
         try:
@@ -1189,13 +1255,16 @@ class TestTrainingFramework:
     async def test_generate_signal_suppressed_when_needs_retrain(self):
         """generate_signal returns None when _needs_retrain is True under default (CNN) backend."""
         import agents.cnn_agent as ca
+
         with patch.object(ca.config, "model_backend", "cnn"):
             agent = CoinbaseCNNAgent()
             agent._needs_retrain = True
 
             product = {"product_id": "BTC-USD", "price": 94000.0}
             result = await agent.generate_signal(product, execute=False)
-            assert result is None, "Signal must be suppressed when model is incompatible (CNN backend)"
+            assert result is None, (
+                "Signal must be suppressed when model is incompatible (CNN backend)"
+            )
 
     @pytest.mark.asyncio
     async def test_generate_signal_persists_scan_under_xgb_when_needs_retrain(self, product):
@@ -1208,23 +1277,22 @@ class TestTrainingFramework:
         writes for ~30 hours.
         """
         import agents.cnn_agent as ca
+
         candles = _make_candles(80)
         save_mock = AsyncMock()
 
         with (
             patch.object(ca.config, "model_backend", "xgb"),
             patch("agents.cnn_agent._TORCH", False),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
             patch("agents.cnn_agent.database.save_cnn_scan", new=save_mock),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
         ):
             agent = CoinbaseCNNAgent()
             agent._needs_retrain = True
@@ -1232,14 +1300,18 @@ class TestTrainingFramework:
                 await agent.generate_signal(product, execute=False)
 
         save_mock.assert_called_once()
-        kwargs = save_mock.call_args.args[0] if save_mock.call_args.args else save_mock.call_args.kwargs
-        assert kwargs["product_id"] == "BTC-USD", \
+        kwargs = (
+            save_mock.call_args.args[0] if save_mock.call_args.args else save_mock.call_args.kwargs
+        )
+        assert kwargs["product_id"] == "BTC-USD", (
             "save_cnn_scan must persist the row even when CNN checkpoint is incompatible"
+        )
 
     @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="PyTorch not installed")
     def test_save_model_stores_n_channels(self, tmp_path, monkeypatch):
         """save_model() writes n_channels into the checkpoint."""
         import torch
+
         import agents.cnn_agent as ca
 
         monkeypatch.setenv("CNN_ARCH", "glu2")
@@ -1259,12 +1331,12 @@ class TestTrainingFramework:
     def test_best_loss_read_write_roundtrip(self, tmp_path):
         """_read_best_loss / _write_best_loss survive a roundtrip."""
         import agents.cnn_agent as ca
+
         orig = ca._BEST_LOSS_PATH
         ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
         try:
             agent = CoinbaseCNNAgent()
-            assert agent._read_best_loss() == float("inf"), \
-                "Missing file should return inf"
+            assert agent._read_best_loss() == float("inf"), "Missing file should return inf"
             agent._write_best_loss(0.4321)
             assert abs(agent._read_best_loss() - 0.4321) < 1e-6
         finally:
@@ -1279,6 +1351,7 @@ class TestTrainingFramework:
         time because best_val_loss >= 1e-06 always.
         """
         import agents.cnn_agent as ca
+
         # Multi-arch registry deleted #311-refactor-e; _best_loss_path_for is
         # now a no-arg helper returning the hardcoded glu1 path. Monkeypatch
         # the helper directly to redirect _read_best_loss at the tmp file.
@@ -1287,12 +1360,14 @@ class TestTrainingFramework:
         agent = CoinbaseCNNAgent()
         with open(tmp_loss, "w") as f:
             f.write("1e-06")
-        assert agent._read_best_loss() == float("inf"), \
+        assert agent._read_best_loss() == float("inf"), (
             "Stale sub-0.1 value must be treated as unset so real models can save"
+        )
         with open(tmp_loss, "w") as f:
             f.write("0.5")
-        assert abs(agent._read_best_loss() - 0.5) < 1e-6, \
+        assert abs(agent._read_best_loss() - 0.5) < 1e-6, (
             "Realistic values >= 0.1 must be preserved"
+        )
 
 
 class TestHMMStability:
@@ -1300,25 +1375,27 @@ class TestHMMStability:
 
     def test_fit_keeps_old_model_on_failure(self):
         """If GaussianHMM raises, the old model is preserved."""
-        from services.hmm_regime import HMMRegimeDetector
         import unittest.mock as mock
+
+        from services.hmm_regime import HMMRegimeDetector
 
         det = HMMRegimeDetector()
         det._model = "SENTINEL"  # pretend we have an existing model
 
         with mock.patch("hmmlearn.hmm.GaussianHMM") as MockHMM:
             MockHMM.return_value.fit.side_effect = RuntimeError("numerical error")
-            result = det.fit(list(range(1, 400)))   # enough bars
+            result = det.fit(list(range(1, 400)))  # enough bars
 
-        assert det._model == "SENTINEL", \
-            "Existing model must not be cleared when fit raises"
+        assert det._model == "SENTINEL", "Existing model must not be cleared when fit raises"
         assert result is False
 
     def test_degenerate_states_rejected(self):
         """Fit with identical-vol states should not replace the current model."""
-        from services.hmm_regime import HMMRegimeDetector
         import unittest.mock as mock
+
         import numpy as np
+
+        from services.hmm_regime import HMMRegimeDetector
 
         det = HMMRegimeDetector()
         det._model = "SENTINEL"
@@ -1330,13 +1407,13 @@ class TestHMMStability:
         with mock.patch("hmmlearn.hmm.GaussianHMM") as MockHMM:
             MockHMM.return_value = fake_model
             fake_model.fit = mock.MagicMock()
-            result = det.fit(list(range(1, 400)))
+            det.fit(list(range(1, 400)))
 
-        assert det._model == "SENTINEL", \
-            "Degenerate-state model must not replace existing model"
+        assert det._model == "SENTINEL", "Degenerate-state model must not replace existing model"
 
 
 # ── Display bug regression tests ──────────────────────────────────────────────
+
 
 class TestRegimeLabelAndVWAPDisplay:
     """
@@ -1354,9 +1431,10 @@ class TestRegimeLabelAndVWAPDisplay:
     @staticmethod
     def _make_tracker_mock():
         from unittest.mock import MagicMock
+
         t = MagicMock()
         t.get_lessons = AsyncMock(return_value=[])
-        t.record      = AsyncMock()
+        t.record = AsyncMock()
         return t
 
     @pytest.mark.asyncio
@@ -1368,33 +1446,28 @@ class TestRegimeLabelAndVWAPDisplay:
         async def _capture(row):
             saved.update(row)
 
-        fake_detector = type("D", (), {
-            "predict": staticmethod(lambda closes: ("CHAOTIC", 0.71, 2))
-        })()
+        fake_detector = type(
+            "D", (), {"predict": staticmethod(lambda closes: ("CHAOTIC", 0.71, 2))}
+        )()
 
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  new=AsyncMock(side_effect=_capture)),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.get_detector",
-                  return_value=fake_detector),
-            patch("agents.cnn_agent.get_tracker",
-                  return_value=self._make_tracker_mock()),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock(side_effect=_capture)),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.get_detector", return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker", return_value=self._make_tracker_mock()),
             patch.object(agent, "_cnn_prob", return_value=0.82),
         ):
             await agent.generate_signal(product)
 
         assert saved, "save_cnn_scan was not called"
         assert saved.get("regime") == "CHAOTIC", (
-            f"Expected regime='CHAOTIC' (from HMM), "
-            f"got regime={saved.get('regime')!r}"
+            f"Expected regime='CHAOTIC' (from HMM), got regime={saved.get('regime')!r}"
         )
 
     @pytest.mark.asyncio
@@ -1410,34 +1483,32 @@ class TestRegimeLabelAndVWAPDisplay:
             captured_signal.update(row)
             return 1
 
-        fake_detector = type("D", (), {
-            "predict": staticmethod(lambda closes: ("TRENDING", 0.80, 0))
-        })()
+        fake_detector = type(
+            "D", (), {"predict": staticmethod(lambda closes: ("TRENDING", 0.80, 0))}
+        )()
 
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  new=AsyncMock()),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(side_effect=_capture_sig)),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.get_detector",
-                  return_value=fake_detector),
-            patch("agents.cnn_agent.get_tracker",
-                  return_value=self._make_tracker_mock()),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(side_effect=_capture_sig)),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.get_detector", return_value=fake_detector),
+            patch("agents.cnn_agent.get_tracker", return_value=self._make_tracker_mock()),
             patch.object(agent, "_cnn_prob", return_value=0.82),
         ):
             await agent.generate_signal(product)
 
         reasoning = captured_signal.get("reasoning", "")
-        assert "Price" in reasoning and "VWAP" in reasoning, \
+        assert "Price" in reasoning and "VWAP" in reasoning, (
             f"reasoning missing VWAP line: {reasoning[:200]}"
+        )
 
         import re
+
         m = re.search(r"Price (?:below|above) VWAP by ([0-9.]+)%", reasoning)
         assert m, f"Could not parse VWAP percent from: {reasoning[:300]}"
         displayed_pct = float(m.group(1))
@@ -1485,11 +1556,13 @@ class TestFitLoopHeartbeat:
         # exceeded the 30-min watchdog and a healthy run was false-killed.
         # Pin to 1 — every epoch logs, so log mtime advances at most one
         # epoch behind real time.
-        assert hasattr(_cnn_mod, "_HEARTBEAT_EVERY"), \
+        assert hasattr(_cnn_mod, "_HEARTBEAT_EVERY"), (
             "cnn_agent must define _HEARTBEAT_EVERY for fit-loop heartbeat"
-        assert _cnn_mod._HEARTBEAT_EVERY == 1, \
-            f"_HEARTBEAT_EVERY must be 1 to survive slow epochs under GPU " \
+        )
+        assert _cnn_mod._HEARTBEAT_EVERY == 1, (
+            f"_HEARTBEAT_EVERY must be 1 to survive slow epochs under GPU "
             f"contention; got {_cnn_mod._HEARTBEAT_EVERY!r}"
+        )
 
     def test_fit_loop_emits_info_log_per_heartbeat(self):
         """Source-level: the per-epoch loop body must contain a logger.info(...)
@@ -1502,15 +1575,18 @@ class TestFitLoopHeartbeat:
         src = inspect.getsource(_cnn_mod.CoinbaseCNNAgent.train_on_history)
         m = re.search(
             r"for ep in range\(start_ep,\s*epochs\s*\+\s*1\):(.+?)# Restore best weights",
-            src, re.DOTALL,
+            src,
+            re.DOTALL,
         )
         assert m, "Per-epoch loop not found in train_on_history"
         body = m.group(1)
-        assert "_HEARTBEAT_EVERY" in body, \
+        assert "_HEARTBEAT_EVERY" in body, (
             "Per-epoch loop must reference _HEARTBEAT_EVERY for heartbeat cadence"
-        assert re.search(r"logger\.info\(", body), \
-            "Per-epoch loop has no logger.info heartbeat — train_watchdog will " \
+        )
+        assert re.search(r"logger\.info\(", body), (
+            "Per-epoch loop has no logger.info heartbeat — train_watchdog will "
             "kill healthy training at 30 min on slow archs (glum)."
+        )
 
 
 class TestRunLoopExitPriority:
@@ -1551,9 +1627,14 @@ class TestDatasetCache:
 
     def _candles(self, n=5, start_ts=1000, start_close=100.0):
         return [
-            {"time": start_ts + i * 3600, "open": start_close + i,
-             "high": start_close + i + 1, "low": start_close + i - 1,
-             "close": start_close + i, "volume": 1000.0}
+            {
+                "time": start_ts + i * 3600,
+                "open": start_close + i,
+                "high": start_close + i + 1,
+                "low": start_close + i - 1,
+                "close": start_close + i,
+                "volume": 1000.0,
+            }
             for i in range(n)
         ]
 
@@ -1578,12 +1659,11 @@ class TestDatasetCache:
         assert fp_a != fp_b and fp_a != fp_c and fp_b != fp_c
 
     def test_cache_miss_on_missing_file(self, tmp_path):
-        assert _cnn_mod._load_dataset_cache(
-            str(tmp_path / "no_such.pt"), "any-fp"
-        ) is None
+        assert _cnn_mod._load_dataset_cache(str(tmp_path / "no_such.pt"), "any-fp") is None
 
     def test_cache_roundtrip(self, tmp_path):
         import torch
+
         path = str(tmp_path / "cache.pt")
         X = [torch.zeros(27, 60), torch.ones(27, 60)]
         y = [0.0, 1.0]
@@ -1597,12 +1677,14 @@ class TestDatasetCache:
 
     def test_cache_miss_on_fingerprint_mismatch(self, tmp_path):
         import torch
+
         path = str(tmp_path / "cache.pt")
         _cnn_mod._save_dataset_cache(path, "fp-old", [torch.zeros(27, 60)], [0.0])
         assert _cnn_mod._load_dataset_cache(path, "fp-new") is None
 
 
 # ── Per-product append-only dataset cache (P2) ───────────────────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestPerProductDatasetCache:
@@ -1617,8 +1699,17 @@ class TestPerProductDatasetCache:
 
     class _FakeFB:
         """Minimal FeatureBuilder shim: 1-channel window of closes."""
-        def build(self, window, _idx, candles_5m=None, btc_closes=None,
-                  funding_rate=None, closes_ext=None, oi_rate=None):
+
+        def build(
+            self,
+            window,
+            _idx,
+            candles_5m=None,
+            btc_closes=None,
+            funding_rate=None,
+            closes_ext=None,
+            oi_rate=None,
+        ):
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
                 closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
@@ -1626,51 +1717,42 @@ class TestPerProductDatasetCache:
 
         def to_tensor(self, channels):
             import torch
+
             return torch.tensor(channels, dtype=torch.float32)
 
-    _FWD   = 4
-    _THR   = 0.003
+    _FWD = 4
+    _THR = 0.003
 
     def _helper_args(self):
         return (self._FakeFB(), SEQ_LEN, self._FWD, self._THR)
 
     def test_full_build_when_entry_missing(self):
         candles = _make_candles(80)
-        entry, status = _cnn_mod._extend_or_rebuild_product(
-            None, candles, *self._helper_args()
-        )
+        entry, status = _cnn_mod._extend_or_rebuild_product(None, candles, *self._helper_args())
         assert status == "rebuild"
         assert entry is not None
         assert entry["first_ts"] == candles[0]["start"]
-        assert entry["last_ts"]  == candles[-1]["start"]
-        assert entry["last_n"]   == 80
+        assert entry["last_ts"] == candles[-1]["start"]
+        assert entry["last_n"] == 80
         assert len(entry["X"]) == len(entry["y"]) > 0
 
     def test_hit_when_candles_unchanged(self):
         candles = _make_candles(80)
-        entry, _ = _cnn_mod._extend_or_rebuild_product(
-            None, candles, *self._helper_args()
-        )
+        entry, _ = _cnn_mod._extend_or_rebuild_product(None, candles, *self._helper_args())
         n_before = len(entry["X"])
-        entry2, status = _cnn_mod._extend_or_rebuild_product(
-            entry, candles, *self._helper_args()
-        )
+        entry2, status = _cnn_mod._extend_or_rebuild_product(entry, candles, *self._helper_args())
         assert status == "hit"
         assert len(entry2["X"]) == n_before
         assert entry2["last_n"] == 80
 
     def test_appends_new_samples_when_candles_extended(self):
         candles80 = _make_candles(80)
-        entry, _ = _cnn_mod._extend_or_rebuild_product(
-            None, candles80, *self._helper_args()
-        )
+        entry, _ = _cnn_mod._extend_or_rebuild_product(None, candles80, *self._helper_args())
         n_before = len(entry["X"])
         candles85 = _make_candles(85)
         # Sanity: extended series is a superset of the original prefix
         assert candles85[:80] == candles80
-        entry2, status = _cnn_mod._extend_or_rebuild_product(
-            entry, candles85, *self._helper_args()
-        )
+        entry2, status = _cnn_mod._extend_or_rebuild_product(entry, candles85, *self._helper_args())
         assert status == "append"
         assert entry2["last_n"] == 85
         assert entry2["last_ts"] == candles85[-1]["start"]
@@ -1681,47 +1763,38 @@ class TestPerProductDatasetCache:
 
     def test_rebuilds_when_first_ts_changed(self):
         candles = _make_candles(80)
-        entry, _ = _cnn_mod._extend_or_rebuild_product(
-            None, candles, *self._helper_args()
-        )
+        entry, _ = _cnn_mod._extend_or_rebuild_product(None, candles, *self._helper_args())
         # Simulate a data re-ingest that shifted the series start.
         candles2 = [dict(c, start=c["start"] + 10_000) for c in _make_candles(80)]
-        entry2, status = _cnn_mod._extend_or_rebuild_product(
-            entry, candles2, *self._helper_args()
-        )
+        entry2, status = _cnn_mod._extend_or_rebuild_product(entry, candles2, *self._helper_args())
         assert status == "rebuild"
         assert entry2["first_ts"] == candles2[0]["start"]
 
     def test_rebuilds_when_entry_last_n_exceeds_candles(self):
         candles = _make_candles(80)
-        entry, _ = _cnn_mod._extend_or_rebuild_product(
-            None, candles, *self._helper_args()
-        )
+        entry, _ = _cnn_mod._extend_or_rebuild_product(None, candles, *self._helper_args())
         # Corrupt last_n to exceed current candle count.
         stale = {**entry, "last_n": 200}
-        entry2, status = _cnn_mod._extend_or_rebuild_product(
-            stale, candles, *self._helper_args()
-        )
+        entry2, status = _cnn_mod._extend_or_rebuild_product(stale, candles, *self._helper_args())
         assert status == "rebuild"
         assert entry2["last_n"] == 80
 
     def test_returns_skip_when_too_few_candles(self):
-        candles = _make_candles(SEQ_LEN + self._FWD)   # one short
-        entry, status = _cnn_mod._extend_or_rebuild_product(
-            None, candles, *self._helper_args()
-        )
+        candles = _make_candles(SEQ_LEN + self._FWD)  # one short
+        entry, status = _cnn_mod._extend_or_rebuild_product(None, candles, *self._helper_args())
         assert status == "skip"
         assert entry is None
 
     def test_pp_cache_file_roundtrip(self, tmp_path):
         import torch
+
         path = str(tmp_path / "pp_cache.pt")
         schema = _cnn_mod._dataset_schema(SEQ_LEN, self._FWD, self._THR, N_CHANNELS)
         products = {
             "BTC-USD": {
                 "first_ts": 1_700_000_000,
-                "last_ts":  1_700_100_000,
-                "last_n":   80,
+                "last_ts": 1_700_100_000,
+                "last_n": 80,
                 "X": [torch.zeros(1, SEQ_LEN)],
                 "y": [1.0],
             }
@@ -1736,20 +1809,28 @@ class TestPerProductDatasetCache:
 
     def test_pp_cache_schema_mismatch_invalidates(self, tmp_path):
         import torch
+
         path = str(tmp_path / "pp_cache.pt")
         schema_a = _cnn_mod._dataset_schema(SEQ_LEN, 4, self._THR, N_CHANNELS)
         schema_b = _cnn_mod._dataset_schema(SEQ_LEN, 8, self._THR, N_CHANNELS)
-        _cnn_mod._save_pp_cache(path, schema_a, {
-            "X-Y": {"first_ts": 0, "last_ts": 1, "last_n": 1,
-                    "X": [torch.zeros(1, SEQ_LEN)], "y": [0.0]}
-        })
+        _cnn_mod._save_pp_cache(
+            path,
+            schema_a,
+            {
+                "X-Y": {
+                    "first_ts": 0,
+                    "last_ts": 1,
+                    "last_n": 1,
+                    "X": [torch.zeros(1, SEQ_LEN)],
+                    "y": [0.0],
+                }
+            },
+        )
         assert _cnn_mod._load_pp_cache(path, schema_b) is None
 
     def test_pp_cache_missing_file_returns_none(self, tmp_path):
         schema = _cnn_mod._dataset_schema(SEQ_LEN, self._FWD, self._THR, N_CHANNELS)
-        assert _cnn_mod._load_pp_cache(
-            str(tmp_path / "no_such.pt"), schema
-        ) is None
+        assert _cnn_mod._load_pp_cache(str(tmp_path / "no_such.pt"), schema) is None
 
     def test_pp_cache_save_retries_on_windows_file_lock(self, tmp_path, monkeypatch):
         """#108 — On Windows os.replace raises PermissionError (WinError 5) when
@@ -1759,12 +1840,16 @@ class TestPerProductDatasetCache:
         a few times with backoff so a brief lock window doesn't lose progress.
         """
         import torch
+
         path = str(tmp_path / "pp_cache.pt")
         schema = _cnn_mod._dataset_schema(SEQ_LEN, self._FWD, self._THR, N_CHANNELS)
         products = {
             "BTC-USD": {
-                "first_ts": 0, "last_ts": 1, "last_n": 1,
-                "X": [torch.zeros(1, SEQ_LEN)], "y": [0.0],
+                "first_ts": 0,
+                "last_ts": 1,
+                "last_n": 1,
+                "X": [torch.zeros(1, SEQ_LEN)],
+                "y": [0.0],
             }
         }
 
@@ -1780,13 +1865,15 @@ class TestPerProductDatasetCache:
         monkeypatch.setattr(_cnn_mod.os, "replace", flaky_replace)
         # Must NOT raise — retry should swallow the first failure.
         _cnn_mod._save_pp_cache(path, schema, products)
-        assert calls["n"] >= 2, \
+        assert calls["n"] >= 2, (
             f"expected at least one retry after PermissionError, got {calls['n']} call(s)"
+        )
         # File actually written.
         assert _cnn_mod._load_pp_cache(path, schema) is not None
 
 
 # ── Triple-barrier labeling (P3a) ─────────────────────────────────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestTripleBarrierLabels:
@@ -1799,14 +1886,13 @@ class TestTripleBarrierLabels:
     time barrier expiration (sign of final close move, with dead-zone skip).
     """
 
-    _UP  = 0.01   # +1% upper barrier
-    _DN  = 0.01   # -1% lower barrier
-    _MAX = 4      # forward window bars
+    _UP = 0.01  # +1% upper barrier
+    _DN = 0.01  # -1% lower barrier
+    _MAX = 4  # forward window bars
     _THR = 0.003
 
-    def _bar(self, o, h, l, c, ts=0):
-        return {"open": o, "high": h, "low": l, "close": c,
-                "volume": 1000.0, "start": ts}
+    def _bar(self, o, h, lo, c, ts=0):
+        return {"open": o, "high": h, "low": lo, "close": c, "volume": 1000.0, "start": ts}
 
     def test_upper_barrier_hit_first_labels_up(self):
         # entry=100, upper=101, lower=99. Bar 1 hits high 102 first.
@@ -1814,12 +1900,10 @@ class TestTripleBarrierLabels:
             self._bar(100, 100, 100, 100, ts=0),
             self._bar(100, 102, 99.5, 101.5, ts=1),
             self._bar(101, 101, 100, 100, ts=2),
-            self._bar(100, 101, 99,   99.5, ts=3),
-            self._bar(99.5, 100, 98,  98.5, ts=4),
+            self._bar(100, 101, 99, 99.5, ts=3),
+            self._bar(99.5, 100, 98, 98.5, ts=4),
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got == 1.0
 
     def test_lower_barrier_hit_first_labels_down(self):
@@ -1831,9 +1915,7 @@ class TestTripleBarrierLabels:
             self._bar(98.2, 99, 97, 97.5, ts=3),
             self._bar(97.5, 98, 96, 96.8, ts=4),
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got == 0.0
 
     def test_time_barrier_up_with_move_above_thresh(self):
@@ -1844,11 +1926,9 @@ class TestTripleBarrierLabels:
             self._bar(100, 100.5, 99.5, 100.2, ts=1),
             self._bar(100.2, 100.8, 99.8, 100.5, ts=2),
             self._bar(100.5, 100.9, 100.1, 100.6, ts=3),
-            self._bar(100.6, 100.9, 100.3, 100.8, ts=4),   # final close = 100.8
+            self._bar(100.6, 100.9, 100.3, 100.8, ts=4),  # final close = 100.8
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got == 1.0
 
     def test_time_barrier_down_with_move_below_thresh(self):
@@ -1858,11 +1938,9 @@ class TestTripleBarrierLabels:
             self._bar(100, 100.5, 99.5, 99.8, ts=1),
             self._bar(99.8, 100.2, 99.2, 99.5, ts=2),
             self._bar(99.5, 99.9, 99.1, 99.3, ts=3),
-            self._bar(99.3, 99.9, 99.0, 99.2, ts=4),     # final close = 99.2
+            self._bar(99.3, 99.9, 99.0, 99.2, ts=4),  # final close = 99.2
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got == 0.0
 
     def test_time_barrier_dead_zone_returns_none(self):
@@ -1872,11 +1950,9 @@ class TestTripleBarrierLabels:
             self._bar(100, 100.3, 99.7, 100.05, ts=1),
             self._bar(100.05, 100.4, 99.8, 100.1, ts=2),
             self._bar(100.1, 100.3, 99.9, 100.05, ts=3),
-            self._bar(100.05, 100.3, 99.8, 100.1, ts=4),   # final close = 100.1 → 0.10% < 0.3%
+            self._bar(100.05, 100.3, 99.8, 100.1, ts=4),  # final close = 100.1 → 0.10% < 0.3%
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got is None
 
     def test_both_barriers_same_bar_use_close_direction(self):
@@ -1889,22 +1965,19 @@ class TestTripleBarrierLabels:
             self._bar(102, 103, 101, 102, ts=3),
             self._bar(102, 103, 101, 102, ts=4),
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got == 1.0
 
     def test_invalid_entry_price_returns_none(self):
         candles = [self._bar(0, 0, 0, 0, ts=0)] + [
             self._bar(100, 101, 99, 100, ts=k) for k in range(1, 5)
         ]
-        got = _cnn_mod._label_triple_barrier(
-            candles, 0, self._MAX, self._UP, self._DN, self._THR
-        )
+        got = _cnn_mod._label_triple_barrier(candles, 0, self._MAX, self._UP, self._DN, self._THR)
         assert got is None
 
 
 # ── Training/inference distribution alignment (P3b) ───────────────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestTrainingConstantChannelMask:
@@ -1930,13 +2003,12 @@ class TestTrainingConstantChannelMask:
 
     def test_mask_zeros_designated_channels(self):
         channels = [[float(i + 0.1)] * SEQ_LEN for i in range(N_CHANNELS)]
-        masked   = _cnn_mod._mask_training_constant_channels(channels)
+        masked = _cnn_mod._mask_training_constant_channels(channels)
         assert len(masked) == N_CHANNELS
         for idx, ch in enumerate(masked):
             assert len(ch) == SEQ_LEN
             if idx in _cnn_mod._TRAINING_CONSTANT_CHANNELS:
-                assert all(v == 0.0 for v in ch), \
-                    f"channel {idx} should be zeroed after masking"
+                assert all(v == 0.0 for v in ch), f"channel {idx} should be zeroed after masking"
             else:
                 # Informative channels are preserved unchanged.
                 assert ch == channels[idx], f"channel {idx} was altered"
@@ -1952,6 +2024,7 @@ class TestTrainingConstantChannelMask:
 
 
 # ── Ch 21: BTC correlation wired through training pipeline (#53) ──────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestBuildSamplesRangeBtcCloses:
@@ -1971,34 +2044,51 @@ class TestBuildSamplesRangeBtcCloses:
     def test_default_no_btc_closes_leaves_channel_21_zero(self):
         candles = _make_candles(80)
         X, _y, _idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
         )
         assert len(X) >= 1
-        assert all(abs(v) < 1e-9 for v in self._ch21(X[0])), \
+        assert all(abs(v) < 1e-9 for v in self._ch21(X[0])), (
             "Ch 21 must be zero when btc_closes not supplied"
+        )
 
     def test_aligned_btc_closes_populate_channel_21(self):
         candles = _make_candles(80)
         # BTC series with distinct movement → non-trivial rolling correlation
         btc_closes = [50000.0 + 1000 * math.sin(i / 7.0) for i in range(len(candles))]
         X, _y, _idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             btc_closes=btc_closes,
         )
         assert len(X) >= 1
         ch21 = self._ch21(X[0])
-        assert any(abs(v) > 1e-6 for v in ch21), \
+        assert any(abs(v) > 1e-6 for v in ch21), (
             "Ch 21 must have non-zero rolling corr values once btc_closes is wired"
+        )
 
     def test_btc_closes_sliced_per_window(self):
         """Each sample at candle index i must receive btc_closes[i-seq_len+1 : i+1]."""
         candles = _make_candles(80)
         btc_closes = [50000.0 + float(i) for i in range(len(candles))]
         X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             btc_closes=btc_closes,
         )
         assert len(X) >= 1
@@ -2010,24 +2100,30 @@ class TestBuildSamplesRangeBtcCloses:
         # Tensor roundtrip is float32; fb.build returns float64 — compare with tolerance
         assert len(actual) == len(expected[21])
         for a, e in zip(actual, expected[21]):
-            assert abs(a - e) < 1e-6, \
-                f"Per-window BTC slice mismatch: {a} vs {e}"
+            assert abs(a - e) < 1e-6, f"Per-window BTC slice mismatch: {a} vs {e}"
 
     def test_extend_or_rebuild_plumbs_btc_closes_on_rebuild(self):
         """The rebuild path of _extend_or_rebuild_product must also forward btc_closes."""
         candles = _make_candles(80)
         btc_closes = [50000.0 + 1000 * math.sin(i / 7.0) for i in range(len(candles))]
         entry, status = _cnn_mod._extend_or_rebuild_product(
-            None, candles, self.fb, SEQ_LEN, 4, 0.003,
+            None,
+            candles,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             btc_closes=btc_closes,
         )
         assert status == "rebuild"
         assert entry is not None and entry["X"]
-        assert any(abs(v) > 1e-6 for v in self._ch21(entry["X"][0])), \
+        assert any(abs(v) > 1e-6 for v in self._ch21(entry["X"][0])), (
             "Rebuild path must forward btc_closes to _build_samples_range"
+        )
 
 
 # ── Ch 20: Funding rate wired through training pipeline (#54) ─────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestBuildSamplesRangeFundingRates:
@@ -2048,49 +2144,72 @@ class TestBuildSamplesRangeFundingRates:
     def test_default_no_funding_rates_leaves_channel_20_zero(self):
         candles = _make_candles(80)
         X, _y, _idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
         )
         assert len(X) >= 1
-        assert all(abs(v) < 1e-9 for v in self._ch20(X[0])), \
+        assert all(abs(v) < 1e-9 for v in self._ch20(X[0])), (
             "Ch 20 must be zero when funding_rates not supplied"
+        )
 
     def test_constant_funding_rates_broadcast_to_channel_20(self):
         candles = _make_candles(80)
         funding_rates = [0.0005] * len(candles)  # +0.05% every bar
         X, _y, _idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             funding_rates=funding_rates,
         )
         # fr_norm = clip(0.0005 / 0.01, -1, 1) = 0.05
         expected = 0.05
         ch20 = self._ch20(X[0])
-        assert all(abs(v - expected) < 1e-5 for v in ch20), \
+        assert all(abs(v - expected) < 1e-5 for v in ch20), (
             f"Ch 20 expected ~{expected}, got {ch20[:3]}"
+        )
 
     def test_funding_rate_selected_per_sample_index(self):
         """For each sample at candle index i, fb.build must receive funding_rates[i]."""
         candles = _make_candles(80)
         funding_rates = [float(i) / 10000.0 for i in range(len(candles))]  # 0..0.0079
         X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             funding_rates=funding_rates,
         )
         i0 = idx[0]
         expected = max(-1.0, min(1.0, funding_rates[i0] / 0.01))
         ch20 = self._ch20(X[0])
-        assert all(abs(v - expected) < 1e-5 for v in ch20), \
+        assert all(abs(v - expected) < 1e-5 for v in ch20), (
             f"Ch 20 at sample idx={i0} expected {expected}, got {ch20[0]}"
+        )
 
     def test_funding_rates_clipped_at_plus_minus_one(self):
         """Funding_rate above 0.01 should clip to 1.0 after normalisation."""
         candles = _make_candles(80)
         funding_rates = [0.05] * len(candles)  # absurdly high +5% → clips to +1.0
         X, _y, _idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            self.fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             funding_rates=funding_rates,
         )
         ch20 = self._ch20(X[0])
@@ -2100,17 +2219,24 @@ class TestBuildSamplesRangeFundingRates:
         candles = _make_candles(80)
         funding_rates = [0.0005] * len(candles)
         entry, status = _cnn_mod._extend_or_rebuild_product(
-            None, candles, self.fb, SEQ_LEN, 4, 0.003,
+            None,
+            candles,
+            self.fb,
+            SEQ_LEN,
+            4,
+            0.003,
             funding_rates=funding_rates,
         )
         assert status == "rebuild"
         assert entry is not None and entry["X"]
         ch20 = self._ch20(entry["X"][0])
-        assert all(abs(v - 0.05) < 1e-5 for v in ch20), \
+        assert all(abs(v - 0.05) < 1e-5 for v in ch20), (
             "Rebuild path must forward funding_rates to _build_samples_range"
+        )
 
 
 # ── Real 5m candles wired through training pipeline (#56) ─────────────────────
+
 
 class TestBuildSamplesRangeRealFiveMinute:
     """#56 — replace the synthetic hourly proxy with real 5m candles.
@@ -2129,18 +2255,29 @@ class TestBuildSamplesRangeRealFiveMinute:
 
     class _CapturingFB:
         """Records what candles_5m fb.build was called with for each sample."""
+
         def __init__(self):
             self.calls = []
 
-        def build(self, window, _idx, candles_5m=None, btc_closes=None,
-                  funding_rate=None, closes_ext=None, oi_rate=None):
-            self.calls.append({
-                "window_start_ts":  window[0]["start"]  if window else None,
-                "window_end_ts":    window[-1]["start"] if window else None,
-                "c5m":              list(candles_5m or []),
-                "c5m_len":          len(candles_5m or []),
-                "closes_ext_len":   len(closes_ext or []),
-            })
+        def build(
+            self,
+            window,
+            _idx,
+            candles_5m=None,
+            btc_closes=None,
+            funding_rate=None,
+            closes_ext=None,
+            oi_rate=None,
+        ):
+            self.calls.append(
+                {
+                    "window_start_ts": window[0]["start"] if window else None,
+                    "window_end_ts": window[-1]["start"] if window else None,
+                    "c5m": list(candles_5m or []),
+                    "c5m_len": len(candles_5m or []),
+                    "closes_ext_len": len(closes_ext or []),
+                }
+            )
             closes = [float(c["close"]) for c in window]
             if len(closes) < SEQ_LEN:
                 closes = [closes[0]] * (SEQ_LEN - len(closes)) + closes
@@ -2148,16 +2285,17 @@ class TestBuildSamplesRangeRealFiveMinute:
 
         def to_tensor(self, channels):
             import torch
+
             return torch.tensor(channels, dtype=torch.float32)
 
     def _make_5m_candles(self, n: int, t0: int = 1_700_000_000) -> list:
         return [
             {
-                "start":  t0 + i * 300,
-                "open":   100.0,
-                "high":   100.5,
-                "low":     99.5,
-                "close":  100.0 + i * 0.01,
+                "start": t0 + i * 300,
+                "open": 100.0,
+                "high": 100.5,
+                "low": 99.5,
+                "close": 100.0 + i * 0.01,
                 "volume": 5.0 + i * 0.1,
             }
             for i in range(n)
@@ -2168,8 +2306,13 @@ class TestBuildSamplesRangeRealFiveMinute:
         fb = self._CapturingFB()
         candles = _make_candles(80)
         _X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            fb,
+            SEQ_LEN,
+            4,
+            0.003,
         )
         assert len(idx) >= 1
         first = fb.calls[0]
@@ -2179,20 +2322,24 @@ class TestBuildSamplesRangeRealFiveMinute:
         c5m = first["c5m"]
         if len(c5m) >= 2:
             spacing = c5m[1]["start"] - c5m[0]["start"]
-            assert spacing == 3600, \
+            assert spacing == 3600, (
                 f"Fallback proxy must use hourly bars (3600s spacing), got {spacing}s"
+            )
 
     def test_real_5m_candles_passed_through_when_provided(self):
         """When candles_5m is supplied, fb.build receives a 5m-spaced slice."""
         fb = self._CapturingFB()
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         # 6h of 5m bars covering the last sample window comfortably
-        candles_5m = self._make_5m_candles(
-            n=80 * 12, t0=candles[0]["start"]
-        )
+        candles_5m = self._make_5m_candles(n=80 * 12, t0=candles[0]["start"])
         _X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            fb,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m,
         )
         assert len(idx) >= 1
@@ -2200,19 +2347,21 @@ class TestBuildSamplesRangeRealFiveMinute:
         c5m = first["c5m"]
         assert len(c5m) >= 2, "Real 5m slice should have multiple bars"
         spacing = c5m[1]["start"] - c5m[0]["start"]
-        assert spacing == 300, \
-            f"Real 5m bars must be 300s apart, got {spacing}s"
+        assert spacing == 300, f"Real 5m bars must be 300s apart, got {spacing}s"
 
     def test_5m_slice_excludes_future_bars(self):
         """No 5m bar with start > end-of-hour-i may leak into the slice for sample i."""
         fb = self._CapturingFB()
-        candles  = _make_candles(80)
-        candles_5m = self._make_5m_candles(
-            n=80 * 12, t0=candles[0]["start"]
-        )
+        candles = _make_candles(80)
+        candles_5m = self._make_5m_candles(n=80 * 12, t0=candles[0]["start"])
         _X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            fb,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m,
         )
         for sample_pos, i in enumerate(idx):
@@ -2226,33 +2375,40 @@ class TestBuildSamplesRangeRealFiveMinute:
     def test_5m_slice_size_matches_inference_convention(self):
         """Slice should cap at 72 bars (6h) — the same window inference uses."""
         fb = self._CapturingFB()
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         # Plenty of history so the 72-bar cap is the binding constraint
-        candles_5m = self._make_5m_candles(
-            n=80 * 12, t0=candles[0]["start"]
-        )
+        candles_5m = self._make_5m_candles(n=80 * 12, t0=candles[0]["start"])
         _X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            fb,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m,
         )
         # For an "interior" sample (well past the 6h warmup) we should see 72 bars.
         # Pick the last sample — definitely has enough history behind it.
         last_call = fb.calls[-1]
-        assert last_call["c5m_len"] == 72, \
+        assert last_call["c5m_len"] == 72, (
             f"5m slice must cap at 72 bars (inference convention); got {last_call['c5m_len']}"
+        )
 
     def test_short_5m_history_returns_what_is_available(self):
         """If the 5m parquet has fewer than 72 bars before sample i, return what we have."""
         fb = self._CapturingFB()
-        candles  = _make_candles(80)
+        candles = _make_candles(80)
         # Only the first 10 5m bars exist — early samples should see ≤10 bars
-        candles_5m = self._make_5m_candles(
-            n=10, t0=candles[0]["start"]
-        )
+        candles_5m = self._make_5m_candles(n=10, t0=candles[0]["start"])
         _X, _y, idx = _cnn_mod._build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            fb, SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            fb,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m,
         )
         for call in fb.calls:
@@ -2261,12 +2417,15 @@ class TestBuildSamplesRangeRealFiveMinute:
     def test_extend_or_rebuild_plumbs_candles_5m_on_rebuild(self):
         """The rebuild path of _extend_or_rebuild_product must forward candles_5m."""
         fb = self._CapturingFB()
-        candles  = _make_candles(80)
-        candles_5m = self._make_5m_candles(
-            n=80 * 12, t0=candles[0]["start"]
-        )
+        candles = _make_candles(80)
+        candles_5m = self._make_5m_candles(n=80 * 12, t0=candles[0]["start"])
         entry, status = _cnn_mod._extend_or_rebuild_product(
-            None, candles, fb, SEQ_LEN, 4, 0.003,
+            None,
+            candles,
+            fb,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m,
         )
         assert status == "rebuild"
@@ -2275,28 +2434,35 @@ class TestBuildSamplesRangeRealFiveMinute:
         last = fb.calls[-1]
         assert last["c5m_len"] >= 2
         spacing = last["c5m"][1]["start"] - last["c5m"][0]["start"]
-        assert spacing == 300, \
+        assert spacing == 300, (
             f"Rebuild path must forward candles_5m to _build_samples_range (got {spacing}s spacing)"
+        )
 
     def test_extend_or_rebuild_plumbs_candles_5m_on_append(self):
         """The append path must also forward candles_5m."""
         fb1 = self._CapturingFB()
         candles80 = _make_candles(80)
-        candles_5m_short = self._make_5m_candles(
-            n=80 * 12, t0=candles80[0]["start"]
-        )
+        candles_5m_short = self._make_5m_candles(n=80 * 12, t0=candles80[0]["start"])
         entry, _status = _cnn_mod._extend_or_rebuild_product(
-            None, candles80, fb1, SEQ_LEN, 4, 0.003,
+            None,
+            candles80,
+            fb1,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m_short,
         )
         # Now extend candles + 5m and append
         fb2 = self._CapturingFB()
         candles85 = _make_candles(85)
-        candles_5m_long = self._make_5m_candles(
-            n=85 * 12, t0=candles85[0]["start"]
-        )
+        candles_5m_long = self._make_5m_candles(n=85 * 12, t0=candles85[0]["start"])
         entry2, status2 = _cnn_mod._extend_or_rebuild_product(
-            entry, candles85, fb2, SEQ_LEN, 4, 0.003,
+            entry,
+            candles85,
+            fb2,
+            SEQ_LEN,
+            4,
+            0.003,
             candles_5m=candles_5m_long,
         )
         assert status2 == "append"
@@ -2305,11 +2471,11 @@ class TestBuildSamplesRangeRealFiveMinute:
             last = fb2.calls[-1]
             assert last["c5m_len"] >= 2
             spacing = last["c5m"][1]["start"] - last["c5m"][0]["start"]
-            assert spacing == 300, \
-                f"Append path must forward candles_5m (got {spacing}s spacing)"
+            assert spacing == 300, f"Append path must forward candles_5m (got {spacing}s spacing)"
 
 
 # ── Sample-uniqueness weighting (P3c) ─────────────────────────────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestSampleUniqueness:
@@ -2345,7 +2511,7 @@ class TestSampleUniqueness:
         h = 4
         indices = list(range(59, 180))
         w = _cnn_mod._compute_uniqueness(indices, h, 200)
-        interior = w[20:100]   # skip boundary effects
+        interior = w[20:100]  # skip boundary effects
         mean_w = sum(interior) / len(interior)
         assert abs(mean_w - 1.0 / h) < 0.01
 
@@ -2355,12 +2521,13 @@ class TestSampleUniqueness:
     def test_weights_clamped_at_out_of_range_t(self):
         # Last samples may have forward bars beyond n — those t's are skipped
         # from the average, not counted with N_t=0 (which would div-by-zero).
-        w = _cnn_mod._compute_uniqueness([96], 4, 100)   # window [97..100], t=100 out-of-range
+        w = _cnn_mod._compute_uniqueness([96], 4, 100)  # window [97..100], t=100 out-of-range
         # Only t=97,98,99 in range; all have N_t=1 → u=1.0
         assert w == [1.0]
 
 
 # ── Label smoothing (P3d) ─────────────────────────────────────────────────────
+
 
 @pytest.mark.skipif(not _TORCH_AVAILABLE, reason="torch not installed")
 class TestLabelSmoothing:
@@ -2374,18 +2541,21 @@ class TestLabelSmoothing:
 
     def test_eps_zero_is_identity(self):
         import torch
+
         y = torch.tensor([[0.0], [1.0], [0.5]])
         got = _cnn_mod._smooth_labels(y, 0.0)
         assert torch.allclose(got, y)
 
     def test_endpoints_pulled_toward_centre(self):
         import torch
+
         y = torch.tensor([[0.0], [1.0]])
         got = _cnn_mod._smooth_labels(y, 0.05)
         assert torch.allclose(got, torch.tensor([[0.05], [0.95]]), atol=1e-7)
 
     def test_midpoint_unchanged(self):
         import torch
+
         y = torch.tensor([[0.5]])
         got = _cnn_mod._smooth_labels(y, 0.05)
         assert torch.allclose(got, y)
@@ -2396,6 +2566,7 @@ class TestLabelSmoothing:
 
 
 # ── Walk-forward purged K-fold CV (P3e) ───────────────────────────────────────
+
 
 class TestPurgedWalkforwardSplits:
     """P3e — walk-forward CV with purging and embargo.
@@ -2415,13 +2586,17 @@ class TestPurgedWalkforwardSplits:
 
     def test_returns_n_splits_folds(self):
         idx = list(range(100))
-        folds = _cnn_mod._purged_walkforward_splits(idx, n_splits=3, forward_hours=4, embargo_bars=2)
+        folds = _cnn_mod._purged_walkforward_splits(
+            idx, n_splits=3, forward_hours=4, embargo_bars=2
+        )
         assert len(folds) == 3
 
     def test_folds_are_walkforward_and_disjoint_on_val(self):
         # Val sets should be consecutive, disjoint, and cover the tail.
         idx = list(range(120))
-        folds = _cnn_mod._purged_walkforward_splits(idx, n_splits=3, forward_hours=4, embargo_bars=2)
+        folds = _cnn_mod._purged_walkforward_splits(
+            idx, n_splits=3, forward_hours=4, embargo_bars=2
+        )
         vals = [v for (_t, v) in folds]
         # Each val set contiguous and sorted
         for v in vals:
@@ -2436,7 +2611,9 @@ class TestPurgedWalkforwardSplits:
     def test_train_set_is_strictly_earlier_than_val(self):
         # Walk-forward guarantee: training samples precede validation samples.
         idx = list(range(100))
-        folds = _cnn_mod._purged_walkforward_splits(idx, n_splits=3, forward_hours=4, embargo_bars=0)
+        folds = _cnn_mod._purged_walkforward_splits(
+            idx, n_splits=3, forward_hours=4, embargo_bars=0
+        )
         for train, val in folds:
             if not train or not val:
                 continue
@@ -2448,7 +2625,10 @@ class TestPurgedWalkforwardSplits:
         # Use candle indices 0..99; val starts around position 66 with n_splits=3.
         sample_indices = list(range(100))  # sample j maps to candle index j
         folds = _cnn_mod._purged_walkforward_splits(
-            sample_indices, n_splits=3, forward_hours=4, embargo_bars=0,
+            sample_indices,
+            n_splits=3,
+            forward_hours=4,
+            embargo_bars=0,
         )
         for train_pos, val_pos in folds:
             if not train_pos or not val_pos:
@@ -2466,7 +2646,10 @@ class TestPurgedWalkforwardSplits:
         # embargo window immediately following the previous val block.
         sample_indices = list(range(120))
         folds = _cnn_mod._purged_walkforward_splits(
-            sample_indices, n_splits=3, forward_hours=0, embargo_bars=5,
+            sample_indices,
+            n_splits=3,
+            forward_hours=0,
+            embargo_bars=5,
         )
         # Inspect fold 2's training set — it should not include any candle
         # within embargo_bars of fold 1's val end (plus the purge window).
@@ -2483,7 +2666,10 @@ class TestPurgedWalkforwardSplits:
     def test_embargo_zero_keeps_samples_adjacent_to_val(self):
         sample_indices = list(range(60))
         folds = _cnn_mod._purged_walkforward_splits(
-            sample_indices, n_splits=3, forward_hours=0, embargo_bars=0,
+            sample_indices,
+            n_splits=3,
+            forward_hours=0,
+            embargo_bars=0,
         )
         # With no purge/embargo, training sets grow monotonically.
         train_sizes = [len(t) for (t, _v) in folds]
@@ -2494,7 +2680,10 @@ class TestPurgedWalkforwardSplits:
         # distance, not sample position distance.
         sparse = list(range(0, 100, 10))  # 10 samples at candles 0,10,...,90
         folds = _cnn_mod._purged_walkforward_splits(
-            sparse, n_splits=3, forward_hours=15, embargo_bars=0,
+            sparse,
+            n_splits=3,
+            forward_hours=15,
+            embargo_bars=0,
         )
         for train_pos, val_pos in folds:
             if not train_pos or not val_pos:
@@ -2511,10 +2700,13 @@ class TestPurgedWalkforwardSplits:
     def test_n_splits_one_raises(self):
         # Walk-forward CV with only 1 split is meaningless.
         with pytest.raises(ValueError):
-            _cnn_mod._purged_walkforward_splits([0, 1, 2], n_splits=1, forward_hours=4, embargo_bars=0)
+            _cnn_mod._purged_walkforward_splits(
+                [0, 1, 2], n_splits=1, forward_hours=4, embargo_bars=0
+            )
 
 
 # ── Per-regime validation metrics (P4) ────────────────────────────────────────
+
 
 class TestPerRegimeMetrics:
     """P4 — break validation metrics out by HMM regime.
@@ -2560,6 +2752,7 @@ class TestPerRegimeMetrics:
         got = _cnn_mod._per_regime_metrics(y_true, y_pred, regimes)
         assert got["CHAOTIC"]["loss"] >= 0.0
         import math
+
         assert math.isfinite(got["CHAOTIC"]["loss"])
 
     def test_pos_rate_reflects_label_balance(self):
@@ -2608,7 +2801,7 @@ class TestPrecisionRecallAtThreshold:
     def test_all_below_threshold_with_positives(self):
         # No predictions above threshold → precision undefined (None).
         # Positives exist but none caught → recall = 0.0.
-        probs  = [0.1, 0.2, 0.3]
+        probs = [0.1, 0.2, 0.3]
         labels = [1.0, 0.0, 1.0]
         p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
         assert p is None, "precision should be None when no preds above threshold"
@@ -2616,14 +2809,14 @@ class TestPrecisionRecallAtThreshold:
 
     def test_all_below_threshold_no_positives(self):
         # No preds above, no actual positives → both undefined.
-        probs  = [0.1, 0.2, 0.3]
+        probs = [0.1, 0.2, 0.3]
         labels = [0.0, 0.0, 0.0]
         p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
         assert p is None
         assert r is None
 
     def test_perfect_classifier(self):
-        probs  = [0.9, 0.8, 0.1, 0.2]
+        probs = [0.9, 0.8, 0.1, 0.2]
         labels = [1.0, 1.0, 0.0, 0.0]
         p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
         assert p == 1.0
@@ -2632,7 +2825,7 @@ class TestPrecisionRecallAtThreshold:
     def test_mixed_known_values(self):
         # probs > 0.5: [0.7, 0.8] → labels [1, 0] → TP=1, FP=1, FN=1
         # precision = 1/(1+1) = 0.5, recall = 1/(1+1) = 0.5
-        probs  = [0.7, 0.4, 0.8, 0.3]
+        probs = [0.7, 0.4, 0.8, 0.3]
         labels = [1.0, 1.0, 0.0, 0.0]
         p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.50)
         assert p == 0.5
@@ -2641,7 +2834,7 @@ class TestPrecisionRecallAtThreshold:
     def test_strict_greater_than_threshold(self):
         # Matches cnn_agent.py:1637 `model_prob > config.cnn_buy_threshold` (strict).
         # A prob EXACTLY at the threshold must NOT count as a positive prediction.
-        probs  = [0.60, 0.60]
+        probs = [0.60, 0.60]
         labels = [1.0, 0.0]
         p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.60)
         assert p is None, "prob == threshold should not count as above (gate is strict >)"
@@ -2651,7 +2844,7 @@ class TestPrecisionRecallAtThreshold:
         # Symmetric SELL gate is model_prob < 0.40; if we want a P/R view of
         # BUY-like signals at a lower threshold (e.g. exploratory), helper
         # must still work with any threshold in (0, 1).
-        probs  = [0.50, 0.46, 0.44]
+        probs = [0.50, 0.46, 0.44]
         labels = [1.0, 0.0, 1.0]
         p, r = _cnn_mod._precision_recall_at_threshold(probs, labels, 0.45)
         # Above 0.45: [0.50, 0.46] → labels [1, 0] → TP=1, FP=1, FN=1
@@ -2668,6 +2861,7 @@ class TestPrecisionRecallAtThreshold:
 
 # ── #267 — Log labels reflect active backend (CNN vs XGB) ────────────────────
 
+
 class TestBackendLabelHelper:
     """#267 — When MODEL_BACKEND=xgb, `_cnn_prob` already delegates to
     `xgb_signal.xgb_prob`, so the active decider is XGB. But the scan-loop
@@ -2681,18 +2875,21 @@ class TestBackendLabelHelper:
 
     def test_returns_xgb_when_backend_is_xgb(self):
         import agents.cnn_agent as ca
+
         with patch.object(ca.config, "model_backend", "xgb"):
             assert ca._backend_label() == "XGB"
 
     def test_returns_xgb_v45_when_backend_is_xgb_v45(self):
         """xgb_v45 driver → label 'XGB_V45' (2026-05-23 CNN deprecation)."""
         import agents.cnn_agent as ca
+
         with patch.object(ca.config, "model_backend", "xgb_v45"):
             assert ca._backend_label() == "XGB_V45"
 
     def test_returns_xgb_for_any_other_backend(self):
         """Defensive: any non-xgb_v45 value falls back to 'XGB' — CNN is deprecated."""
         import agents.cnn_agent as ca
+
         with patch.object(ca.config, "model_backend", "xgb"):
             assert ca._backend_label() == "XGB"
 
@@ -2708,34 +2905,37 @@ class TestAlignedBtcClosesHelper:
 
     def test_returns_list_with_target_length(self):
         from agents.cnn_agent import _aligned_btc_closes
+
         target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
-        btc    = [{"start": 1000 + i * 3600, "close": 50000.0 + i * 100} for i in range(5)]
+        btc = [{"start": 1000 + i * 3600, "close": 50000.0 + i * 100} for i in range(5)]
         assert len(_aligned_btc_closes(target, btc)) == len(target)
 
     def test_aligns_by_matching_timestamps(self):
         from agents.cnn_agent import _aligned_btc_closes
+
         target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(3)]
-        btc    = [{"start": 1000 + i * 3600, "close": 50000.0 + i * 100} for i in range(3)]
+        btc = [{"start": 1000 + i * 3600, "close": 50000.0 + i * 100} for i in range(3)]
         assert _aligned_btc_closes(target, btc) == [50000.0, 50100.0, 50200.0]
 
     def test_forward_fills_missing_btc_bars(self):
         """If BTC has gaps inside target window, fill with prior known close."""
         from agents.cnn_agent import _aligned_btc_closes
+
         target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
         btc = [
             {"start": 1000 + 0 * 3600, "close": 50000.0},
             {"start": 1000 + 2 * 3600, "close": 50200.0},
             {"start": 1000 + 4 * 3600, "close": 50400.0},
         ]
-        assert _aligned_btc_closes(target, btc) == \
-            [50000.0, 50000.0, 50200.0, 50200.0, 50400.0]
+        assert _aligned_btc_closes(target, btc) == [50000.0, 50000.0, 50200.0, 50200.0, 50400.0]
 
     def test_pre_target_btc_seeds_initial_value(self):
         """BTC bars before target start should provide the seed close so the
         series is not None at index 0."""
         from agents.cnn_agent import _aligned_btc_closes
+
         target = [{"start": 5000 + i * 3600, "close": 1.0} for i in range(2)]
-        btc    = [
+        btc = [
             {"start": 1000, "close": 49000.0},
             {"start": 5000 + 1 * 3600, "close": 50000.0},
         ]
@@ -2743,6 +2943,7 @@ class TestAlignedBtcClosesHelper:
 
     def test_returns_none_when_btc_empty_or_none(self):
         from agents.cnn_agent import _aligned_btc_closes
+
         target = [{"start": 1000, "close": 1.0}]
         assert _aligned_btc_closes(target, []) is None
         assert _aligned_btc_closes(target, None) is None
@@ -2759,6 +2960,7 @@ class TestAlignedFundingRatesHelper:
 
     def test_returns_list_with_target_length(self):
         from agents.cnn_agent import _aligned_funding_rates
+
         target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
         # Funding event 1h before the first target bar.
         funding = [(1000 * 1000, 0.0001)]
@@ -2767,6 +2969,7 @@ class TestAlignedFundingRatesHelper:
 
     def test_forward_fills_single_event_to_all_bars(self):
         from agents.cnn_agent import _aligned_funding_rates
+
         target = [{"start": 5000 + i * 3600, "close": 1.0} for i in range(3)]
         funding = [(5000 * 1000, 0.00012)]
         assert _aligned_funding_rates(target, funding) == [0.00012, 0.00012, 0.00012]
@@ -2776,12 +2979,13 @@ class TestAlignedFundingRatesHelper:
         the first rate; bars at/after the second event switch to the new
         rate. Mirrors Binance's 8h funding cycle."""
         from agents.cnn_agent import _aligned_funding_rates
+
         # 10 hourly bars starting at unix=0
         target = [{"start": i * 3600, "close": 1.0} for i in range(10)]
         # Event A at hour 0, Event B at hour 8
         funding = [
-            (0,                  0.0001),
-            (8 * 3600 * 1000,   -0.0002),
+            (0, 0.0001),
+            (8 * 3600 * 1000, -0.0002),
         ]
         out = _aligned_funding_rates(target, funding)
         assert out[:8] == [0.0001] * 8
@@ -2791,10 +2995,11 @@ class TestAlignedFundingRatesHelper:
         """A funding event before the first target bar should provide the
         seed rate so the series is not None at index 0."""
         from agents.cnn_agent import _aligned_funding_rates
+
         target = [{"start": 100_000 + i * 3600, "close": 1.0} for i in range(2)]
         funding = [
-            (50_000 * 1000,                 0.0003),  # well before target
-            ((100_000 + 3600) * 1000,       0.0004),  # at second bar
+            (50_000 * 1000, 0.0003),  # well before target
+            ((100_000 + 3600) * 1000, 0.0004),  # at second bar
         ]
         assert _aligned_funding_rates(target, funding) == [0.0003, 0.0004]
 
@@ -2803,12 +3008,14 @@ class TestAlignedFundingRatesHelper:
         early bars with the first available rate (mirrors _aligned_btc_closes
         behaviour — never return None inside the list)."""
         from agents.cnn_agent import _aligned_funding_rates
+
         target = [{"start": i * 3600, "close": 1.0} for i in range(3)]
         funding = [(2 * 3600 * 1000, 0.0001)]  # first event at hour 2
         assert _aligned_funding_rates(target, funding) == [0.0001, 0.0001, 0.0001]
 
     def test_returns_none_when_funding_empty_or_none(self):
         from agents.cnn_agent import _aligned_funding_rates
+
         target = [{"start": 1000, "close": 1.0}]
         assert _aligned_funding_rates(target, []) is None
         assert _aligned_funding_rates(target, None) is None
@@ -2825,6 +3032,7 @@ class TestAlignedOIHistoryHelper:
 
     def test_returns_list_with_target_length(self):
         from agents.cnn_agent import _aligned_oi_history
+
         target = [{"start": 1000 + i * 3600, "close": 1.0} for i in range(5)]
         oi = [(1000 * 1000, 1_000_000.0)]
         out = _aligned_oi_history(target, oi)
@@ -2832,6 +3040,7 @@ class TestAlignedOIHistoryHelper:
 
     def test_forward_fills_single_event_to_all_bars(self):
         from agents.cnn_agent import _aligned_oi_history
+
         target = [{"start": 5000 + i * 3600, "close": 1.0} for i in range(3)]
         oi = [(5000 * 1000, 2_500_000.0)]
         assert _aligned_oi_history(target, oi) == [2_500_000.0] * 3
@@ -2842,10 +3051,11 @@ class TestAlignedOIHistoryHelper:
         value. OKX returns hourly OI in our pull, but the helper must not
         assume any specific cadence."""
         from agents.cnn_agent import _aligned_oi_history
+
         target = [{"start": i * 3600, "close": 1.0} for i in range(10)]
         oi = [
-            (0,                  1_000_000.0),
-            (4 * 3600 * 1000,    1_500_000.0),
+            (0, 1_000_000.0),
+            (4 * 3600 * 1000, 1_500_000.0),
         ]
         out = _aligned_oi_history(target, oi)
         assert out[:4] == [1_000_000.0] * 4
@@ -2855,10 +3065,11 @@ class TestAlignedOIHistoryHelper:
         """An OI event before the first target bar should provide the seed
         value so the series is not None at index 0."""
         from agents.cnn_agent import _aligned_oi_history
+
         target = [{"start": 100_000 + i * 3600, "close": 1.0} for i in range(2)]
         oi = [
-            (50_000 * 1000,                 900_000.0),
-            ((100_000 + 3600) * 1000,       950_000.0),
+            (50_000 * 1000, 900_000.0),
+            ((100_000 + 3600) * 1000, 950_000.0),
         ]
         assert _aligned_oi_history(target, oi) == [900_000.0, 950_000.0]
 
@@ -2867,12 +3078,14 @@ class TestAlignedOIHistoryHelper:
         bars with the first available value (mirrors _aligned_btc_closes /
         _aligned_funding_rates behaviour — never return None inside list)."""
         from agents.cnn_agent import _aligned_oi_history
+
         target = [{"start": i * 3600, "close": 1.0} for i in range(3)]
         oi = [(2 * 3600 * 1000, 1_234_567.0)]
         assert _aligned_oi_history(target, oi) == [1_234_567.0] * 3
 
     def test_returns_none_when_oi_empty_or_none(self):
         from agents.cnn_agent import _aligned_oi_history
+
         target = [{"start": 1000, "close": 1.0}]
         assert _aligned_oi_history(target, []) is None
         assert _aligned_oi_history(target, None) is None
@@ -2886,18 +3099,25 @@ class TestFeatureBuilderCh27OpenInterest:
 
     def _make_candles(self, closes):
         return [
-            {"start": 1700000000 + i * 3600,
-             "open": c - 0.1, "high": c + 0.5, "low": c - 0.5,
-             "close": c, "volume": 100.0}
+            {
+                "start": 1700000000 + i * 3600,
+                "open": c - 0.1,
+                "high": c + 0.5,
+                "low": c - 0.5,
+                "close": c,
+                "volume": 100.0,
+            }
             for i, c in enumerate(closes)
         ]
 
     def test_n_channels_bumped_to_28(self):
         from agents.cnn_agent import N_CHANNELS
+
         assert N_CHANNELS == 28
 
     def test_build_emits_28_channels(self):
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN, N_CHANNELS
+        from agents.cnn_agent import N_CHANNELS, SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
         channels = fb.build(self._make_candles(closes), {})
@@ -2906,7 +3126,8 @@ class TestFeatureBuilderCh27OpenInterest:
     def test_build_oi_rate_default_is_zero_channel(self):
         """No oi_rate kwarg → Ch 27 is all zeros (matches inference fallback
         when OI fetch fails / is unavailable for a product)."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
         channels = fb.build(self._make_candles(closes), {})
@@ -2918,11 +3139,14 @@ class TestFeatureBuilderCh27OpenInterest:
         """With `oi_rate=0.5` (already z-scored), Ch 27 should be a constant
         non-zero series (broadcast across the SEQ_LEN window). Mirrors how
         Ch 20 (funding) is broadcast across the window."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
         channels = fb.build(
-            self._make_candles(closes), {}, oi_rate=0.5,
+            self._make_candles(closes),
+            {},
+            oi_rate=0.5,
         )
         ch27 = channels[27]
         assert len(ch27) == SEQ_LEN
@@ -2934,7 +3158,8 @@ class TestFeatureBuilderCh27OpenInterest:
     def test_build_oi_rate_clipped_to_unit_range(self):
         """oi_rate is z-scored upstream; fb.build divides by 3 (3σ) and
         clips to [-1, 1] so the channel is bounded like the rest."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         closes = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
         # extreme positive z-score → clip ceiling
@@ -2958,12 +3183,18 @@ class TestBuildSamplesRangeOIPlumbing:
 
     def _hourly(self, n=200, base=50_000.0):
         import math as _math
-        return [{
-            "open": base - 50, "high": base + 100, "low": base - 100,
-            "close": base + 500 * _math.sin(i / 5.0),
-            "volume": 10_000 + i * 100,
-            "start": 1_700_000_000 + i * 3600,
-        } for i in range(n)]
+
+        return [
+            {
+                "open": base - 50,
+                "high": base + 100,
+                "low": base - 100,
+                "close": base + 500 * _math.sin(i / 5.0),
+                "volume": 10_000 + i * 100,
+                "start": 1_700_000_000 + i * 3600,
+            }
+            for i in range(n)
+        ]
 
     def test_oi_rates_propagated_to_fb_build(self):
         """Each call to fb.build during _build_samples_range should receive
@@ -2973,7 +3204,9 @@ class TestBuildSamplesRangeOIPlumbing:
         except ImportError:
             pytest.skip("PyTorch not installed")
         from agents.cnn_agent import (
-            FeatureBuilder, _build_samples_range, SEQ_LEN,
+            SEQ_LEN,
+            FeatureBuilder,
+            _build_samples_range,
         )
 
         candles = self._hourly(120)
@@ -2994,16 +3227,22 @@ class TestBuildSamplesRangeOIPlumbing:
         i_start = SEQ_LEN - 1
         i_end = len(candles) - 4  # forward_hours=4
         X, y, idx = _build_samples_range(
-            candles, i_start, i_end,
-            SpyFB(), SEQ_LEN, 4, 0.003,
+            candles,
+            i_start,
+            i_end,
+            SpyFB(),
+            SEQ_LEN,
+            4,
+            0.003,
             oi_rates=oi_rates,
         )
 
         assert len(seen_oi) > 0, "expected fb.build to be called at least once"
         # All values should be floats (z-scored), none should be the raw OI
         # values like 1_000_000.0
-        assert all(isinstance(v, float) for v in seen_oi), \
+        assert all(isinstance(v, float) for v in seen_oi), (
             f"expected float oi_rate per call; saw {[type(v) for v in seen_oi]}"
+        )
         assert all(abs(v) < 100.0 for v in seen_oi), (
             "z-scored values should be O(1); large values mean raw OI was "
             f"forwarded without normalization. Sample: {seen_oi[:3]}"
@@ -3017,7 +3256,9 @@ class TestBuildSamplesRangeOIPlumbing:
         except ImportError:
             pytest.skip("PyTorch not installed")
         from agents.cnn_agent import (
-            FeatureBuilder, _build_samples_range, SEQ_LEN,
+            SEQ_LEN,
+            FeatureBuilder,
+            _build_samples_range,
         )
 
         candles = self._hourly(120)
@@ -3033,8 +3274,13 @@ class TestBuildSamplesRangeOIPlumbing:
                 return real_fb.to_tensor(channels)
 
         _build_samples_range(
-            candles, SEQ_LEN - 1, len(candles) - 4,
-            SpyFB(), SEQ_LEN, 4, 0.003,
+            candles,
+            SEQ_LEN - 1,
+            len(candles) - 4,
+            SpyFB(),
+            SEQ_LEN,
+            4,
+            0.003,
             oi_rates=None,
         )
         assert len(seen_oi) > 0
@@ -3052,27 +3298,38 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
     @pytest.fixture(autouse=True)
     def _isolate_paths(self, tmp_path, monkeypatch):
         import agents.cnn_agent as ca
-        monkeypatch.setattr(ca, "_BEST_LOSS_PATH",      str(tmp_path / "best_loss.txt"))
-        monkeypatch.setattr(ca, "MODEL_PATH",           str(tmp_path / "cnn_model.pt"))
-        monkeypatch.setattr(ca, "_MODEL_BAK_PATH",      str(tmp_path / "cnn_model.pt.bak"))
-        monkeypatch.setattr(ca, "_CKPT_PATH",           str(tmp_path / "ckpt_resume.pt"))
-        monkeypatch.setattr(ca, "_DATASET_CACHE_PATH",  str(tmp_path / "dataset_cache.pt"))
+
+        monkeypatch.setattr(ca, "_BEST_LOSS_PATH", str(tmp_path / "best_loss.txt"))
+        monkeypatch.setattr(ca, "MODEL_PATH", str(tmp_path / "cnn_model.pt"))
+        monkeypatch.setattr(ca, "_MODEL_BAK_PATH", str(tmp_path / "cnn_model.pt.bak"))
+        monkeypatch.setattr(ca, "_CKPT_PATH", str(tmp_path / "ckpt_resume.pt"))
+        monkeypatch.setattr(ca, "_DATASET_CACHE_PATH", str(tmp_path / "dataset_cache.pt"))
 
     def _hourly(self, n=200, base=50000.0):
-        return [{
-            "open": base - 50, "high": base + 100, "low": base - 100,
-            "close": base + 500 * math.sin(i / 5.0),
-            "volume": 10_000 + i * 100,
-            "start": 1_700_000_000 + i * 3600,
-        } for i in range(n)]
+        return [
+            {
+                "open": base - 50,
+                "high": base + 100,
+                "low": base - 100,
+                "close": base + 500 * math.sin(i / 5.0),
+                "volume": 10_000 + i * 100,
+                "start": 1_700_000_000 + i * 3600,
+            }
+            for i in range(n)
+        ]
 
     def _five_min(self, n=300, base=50000.0):
-        return [{
-            "open": base, "high": base + 5, "low": base - 5,
-            "close": base + 10 * math.sin(i / 5.0),
-            "volume": 100.0,
-            "start": 1_700_000_000 + i * 300,
-        } for i in range(n)]
+        return [
+            {
+                "open": base,
+                "high": base + 5,
+                "low": base - 5,
+                "close": base + 10 * math.sin(i / 5.0),
+                "volume": 100.0,
+                "start": 1_700_000_000 + i * 300,
+            }
+            for i in range(n)
+        ]
 
     @pytest.mark.asyncio
     async def test_extend_or_rebuild_receives_btc_closes_for_non_btc_products(self):
@@ -3086,7 +3343,7 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
         agent = CoinbaseCNNAgent()
         products = [{"product_id": pid} for pid in ("BTC-USD", "ETH-USD", "SOL-USD")]
-        candles  = self._hourly(200)
+        candles = self._hourly(200)
         seen = []
         from agents.cnn_agent import _extend_or_rebuild_product as orig
 
@@ -3098,10 +3355,8 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
             return orig(*args, **kwargs)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
             patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
         ):
@@ -3110,7 +3365,7 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
         assert len(seen) == 3, f"expected 3 calls (BTC, ETH, SOL); got {len(seen)}"
         # BTC-USD: btc_closes must be None (own-series, no self-correlation)
         # Other products: btc_closes must be a non-empty list aligned to candles
-        n_with_btc   = sum(1 for k in seen if k.get("btc_closes") is not None)
+        n_with_btc = sum(1 for k in seen if k.get("btc_closes") is not None)
         n_without_btc = sum(1 for k in seen if k.get("btc_closes") is None)
         assert n_with_btc == 2, f"non-BTC products must get btc_closes; only {n_with_btc} did"
         assert n_without_btc == 1, "exactly one call (BTC-USD) should have btc_closes=None"
@@ -3118,8 +3373,9 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
         for k in seen:
             bc = k.get("btc_closes")
             if bc is not None:
-                assert len(bc) == len(candles), \
+                assert len(bc) == len(candles), (
                     f"btc_closes len {len(bc)} != candles len {len(candles)}"
+                )
 
     @pytest.mark.asyncio
     async def test_extend_or_rebuild_receives_candles_5m(self):
@@ -3130,8 +3386,8 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
         agent = CoinbaseCNNAgent()
         products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
-        candles  = self._hourly(200)
-        c5m      = self._five_min(300)
+        candles = self._hourly(200)
+        c5m = self._five_min(300)
         seen = []
         from agents.cnn_agent import _extend_or_rebuild_product as orig
 
@@ -3140,10 +3396,8 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
             return orig(*args, **kwargs)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
             patch("agents.cnn_agent.load_5m_history", return_value=c5m),
             patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
@@ -3152,8 +3406,9 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
         assert seen
         for kwargs in seen:
-            assert kwargs.get("candles_5m") == c5m, \
+            assert kwargs.get("candles_5m") == c5m, (
                 "_extend_or_rebuild_product not called with candles_5m"
+            )
 
     @pytest.mark.asyncio
     async def test_extend_or_rebuild_receives_funding_rates(self):
@@ -3169,7 +3424,7 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
         agent = CoinbaseCNNAgent()
         products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
-        candles  = self._hourly(200)
+        candles = self._hourly(200)
         # Funding event at the first candle bar; same rate should forward-
         # fill across all 200 hourly bars.
         first_ts_ms = int(candles[0]["start"]) * 1000
@@ -3183,25 +3438,22 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
             return orig(*args, **kwargs)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
             patch("agents.cnn_agent.load_5m_history", return_value=[]),
-            patch("agents.cnn_agent.fetch_funding_history",
-                  new=AsyncMock(return_value=funding_payload)),
+            patch(
+                "agents.cnn_agent.fetch_funding_history",
+                new=AsyncMock(return_value=funding_payload),
+            ),
             patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
         ):
             await agent.train_on_history(epochs=1)
 
         assert seen, "expected _extend_or_rebuild_product calls"
-        n_with_funding = sum(
-            1 for k in seen if isinstance(k.get("funding_rates"), list)
-        )
+        n_with_funding = sum(1 for k in seen if isinstance(k.get("funding_rates"), list))
         assert n_with_funding == len(seen), (
-            f"all calls should pass funding_rates list; "
-            f"{n_with_funding}/{len(seen)} did"
+            f"all calls should pass funding_rates list; {n_with_funding}/{len(seen)} did"
         )
         for k in seen:
             fr = k["funding_rates"]
@@ -3225,7 +3477,7 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
 
         agent = CoinbaseCNNAgent()
         products = [{"product_id": "BTC-USD"}, {"product_id": "ETH-USD"}]
-        candles  = self._hourly(200)
+        candles = self._hourly(200)
         first_ts_ms = int(candles[0]["start"]) * 1000
         oi_payload = [(first_ts_ms, 2_500_000.0)]
 
@@ -3237,33 +3489,24 @@ class TestBuildDatasetWiresBtcAndFiveMinute:
             return orig(*args, **kwargs)
 
         with (
-            patch("agents.cnn_agent.database.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_products", new=AsyncMock(return_value=products)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
             patch("agents.cnn_agent.load_history", return_value=[]),
             patch("agents.cnn_agent.load_5m_history", return_value=[]),
-            patch("agents.cnn_agent.fetch_funding_history",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.fetch_oi_history",
-                  new=AsyncMock(return_value=oi_payload)),
+            patch("agents.cnn_agent.fetch_funding_history", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.fetch_oi_history", new=AsyncMock(return_value=oi_payload)),
             patch("agents.cnn_agent._extend_or_rebuild_product", side_effect=spy),
         ):
             await agent.train_on_history(epochs=1)
 
         assert seen, "expected _extend_or_rebuild_product calls"
-        n_with_oi = sum(
-            1 for k in seen if isinstance(k.get("oi_rates"), list)
-        )
+        n_with_oi = sum(1 for k in seen if isinstance(k.get("oi_rates"), list))
         assert n_with_oi == len(seen), (
-            f"all calls should pass oi_rates list; "
-            f"{n_with_oi}/{len(seen)} did"
+            f"all calls should pass oi_rates list; {n_with_oi}/{len(seen)} did"
         )
         for k in seen:
             oi = k["oi_rates"]
-            assert len(oi) == len(candles), (
-                f"oi_rates len {len(oi)} != candles len {len(candles)}"
-            )
+            assert len(oi) == len(candles), f"oi_rates len {len(oi)} != candles len {len(candles)}"
             assert oi[0] == 2_500_000.0, "oi value should match payload"
 
 
@@ -3279,10 +3522,12 @@ class TestMaskShrinkAndCacheBump:
         # mask was correct for 10/11/20/24/25/26 (now real), but 17/18/19
         # were never wired up.
         from agents.cnn_agent import _TRAINING_CONSTANT_CHANNELS
+
         assert _TRAINING_CONSTANT_CHANNELS == frozenset({17, 18, 19})
 
     def test_dataset_cache_version_bumped(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
+
         # #98 superseded the #86 bump from 8→9; cache is now at 10.
         assert _DATASET_CACHE_VERSION >= 9
 
@@ -3296,7 +3541,9 @@ class TestZeroMaskChannelsHelper:
 
     def test_zero_mask_channels_zeros_only_listed_set(self):
         import torch
-        from agents.cnn_agent import _zero_mask_channels, N_CHANNELS
+
+        from agents.cnn_agent import N_CHANNELS, _zero_mask_channels
+
         x = torch.ones(2, N_CHANNELS, 60) * 0.5
         out = _zero_mask_channels(x)
         # 17/18/19 zeroed, others preserved
@@ -3305,11 +3552,13 @@ class TestZeroMaskChannelsHelper:
         assert torch.all(out[:, 19, :] == 0.0)
         assert torch.all(out[:, 16, :] == 0.5)
         assert torch.all(out[:, 20, :] == 0.5)
-        assert torch.all(out[:, 0,  :] == 0.5)
+        assert torch.all(out[:, 0, :] == 0.5)
 
     def test_zero_mask_channels_does_not_mutate_input(self):
         import torch
-        from agents.cnn_agent import _zero_mask_channels, N_CHANNELS
+
+        from agents.cnn_agent import N_CHANNELS, _zero_mask_channels
+
         x = torch.ones(1, N_CHANNELS, 60) * 0.5
         x_before = x.clone()
         _ = _zero_mask_channels(x)
@@ -3317,7 +3566,9 @@ class TestZeroMaskChannelsHelper:
 
     def test_zero_mask_channels_preserves_shape_and_dtype(self):
         import torch
-        from agents.cnn_agent import _zero_mask_channels, N_CHANNELS
+
+        from agents.cnn_agent import N_CHANNELS, _zero_mask_channels
+
         x = torch.randn(3, N_CHANNELS, 60, dtype=torch.float32)
         out = _zero_mask_channels(x)
         assert out.shape == x.shape
@@ -3329,21 +3580,25 @@ class TestClosePositionHelper:
 
     def test_close_at_high_returns_one(self):
         from agents.cnn_agent import _close_position
+
         out = _close_position([10.0], [10.0], [9.0])
         assert out == [1.0]
 
     def test_close_at_low_returns_zero(self):
         from agents.cnn_agent import _close_position
+
         out = _close_position([9.0], [10.0], [9.0])
         assert out == [0.0]
 
     def test_close_at_midpoint_returns_half(self):
         from agents.cnn_agent import _close_position
+
         out = _close_position([9.5], [10.0], [9.0])
         assert out == [0.5]
 
     def test_zero_range_returns_zero_no_div_zero(self):
         from agents.cnn_agent import _close_position
+
         out = _close_position([10.0], [10.0], [10.0])
         assert out == [0.0]
 
@@ -3353,16 +3608,19 @@ class TestBarRangeHelper:
 
     def test_zero_range_returns_zero(self):
         from agents.cnn_agent import _bar_range
+
         out = _bar_range([10.0], [10.0], [10.0])
         assert out == [0.0]
 
     def test_one_pct_range_scales_to_zero_point_one(self):
         from agents.cnn_agent import _bar_range
+
         out = _bar_range([100.0], [100.5], [99.5])
         assert abs(out[0] - 0.1) < 1e-6
 
     def test_clipped_at_one(self):
         from agents.cnn_agent import _bar_range
+
         out = _bar_range([100.0], [200.0], [50.0])
         assert out[0] == 1.0
 
@@ -3372,25 +3630,29 @@ class TestRealizedVolHelper:
 
     def test_constant_prices_yield_zero(self):
         from agents.cnn_agent import _rv_series
+
         out = _rv_series([100.0] * 30, window=20)
         assert all(v == 0.0 for v in out)
 
     def test_pre_window_bars_are_zero(self):
         from agents.cnn_agent import _rv_series
+
         out = _rv_series([100.0 + i for i in range(30)], window=20)
         assert out[0] == 0.0
         assert out[19] == 0.0
 
     def test_post_window_increases_with_volatility(self):
         from agents.cnn_agent import _rv_series
+
         low_vol = [100.0 + 0.01 * i for i in range(30)]
-        high_vol = [100.0 + 5.0 * (-1)**i for i in range(30)]
+        high_vol = [100.0 + 5.0 * (-1) ** i for i in range(30)]
         ov_low = _rv_series(low_vol, window=20)
         ov_high = _rv_series(high_vol, window=20)
         assert ov_high[-1] > ov_low[-1]
 
     def test_output_clipped_to_unit_range(self):
         from agents.cnn_agent import _rv_series
+
         crazy = [100.0 * (1.5 if i % 2 else 1.0) for i in range(30)]
         out = _rv_series(crazy, window=20)
         assert all(0.0 <= v <= 1.0 for v in out)
@@ -3401,6 +3663,7 @@ class TestVolumeSentimentHelper:
 
     def test_all_up_bars_yield_plus_one(self):
         from agents.cnn_agent import _volume_sentiment
+
         closes = [100.0 + i for i in range(10)]
         vols = [1.0] * 10
         out = _volume_sentiment(closes, vols, window=5)
@@ -3408,6 +3671,7 @@ class TestVolumeSentimentHelper:
 
     def test_all_down_bars_yield_minus_one(self):
         from agents.cnn_agent import _volume_sentiment
+
         closes = [100.0 - i for i in range(10)]
         vols = [1.0] * 10
         out = _volume_sentiment(closes, vols, window=5)
@@ -3415,6 +3679,7 @@ class TestVolumeSentimentHelper:
 
     def test_balanced_alternating_yields_near_zero(self):
         from agents.cnn_agent import _volume_sentiment
+
         closes = [100.0 + (1 if i % 2 else -1) for i in range(20)]
         vols = [1.0] * 20
         out = _volume_sentiment(closes, vols, window=10)
@@ -3422,11 +3687,13 @@ class TestVolumeSentimentHelper:
 
     def test_zero_volume_window_yields_zero(self):
         from agents.cnn_agent import _volume_sentiment
+
         out = _volume_sentiment([100.0] * 10, [0.0] * 10, window=5)
         assert all(v == 0.0 for v in out)
 
     def test_first_bar_is_zero(self):
         from agents.cnn_agent import _volume_sentiment
+
         out = _volume_sentiment([100.0, 101.0, 102.0], [1.0, 1.0, 1.0], window=5)
         assert out[0] == 0.0
 
@@ -3445,16 +3712,22 @@ class TestRvPrefixLookback:
     def _make_candles(self, closes):
         """Build minimal hourly candles from a closes list (open=close-0.1, h/l flat)."""
         return [
-            {"start": 1700000000 + i * 3600,
-             "open": c - 0.1, "high": c + 0.5, "low": c - 0.5,
-             "close": c, "volume": 100.0}
+            {
+                "start": 1700000000 + i * 3600,
+                "open": c - 0.1,
+                "high": c + 0.5,
+                "low": c - 0.5,
+                "close": c,
+                "volume": 100.0,
+            }
             for i, c in enumerate(closes)
         ]
 
     def test_no_closes_ext_keeps_current_zero_behavior(self):
         """Regression guard: without closes_ext, rv60 stays all-zero (today's
         bug) so the cache version bump is the canary, not silent change."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN, N_CHANNELS
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         # 60 random-walk closes, no prefix
         closes = [100.0 + 0.5 * ((i * 37) % 7 - 3) for i in range(SEQ_LEN)]
@@ -3468,15 +3741,18 @@ class TestRvPrefixLookback:
     def test_closes_ext_makes_rv60_nonzero_across_window(self):
         """With 60 prior closes prepended via closes_ext, rv60_ch must be
         non-zero across all 60 in-window bars."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         # 120 closes total: 60 prefix + 60 in-window. Use a slightly oscillating
         # series so realized vol is genuinely non-zero everywhere.
         all_closes = [100.0 + 2.0 * (((i * 13) % 11) - 5) / 5.0 for i in range(SEQ_LEN * 2)]
         in_window = all_closes[-SEQ_LEN:]
-        prefix    = all_closes[:-SEQ_LEN]  # 60 prior closes (oldest → newest-1)
-        channels  = fb.build(
-            self._make_candles(in_window), {}, closes_ext=prefix + in_window,
+        prefix = all_closes[:-SEQ_LEN]  # 60 prior closes (oldest → newest-1)
+        channels = fb.build(
+            self._make_candles(in_window),
+            {},
+            closes_ext=prefix + in_window,
         )
         rv60 = channels[25]
         nonzero = sum(1 for v in rv60 if v > 0.0)
@@ -3487,12 +3763,15 @@ class TestRvPrefixLookback:
     def test_closes_ext_makes_rv20_nonzero_across_window(self):
         """rv20_ch should also be non-zero across all in-window bars when
         closes_ext provides ≥20 bars of prefix."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         all_closes = [100.0 + 0.3 * (((i * 17) % 9) - 4) for i in range(SEQ_LEN * 2)]
-        in_window  = all_closes[-SEQ_LEN:]
+        in_window = all_closes[-SEQ_LEN:]
         channels = fb.build(
-            self._make_candles(in_window), {}, closes_ext=all_closes,
+            self._make_candles(in_window),
+            {},
+            closes_ext=all_closes,
         )
         rv20 = channels[24]
         nonzero = sum(1 for v in rv20 if v > 0.0)
@@ -3504,12 +3783,15 @@ class TestRvPrefixLookback:
         """The last value of rv60_ch when closes_ext is provided must equal
         the value computed over the last 60 closes of closes_ext (sanity:
         the channel is aligned to the in-window candles, not shifted)."""
-        from agents.cnn_agent import FeatureBuilder, _rv_series, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder, _rv_series
+
         fb = FeatureBuilder()
         all_closes = [100.0 + 0.5 * (((i * 7) % 5) - 2) for i in range(SEQ_LEN * 2)]
-        in_window  = all_closes[-SEQ_LEN:]
+        in_window = all_closes[-SEQ_LEN:]
         channels = fb.build(
-            self._make_candles(in_window), {}, closes_ext=all_closes,
+            self._make_candles(in_window),
+            {},
+            closes_ext=all_closes,
         )
         rv60_ch = channels[25]
         # Recompute expected last value: rv at index N-1 of closes_ext
@@ -3521,11 +3803,14 @@ class TestRvPrefixLookback:
     def test_short_closes_ext_falls_back_gracefully(self):
         """If closes_ext is shorter than closes (degenerate input), build must
         not crash — it falls back to using closes alone (current behavior)."""
-        from agents.cnn_agent import FeatureBuilder, SEQ_LEN
+        from agents.cnn_agent import SEQ_LEN, FeatureBuilder
+
         fb = FeatureBuilder()
         in_window = [100.0 + 0.1 * i for i in range(SEQ_LEN)]
-        channels  = fb.build(
-            self._make_candles(in_window), {}, closes_ext=[100.0, 100.5],
+        channels = fb.build(
+            self._make_candles(in_window),
+            {},
+            closes_ext=[100.0, 100.5],
         )
         rv60 = channels[25]
         assert len(rv60) == SEQ_LEN
@@ -3543,10 +3828,12 @@ class TestDatasetCacheVersionBumpForRv:
 
     def test_dataset_cache_version_bumped_to_11(self):
         from agents.cnn_agent import _DATASET_CACHE_VERSION
+
         assert _DATASET_CACHE_VERSION >= 12
 
 
 # ── _CNNBook.sell() ordering: trades table is source of truth ──────────────────
+
 
 class TestCNNBookSellOrdering:
     """#109: _CNNBook.sell() must persist the trade close to the DB BEFORE
@@ -3560,8 +3847,10 @@ class TestCNNBookSellOrdering:
 
         book = _CNNBook()
         book.positions["XRP-USD"] = {
-            "size": 100.0, "avg_price": 1.30,
-            "entry_time": 0.0, "peak_price": 1.30,
+            "size": 100.0,
+            "avg_price": 1.30,
+            "entry_time": 0.0,
+            "peak_price": 1.30,
         }
 
         call_order: list[str] = []
@@ -3573,10 +3862,13 @@ class TestCNNBookSellOrdering:
             call_order.append("save_agent_state")
 
         with (
-            patch("agents.cnn_agent.database.close_trade",
-                  new=AsyncMock(side_effect=fake_close_trade)),
-            patch("agents.cnn_agent.database.save_agent_state",
-                  new=AsyncMock(side_effect=fake_save_agent_state)),
+            patch(
+                "agents.cnn_agent.database.close_trade", new=AsyncMock(side_effect=fake_close_trade)
+            ),
+            patch(
+                "agents.cnn_agent.database.save_agent_state",
+                new=AsyncMock(side_effect=fake_save_agent_state),
+            ),
         ):
             await book.sell("XRP-USD", 1.40, trigger="SCAN")
 
@@ -3593,8 +3885,10 @@ class TestCNNBookSellOrdering:
 
         book = _CNNBook()
         book.positions["XRP-USD"] = {
-            "size": 100.0, "avg_price": 1.30,
-            "entry_time": 0.0, "peak_price": 1.30,
+            "size": 100.0,
+            "avg_price": 1.30,
+            "entry_time": 0.0,
+            "peak_price": 1.30,
         }
         balance_before = book.balance
         pnl_before = book.realized_pnl
@@ -3603,10 +3897,8 @@ class TestCNNBookSellOrdering:
             raise RuntimeError("DB write failed")
 
         with (
-            patch("agents.cnn_agent.database.close_trade",
-                  new=AsyncMock(side_effect=boom)),
-            patch("agents.cnn_agent.database.save_agent_state",
-                  new=AsyncMock()) as save_mock,
+            patch("agents.cnn_agent.database.close_trade", new=AsyncMock(side_effect=boom)),
+            patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()) as save_mock,
         ):
             with pytest.raises(RuntimeError):
                 await book.sell("XRP-USD", 1.40, trigger="SCAN")
@@ -3631,15 +3923,18 @@ class TestCNNBookSellEvaluatesProductStatus:
 
         book = _CNNBook()
         book.positions["XRP-USD"] = {
-            "size": 100.0, "avg_price": 1.30,
-            "entry_time": 0.0, "peak_price": 1.30,
+            "size": 100.0,
+            "avg_price": 1.30,
+            "entry_time": 0.0,
+            "peak_price": 1.30,
         }
         with (
             patch("agents.cnn_agent.database.close_trade", new=AsyncMock()),
             patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
-            patch("agents.cnn_agent.product_status.evaluate_and_persist",
-                  new=AsyncMock(return_value=("active", "active", False)))
-                  as eval_mock,
+            patch(
+                "agents.cnn_agent.product_status.evaluate_and_persist",
+                new=AsyncMock(return_value=("active", "active", False)),
+            ) as eval_mock,
         ):
             await book.sell("XRP-USD", 1.40, trigger="SCAN")
 
@@ -3656,15 +3951,20 @@ class TestCNNBookSellEvaluatesProductStatus:
 
         book = _CNNBook()
         book.positions["XRP-USD"] = {
-            "size": 100.0, "avg_price": 1.30,
-            "entry_time": 0.0, "peak_price": 1.30,
+            "size": 100.0,
+            "avg_price": 1.30,
+            "entry_time": 0.0,
+            "peak_price": 1.30,
         }
         with (
-            patch("agents.cnn_agent.database.close_trade",
-                  new=AsyncMock(side_effect=RuntimeError("DB down"))),
+            patch(
+                "agents.cnn_agent.database.close_trade",
+                new=AsyncMock(side_effect=RuntimeError("DB down")),
+            ),
             patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
-            patch("agents.cnn_agent.product_status.evaluate_and_persist",
-                  new=AsyncMock()) as eval_mock,
+            patch(
+                "agents.cnn_agent.product_status.evaluate_and_persist", new=AsyncMock()
+            ) as eval_mock,
         ):
             with pytest.raises(RuntimeError):
                 await book.sell("XRP-USD", 1.40, trigger="SCAN")
@@ -3679,14 +3979,18 @@ class TestCNNBookSellEvaluatesProductStatus:
 
         book = _CNNBook()
         book.positions["XRP-USD"] = {
-            "size": 100.0, "avg_price": 1.30,
-            "entry_time": 0.0, "peak_price": 1.30,
+            "size": 100.0,
+            "avg_price": 1.30,
+            "entry_time": 0.0,
+            "peak_price": 1.30,
         }
         with (
             patch("agents.cnn_agent.database.close_trade", new=AsyncMock()),
             patch("agents.cnn_agent.database.save_agent_state", new=AsyncMock()),
-            patch("agents.cnn_agent.product_status.evaluate_and_persist",
-                  new=AsyncMock(side_effect=RuntimeError("evaluator boom"))),
+            patch(
+                "agents.cnn_agent.product_status.evaluate_and_persist",
+                new=AsyncMock(side_effect=RuntimeError("evaluator boom")),
+            ),
         ):
             pnl = await book.sell("XRP-USD", 1.40, trigger="SCAN")
 
@@ -3706,10 +4010,14 @@ class TestMCFilterChainIntegration:
         """MC_FILTERS='' (default) -> chain is identity for BUY side."""
         monkeypatch.delenv("MC_FILTERS", raising=False)
         from agents.mc import registry
+
         registry._reset_chain_cache()
         side, tele = registry.apply_buy_filters(
-            side="BUY", model_prob=0.7, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.7,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert side == "BUY"
         assert tele == {}
@@ -3719,19 +4027,25 @@ class TestMCFilterChainIntegration:
         monkeypatch.setenv("MC_FILTERS", "ci")
         monkeypatch.setenv("MC_CI_K", "1.0")
         import importlib
+
         from agents.mc import registry
+
         try:
             from agents.mc import ci_filter
+
             importlib.reload(ci_filter)  # re-register after env change
         except Exception:
             pass
         registry._reset_chain_cache()
 
-        import agents.xgb_signal as xs
         import numpy as np
 
+        import agents.xgb_signal as xs
+
         class _Booster:
-            def num_boosted_rounds(self): return 5
+            def num_boosted_rounds(self):
+                return 5
+
             def predict(self, dmat, iteration_range=None):
                 k = iteration_range[1] if iteration_range else 5
                 # trajectory 0.50, 0.55, 0.60, 0.65, 0.70; stdev ~= 0.0707
@@ -3742,8 +4056,10 @@ class TestMCFilterChainIntegration:
         monkeypatch.setattr(xs, "_feature_names", ["f"] * 350)
         monkeypatch.setattr(xs, "_load_succeeded", True)
         import xgboost as xgb_mod
+
         monkeypatch.setattr(
-            xgb_mod, "DMatrix",
+            xgb_mod,
+            "DMatrix",
             type("DM", (), {"__init__": lambda *a, **kw: None}),
         )
         monkeypatch.setattr(
@@ -3751,16 +4067,22 @@ class TestMCFilterChainIntegration:
             lambda pid, **kw: {"micro": [], "meso": [], "macro": []},
         )
         import tools.xgb_features as xf
+
         monkeypatch.setattr(
-            xf, "extract_features",
+            xf,
+            "extract_features",
             lambda tiers, feature_set="v3": (np.zeros((1, 350)), ["f"] * 350),
         )
         import config as cfg
+
         monkeypatch.setattr(cfg.config, "cnn_buy_threshold", 0.65)
 
         side, tele = registry.apply_buy_filters(
-            side="BUY", model_prob=0.70, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.70,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert side == "HOLD"
         assert tele["ci"]["decision"] == "block"
@@ -3769,13 +4091,17 @@ class TestMCFilterChainIntegration:
         """Structural test: the scan-dict construction in generate_signal
         propagates CIFilter telemetry into save_cnn_scan."""
         import json
+
         scan = {
-            "product_id": "BTC-USD", "price": 100.0,
-            "cnn_prob": 0.7, "model_prob": 0.7,
-            "side": "BUY", "strength": 0.4, "signal_gen": True,
+            "product_id": "BTC-USD",
+            "price": 100.0,
+            "cnn_prob": 0.7,
+            "model_prob": 0.7,
+            "side": "BUY",
+            "strength": 0.4,
+            "signal_gen": True,
         }
-        mc_tele = {"ci": {"stdev": 0.0124, "lower": 0.6876, "K": 1.0,
-                          "decision": "keep"}}
+        mc_tele = {"ci": {"stdev": 0.0124, "lower": 0.6876, "K": 1.0, "decision": "keep"}}
         # Match cnn_agent's dict-build snippet exactly
         scan["xgb_prob_stdev"] = mc_tele.get("ci", {}).get("stdev") if mc_tele else None
         scan["mc_telemetry"] = json.dumps(mc_tele) if mc_tele else None
@@ -3788,12 +4114,9 @@ class TestMCFilterChainIntegration:
 
 class TestV4ShadowWriteThrough:
     @pytest.mark.asyncio
-    async def test_generate_signal_passes_xgb_prob_v4_to_save_cnn_scan(
-        self, monkeypatch
-    ):
+    async def test_generate_signal_passes_xgb_prob_v4_to_save_cnn_scan(self, monkeypatch):
         """When config.model_backend='xgb', cnn_agent must call xgb_prob_shadow
         and forward the v4 prob into the save_cnn_scan dict as xgb_prob_v4."""
-        import agents.cnn_agent as ca
 
         # Stub xgb_signal.xgb_prob_shadow to return known (v3, v4)
         monkeypatch.setattr(
@@ -3803,8 +4126,10 @@ class TestV4ShadowWriteThrough:
 
         # Capture save_cnn_scan calls
         saved: list = []
+
         async def fake_save(scan, db_path=None):
             saved.append(scan)
+
         monkeypatch.setattr("database.save_cnn_scan", fake_save)
 
         # Build a minimal agent and run generate_signal with enough fakes
@@ -3837,6 +4162,7 @@ class TestV45ShadowAndDriver:
         no-MC environment. Without this, BUY decisions get downgraded to HOLD."""
         monkeypatch.setenv("MC_FILTERS", "")
         from agents.mc import registry
+
         registry._reset_chain_cache()
         yield
         registry._reset_chain_cache()
@@ -3845,6 +4171,7 @@ class TestV45ShadowAndDriver:
     async def test_generate_signal_xgb_logs_v45_shadow(self, agent, product, monkeypatch):
         """Under MODEL_BACKEND=xgb (v3 driver), v4.5 shadow logs every scan."""
         import agents.cnn_agent as ca
+
         monkeypatch.setattr(ca.config, "model_backend", "xgb")
         monkeypatch.setattr(
             "agents.xgb_signal.xgb_prob_shadow_v4_5",
@@ -3852,23 +4179,21 @@ class TestV45ShadowAndDriver:
         )
 
         captured = []
+
         async def _capture_save(scan, db_path=None):
             captured.append(scan)
 
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  side_effect=_capture_save),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", side_effect=_capture_save),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
             patch.object(agent, "_cnn_prob", return_value=0.82),
         ):
             await agent.generate_signal(product)
@@ -3878,16 +4203,20 @@ class TestV45ShadowAndDriver:
         # v3 driver decision still controls side (model_prob 0.82 > 0.60 → BUY)
         assert scan["side"] == "BUY"
         # v4.5 shadow probs persisted atomically (invariant #17)
-        assert scan["xgb_prob_v4_5_down"]    == 0.10
+        assert scan["xgb_prob_v4_5_down"] == 0.10
         assert scan["xgb_prob_v4_5_neutral"] == 0.10
-        assert scan["xgb_prob_v4_5_up"]      == 0.80
+        assert scan["xgb_prob_v4_5_up"] == 0.80
 
     @pytest.mark.asyncio
     async def test_generate_signal_xgb_handles_v45_shadow_failure(
-        self, agent, product, monkeypatch,
+        self,
+        agent,
+        product,
+        monkeypatch,
     ):
         """v4.5 failure → all three probs NULL atomically; v3 driver unaffected."""
         import agents.cnn_agent as ca
+
         monkeypatch.setattr(ca.config, "model_backend", "xgb")
         monkeypatch.setattr(
             "agents.xgb_signal.xgb_prob_shadow_v4_5",
@@ -3895,31 +4224,29 @@ class TestV45ShadowAndDriver:
         )
 
         captured = []
+
         async def _capture_save(scan, db_path=None):
             captured.append(scan)
 
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  side_effect=_capture_save),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", side_effect=_capture_save),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
             patch.object(agent, "_cnn_prob", return_value=0.82),
         ):
             await agent.generate_signal(product)
 
         scan = captured[0]
-        assert scan["xgb_prob_v4_5_down"]    is None
+        assert scan["xgb_prob_v4_5_down"] is None
         assert scan["xgb_prob_v4_5_neutral"] is None
-        assert scan["xgb_prob_v4_5_up"]      is None
+        assert scan["xgb_prob_v4_5_up"] is None
         # v3 shadow still recorded
         assert scan["xgb_prob"] == pytest.approx(0.65, abs=1e-3)
 
@@ -3927,8 +4254,9 @@ class TestV45ShadowAndDriver:
     async def test_generate_signal_xgb_v45_driver_path(self, agent, product, monkeypatch):
         """Under MODEL_BACKEND=xgb_v45, BUY decided by indep_thresholds on v4.5 probs."""
         import agents.cnn_agent as ca
+
         monkeypatch.setattr(ca.config, "model_backend", "xgb_v45")
-        monkeypatch.setattr(ca.config, "xgb_v45_thresh_up",   0.50)
+        monkeypatch.setattr(ca.config, "xgb_v45_thresh_up", 0.50)
         monkeypatch.setattr(ca.config, "xgb_v45_thresh_down", 0.50)
         monkeypatch.setattr(
             "agents.xgb_signal.xgb_prob_shadow_v4_5",
@@ -3936,23 +4264,21 @@ class TestV45ShadowAndDriver:
         )
 
         captured = []
+
         async def _capture_save(scan, db_path=None):
             captured.append(scan)
 
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  side_effect=_capture_save),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", side_effect=_capture_save),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
             patch.object(agent, "_cnn_prob", return_value=0.55),
         ):
             sig = await agent.generate_signal(product)
@@ -3962,15 +4288,19 @@ class TestV45ShadowAndDriver:
         assert sig["side"] == "BUY"
         # Both v3 and v4.5 shadow probs persisted (always-on)
         scan = captured[0]
-        assert scan["xgb_prob_v4_5_up"]   == 0.80
+        assert scan["xgb_prob_v4_5_up"] == 0.80
         assert scan["xgb_prob_v4_5_down"] == 0.10
 
     @pytest.mark.asyncio
     async def test_generate_signal_xgb_v45_holds_on_v45_failure(
-        self, agent, product, monkeypatch,
+        self,
+        agent,
+        product,
+        monkeypatch,
     ):
         """Under MODEL_BACKEND=xgb_v45, v4.5 inference failure → HOLD (no garbage trades)."""
         import agents.cnn_agent as ca
+
         monkeypatch.setattr(ca.config, "model_backend", "xgb_v45")
         monkeypatch.setattr(
             "agents.xgb_signal.xgb_prob_shadow_v4_5",
@@ -3979,18 +4309,15 @@ class TestV45ShadowAndDriver:
 
         candles = _make_candles(80)
         with (
-            patch("agents.cnn_agent.database.get_candles",
-                  new=AsyncMock(return_value=candles)),
-            patch("agents.cnn_agent.database.get_agent_decisions",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.database.save_cnn_scan",
-                  new=AsyncMock()),
-            patch("agents.cnn_agent.database.get_recent_lessons",
-                  new=AsyncMock(return_value=[])),
-            patch("agents.cnn_agent.coinbase_client.get_orderbook",
-                  new=AsyncMock(return_value={"bids": [], "asks": []})),
-            patch("agents.cnn_agent.database.save_signal",
-                  new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=AsyncMock()),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
             patch.object(agent, "_cnn_prob", return_value=0.55),
         ):
             sig = await agent.generate_signal(product)
@@ -4012,8 +4339,10 @@ class TestCNNBookSellLock:
         book = _CNNBook()
         book.balance = 1000.0
         book.positions["BTC-USD"] = {
-            "size": 1.0, "avg_price": 100.0,
-            "entry_time": 0.0, "peak_price": 100.0,
+            "size": 1.0,
+            "avg_price": 100.0,
+            "entry_time": 0.0,
+            "peak_price": 100.0,
         }
 
         close_trade_calls = []
@@ -4031,7 +4360,8 @@ class TestCNNBookSellLock:
         monkeypatch.setattr("agents.cnn_agent.database.close_trade", _fake_close_trade)
         monkeypatch.setattr("agents.cnn_agent.database.save_agent_state", _fake_save)
         monkeypatch.setattr(
-            "agents.cnn_agent.product_status.evaluate_and_persist", _fake_evaluate,
+            "agents.cnn_agent.product_status.evaluate_and_persist",
+            _fake_evaluate,
         )
 
         results = await asyncio.gather(
@@ -4052,16 +4382,21 @@ class TestCNNBookSellLock:
 # Task #46 — PnL-anchored trail: state migration
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestCNNBookPnLMigration:
     """_CNNBook._migrate_position_state adds peak_pnl_pct + position_dollars
     to legacy position dicts loaded from agent_state.positions_json."""
 
     def test_migration_computes_peak_pnl_from_peak_price_and_avg(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         legacy = {
-            "size": 1.0, "avg_price": 100.0, "peak_price": 110.0,
-            "entry_time": 1700000000.0, "trail_pct": 0.06,
+            "size": 1.0,
+            "avg_price": 100.0,
+            "peak_price": 110.0,
+            "entry_time": 1700000000.0,
+            "trail_pct": 0.06,
         }
         migrated = book._migrate_position_state(legacy)
         assert "peak_pnl_pct" in migrated
@@ -4071,10 +4406,14 @@ class TestCNNBookPnLMigration:
 
     def test_migration_preserves_existing_pnl_pct(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         pos = {
-            "size": 1.0, "avg_price": 100.0, "peak_price": 110.0,
-            "peak_pnl_pct": 0.15, "position_dollars": 105.0,
+            "size": 1.0,
+            "avg_price": 100.0,
+            "peak_price": 110.0,
+            "peak_pnl_pct": 0.15,
+            "position_dollars": 105.0,
         }
         migrated = book._migrate_position_state(pos)
         assert migrated["peak_pnl_pct"] == 0.15
@@ -4082,6 +4421,7 @@ class TestCNNBookPnLMigration:
 
     def test_migration_handles_zero_avg_price(self):
         from agents.cnn_agent import _CNNBook
+
         book = _CNNBook()
         pos = {"size": 1.0, "avg_price": 0.0, "peak_price": 0.0}
         migrated = book._migrate_position_state(pos)

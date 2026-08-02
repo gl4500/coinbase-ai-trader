@@ -6,10 +6,11 @@ during extreme fear (< 20) to avoid catching falling knives.
 
 External HTTP call is always mocked.
 """
+
 import os
 import sys
 import time
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,27 +18,25 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
-from services.fear_greed import FearGreedIndex, _EXTREME_FEAR_THRESHOLD
-
+from services.fear_greed import _EXTREME_FEAR_THRESHOLD, FearGreedIndex
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
+
 def _mock_response(value: int, label: str = "Fear") -> dict:
     """Simulates the alternative.me API response format."""
-    return {
-        "data": [{"value": str(value), "value_classification": label}]
-    }
+    return {"data": [{"value": str(value), "value_classification": label}]}
 
 
 # ── FearGreedIndex ─────────────────────────────────────────────────────────────
 
-class TestFearGreedFetch:
 
+class TestFearGreedFetch:
     @pytest.mark.asyncio
     async def test_returns_value_and_label(self):
         fg = FearGreedIndex()
@@ -46,9 +45,7 @@ class TestFearGreedFetch:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("services.fear_greed.httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
-                return_value=mock_resp
-            )
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
             result = await fg.fetch()
 
         assert result["value"] == 35
@@ -62,9 +59,7 @@ class TestFearGreedFetch:
         mock_resp.raise_for_status = MagicMock()
 
         with patch("services.fear_greed.httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
-                return_value=mock_resp
-            )
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_resp)
             result = await fg.fetch()
 
         assert result["value"] == 10
@@ -86,7 +81,6 @@ class TestFearGreedFetch:
 
 
 class TestFearGreedCache:
-
     @pytest.mark.asyncio
     async def test_second_call_uses_cache(self):
         """Repeated calls within TTL must not make a second HTTP request."""
@@ -108,7 +102,7 @@ class TestFearGreedCache:
     @pytest.mark.asyncio
     async def test_cache_expires(self):
         """After TTL expires, a fresh HTTP request should be made."""
-        fg = FearGreedIndex(cache_ttl=0)   # TTL=0 → always expired
+        fg = FearGreedIndex(cache_ttl=0)  # TTL=0 → always expired
         mock_resp = MagicMock()
         mock_resp.json.return_value = _mock_response(40, "Fear")
         mock_resp.raise_for_status = MagicMock()
@@ -124,7 +118,6 @@ class TestFearGreedCache:
 
 
 class TestFearGreedTradingGate:
-
     @pytest.mark.asyncio
     async def test_extreme_fear_blocks_buy(self):
         """is_buy_allowed() returns False when F&G < EXTREME_FEAR_THRESHOLD."""
@@ -168,7 +161,6 @@ class TestFearGreedTradingGate:
 
 
 class TestFearGreedThreshold:
-
     def test_extreme_fear_threshold_is_reasonable(self):
         """Threshold should be between 15 and 25 (historical extreme fear zone)."""
         assert 15 <= _EXTREME_FEAR_THRESHOLD <= 25, (

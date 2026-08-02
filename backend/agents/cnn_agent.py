@@ -39,9 +39,9 @@ Blend: trending market → CNN 75% / LLM 25%
 Install PyTorch (CUDA 12.x):
   pip install torch --index-url https://download.pytorch.org/whl/cu124
 """
+
 import asyncio
 import bisect
-import copy
 import datetime as _dt
 import json
 import logging
@@ -54,34 +54,42 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 import database
-from clients import coinbase_client
 from agents.exit_thresholds import _compute_exit_threshold  # task #46
 from agents.signal_generator import (
-    _rsi, _ema, _macd, _bollinger, _ema_cross,
-    _atr, _adx, _mfi, _obv_slope, _stoch_rsi, _vwap,
-    _kelly_fraction, _realized_vol,
+    _adx,
+    _atr,
+    _bollinger,
+    _ema,
+    _kelly_fraction,
+    _macd,
+    _mfi,
+    _realized_vol,
+    _rsi,
+    _stoch_rsi,
+    _vwap,
 )
+from clients import coinbase_client
 from config import config
-from services.outcome_tracker import get_tracker
-from services.history_backfill import load_history, load_5m_history
-from services.deribit_iv import get_iv, compute_iv_rv_spreads
+from services import product_status
 from services.binance_sentiment import get_ls_sentiment
+from services.deribit_iv import compute_iv_rv_spreads, get_iv
+from services.history_backfill import load_5m_history, load_history
+from services.hmm_regime import get_detector, regime_blend
 from services.okx_funding_history import fetch_funding_history
 from services.okx_oi_history import fetch_oi_history
-from services.hmm_regime import get_detector, regime_blend
-from services import product_status
+from services.outcome_tracker import get_tracker
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
-_CNN_MAX_FRAC        = 0.15    # max 15% of portfolio per position
-_CNN_STOP_LOSS_PCT    = 0.08    # 8% hard stop-loss below avg entry price
-_CNN_ATR_TRAIL_MULT   = 2.0     # trailing stop = ATR(14) × multiplier below peak
-_CNN_ATR_TRAIL_MIN    = 0.06    # floor: never tighter than 6% (Session 57 cash-flow lever 3 — was 3%, exited too early in low-ATR regimes)
-_CNN_ATR_TRAIL_MAX    = 0.15    # ceiling: never wider than 15% (limits max give-back)
-_CNN_MAX_HOLD_SECS    = 7 * 24 * 3600  # 7-day max-hold — last resort for flat/forgotten positions
+_CNN_MAX_FRAC = 0.15  # max 15% of portfolio per position
+_CNN_STOP_LOSS_PCT = 0.08  # 8% hard stop-loss below avg entry price
+_CNN_ATR_TRAIL_MULT = 2.0  # trailing stop = ATR(14) × multiplier below peak
+_CNN_ATR_TRAIL_MIN = 0.06  # floor: never tighter than 6% (Session 57 cash-flow lever 3 — was 3%, exited too early in low-ATR regimes)
+_CNN_ATR_TRAIL_MAX = 0.15  # ceiling: never wider than 15% (limits max give-back)
+_CNN_MAX_HOLD_SECS = 7 * 24 * 3600  # 7-day max-hold — last resort for flat/forgotten positions
 # Positions missing entry_time (opened before that field existed) are treated
 # as if they were opened _CNN_LEGACY_HOLD_SECS ago — triggers max-hold exit promptly.
 _CNN_LEGACY_HOLD_SECS = _CNN_MAX_HOLD_SECS + 1  # exceeds max-hold, forces exit on next check
-MIN_PRICE            = 0.01    # skip micro-priced tokens (0.0000 display = unprofitable spreads)
+MIN_PRICE = 0.01  # skip micro-priced tokens (0.0000 display = unprofitable spreads)
 
 # Task #46 B2 — model-driven exit: force-exit a held position when v4.5 says
 # DOWN is the most likely 72-hour outcome with confidence > threshold.
@@ -125,10 +133,11 @@ class _CNNBook:
     trades appear in the `trades` table and per-product positions are
     tracked (prevents buying the same asset repeatedly).
     """
+
     def __init__(self):
-        self._agent      = "CNN"
-        self.balance     = _CNN_DRY_RUN_BALANCE
-        self.positions: Dict[str, Dict] = {}   # pid → {size, avg_price}
+        self._agent = "CNN"
+        self.balance = _CNN_DRY_RUN_BALANCE
+        self.positions: Dict[str, Dict] = {}  # pid → {size, avg_price}
         self.realized_pnl = 0.0
         # Per-pid lock so WS exit handler and scan-loop _check_risk_exits
         # cannot race a duplicate database.close_trade write.
@@ -163,14 +172,13 @@ class _CNNBook:
     async def load(self) -> None:
         state = await database.load_agent_state(self._agent)
         if state:
-            self.balance      = state["balance"]
+            self.balance = state["balance"]
             self.realized_pnl = state["realized_pnl"]
-            self.positions    = state["positions"]
+            self.positions = state["positions"]
 
             # Drop corrupt positions (avg_price == 0) — these were opened before
             # the price filter existed and can never be exited meaningfully
-            corrupt = [pid for pid, pos in self.positions.items()
-                       if pos.get("avg_price", 0) == 0]
+            corrupt = [pid for pid, pos in self.positions.items() if pos.get("avg_price", 0) == 0]
             for pid in corrupt:
                 del self.positions[pid]
                 logger.warning(
@@ -216,7 +224,9 @@ class _CNNBook:
                     ghost_count += 1
 
         if ghost_count:
-            logger.info(f"CNN book: reconciled {ghost_count} ghost open trade row(s) from prior sessions")
+            logger.info(
+                f"CNN book: reconciled {ghost_count} ghost open trade row(s) from prior sessions"
+            )
 
     async def _save(self) -> None:
         await database.save_agent_state(
@@ -227,10 +237,10 @@ class _CNNBook:
         return pid in self.positions
 
     # ── Win/loss performance tracking ─────────────────────────────────────────
-    wins:          int   = 0
-    losses:        int   = 0
-    _sum_win_pct:  float = 0.0   # cumulative % gain on winning trades
-    _sum_loss_pct: float = 0.0   # cumulative % loss on losing trades (positive number)
+    wins: int = 0
+    losses: int = 0
+    _sum_win_pct: float = 0.0  # cumulative % gain on winning trades
+    _sum_loss_pct: float = 0.0  # cumulative % loss on losing trades (positive number)
 
     @property
     def win_rate(self) -> float:
@@ -242,12 +252,13 @@ class _CNNBook:
         """Expected % gain per trade = win_rate * avg_win_pct - loss_rate * avg_loss_pct."""
         if self.wins + self.losses == 0:
             return 0.0
-        avg_win  = self._sum_win_pct  / self.wins   if self.wins   > 0 else 0.0
+        avg_win = self._sum_win_pct / self.wins if self.wins > 0 else 0.0
         avg_loss = self._sum_loss_pct / self.losses if self.losses > 0 else 0.0
         return self.win_rate * avg_win - (1 - self.win_rate) * avg_loss
 
-    async def buy(self, pid: str, price: float, frac: float,
-                  trigger: str = "SCAN") -> Tuple[float, float]:
+    async def buy(
+        self, pid: str, price: float, frac: float, trigger: str = "SCAN"
+    ) -> Tuple[float, float]:
         # #125a: tiered blacklist gating. Active (or no row) → full frac.
         # Probation → half size (real money, reduced risk). Suspended →
         # paper-trade only: log the signal but do not spend or open a trade.
@@ -256,7 +267,9 @@ class _CNNBook:
         if status == "suspended":
             logger.info(
                 "CNN PAPER %s @ %.6f frac=%.4f — suspended tier (no execution)",
-                pid, price, frac,
+                pid,
+                price,
+                frac,
             )
             return 0.0, 0.0
         if status == "probation":
@@ -273,16 +286,20 @@ class _CNNBook:
             pos["size"] = tot
         else:
             self.positions[pid] = {
-                "size":       size,
-                "avg_price":  price,
+                "size": size,
+                "avg_price": price,
                 "entry_time": time.time(),
                 "peak_price": price,
             }
         self.balance -= spend
         await self._save()
         await database.open_trade(
-            agent=self._agent, product_id=pid, entry_price=price,
-            size=size, usd_open=spend, trigger_open=trigger,
+            agent=self._agent,
+            product_id=pid,
+            entry_price=price,
+            size=size,
+            usd_open=spend,
+            trigger_open=trigger,
             balance_after=self.balance,
         )
         return spend, size
@@ -296,8 +313,8 @@ class _CNNBook:
                 return 0.0
             pos = self.positions[pid]
             proceeds = pos["size"] * price
-            pnl      = proceeds - pos["size"] * pos["avg_price"]
-            pct_pnl  = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
+            pnl = proceeds - pos["size"] * pos["avg_price"]
+            pct_pnl = (price - pos["avg_price"]) / pos["avg_price"] * 100.0
 
             # #109: persist trade close to DB FIRST — trades table is the source of
             # truth for realized PnL. If this raises, leave in-memory state intact
@@ -306,22 +323,26 @@ class _CNNBook:
             # captured the gain but no closed-trade row existed; on restart the
             # reconcile path force-closed the orphan with pnl=0, locking in skew.
             await database.close_trade(
-                agent=self._agent, product_id=pid, exit_price=price,
-                size=pos["size"], pnl=pnl, trigger_close=trigger,
+                agent=self._agent,
+                product_id=pid,
+                exit_price=price,
+                size=pos["size"],
+                pnl=pnl,
+                trigger_close=trigger,
                 balance_after=self.balance + proceeds,
             )
 
             # close_trade succeeded — now mutate in-memory state and persist it
             self.positions.pop(pid)
-            self.balance      += proceeds
+            self.balance += proceeds
             self.realized_pnl += pnl
 
             if pnl > 0:
-                self.wins         += 1
+                self.wins += 1
                 self._sum_win_pct += pct_pnl
             elif pnl < 0:
-                self.losses         += 1
-                self._sum_loss_pct  += abs(pct_pnl)
+                self.losses += 1
+                self._sum_loss_pct += abs(pct_pnl)
 
             await self._save()
 
@@ -335,12 +356,14 @@ class _CNNBook:
 
             return pnl
 
+
 logger = logging.getLogger(__name__)
 
 try:
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
+
     _TORCH = True
     _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -351,12 +374,12 @@ try:
     else:
         logger.info("CUDA not available — CNN will use CPU")
 except ImportError:
-    _TORCH  = False
+    _TORCH = False
     _DEVICE = None
     logger.warning("PyTorch not found — CNN agent uses linear fallback")
 
-N_CHANNELS      = 28
-SEQ_LEN         = 60
+N_CHANNELS = 28
+SEQ_LEN = 60
 
 # Channels whose values are still constant-zero during training because the
 # training loop (train_on_history) doesn't yet pass the upstream inputs that
@@ -382,9 +405,9 @@ def _close_position(closes, highs, lows):
     1.0 = closed at high (buy pressure), 0.0 = closed at low.
     Returns 0.0 for zero-range bars (no div-by-zero)."""
     out = []
-    for c, h, l in zip(closes, highs, lows):
-        rng = h - l
-        out.append((c - l) / rng if rng > 0 else 0.0)
+    for c, h, lo in zip(closes, highs, lows, strict=False):
+        rng = h - lo
+        out.append((c - lo) / rng if rng > 0 else 0.0)
     return out
 
 
@@ -392,11 +415,11 @@ def _bar_range(closes, highs, lows):
     """Ch 11: relative bar size (high-low)/close, scaled ×10 and clipped [0,1].
     A 1% bar maps to 0.1; a 10%+ bar saturates at 1.0."""
     out = []
-    for c, h, l in zip(closes, highs, lows):
+    for c, h, lo in zip(closes, highs, lows, strict=False):
         if c <= 0:
             out.append(0.0)
             continue
-        v = (h - l) / c * 10.0
+        v = (h - lo) / c * 10.0
         out.append(min(1.0, max(0.0, v)))
     return out
 
@@ -439,8 +462,11 @@ def _volume_sentiment(closes, volumes, window):
 
 
 def _indep_thresholds_decision(
-    p_down: float, p_neutral: float, p_up: float,
-    thresh_up: float, thresh_down: float,
+    p_down: float,
+    p_neutral: float,
+    p_up: float,
+    thresh_up: float,
+    thresh_down: float,
 ) -> Tuple[str, float]:
     """v4.5 indep_thresholds rule. Mirrors tools/v4_5_horizon_compare.py:138.
 
@@ -467,8 +493,7 @@ def _mask_training_constant_channels(channels):
     T = len(channels[0]) if channels[0] else 0
     zero = [0.0] * T
     return [
-        list(zero) if idx in _TRAINING_CONSTANT_CHANNELS else ch
-        for idx, ch in enumerate(channels)
+        list(zero) if idx in _TRAINING_CONSTANT_CHANNELS else ch for idx, ch in enumerate(channels)
     ]
 
 
@@ -489,13 +514,13 @@ def _zero_mask_channels(x):
         out[:, ch, :] = 0.0
     return out
 
+
 _PHASE2_LOG_EVERY = 5  # log dataset-build progress every N products (watchdog)
-MODEL_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_model.pt")
 _DATASET_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_dataset_cache.pt")
 
 
-def _dataset_fingerprint(all_candle_sets, seq_len, forward_hours,
-                         label_thresh, n_channels) -> str:
+def _dataset_fingerprint(all_candle_sets, seq_len, forward_hours, label_thresh, n_channels) -> str:
     """Stable SHA-256 over inputs that affect the built X/y tensors.
 
     Two runs with the same fingerprint are guaranteed to produce identical
@@ -503,6 +528,7 @@ def _dataset_fingerprint(all_candle_sets, seq_len, forward_hours,
     threshold, different channel count) produces a different hex digest.
     """
     import hashlib
+
     h = hashlib.sha256()
     h.update(f"{seq_len}|{forward_hours}|{label_thresh}|{n_channels}".encode())
     for candles in all_candle_sets:
@@ -511,8 +537,7 @@ def _dataset_fingerprint(all_candle_sets, seq_len, forward_hours,
             continue
         first, last = candles[0], candles[-1]
         h.update(
-            f"|{len(candles)}|{first.get('time')}|{last.get('time')}|"
-            f"{last.get('close')}".encode()
+            f"|{len(candles)}|{first.get('time')}|{last.get('time')}|{last.get('close')}".encode()
         )
     return h.hexdigest()
 
@@ -523,6 +548,7 @@ def _load_dataset_cache(path: str, fingerprint: str):
         return None
     try:
         import torch
+
         blob = torch.load(path, map_location="cpu", weights_only=False)
     except Exception as _le:
         logger.warning(f"CNN dataset cache load failed: {_le}")
@@ -535,6 +561,7 @@ def _load_dataset_cache(path: str, fingerprint: str):
 def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
     """Atomically save X/y lists + fingerprint to disk."""
     import torch
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
     torch.save({"fingerprint": fingerprint, "X": X_list, "y": y_list}, tmp)
@@ -552,18 +579,18 @@ def _save_dataset_cache(path: str, fingerprint: str, X_list, y_list) -> None:
 # Version 4 = triple-barrier labels (P3a) + per-sample index tracking for
 # López-de-Prado sample-uniqueness weighting (P3c).
 _DATASET_CACHE_VERSION = 12  # bumped for #143-B: Ch 27 (OKX OI) added; channel count 27→28
-                            # a single value computed on the full candle
-                            # window across all 60 timesteps — every cached
-                            # sample's Ch 15 series leaked future info.
-                            # Now per-bar causal expanding window. v10 caches
-                            # must rebuild to pick up the corrected channel.
-                            # (Prior: v10 = #98 OKX rv20/rv60.)
+# a single value computed on the full candle
+# window across all 60 timesteps — every cached
+# sample's Ch 15 series leaked future info.
+# Now per-bar causal expanding window. v10 caches
+# must rebuild to pick up the corrected channel.
+# (Prior: v10 = #98 OKX rv20/rv60.)
 
 # Triple-barrier parameters (P3a). López de Prado 2018: label a sample by
 # whichever of {upper barrier hit, lower barrier hit, time barrier} fires
 # first inside the forward window — cuts label noise vs. sign-of-final-return.
-_TB_UP_MULT = 0.01   # +1% upper barrier
-_TB_DN_MULT = 0.01   # -1% lower barrier
+_TB_UP_MULT = 0.01  # +1% upper barrier
+_TB_DN_MULT = 0.01  # -1% lower barrier
 
 # Label smoothing (P3d). Szegedy et al. 2016 Inception-v3: replace hard
 # targets {0,1} with soft {ε, 1-ε} so BCE stops pushing logits to ±∞ and
@@ -672,18 +699,18 @@ def _per_regime_metrics(y_true, y_pred, regimes):
       dict[regime_str, {"n", "acc", "loss", "pos_rate"}]
     """
     import math
+
     y_true = list(y_true)
     y_pred = list(y_pred)
     regimes = list(regimes)
     if not (len(y_true) == len(y_pred) == len(regimes)):
         raise ValueError(
-            f"length mismatch: y_true={len(y_true)}, y_pred={len(y_pred)}, "
-            f"regimes={len(regimes)}"
+            f"length mismatch: y_true={len(y_true)}, y_pred={len(y_pred)}, regimes={len(regimes)}"
         )
     if not y_true:
         return {}
     buckets: dict = {}
-    for yt, yp, r in zip(y_true, y_pred, regimes):
+    for yt, yp, r in zip(y_true, y_pred, regimes, strict=False):
         buckets.setdefault(r, {"yt": [], "yp": []})
         buckets[r]["yt"].append(float(yt))
         buckets[r]["yp"].append(float(yp))
@@ -693,12 +720,17 @@ def _per_regime_metrics(y_true, y_pred, regimes):
         yt_list = b["yt"]
         yp_list = b["yp"]
         n = len(yt_list)
-        correct = sum(1 for yt, yp in zip(yt_list, yp_list) if (yp >= 0.5) == (yt >= 0.5))
-        loss = -sum(
-            yt * math.log(max(min(yp, 1.0 - EPS), EPS))
-            + (1.0 - yt) * math.log(max(min(1.0 - yp, 1.0 - EPS), EPS))
-            for yt, yp in zip(yt_list, yp_list)
-        ) / n
+        correct = sum(
+            1 for yt, yp in zip(yt_list, yp_list, strict=False) if (yp >= 0.5) == (yt >= 0.5)
+        )
+        loss = (
+            -sum(
+                yt * math.log(max(min(yp, 1.0 - EPS), EPS))
+                + (1.0 - yt) * math.log(max(min(1.0 - yp, 1.0 - EPS), EPS))
+                for yt, yp in zip(yt_list, yp_list, strict=False)
+            )
+            / n
+        )
         pos_rate = sum(1 for yt in yt_list if yt >= 0.5) / n
         out[r] = {
             "n": n,
@@ -728,17 +760,15 @@ def _precision_recall_at_threshold(probs, labels, threshold):
       precision is None when no predictions exceed the threshold.
       recall is None when the val set contains no positive labels.
     """
-    probs  = list(probs)
+    probs = list(probs)
     labels = list(labels)
     if len(probs) != len(labels):
-        raise ValueError(
-            f"length mismatch: probs={len(probs)}, labels={len(labels)}"
-        )
+        raise ValueError(f"length mismatch: probs={len(probs)}, labels={len(labels)}")
     if not probs:
         return (None, None)
     tp = fp = fn = 0
     total_pos = 0
-    for p, y in zip(probs, labels):
+    for p, y in zip(probs, labels, strict=False):
         is_pos = float(y) >= 0.5
         predicted = float(p) > threshold
         if is_pos:
@@ -750,7 +780,7 @@ def _precision_recall_at_threshold(probs, labels, threshold):
         elif not predicted and is_pos:
             fn += 1
     precision = tp / (tp + fp) if (tp + fp) > 0 else None
-    recall    = tp / total_pos if total_pos > 0 else None
+    recall = tp / total_pos if total_pos > 0 else None
     return (precision, recall)
 
 
@@ -781,9 +811,9 @@ def _compute_uniqueness(sample_indices, forward_hours: int, n_candles: int):
     return weights
 
 
-def _label_triple_barrier(candles, i: int, max_bars: int,
-                          up_mult: float, dn_mult: float,
-                          label_thresh: float):
+def _label_triple_barrier(
+    candles, i: int, max_bars: int, up_mult: float, dn_mult: float, label_thresh: float
+):
     """Return 1.0, 0.0, or None for the triple-barrier label at index i.
 
     Scans candles[i+1 .. i+max_bars] and returns:
@@ -802,10 +832,11 @@ def _label_triple_barrier(candles, i: int, max_bars: int,
         return None
     upper = entry * (1.0 + up_mult)
     lower = entry * (1.0 - dn_mult)
-    end   = min(n - 1, i + max_bars)
+    end = min(n - 1, i + max_bars)
     for k in range(i + 1, end + 1):
-        c  = candles[k]
-        hi = c["high"]; lo = c["low"]
+        c = candles[k]
+        hi = c["high"]
+        lo = c["low"]
         hit_up = hi >= upper
         hit_dn = lo <= lower
         if hit_up and hit_dn:
@@ -821,29 +852,29 @@ def _label_triple_barrier(candles, i: int, max_bars: int,
             return 0.0
     # Time barrier — use sign of close move vs. dead-zone threshold.
     exit_px = candles[end]["close"]
-    ret     = (exit_px - entry) / entry
+    ret = (exit_px - entry) / entry
     if abs(ret) < label_thresh:
         return None
     return 1.0 if ret > 0 else 0.0
 
 
-def _dataset_schema(seq_len: int, forward_hours: int,
-                    label_thresh: float, n_channels: int) -> dict:
+def _dataset_schema(seq_len: int, forward_hours: int, label_thresh: float, n_channels: int) -> dict:
     return {
-        "version":       _DATASET_CACHE_VERSION,
-        "seq_len":       seq_len,
+        "version": _DATASET_CACHE_VERSION,
+        "seq_len": seq_len,
         "forward_hours": forward_hours,
-        "label_thresh":  label_thresh,
-        "n_channels":    n_channels,
+        "label_thresh": label_thresh,
+        "n_channels": n_channels,
     }
 
 
-_TRAIN_5M_LIMIT = 72   # last 6h of 5m bars — mirrors inference fetch in scan_all
-_RV_PREFIX_BARS = 60   # #98: prior closes prepended for RV60/RV20 lookback
+_TRAIN_5M_LIMIT = 72  # last 6h of 5m bars — mirrors inference fetch in scan_all
+_RV_PREFIX_BARS = 60  # #98: prior closes prepended for RV60/RV20 lookback
 
 
-def _aligned_btc_closes(target_candles: List[Dict],
-                        btc_candles: Optional[List[Dict]]) -> Optional[List[float]]:
+def _aligned_btc_closes(
+    target_candles: List[Dict], btc_candles: Optional[List[Dict]]
+) -> Optional[List[float]]:
     """Return BTC closes aligned 1:1 with `target_candles` (forward-fill on gaps).
 
     Both candle series are assumed to use a 'start' (or 'time') unix-timestamp
@@ -877,8 +908,9 @@ def _aligned_btc_closes(target_candles: List[Dict],
     return out
 
 
-def _aligned_funding_rates(target_candles: List[Dict],
-                           funding_history: Optional[List[Tuple[int, float]]]) -> Optional[List[float]]:
+def _aligned_funding_rates(
+    target_candles: List[Dict], funding_history: Optional[List[Tuple[int, float]]]
+) -> Optional[List[float]]:
     """Return funding rates aligned 1:1 with `target_candles` (forward-fill).
 
     `funding_history` is a list of `(funding_time_ms, rate)` tuples sorted
@@ -896,8 +928,8 @@ def _aligned_funding_rates(target_candles: List[Dict],
     if not funding_history:
         return None
     fh_sorted = sorted(funding_history, key=lambda tr: tr[0])
-    fh_times  = [int(t) for t, _ in fh_sorted]
-    fh_rates  = [float(r) for _, r in fh_sorted]
+    fh_times = [int(t) for t, _ in fh_sorted]
+    fh_rates = [float(r) for _, r in fh_sorted]
 
     out: List[float] = []
     last: Optional[float] = None
@@ -914,8 +946,9 @@ def _aligned_funding_rates(target_candles: List[Dict],
     return out
 
 
-def _aligned_oi_history(target_candles: List[Dict],
-                        oi_history: Optional[List[Tuple[int, float]]]) -> Optional[List[float]]:
+def _aligned_oi_history(
+    target_candles: List[Dict], oi_history: Optional[List[Tuple[int, float]]]
+) -> Optional[List[float]]:
     """Return open-interest values aligned 1:1 with `target_candles` (forward-fill).
 
     `oi_history` is a list of `(oi_time_ms, value)` tuples sorted ascending —
@@ -931,8 +964,8 @@ def _aligned_oi_history(target_candles: List[Dict],
     if not oi_history:
         return None
     oi_sorted = sorted(oi_history, key=lambda tr: tr[0])
-    oi_times  = [int(t) for t, _ in oi_sorted]
-    oi_vals   = [float(v) for _, v in oi_sorted]
+    oi_times = [int(t) for t, _ in oi_sorted]
+    oi_vals = [float(v) for _, v in oi_sorted]
 
     out: List[float] = []
     last: Optional[float] = None
@@ -949,13 +982,19 @@ def _aligned_oi_history(target_candles: List[Dict],
     return out
 
 
-def _build_samples_range(candles, i_start: int, i_end: int,
-                         fb, seq_len: int, forward_hours: int,
-                         label_thresh: float,
-                         btc_closes: Optional[List[float]] = None,
-                         funding_rates: Optional[List[float]] = None,
-                         oi_rates: Optional[List[float]] = None,
-                         candles_5m: Optional[List[Dict]] = None):
+def _build_samples_range(
+    candles,
+    i_start: int,
+    i_end: int,
+    fb,
+    seq_len: int,
+    forward_hours: int,
+    label_thresh: float,
+    btc_closes: Optional[List[float]] = None,
+    funding_rates: Optional[List[float]] = None,
+    oi_rates: Optional[List[float]] = None,
+    candles_5m: Optional[List[Dict]] = None,
+):
     """Build (X, y, indices) for sliding-window indices i in [i_start, i_end).
 
     Labels use triple-barrier (P3a): upper barrier (+_TB_UP_MULT), lower
@@ -1007,16 +1046,15 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         )
         if label is None:
             continue
-        window  = candles[i - seq_len + 1: i + 1]
+        window = candles[i - seq_len + 1 : i + 1]
         if c5m_starts is not None:
             t_close = int(candles[i]["start"]) + 3600  # exclusive end of hour i
-            cutoff  = bisect.bisect_left(c5m_starts, t_close)
-            five_m  = candles_5m[max(0, cutoff - _TRAIN_5M_LIMIT): cutoff]
+            cutoff = bisect.bisect_left(c5m_starts, t_close)
+            five_m = candles_5m[max(0, cutoff - _TRAIN_5M_LIMIT) : cutoff]
         else:
-            five_m = candles[max(0, i - 11): i + 1]
-        btc_win = (btc_closes[i - seq_len + 1: i + 1]
-                   if btc_closes is not None else None)
-        fr_val  = funding_rates[i] if funding_rates is not None else None
+            five_m = candles[max(0, i - 11) : i + 1]
+        btc_win = btc_closes[i - seq_len + 1 : i + 1] if btc_closes is not None else None
+        fr_val = funding_rates[i] if funding_rates is not None else None
         if oi_rates is not None:
             oi_val_z = (oi_rates[i] - oi_mean) / oi_std
         else:
@@ -1025,22 +1063,34 @@ def _build_samples_range(candles, i_start: int, i_end: int,
         # returns 0.0 for the first `window` bars, leaving Ch 25 (rv60)
         # constant-zero across the entire SEQ_LEN=60 window.
         ext_start = max(0, i - seq_len + 1 - _RV_PREFIX_BARS)
-        closes_ext = [c["close"] for c in candles[ext_start: i + 1]]
-        channels = fb.build(window, {}, candles_5m=five_m,
-                            btc_closes=btc_win, funding_rate=fr_val,
-                            closes_ext=closes_ext, oi_rate=oi_val_z)
+        closes_ext = [c["close"] for c in candles[ext_start : i + 1]]
+        channels = fb.build(
+            window,
+            {},
+            candles_5m=five_m,
+            btc_closes=btc_win,
+            funding_rate=fr_val,
+            closes_ext=closes_ext,
+            oi_rate=oi_val_z,
+        )
         X_list.append(fb.to_tensor(channels))
         y_list.append(label)
         idx_list.append(i)
     return X_list, y_list, idx_list
 
 
-def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
-                               forward_hours: int, label_thresh: float,
-                               btc_closes: Optional[List[float]] = None,
-                               funding_rates: Optional[List[float]] = None,
-                               oi_rates: Optional[List[float]] = None,
-                               candles_5m: Optional[List[Dict]] = None):
+def _extend_or_rebuild_product(
+    entry,
+    candles,
+    fb,
+    seq_len: int,
+    forward_hours: int,
+    label_thresh: float,
+    btc_closes: Optional[List[float]] = None,
+    funding_rates: Optional[List[float]] = None,
+    oi_rates: Optional[List[float]] = None,
+    candles_5m: Optional[List[Dict]] = None,
+):
     """Return (new_entry, status) for one product's per-product cache slot.
 
     status ∈ {"skip", "hit", "append", "rebuild"}
@@ -1064,26 +1114,37 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         return None, "skip"
 
     first_ts = candles[0].get("start") or candles[0].get("time")
-    last_ts  = candles[-1].get("start") or candles[-1].get("time")
+    last_ts = candles[-1].get("start") or candles[-1].get("time")
 
     def _full_rebuild():
         X, y, idx = _build_samples_range(
-            candles, seq_len - 1, n - forward_hours,
-            fb, seq_len, forward_hours, label_thresh,
+            candles,
+            seq_len - 1,
+            n - forward_hours,
+            fb,
+            seq_len,
+            forward_hours,
+            label_thresh,
             btc_closes=btc_closes,
             funding_rates=funding_rates,
             oi_rates=oi_rates,
             candles_5m=candles_5m,
         )
         return {
-            "first_ts": first_ts, "last_ts": last_ts, "last_n": n,
-            "X": X, "y": y, "indices": idx,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "last_n": n,
+            "X": X,
+            "y": y,
+            "indices": idx,
         }
 
-    if (entry is None
-            or entry.get("first_ts") != first_ts
-            or int(entry.get("last_n", 0)) > n
-            or "indices" not in entry):
+    if (
+        entry is None
+        or entry.get("first_ts") != first_ts
+        or int(entry.get("last_n", 0)) > n
+        or "indices" not in entry
+    ):
         # Missing "indices" ⇒ v<4 cache; full rebuild reseeds it.
         return _full_rebuild(), "rebuild"
 
@@ -1092,10 +1153,15 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
         return entry, "hit"
 
     i_start = max(seq_len - 1, last_n - forward_hours)
-    i_end   = n - forward_hours
+    i_end = n - forward_hours
     X_new, y_new, idx_new = _build_samples_range(
-        candles, i_start, i_end,
-        fb, seq_len, forward_hours, label_thresh,
+        candles,
+        i_start,
+        i_end,
+        fb,
+        seq_len,
+        forward_hours,
+        label_thresh,
         btc_closes=btc_closes,
         funding_rates=funding_rates,
         oi_rates=oi_rates,
@@ -1103,11 +1169,11 @@ def _extend_or_rebuild_product(entry, candles, fb, seq_len: int,
     )
     return {
         "first_ts": first_ts,
-        "last_ts":  last_ts,
-        "last_n":   n,
-        "X":        list(entry.get("X", [])) + X_new,
-        "y":        list(entry.get("y", [])) + y_new,
-        "indices":  list(entry.get("indices", [])) + idx_new,
+        "last_ts": last_ts,
+        "last_n": n,
+        "X": list(entry.get("X", [])) + X_new,
+        "y": list(entry.get("y", [])) + y_new,
+        "indices": list(entry.get("indices", [])) + idx_new,
     }, "append"
 
 
@@ -1117,6 +1183,7 @@ def _load_pp_cache(path: str, schema: dict):
         return None
     try:
         import torch
+
         blob = torch.load(path, map_location="cpu", weights_only=False)
     except Exception as _le:
         logger.warning(f"CNN per-product cache load failed: {_le}")
@@ -1135,7 +1202,10 @@ def _save_pp_cache(path: str, schema: dict, products: dict) -> None:
     backend keeping cnn_dataset_cache.pt mapped during inference. The lock
     window is brief, so retry a few times before giving up (#108).
     """
-    import torch, time as _t
+    import time as _t
+
+    import torch
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
     torch.save({"schema": schema, "products": products}, tmp)
@@ -1150,9 +1220,10 @@ def _save_pp_cache(path: str, schema: dict, products: dict) -> None:
             last_exc = e
     raise last_exc
 
+
 _MODEL_BAK_PATH = MODEL_PATH + ".bak"
 _BEST_LOSS_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss.txt")
-_CKPT_PATH      = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
+_CKPT_PATH = os.path.join(os.path.dirname(__file__), "..", "cnn_checkpoint_resume.pt")
 
 
 def _model_path_for() -> str:
@@ -1164,28 +1235,32 @@ def _model_path_for() -> str:
 def _best_loss_path_for() -> str:
     """Path to the active best-loss baseline (glu1)."""
     return os.path.join(os.path.dirname(__file__), "..", "cnn_best_loss_glu1.txt")
-_CKPT_EVERY     = 10   # save resume checkpoint every N epochs
-_HEARTBEAT_EVERY = 1   # #106: every epoch — under GPU contention 5+ min epochs caused
-                       # check (1800s) doesn't kill healthy training on slow archs
+
+
+_CKPT_EVERY = 10  # save resume checkpoint every N epochs
+_HEARTBEAT_EVERY = 1  # #106: every epoch — under GPU contention 5+ min epochs caused
+# check (1800s) doesn't kill healthy training on slow archs
 # OLLAMA_URL deleted #311-refactor-f — Ollama LLM blend was CNN-backend-only
 # and is now removed; cnn_agent makes no HTTP calls to Ollama.
-_CACHE_TTL      = 300
-_EARLY_STOP_PATIENCE = 15   # stop if val_loss doesn't improve for this many epochs
+_CACHE_TTL = 300
+_EARLY_STOP_PATIENCE = 15  # stop if val_loss doesn't improve for this many epochs
 
 
 # ── CNN-LSTM Model ────────────────────────────────────────────────────────────
 
 if _TORCH:
+
     class GatedConv1d(nn.Module):
         """
         GLU conv block with BatchNorm. BatchNorm normalises activations so
         gradients don't vanish through stacked gated layers.
         """
+
         def __init__(self, in_ch: int, out_ch: int, kernel: int = 3, padding: int = 1):
             super().__init__()
             self.conv_main = nn.Conv1d(in_ch, out_ch, kernel, padding=padding)
             self.conv_gate = nn.Conv1d(in_ch, out_ch, kernel, padding=padding)
-            self.bn        = nn.BatchNorm1d(out_ch)
+            self.bn = nn.BatchNorm1d(out_ch)
 
         def forward(self, x):
             out = self.conv_main(x) * torch.sigmoid(self.conv_gate(x))
@@ -1201,21 +1276,23 @@ if _TORCH:
         Built to combat the epoch-1 memorization seen on glu2 in production
         retrains: ~20× fewer params trades expressivity for generalization.
         """
+
         arch = "glu1"
 
         def __init__(self, n_ch: int = N_CHANNELS):
             super().__init__()
-            self.c1   = GatedConv1d(n_ch, 16)
-            self.c2   = GatedConv1d(16,   32)
-            self.p2   = nn.MaxPool1d(2)        # 60 → 30
+            self.c1 = GatedConv1d(n_ch, 16)
+            self.c2 = GatedConv1d(16, 32)
+            self.p2 = nn.MaxPool1d(2)  # 60 → 30
             self.lstm = nn.LSTM(32, 16, num_layers=1, batch_first=True)
             self.drop = nn.Dropout(0.3)
-            self.fc   = nn.Linear(16, 1)
+            self.fc = nn.Linear(16, 1)
 
         def forward(self, x):
             x = self.c1(x)
-            x = self.c2(x); x = self.p2(x)
-            x = x.permute(0, 2, 1)             # (B, seq, 32)
+            x = self.c2(x)
+            x = self.p2(x)
+            x = x.permute(0, 2, 1)  # (B, seq, 32)
             self.lstm.flatten_parameters()
             x, _ = self.lstm(x)
             x = x[:, -1, :]
@@ -1240,6 +1317,7 @@ def _build_cnn():
 
 # ── Feature Builder ───────────────────────────────────────────────────────────
 
+
 class FeatureBuilder:
     @staticmethod
     def _pad(series: List[float], n: int, v: float = 0.0) -> List[float]:
@@ -1249,16 +1327,20 @@ class FeatureBuilder:
     def _slog(v: float) -> float:
         return math.log10(max(v, 1.0))
 
-    def build(self, candles: List[Dict], ob: Dict,
-              candles_5m: Optional[List[Dict]] = None,
-              btc_closes: Optional[List[float]] = None,
-              funding_rate: Optional[float] = None,
-              iv_rv20_spread: Optional[float] = None,
-              iv_rv60_spread: Optional[float] = None,
-              ls_sentiment: Optional[float] = None,
-              closes_ext: Optional[List[float]] = None,
-              oi_rate: Optional[float] = None,
-              T: int = SEQ_LEN) -> List[List[float]]:
+    def build(
+        self,
+        candles: List[Dict],
+        ob: Dict,
+        candles_5m: Optional[List[Dict]] = None,
+        btc_closes: Optional[List[float]] = None,
+        funding_rate: Optional[float] = None,
+        iv_rv20_spread: Optional[float] = None,
+        iv_rv60_spread: Optional[float] = None,
+        ls_sentiment: Optional[float] = None,
+        closes_ext: Optional[List[float]] = None,
+        oi_rate: Optional[float] = None,
+        T: int = SEQ_LEN,
+    ) -> List[List[float]]:
         if not candles:
             return [[0.0] * T] * N_CHANNELS
 
@@ -1276,10 +1358,10 @@ class FeatureBuilder:
             except Exception:
                 _hours.append(0)
 
-        opens   = [c["open"]   for c in candles]
-        highs   = [c["high"]   for c in candles]
-        lows    = [c["low"]    for c in candles]
-        closes  = [c["close"]  for c in candles]
+        opens = [c["open"] for c in candles]
+        highs = [c["high"] for c in candles]
+        lows = [c["low"] for c in candles]
+        closes = [c["close"] for c in candles]
         volumes = [c["volume"] for c in candles]
 
         # ── Ch 0: Normalised close ────────────────────────────────────────────
@@ -1292,42 +1374,49 @@ class FeatureBuilder:
         # boundary. Switching to per-bar expanding min/max would change
         # the normalization scale and require a full retrain.
         mn, mx = min(closes), max(closes)
-        rng    = mx - mn if mx != mn else 1.0
+        rng = mx - mn if mx != mn else 1.0
         norm_c = [(v - mn) / rng for v in closes]
 
         # ── Ch 2: High-low range / close ──────────────────────────────────────
-        hl_range = [(h - l) / max(c, 1e-9) for h, l, c in zip(highs, lows, closes)]
+        hl_range = [(h - lo) / max(c, 1e-9) for h, lo, c in zip(highs, lows, closes, strict=False)]
 
         # ── Ch 3: Candle body direction ───────────────────────────────────────
-        body = [max(-1.0, min(1.0, (c - o) / max(abs(o), 1e-9)))
-                for o, c in zip(opens, closes)]
+        body = [
+            max(-1.0, min(1.0, (c - o) / max(abs(o), 1e-9)))
+            for o, c in zip(opens, closes, strict=False)
+        ]
 
         # ── Ch 4: RSI(14) per bar ─────────────────────────────────────────────
-        rsi_ch = [_rsi(closes[max(0, i - 20): i + 1]) / 100.0
-                  for i in range(len(closes))]
+        rsi_ch = [_rsi(closes[max(0, i - 20) : i + 1]) / 100.0 for i in range(len(closes))]
 
         # ── Ch 5: MACD histogram ──────────────────────────────────────────────
         macd_ch = [0.0] * len(closes)
-        if len(closes) >= 16:   # fast MACD(5,13,3) needs slow+signal=16 bars
+        if len(closes) >= 16:  # fast MACD(5,13,3) needs slow+signal=16 bars
             for i in range(16, len(closes) + 1):
                 _, _, h = _macd(closes[:i])
-                scale   = max(abs(closes[i - 1]), 1)
+                scale = max(abs(closes[i - 1]), 1)
                 macd_ch[i - 1] = max(-1.0, min(1.0, h / scale * 1000))
 
         # ── Ch 6 & 7: EMA distance ────────────────────────────────────────────
-        ema9_ch  = [0.0] * len(closes)
+        ema9_ch = [0.0] * len(closes)
         ema21_ch = [0.0] * len(closes)
         if len(closes) >= 21:
-            e9   = _ema(closes, 9);  off9  = len(closes) - len(e9)
-            e21  = _ema(closes, 21); off21 = len(closes) - len(e21)
+            e9 = _ema(closes, 9)
+            off9 = len(closes) - len(e9)
+            e21 = _ema(closes, 21)
+            off21 = len(closes) - len(e21)
             for i, v in enumerate(e9):
-                ema9_ch[i + off9]  = max(-0.1, min(0.1, (v - closes[i + off9])  / max(closes[i + off9],  1e-9))) / 0.1
+                ema9_ch[i + off9] = (
+                    max(-0.1, min(0.1, (v - closes[i + off9]) / max(closes[i + off9], 1e-9))) / 0.1
+                )
             for i, v in enumerate(e21):
-                ema21_ch[i + off21] = max(-0.1, min(0.1, (v - closes[i + off21]) / max(closes[i + off21], 1e-9))) / 0.1
+                ema21_ch[i + off21] = (
+                    max(-0.1, min(0.1, (v - closes[i + off21]) / max(closes[i + off21], 1e-9)))
+                    / 0.1
+                )
 
         # ── Ch 8: Bollinger position ──────────────────────────────────────────
-        bb_ch = [_bollinger(closes[max(0, i - 22): i + 1])[3]
-                 for i in range(len(closes))]
+        bb_ch = [_bollinger(closes[max(0, i - 22) : i + 1])[3] for i in range(len(closes))]
 
         # ── Ch 9: 1-bar price change ──────────────────────────────────────────
         chg_ch = [0.0]
@@ -1337,15 +1426,20 @@ class FeatureBuilder:
 
         # ── Ch 10 & 11: Candle-derived intra-bar pressure (#46-A) ────────────
         # Replaced order-book depth (no historical L1 source) with candle proxies.
-        bid_ch = _close_position(closes, highs, lows)   # buy pressure 0..1
-        ask_ch = _bar_range(closes, highs, lows)        # bar volatility 0..1
+        bid_ch = _close_position(closes, highs, lows)  # buy pressure 0..1
+        ask_ch = _bar_range(closes, highs, lows)  # bar volatility 0..1
 
         # ── Ch 12: MFI(14) per bar ────────────────────────────────────────────
-        mfi_ch = [_mfi(highs[max(0, i - 20): i + 1],
-                       lows[max(0, i - 20): i + 1],
-                       closes[max(0, i - 20): i + 1],
-                       volumes[max(0, i - 20): i + 1]) / 100.0
-                  for i in range(len(closes))]
+        mfi_ch = [
+            _mfi(
+                highs[max(0, i - 20) : i + 1],
+                lows[max(0, i - 20) : i + 1],
+                closes[max(0, i - 20) : i + 1],
+                volumes[max(0, i - 20) : i + 1],
+            )
+            / 100.0
+            for i in range(len(closes))
+        ]
 
         # ── Ch 13: OBV slope ─────────────────────────────────────────────────
         obv_raw = [0.0]
@@ -1359,8 +1453,10 @@ class FeatureBuilder:
         obv_ch = [0.0] * len(closes)
         sp = 10
         for i in range(sp, len(obv_raw)):
-            w  = obv_raw[i - sp: i + 1]
-            n  = len(w); xm = (n - 1) / 2; ym = sum(w) / n
+            w = obv_raw[i - sp : i + 1]
+            n = len(w)
+            xm = (n - 1) / 2
+            ym = sum(w) / n
             num = sum((j - xm) * (w[j] - ym) for j in range(n))
             den = sum((j - xm) ** 2 for j in range(n))
             slp = num / den if den else 0.0
@@ -1368,7 +1464,7 @@ class FeatureBuilder:
 
         # ── Ch 14: Stochastic RSI K ───────────────────────────────────────────
         stoch_ch = [0.5] * len(closes)
-        stoch_p  = 14
+        stoch_p = 14
         for i in range(stoch_p * 2, len(closes)):
             k, _ = _stoch_rsi(closes[: i + 1], stoch_p)
             stoch_ch[i] = k / 100.0
@@ -1386,7 +1482,7 @@ class FeatureBuilder:
         # ── Ch 16: VWAP distance per bar ──────────────────────────────────────
         # Rolling 20-bar VWAP; distance = (close - vwap) / vwap, norm to [-1,1]
         vwap_ch = [0.0] * len(closes)
-        vwap_p  = 20
+        vwap_p = 20
         for i in range(vwap_p, len(closes) + 1):
             _, dist = _vwap(highs[:i], lows[:i], closes[:i], volumes[:i], vwap_p)
             vwap_ch[i - 1] = dist
@@ -1400,13 +1496,13 @@ class FeatureBuilder:
         # (candles_5m) is still accepted in the signature for backward
         # compatibility, but is no longer consumed by the build path.
         fast_rsi_ch = [0.0] * len(closes)
-        vel_ch      = [0.0] * len(closes)
-        vol_z_ch    = [0.0] * len(closes)
+        vel_ch = [0.0] * len(closes)
+        vol_z_ch = [0.0] * len(closes)
 
         # ── Ch 20: Funding rate ───────────────────────────────────────────────
         # Positive = longs pay shorts (bullish crowding); normalised to [-1,1]
         # Typical range ±0.1%; clip at ±1% → / 0.01 gives [-1,1]
-        fr_val  = float(funding_rate) if funding_rate is not None else 0.0
+        fr_val = float(funding_rate) if funding_rate is not None else 0.0
         fr_norm = max(-1.0, min(1.0, fr_val / 0.01))
         fund_ch = [fr_norm] * len(closes)
 
@@ -1415,8 +1511,7 @@ class FeatureBuilder:
         if btc_closes and len(btc_closes) >= 2 and len(closes) >= 2:
             n_btc = min(len(btc_closes), len(closes))
             asset_ret = [
-                (closes[i]     - closes[i - 1])    / max(closes[i - 1],    1e-9)
-                for i in range(1, n_btc)
+                (closes[i] - closes[i - 1]) / max(closes[i - 1], 1e-9) for i in range(1, n_btc)
             ]
             btc_ret = [
                 (btc_closes[i] - btc_closes[i - 1]) / max(btc_closes[i - 1], 1e-9)
@@ -1424,22 +1519,23 @@ class FeatureBuilder:
             ]
             roll = 20
             for i in range(roll - 1, len(asset_ret)):
-                a = asset_ret[max(0, i - roll + 1): i + 1]
-                b = btc_ret[max(0, i - roll + 1):  i + 1]
-                n  = len(a)
+                a = asset_ret[max(0, i - roll + 1) : i + 1]
+                b = btc_ret[max(0, i - roll + 1) : i + 1]
+                n = len(a)
                 if n < 5:
                     continue
-                ma = sum(a) / n; mb = sum(b) / n
+                ma = sum(a) / n
+                mb = sum(b) / n
                 num = sum((a[j] - ma) * (b[j] - mb) for j in range(n))
-                da  = math.sqrt(sum((v - ma) ** 2 for v in a))
-                db  = math.sqrt(sum((v - mb) ** 2 for v in b))
+                da = math.sqrt(sum((v - ma) ** 2 for v in a))
+                db = math.sqrt(sum((v - mb) ** 2 for v in b))
                 corr = num / (da * db) if da > 0 and db > 0 else 0.0
                 corr_ch[i + 1] = max(-1.0, min(1.0, corr))
 
         # ── Ch 22 & 23: Time-of-day sin/cos encoding ──────────────────────────
         _2pi_24 = 2.0 * math.pi / 24.0
-        sin_ch  = [math.sin(_hours[i] * _2pi_24) for i in range(len(closes))]
-        cos_ch  = [math.cos(_hours[i] * _2pi_24) for i in range(len(closes))]
+        sin_ch = [math.sin(_hours[i] * _2pi_24) for i in range(len(closes))]
+        cos_ch = [math.cos(_hours[i] * _2pi_24) for i in range(len(closes))]
 
         # ── Ch 24 & 25: Realized-vol windows (#46-A, #98) ────────────────────
         # Replaced IV/RV spread (Deribit only had BTC/ETH) with pure RV — no
@@ -1452,8 +1548,8 @@ class FeatureBuilder:
             _rv_src = closes_ext
         else:
             _rv_src = closes
-        ivrv20_ch = _rv_series(_rv_src, window=20)[-len(closes):]
-        ivrv60_ch = _rv_series(_rv_src, window=60)[-len(closes):]
+        ivrv20_ch = _rv_series(_rv_src, window=20)[-len(closes) :]
+        ivrv60_ch = _rv_series(_rv_src, window=60)[-len(closes) :]
 
         # ── Ch 26: Volume sentiment (#46-A) ──────────────────────────────────
         # Replaced Binance L/S (geo-blocked) with rolling up-vol / total-vol.
@@ -1463,40 +1559,40 @@ class FeatureBuilder:
         # Z-scored upstream by `_build_samples_range` over full per-product series.
         # Clip to [-1, 1] via /3.0 (3σ → 1.0). Broadcast scalar across window
         # like Ch 20 funding pattern.
-        oi_val  = float(oi_rate) if oi_rate is not None else 0.0
+        oi_val = float(oi_rate) if oi_rate is not None else 0.0
         oi_norm = max(-1.0, min(1.0, oi_val / 3.0))
-        oi_ch   = [oi_norm] * len(closes)
+        oi_ch = [oi_norm] * len(closes)
 
         P = self._pad
         channels = [
-            P(norm_c,                                  T),   # 0
+            P(norm_c, T),  # 0
             P([self._slog(v) / 10.0 for v in volumes], T),  # 1
-            P(hl_range,                                T),   # 2
-            P(body,                                    T),   # 3
-            P(rsi_ch,                                  T),   # 4
-            P(macd_ch,                                 T),   # 5
-            P(ema9_ch,                                 T),   # 6
-            P(ema21_ch,                                T),   # 7
-            P(bb_ch,                                   T),   # 8
-            P(chg_ch,                                  T),   # 9
-            P(bid_ch,                                  T),   # 10
-            P(ask_ch,                                  T),   # 11
-            P(mfi_ch,                                  T),   # 12
-            P(obv_ch,                                  T),   # 13
-            P(stoch_ch,                                T),   # 14
-            P(adx_ch,                                  T),   # 15
-            P(vwap_ch,                                 T),   # 16
-            P(fast_rsi_ch,                             T),   # 17
-            P(vel_ch,                                  T),   # 18
-            P(vol_z_ch,                                T),   # 19
-            P(fund_ch,                                 T),   # 20
-            P(corr_ch,                                 T),   # 21
-            P(sin_ch,                                  T),   # 22
-            P(cos_ch,                                  T),   # 23
-            P(ivrv20_ch,                               T),   # 24
-            P(ivrv60_ch,                               T),   # 25
-            P(ls_ch,                                   T),   # 26
-            P(oi_ch,                                   T),   # 27
+            P(hl_range, T),  # 2
+            P(body, T),  # 3
+            P(rsi_ch, T),  # 4
+            P(macd_ch, T),  # 5
+            P(ema9_ch, T),  # 6
+            P(ema21_ch, T),  # 7
+            P(bb_ch, T),  # 8
+            P(chg_ch, T),  # 9
+            P(bid_ch, T),  # 10
+            P(ask_ch, T),  # 11
+            P(mfi_ch, T),  # 12
+            P(obv_ch, T),  # 13
+            P(stoch_ch, T),  # 14
+            P(adx_ch, T),  # 15
+            P(vwap_ch, T),  # 16
+            P(fast_rsi_ch, T),  # 17
+            P(vel_ch, T),  # 18
+            P(vol_z_ch, T),  # 19
+            P(fund_ch, T),  # 20
+            P(corr_ch, T),  # 21
+            P(sin_ch, T),  # 22
+            P(cos_ch, T),  # 23
+            P(ivrv20_ch, T),  # 24
+            P(ivrv60_ch, T),  # 25
+            P(ls_ch, T),  # 26
+            P(oi_ch, T),  # 27
         ]
         assert len(channels) == N_CHANNELS
         return channels
@@ -1540,28 +1636,29 @@ class FeatureBuilder:
 
 # ── CNN-LSTM Agent ─────────────────────────────────────────────────────────────
 
+
 class CoinbaseCNNAgent:
     def __init__(self, ws_subscriber=None):
-        self.ws     = ws_subscriber
-        self.fb     = FeatureBuilder()
+        self.ws = ws_subscriber
+        self.fb = FeatureBuilder()
         self._cache: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
         self.model: Optional[Any] = None
-        self.book   = _CNNBook()          # dry-run portfolio — tracks positions + trades table
+        self.book = _CNNBook()  # dry-run portfolio — tracks positions + trades table
         # ── Runtime stats ──────────────────────────────────────────────────
-        self.last_scan_at:     Optional[float] = None
-        self.next_scan_at:     Optional[float] = None
-        self.scan_count:       int = 0
-        self.signals_total:    int = 0
-        self.signals_buy:      int = 0
-        self.signals_sell:     int = 0
+        self.last_scan_at: Optional[float] = None
+        self.next_scan_at: Optional[float] = None
+        self.scan_count: int = 0
+        self.signals_total: int = 0
+        self.signals_buy: int = 0
+        self.signals_sell: int = 0
         self.signals_executed: int = 0
-        self.last_trained_at:  Optional[float] = None
-        self.train_count:      int = 0
+        self.last_trained_at: Optional[float] = None
+        self.train_count: int = 0
         # ── LLM token tracking ─────────────────────────────────────────────
         # Kept for main.py /api/cnn/status payload back-compat; always zero
         # after #311-refactor-f removed the Ollama blend.
-        self.llm_calls:          int = 0
-        self.llm_prompt_tokens:  int = 0
+        self.llm_calls: int = 0
+        self.llm_prompt_tokens: int = 0
         self.llm_response_tokens: int = 0
         # ── Model health flags ──────────────────────────────────────────────
         # True when the on-disk checkpoint is incompatible with the current
@@ -1576,8 +1673,11 @@ class CoinbaseCNNAgent:
         if _TORCH:
             self.model = _build_cnn().to(_DEVICE)
             self._load()
-        _status = "incompatible — signals suppressed until retrained" if self._needs_retrain else \
-                  ("loaded" if self._exists() else "random (untrained)")
+        _status = (
+            "incompatible — signals suppressed until retrained"
+            if self._needs_retrain
+            else ("loaded" if self._exists() else "random (untrained)")
+        )
         _device_str = str(_DEVICE) if _TORCH else "n/a"
         logger.info(
             f"CoinbaseCNNAgent ready | torch={'yes' if _TORCH else 'linear'} | "
@@ -1598,7 +1698,7 @@ class CoinbaseCNNAgent:
         try:
             ckpt = torch.load(_model_path_for(), map_location="cpu", weights_only=False)
             if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                arch          = ckpt.get("arch", "legacy")
+                arch = ckpt.get("arch", "legacy")
                 ckpt_channels = ckpt.get("n_channels", N_CHANNELS)
 
                 if ckpt_channels != N_CHANNELS:
@@ -1640,7 +1740,7 @@ class CoinbaseCNNAgent:
             shutil.copy2(path, path + ".bak")
         torch.save(
             {
-                "arch":       getattr(self.model, "arch", "glu"),
+                "arch": getattr(self.model, "arch", "glu"),
                 "n_channels": N_CHANNELS,
                 "state_dict": self.model.state_dict(),
             },
@@ -1669,6 +1769,7 @@ class CoinbaseCNNAgent:
         channels = _mask_training_constant_channels(channels)
         if config.model_backend in ("xgb", "xgb_v45"):
             from agents import xgb_signal
+
             return xgb_signal.xgb_prob(channels, pid=pid)
         # Unreachable under config._validate_backend; defensive only.
         raise RuntimeError(f"unsupported model_backend={config.model_backend!r}")
@@ -1682,9 +1783,8 @@ class CoinbaseCNNAgent:
                 return {}
             bv = sum(b["size"] for b in bids)
             av = sum(a["size"] for a in asks)
-            t  = bv + av
-            return {"bid_depth": bv, "ask_depth": av,
-                    "imbalance": (bv - av) / t if t else 0}
+            t = bv + av
+            return {"bid_depth": bv, "ask_depth": av, "imbalance": (bv - av) / t if t else 0}
         except Exception:
             return {}
 
@@ -1716,15 +1816,15 @@ class CoinbaseCNNAgent:
             price = self._live_price(pid, 0.0)
             if not price:
                 try:
-                    data  = await coinbase_client.get_product(pid)
+                    data = await coinbase_client.get_product(pid)
                     price = float(data.get("price", 0) or 0)
                 except Exception:
                     pass
             if not price:
-                continue   # no price available — skip safely
+                continue  # no price available — skip safely
 
-            avg_price  = pos["avg_price"]
-            pct_entry  = (price - avg_price) / avg_price
+            avg_price = pos["avg_price"]
+            pct_entry = (price - avg_price) / avg_price
 
             # Update peak price — ratchets up, never down
             peak_price = pos.get("peak_price") or avg_price
@@ -1732,17 +1832,17 @@ class CoinbaseCNNAgent:
                 peak_price = price
                 pos["peak_price"] = peak_price
 
-            pct_from_peak = (price - peak_price) / peak_price
+            (price - peak_price) / peak_price
 
             # Compute ATR-based trail distance for this product
             trail_pct = _CNN_ATR_TRAIL_MIN  # fallback if candles unavailable
             try:
                 candles = await database.get_candles(pid, limit=20)
                 if len(candles) >= 15:
-                    highs  = [c["high"]  for c in candles]
-                    lows   = [c["low"]   for c in candles]
+                    highs = [c["high"] for c in candles]
+                    lows = [c["low"] for c in candles]
                     closes = [c["close"] for c in candles]
-                    atr    = _atr(highs, lows, closes)
+                    atr = _atr(highs, lows, closes)
                     if atr > 0 and peak_price > 0:
                         raw = atr * _CNN_ATR_TRAIL_MULT / peak_price
                         trail_pct = max(_CNN_ATR_TRAIL_MIN, min(raw, _CNN_ATR_TRAIL_MAX))
@@ -1756,7 +1856,9 @@ class CoinbaseCNNAgent:
             # Task #46: PnL-anchored trail. Ratchet peak_pnl_pct from the
             # ratcheted peak_price (handles positions whose peak existed before
             # the field was added; migration also seeds this on load).
-            peak_pnl_from_peak_price = (peak_price - avg_price) / avg_price if avg_price > 0 else 0.0
+            peak_pnl_from_peak_price = (
+                (peak_price - avg_price) / avg_price if avg_price > 0 else 0.0
+            )
             pos["peak_pnl_pct"] = max(pos.get("peak_pnl_pct", 0.0), peak_pnl_from_peak_price)
             pos["position_dollars"] = float(pos["size"]) * price
 
@@ -1772,7 +1874,7 @@ class CoinbaseCNNAgent:
 
             # Positions without entry_time are legacy — treat as already overdue
             entry_time = pos.get("entry_time")
-            hold_secs  = _CNN_LEGACY_HOLD_SECS if entry_time is None else time.time() - entry_time
+            hold_secs = _CNN_LEGACY_HOLD_SECS if entry_time is None else time.time() - entry_time
 
             # Task #46 B2: MODEL_DOWN — force-exit when v4.5 says drop is
             # likely (cached by generate_signal). Sits between STOP_LOSS
@@ -1781,9 +1883,11 @@ class CoinbaseCNNAgent:
             # missing ts means legacy position → fail closed (no fire).
             now_ms = int(time.time() * 1000)
             p_down_ts = pos.get("p_down_ts_ms")
-            p_down = pos.get("p_down", 0.0) if (
-                p_down_ts is not None and (now_ms - p_down_ts) <= _P_DOWN_STALE_MS
-            ) else 0.0
+            p_down = (
+                pos.get("p_down", 0.0)
+                if (p_down_ts is not None and (now_ms - p_down_ts) <= _P_DOWN_STALE_MS)
+                else 0.0
+            )
 
             trigger = None
             if pct_entry <= -_CNN_STOP_LOSS_PCT:
@@ -1799,10 +1903,10 @@ class CoinbaseCNNAgent:
                 pnl = await self.book.sell(pid, price, trigger=trigger)
                 logger.info(
                     f"CNN RISK EXIT {pid} @{price:.6f} | {trigger} | "
-                    f"entry={pct_entry*100:+.2f}% peak={peak_price:.6f} "
-                    f"peak_pnl={pos['peak_pnl_pct']*100:+.2f}% "
-                    f"exit_thr={exit_threshold*100:+.2f}% (atr_trail={trail_pct*100:.1f}%) "
-                    f"hold={hold_secs/3600:.1f}h | "
+                    f"entry={pct_entry * 100:+.2f}% peak={peak_price:.6f} "
+                    f"peak_pnl={pos['peak_pnl_pct'] * 100:+.2f}% "
+                    f"exit_thr={exit_threshold * 100:+.2f}% (atr_trail={trail_pct * 100:.1f}%) "
+                    f"hold={hold_secs / 3600:.1f}h | "
                     f"pnl=${pnl:+.2f} | balance=${self.book.balance:.2f}"
                 )
 
@@ -1824,7 +1928,7 @@ class CoinbaseCNNAgent:
             )
             return None
 
-        pid   = product["product_id"]
+        pid = product["product_id"]
         price = self._live_price(pid, product.get("price") or 0)
         if not price or price <= 0:
             return None
@@ -1835,12 +1939,16 @@ class CoinbaseCNNAgent:
         # Default all indicator scalars so they're always defined regardless of
         # which branch runs or whether an early return/exception occurs mid-branch.
         cnn_prob = 0.5
-        adx_val  = float(config.adx_trend_threshold)
-        rsi_val  = 50.0;  macd_h = 0.0;  bb_pos = 0.5
-        mfi_val  = 50.0;  stoch_k = 50.0; atr_val = 0.0
-        vwap_price = price; vwap_d = 0.0
+        adx_val = float(config.adx_trend_threshold)
+        rsi_val = 50.0
+        macd_h = 0.0
+        bb_pos = 0.5
+        mfi_val = 50.0
+        stoch_k = 50.0
+        atr_val = 0.0
+        vwap_price = price
+        vwap_d = 0.0
         fast_rsi_val = vel_norm = vol_z_norm = 0.5
-        hurst = 0.5; di = 0.0; entropy = 0.5
         closes: List[float] = []
         ob = {}
 
@@ -1850,17 +1958,17 @@ class CoinbaseCNNAgent:
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob, _, _cached_ind = cached
-            adx_val      = _cached_ind.get("adx_val",      adx_val)
-            rsi_val      = _cached_ind.get("rsi_val",      rsi_val)
-            macd_h       = _cached_ind.get("macd_h",       macd_h)
-            mfi_val      = _cached_ind.get("mfi_val",      mfi_val)
-            stoch_k      = _cached_ind.get("stoch_k",      stoch_k)
-            atr_val      = _cached_ind.get("atr_val",      atr_val)
-            vwap_d       = _cached_ind.get("vwap_d",       vwap_d)
+            adx_val = _cached_ind.get("adx_val", adx_val)
+            rsi_val = _cached_ind.get("rsi_val", rsi_val)
+            macd_h = _cached_ind.get("macd_h", macd_h)
+            mfi_val = _cached_ind.get("mfi_val", mfi_val)
+            stoch_k = _cached_ind.get("stoch_k", stoch_k)
+            atr_val = _cached_ind.get("atr_val", atr_val)
+            vwap_d = _cached_ind.get("vwap_d", vwap_d)
             fast_rsi_val = _cached_ind.get("fast_rsi_val", fast_rsi_val)
-            vel_norm     = _cached_ind.get("vel_norm",     vel_norm)
-            vol_z_norm   = _cached_ind.get("vol_z_norm",   vol_z_norm)
-            xgb_shadow   = _cached_ind.get("xgb_shadow",   None)
+            vel_norm = _cached_ind.get("vel_norm", vel_norm)
+            vol_z_norm = _cached_ind.get("vol_z_norm", vol_z_norm)
+            xgb_shadow = _cached_ind.get("xgb_shadow", None)
         else:
             # #98: fetch SEQ_LEN(60) + RV_PREFIX_BARS(60) + 20 buffer = 140
             # so closes_ext can satisfy the rv60 lookback at the first
@@ -1869,9 +1977,9 @@ class CoinbaseCNNAgent:
             if len(candles) < 30:
                 return None
 
-            closes  = [c["close"]  for c in candles]
-            highs   = [c["high"]   for c in candles]
-            lows    = [c["low"]    for c in candles]
+            closes = [c["close"] for c in candles]
+            highs = [c["high"] for c in candles]
+            lows = [c["low"] for c in candles]
             volumes = [c["volume"] for c in candles]
 
             ob = await self._ob(pid)
@@ -1890,18 +1998,18 @@ class CoinbaseCNNAgent:
             fast_rsi_val = vel_norm = vol_z_norm = 0.0  # overwritten below if 5m data available
             c5m = candles_5m or []
             if len(c5m) >= 14:
-                c5    = [c["close"]  for c in c5m]
-                v5    = [c["volume"] for c in c5m]
+                c5 = [c["close"] for c in c5m]
+                v5 = [c["volume"] for c in c5m]
                 fast_rsi_val = _rsi(c5[-14:]) / 100.0
-                n_vel   = min(12, len(c5) - 1)
+                n_vel = min(12, len(c5) - 1)
                 p_start = c5[-(n_vel + 1)]
-                p_end   = c5[-1]
-                vel     = (p_end - p_start) / max(p_start, 1e-9) / max(n_vel, 1)
+                p_end = c5[-1]
+                vel = (p_end - p_start) / max(p_start, 1e-9) / max(n_vel, 1)
                 vel_norm = max(-1.0, min(1.0, vel / 0.005))
-                v5_win  = v5[-60:] if len(v5) >= 60 else v5
-                v_mean  = sum(v5_win) / len(v5_win)
-                v_std   = math.sqrt(sum((x - v_mean) ** 2 for x in v5_win) / max(len(v5_win), 1))
-                v_z     = (v5[-1] - v_mean) / max(v_std, 1e-9)
+                v5_win = v5[-60:] if len(v5) >= 60 else v5
+                v_mean = sum(v5_win) / len(v5_win)
+                v_std = math.sqrt(sum((x - v_mean) ** 2 for x in v5_win) / max(len(v5_win), 1))
+                v_z = (v5[-1] - v_mean) / max(v_std, 1e-9)
                 vol_z_norm = max(-1.0, min(1.0, v_z / 3.0))
 
             # ── Fetch funding rate (Binance perp) ─────────────────────────────
@@ -1957,9 +2065,13 @@ class CoinbaseCNNAgent:
             # the last SEQ_LEN of that, and closes_ext is the full series so
             # the rv60 lookback at the first in-window bar is satisfied.
             channels = self.fb.build(
-                candles, ob, candles_5m=candles_5m,
-                btc_closes=btc_closes, funding_rate=funding_rate,
-                iv_rv20_spread=iv_rv20_spread, iv_rv60_spread=iv_rv60_spread,
+                candles,
+                ob,
+                candles_5m=candles_5m,
+                btc_closes=btc_closes,
+                funding_rate=funding_rate,
+                iv_rv20_spread=iv_rv20_spread,
+                iv_rv60_spread=iv_rv60_spread,
                 ls_sentiment=ls_sentiment,
                 closes_ext=closes,
             )
@@ -1970,12 +2082,13 @@ class CoinbaseCNNAgent:
             # built-in isolation: v4.5 failure -> v45=None, never affects v3.
             try:
                 from agents import xgb_signal as _xgb
+
                 xgb_shadow, xgb_shadow_v45 = _xgb.xgb_prob_shadow_v4_5(
                     _mask_training_constant_channels(channels),
                     pid=pid,
                 )
             except Exception:
-                xgb_shadow     = None
+                xgb_shadow = None
                 xgb_shadow_v45 = None
 
             # Task #46 B2: cache v4.5 p_down on the held position (if any) so
@@ -1987,25 +2100,35 @@ class CoinbaseCNNAgent:
                 self.book.positions[pid]["p_down"] = float(xgb_shadow_v45[0])
                 self.book.positions[pid]["p_down_ts_ms"] = int(time.time() * 1000)
 
-            rsi_val            = _rsi(closes)
-            _, _, macd_h       = _macd(closes)
-            _, _, _, bb_pos    = _bollinger(closes)
-            adx_val, _, _      = _adx(highs, lows, closes)
-            mfi_val            = _mfi(highs, lows, closes, volumes)
-            stoch_k, _         = _stoch_rsi(closes)
-            atr_val            = _atr(highs, lows, closes)
+            rsi_val = _rsi(closes)
+            _, _, macd_h = _macd(closes)
+            _, _, _, bb_pos = _bollinger(closes)
+            adx_val, _, _ = _adx(highs, lows, closes)
+            mfi_val = _mfi(highs, lows, closes, volumes)
+            stoch_k, _ = _stoch_rsi(closes)
+            atr_val = _atr(highs, lows, closes)
             vwap_price, vwap_d = _vwap(highs, lows, closes, volumes)
             # Hurst / DI / entropy computations dropped #311-refactor-f —
             # their only consumers were the CNN-backend-only suppression gates
             # and the Ollama-skip decision tree, both now removed.
 
-            self._cache[pid] = (cnn_prob, time.time(), {
-                "adx_val": adx_val, "rsi_val": rsi_val, "macd_h": macd_h,
-                "mfi_val": mfi_val, "stoch_k": stoch_k, "atr_val": atr_val,
-                "vwap_d": vwap_d, "fast_rsi_val": fast_rsi_val,
-                "vel_norm": vel_norm, "vol_z_norm": vol_z_norm,
-                "xgb_shadow": xgb_shadow,
-            })
+            self._cache[pid] = (
+                cnn_prob,
+                time.time(),
+                {
+                    "adx_val": adx_val,
+                    "rsi_val": rsi_val,
+                    "macd_h": macd_h,
+                    "mfi_val": mfi_val,
+                    "stoch_k": stoch_k,
+                    "atr_val": atr_val,
+                    "vwap_d": vwap_d,
+                    "fast_rsi_val": fast_rsi_val,
+                    "vel_norm": vel_norm,
+                    "vol_z_norm": vol_z_norm,
+                    "xgb_shadow": xgb_shadow,
+                },
+            )
 
         # ── HMM regime detection ─────────────────────────────────────────────
         # Regime label is still persisted to cnn_scans for downstream analysis;
@@ -2015,9 +2138,9 @@ class CoinbaseCNNAgent:
         hmm_regime, hmm_conf, _hmm_state = get_detector().predict(closes)
         if hmm_regime == "UNKNOWN":
             # Fallback to binary ADX gate when HMM not fitted yet
-            trending   = adx_val >= config.adx_trend_threshold
+            trending = adx_val >= config.adx_trend_threshold
             hmm_regime = "TRENDING" if trending else "RANGING"
-            hmm_conf   = 1.0
+            hmm_conf = 1.0
         else:
             trending = hmm_regime == "TRENDING"
         cnn_w, llm_w = regime_blend(hmm_regime, hmm_conf)
@@ -2047,32 +2170,38 @@ class CoinbaseCNNAgent:
             else:
                 p_down, p_neutral, p_up = xgb_shadow_v45
                 side, strength = _indep_thresholds_decision(
-                    p_down, p_neutral, p_up,
-                    thresh_up   = config.xgb_v45_thresh_up,
-                    thresh_down = config.xgb_v45_thresh_down,
+                    p_down,
+                    p_neutral,
+                    p_up,
+                    thresh_up=config.xgb_v45_thresh_up,
+                    thresh_down=config.xgb_v45_thresh_down,
                 )
         else:
             # MODEL_BACKEND=xgb — existing 2-class gate on v3 prob.
             if model_prob > config.cnn_buy_threshold:
-                side     = "BUY"
+                side = "BUY"
                 strength = round((model_prob - 0.5) * 2, 3)
             elif model_prob < config.cnn_sell_threshold:
-                side     = "SELL"
+                side = "SELL"
                 strength = round((0.5 - model_prob) * 2, 3)
             else:
-                side     = "HOLD"
+                side = "HOLD"
                 strength = 0.0
 
         # MC filter chain (off by default; MC_FILTERS env-gated). Returns the
         # side unchanged and {} telemetry when MC_FILTERS is empty.
         from agents.mc import registry as _mc
+
         try:
-            from agents.mc import ci_filter as _ci_filter  # registers ci into _FILTER_CLASSES
+            pass  # registers ci into _FILTER_CLASSES
         except Exception:
             pass
         side, mc_telemetry = _mc.apply_buy_filters(
-            side=side, model_prob=model_prob, pid=pid,
-            channels=channels, context={"strength": strength},
+            side=side,
+            model_prob=model_prob,
+            pid=pid,
+            channels=channels,
+            context={"strength": strength},
         )
         if side == "HOLD":
             strength = 0.0  # re-zero if MC down-graded BUY to HOLD
@@ -2080,48 +2209,59 @@ class CoinbaseCNNAgent:
         passes = side != "HOLD"
 
         # ── Save every scan result for the confidence table ───────────────────
-        await database.save_cnn_scan({
-            "product_id":  pid,
-            "price":       round(price, 6),
-            "cnn_prob":    round(cnn_prob, 4),
-            "llm_prob":    round(llm_prob, 4) if llm_prob is not None else None,
-            "model_prob":  round(model_prob, 4),
-            "cnn_weight":  cnn_w,
-            "llm_weight":  llm_w,
-            "side":        side,
-            "strength":    round(strength, 3),
-            "signal_gen":  passes,
-            "regime":      hmm_regime,
-            "adx":         round(adx_val, 1),
-            "rsi":         round(rsi_val, 1),
-            "macd":        round(macd_h, 6),
-            "mfi":         round(mfi_val, 1),
-            "stoch_k":     round(stoch_k, 1),
-            "atr":         round(atr_val, 6),
-            "vwap_dist":   round(vwap_d, 4),
-            "fast_rsi":    round(fast_rsi_val, 4),
-            "velocity":    round(vel_norm, 4),
-            "vol_z":       round(vol_z_norm, 4),
-            "xgb_prob":    round(xgb_shadow, 4) if xgb_shadow is not None else None,
-            "xgb_prob_v4_5_down":    round(xgb_shadow_v45[0], 4) if xgb_shadow_v45 is not None else None,
-            "xgb_prob_v4_5_neutral": round(xgb_shadow_v45[1], 4) if xgb_shadow_v45 is not None else None,
-            "xgb_prob_v4_5_up":      round(xgb_shadow_v45[2], 4) if xgb_shadow_v45 is not None else None,
-            "xgb_prob_stdev": mc_telemetry.get("ci", {}).get("stdev") if mc_telemetry else None,
-            "mc_telemetry":   json.dumps(mc_telemetry) if mc_telemetry else None,
-        })
+        await database.save_cnn_scan(
+            {
+                "product_id": pid,
+                "price": round(price, 6),
+                "cnn_prob": round(cnn_prob, 4),
+                "llm_prob": round(llm_prob, 4) if llm_prob is not None else None,
+                "model_prob": round(model_prob, 4),
+                "cnn_weight": cnn_w,
+                "llm_weight": llm_w,
+                "side": side,
+                "strength": round(strength, 3),
+                "signal_gen": passes,
+                "regime": hmm_regime,
+                "adx": round(adx_val, 1),
+                "rsi": round(rsi_val, 1),
+                "macd": round(macd_h, 6),
+                "mfi": round(mfi_val, 1),
+                "stoch_k": round(stoch_k, 1),
+                "atr": round(atr_val, 6),
+                "vwap_dist": round(vwap_d, 4),
+                "fast_rsi": round(fast_rsi_val, 4),
+                "velocity": round(vel_norm, 4),
+                "vol_z": round(vol_z_norm, 4),
+                "xgb_prob": round(xgb_shadow, 4) if xgb_shadow is not None else None,
+                "xgb_prob_v4_5_down": round(xgb_shadow_v45[0], 4)
+                if xgb_shadow_v45 is not None
+                else None,
+                "xgb_prob_v4_5_neutral": round(xgb_shadow_v45[1], 4)
+                if xgb_shadow_v45 is not None
+                else None,
+                "xgb_prob_v4_5_up": round(xgb_shadow_v45[2], 4)
+                if xgb_shadow_v45 is not None
+                else None,
+                "xgb_prob_stdev": mc_telemetry.get("ci", {}).get("stdev") if mc_telemetry else None,
+                "mc_telemetry": json.dumps(mc_telemetry) if mc_telemetry else None,
+            }
+        )
 
         if not passes:
             return None
 
         # Record CNN signal to outcome tracker (resolved 4h later)
         await get_tracker().record(
-            source="CNN", product_id=pid, side=side,
-            confidence=round(strength, 3), price=price,
+            source="CNN",
+            product_id=pid,
+            side=side,
+            confidence=round(strength, 3),
+            price=price,
             indicators={
                 "cnn_prob": round(cnn_prob, 4),
-                "adx":      round(adx_val, 1),
-                "regime":   hmm_regime,
-                "rsi":      round(rsi_val, 1),
+                "adx": round(adx_val, 1),
+                "regime": hmm_regime,
+                "rsi": round(rsi_val, 1),
             },
         )
 
@@ -2131,27 +2271,27 @@ class CoinbaseCNNAgent:
         prob_line = f"\ncnn_prob={cnn_prob:.4f} llm_prob=None model_prob={model_prob:.4f}"
 
         signal = {
-            "product_id":  pid,
+            "product_id": pid,
             "signal_type": f"CNN_{'LONG' if side == 'BUY' else 'SHORT'}",
-            "side":        side,
-            "price":       round(price, 6),
-            "strength":    strength,
-            "rsi":         round(rsi_val, 2),
-            "macd":        round(macd_h, 6),
+            "side": side,
+            "price": round(price, 6),
+            "strength": strength,
+            "rsi": round(rsi_val, 2),
+            "macd": round(macd_h, 6),
             "bb_position": round(bb_pos, 3),
-            "reasoning":   context + prob_line,
-            "quote_size":  round(quote_size, 2),
-            "atr":       round(atr_val, 6),
-            "adx":       round(adx_val, 1),
+            "reasoning": context + prob_line,
+            "quote_size": round(quote_size, 2),
+            "atr": round(atr_val, 6),
+            "adx": round(adx_val, 1),
             "vwap_dist": round(vwap_d, 4),
         }
 
-        signal_id    = await database.save_signal(signal)
+        signal_id = await database.save_signal(signal)
         signal["id"] = signal_id
 
         self.signals_total += 1
         if side == "BUY":
-            self.signals_buy  += 1
+            self.signals_buy += 1
         else:
             self.signals_sell += 1
 
@@ -2208,8 +2348,7 @@ class CoinbaseCNNAgent:
 
         return signal
 
-    async def scan_all(self, execute: bool = False,
-                       order_executor=None) -> List[Dict]:
+    async def scan_all(self, execute: bool = False, order_executor=None) -> List[Dict]:
         products = await database.get_products(tracked_only=True)
         if not products:
             return []
@@ -2225,12 +2364,15 @@ class CoinbaseCNNAgent:
         signals.sort(key=lambda s: s["strength"], reverse=True)
         return signals
 
-    async def run_loop(self, interval: int = 900,
-                       train_every_n_scans: int = 4,
-                       order_executor=None,
-                       is_trading_fn=None,
-                       broadcast_fn=None,
-                       auto_train_fn=None) -> None:
+    async def run_loop(
+        self,
+        interval: int = 900,
+        train_every_n_scans: int = 4,
+        order_executor=None,
+        is_trading_fn=None,
+        broadcast_fn=None,
+        auto_train_fn=None,
+    ) -> None:
         """
         Scan every `interval` seconds (default 15 min).
         Auto-train every `train_every_n_scans` scans (default 4 = ~1 hour).
@@ -2240,7 +2382,7 @@ class CoinbaseCNNAgent:
         Why 1 hour: candles are hourly so no new training data arrives faster
         than that. Training more often just re-learns the same data → overfitting.
         """
-        await self.start()   # restore persisted book state before first scan
+        await self.start()  # restore persisted book state before first scan
         logger.info(
             f"CNN-LSTM loop started | scan={interval}s | "
             f"auto-train every {train_every_n_scans} scans "
@@ -2260,8 +2402,8 @@ class CoinbaseCNNAgent:
                 # TRAIL_STOP/STOP_LOSS to lose -$92 net while SCAN exits
                 # earned +$59 on the same window.
                 await self.scan_all(
-                    execute        = should_execute,
-                    order_executor = order_executor if should_execute else None,
+                    execute=should_execute,
+                    order_executor=order_executor if should_execute else None,
                 )
 
                 # Secondary/tertiary fallbacks (TRAIL_STOP → STOP_LOSS →
@@ -2269,7 +2411,7 @@ class CoinbaseCNNAgent:
                 # stops must fire even when scanning is paused — but only
                 # close positions CNN did not already exit via SCAN above.
                 await self._check_risk_exits()
-                self.scan_count  += 1
+                self.scan_count += 1
                 self.next_scan_at = time.time() + interval
 
                 # Push fresh state to all connected browser clients immediately
@@ -2309,13 +2451,14 @@ class CoinbaseCNNAgent:
         """
         if not _TORCH or not self.model:
             return {"error": "PyTorch not available"}
-        import torch.optim as optim
         import time as _t
 
-        _FORWARD_HOURS = 4   # predict whether close is higher 4 hours ahead
-        _train_start   = _t.time()
+        import torch.optim as optim
 
-        loop     = asyncio.get_event_loop()
+        _FORWARD_HOURS = 4  # predict whether close is higher 4 hours ahead
+        _train_start = _t.time()
+
+        loop = asyncio.get_event_loop()
         products = await database.get_products()
 
         # ── Phase 1: collect candles (async DB calls stay on event loop) ──────
@@ -2336,7 +2479,7 @@ class CoinbaseCNNAgent:
         # [(pid, candles, btc_aligned, candles_5m, funding_aligned, oi_aligned)]
         all_candle_sets: list = []
         for p in products:
-            pid  = p["product_id"]
+            pid = p["product_id"]
             hist = await loop.run_in_executor(None, load_history, pid)
             if hist:
                 live = await database.get_candles(pid, limit=200)
@@ -2344,8 +2487,8 @@ class CoinbaseCNNAgent:
                     if "start_time" in c and "start" not in c:
                         c["start"] = c["start_time"]
                 live_starts = {c["start"] for c in hist}
-                new_live    = [c for c in live if c["start"] not in live_starts]
-                candles     = sorted(hist + new_live, key=lambda c: c["start"])
+                new_live = [c for c in live if c["start"] not in live_starts]
+                candles = sorted(hist + new_live, key=lambda c: c["start"])
                 logger.debug(
                     f"Training {pid}: {len(hist)} parquet + {len(new_live)} "
                     f"live = {len(candles)} bars"
@@ -2362,8 +2505,7 @@ class CoinbaseCNNAgent:
                 # synthetic hourly proxy in that case.
                 c5m = await loop.run_in_executor(None, load_5m_history, pid) or []
                 btc_aligned = (
-                    _aligned_btc_closes(candles, btc_hist_for_align)
-                    if pid != "BTC-USD" else None
+                    _aligned_btc_closes(candles, btc_hist_for_align) if pid != "BTC-USD" else None
                 )
                 # Per-product Binance funding history (#57 stage b). The
                 # fetcher returns [] for unsupported symbols, fetch errors,
@@ -2371,17 +2513,13 @@ class CoinbaseCNNAgent:
                 # returns None and Ch 20 stays at zero (caller behaviour
                 # matches the prior constant-zero state).
                 fr_start_ms = int(candles[0]["start"]) * 1000
-                fr_end_ms   = int(candles[-1]["start"]) * 1000
-                funding_hist = await fetch_funding_history(
-                    pid, fr_start_ms, fr_end_ms
-                )
+                fr_end_ms = int(candles[-1]["start"]) * 1000
+                funding_hist = await fetch_funding_history(pid, fr_start_ms, fr_end_ms)
                 funding_aligned = _aligned_funding_rates(candles, funding_hist)
                 # Per-product OKX OI history (#143-A). Same forward-fill
                 # alignment as funding; `_aligned_oi_history` returns None
                 # when the fetcher yields no data, leaving Ch 27 at zero.
-                oi_hist = await fetch_oi_history(
-                    pid, fr_start_ms, fr_end_ms
-                )
+                oi_hist = await fetch_oi_history(pid, fr_start_ms, fr_end_ms)
                 oi_aligned = _aligned_oi_history(candles, oi_hist)
                 all_candle_sets.append(
                     (pid, candles, btc_aligned, c5m, funding_aligned, oi_aligned)
@@ -2397,17 +2535,17 @@ class CoinbaseCNNAgent:
         # Sliding-window feature extraction + tensor stacking + GPU transfer are
         # all CPU/GPU-bound and must NOT run on the event loop.
         _phase2_start = _t.time()
-        logger.info(f"CNN training phase 2/3: building feature tensors (sliding window)")
+        logger.info("CNN training phase 2/3: building feature tensors (sliding window)")
         fb = self.fb  # capture FeatureBuilder for closure
 
-        _LABEL_THRESH = 0.003   # require ≥0.3% move to avoid noisy near-zero labels
+        _LABEL_THRESH = 0.003  # require ≥0.3% move to avoid noisy near-zero labels
 
         def _build_dataset():
             # Per-product append-only cache (P2). Schema change on any of
             # seq_len / forward_hours / label_thresh / n_channels invalidates
             # everything; otherwise only new candles per product cost work.
             schema = _dataset_schema(SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH, N_CHANNELS)
-            cache  = _load_pp_cache(_DATASET_CACHE_PATH, schema) or {}
+            cache = _load_pp_cache(_DATASET_CACHE_PATH, schema) or {}
             n_products = len(all_candle_sets)
             if cache:
                 logger.info(
@@ -2415,15 +2553,24 @@ class CoinbaseCNNAgent:
                     f"{len(cache)} products in cache, {n_products} to process"
                 )
             else:
-                logger.info(
-                    f"CNN dataset per-product cache empty — building from scratch"
-                )
+                logger.info("CNN dataset per-product cache empty — building from scratch")
             X_list, y_list, w_list = [], [], []
             hits = appends = rebuilds = skips = 0
-            for prod_idx, (pid, candles, btc_aligned, c5m, funding_aligned, oi_aligned) in enumerate(all_candle_sets, 1):
+            for prod_idx, (
+                pid,
+                candles,
+                btc_aligned,
+                c5m,
+                funding_aligned,
+                oi_aligned,
+            ) in enumerate(all_candle_sets, 1):
                 entry, status = _extend_or_rebuild_product(
-                    cache.get(pid), candles, fb,
-                    SEQ_LEN, _FORWARD_HOURS, _LABEL_THRESH,
+                    cache.get(pid),
+                    candles,
+                    fb,
+                    SEQ_LEN,
+                    _FORWARD_HOURS,
+                    _LABEL_THRESH,
                     btc_closes=btc_aligned,
                     funding_rates=funding_aligned,
                     oi_rates=oi_aligned,
@@ -2445,9 +2592,11 @@ class CoinbaseCNNAgent:
                 # Per-product uniqueness weight = mean(1/N_t) over forward
                 # window (P3c). Compute fresh each dataset assembly so cache
                 # updates don't drift.
-                w_list.extend(_compute_uniqueness(
-                    entry.get("indices", []), _FORWARD_HOURS, int(entry["last_n"])
-                ))
+                w_list.extend(
+                    _compute_uniqueness(
+                        entry.get("indices", []), _FORWARD_HOURS, int(entry["last_n"])
+                    )
+                )
                 if prod_idx % _PHASE2_LOG_EVERY == 0 or prod_idx == n_products:
                     logger.info(
                         f"CNN dataset build: {prod_idx}/{n_products} products, "
@@ -2470,7 +2619,7 @@ class CoinbaseCNNAgent:
         _phase2_secs = _t.time() - _phase2_start
         logger.info(
             f"CNN training phase 2/3 done: {len(X_list):,} samples built "
-            f"in {_phase2_secs:.1f}s ({_phase2_secs/60:.1f} min)"
+            f"in {_phase2_secs:.1f}s ({_phase2_secs / 60:.1f} min)"
         )
 
         if len(X_list) < 4:
@@ -2487,33 +2636,33 @@ class CoinbaseCNNAgent:
             )
             pos_weight_val = 1.0
         else:
-            pos_weight_val = n_neg / n_pos   # >1 = more negatives (up-weight positives)
+            pos_weight_val = n_neg / n_pos  # >1 = more negatives (up-weight positives)
         logger.info(
-            f"CNN dataset: {len(y_list)} samples | up={n_pos} ({100*n_pos/len(y_list):.1f}%) "
-            f"down={n_neg} ({100*n_neg/len(y_list):.1f}%) | pos_weight={pos_weight_val:.3f}"
+            f"CNN dataset: {len(y_list)} samples | up={n_pos} ({100 * n_pos / len(y_list):.1f}%) "
+            f"down={n_neg} ({100 * n_neg / len(y_list):.1f}%) | pos_weight={pos_weight_val:.3f}"
         )
 
         # ── 80/20 time-ordered split (no shuffle — preserves temporal order) ──
-        split      = max(1, int(len(X_list) * 0.8))
-        X_all      = torch.stack(X_list).to(_DEVICE)
+        split = max(1, int(len(X_list) * 0.8))
+        X_all = torch.stack(X_list).to(_DEVICE)
         # #99: zero training-constant channels before fit so train and
         # inference both see zeros for the same channels. Without this,
         # ch 17 (=0.5 in cache) trains as 0.5 but inference zeros it.
-        X_all      = _zero_mask_channels(X_all)
-        y_all      = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
+        X_all = _zero_mask_channels(X_all)
+        y_all = torch.tensor(y_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
         # Per-sample uniqueness weight (P3c). Fallback to 1.0 if upstream
         # couldn't produce a weight list (e.g. legacy code path).
         if not w_list or len(w_list) != len(X_list):
             w_list = [1.0] * len(X_list)
-        w_all      = torch.tensor(w_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
+        w_all = torch.tensor(w_list, dtype=torch.float32).unsqueeze(1).to(_DEVICE)
         X_train, X_val = X_all[:split], X_all[split:]
         y_train, y_val = y_all[:split], y_all[split:]
         w_train, w_val = w_all[:split], w_all[split:]
 
-        model      = self.model  # capture for thread closure
-        epoch_log: list = []    # [{epoch, train_loss, val_loss}]
-        fit_box:   list = [{}]  # mutable container: {best_val_loss, stopped_epoch}
-        _pos_w     = torch.tensor([pos_weight_val], dtype=torch.float32).to(_DEVICE)
+        model = self.model  # capture for thread closure
+        epoch_log: list = []  # [{epoch, train_loss, val_loss}]
+        fit_box: list = [{}]  # mutable container: {best_val_loss, stopped_epoch}
+        _pos_w = torch.tensor([pos_weight_val], dtype=torch.float32).to(_DEVICE)
 
         def _sync_fit() -> None:
             """Run the blocking PyTorch fit loop in a thread pool executor.
@@ -2536,17 +2685,21 @@ class CoinbaseCNNAgent:
                 BATCH = 64
 
             # Scale initial LR with batch size (linear scaling rule, anchor = 64)
-            base_lr   = 1e-3 * (BATCH / 64) ** 0.5
-            patience  = _EARLY_STOP_PATIENCE
-            opt       = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=1e-4)
+            base_lr = 1e-3 * (BATCH / 64) ** 0.5
+            patience = _EARLY_STOP_PATIENCE
+            opt = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=1e-4)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                opt, mode="min", factor=0.5, patience=5, min_lr=1e-6,
+                opt,
+                mode="min",
+                factor=0.5,
+                patience=5,
+                min_lr=1e-6,
             )
 
-            best_val   = float("inf")
-            best_sd    = None
+            best_val = float("inf")
+            best_sd = None
             no_improve = 0
-            start_ep   = 1
+            start_ep = 1
 
             # Resume from checkpoint if one exists from a previous interrupted run
             if os.path.exists(_CKPT_PATH):
@@ -2554,10 +2707,10 @@ class CoinbaseCNNAgent:
                     ckpt = torch.load(_CKPT_PATH, map_location=_DEVICE, weights_only=False)
                     model.load_state_dict(ckpt["model_sd"])
                     opt.load_state_dict(ckpt["opt_sd"])
-                    best_val   = ckpt.get("best_val", float("inf"))
-                    best_sd    = ckpt.get("best_sd")
+                    best_val = ckpt.get("best_val", float("inf"))
+                    best_sd = ckpt.get("best_sd")
                     no_improve = ckpt.get("no_improve", 0)
-                    start_ep   = ckpt.get("epoch", 0) + 1
+                    start_ep = ckpt.get("epoch", 0) + 1
                     epoch_log.extend(ckpt.get("epoch_log", []))
                     logger.info(
                         f"CNN fit resuming from checkpoint at epoch {start_ep} "
@@ -2578,7 +2731,7 @@ class CoinbaseCNNAgent:
                 perm = torch.randperm(n_train)
                 batch_losses = []
                 for start in range(0, n_train, BATCH):
-                    idx = perm[start: start + BATCH]
+                    idx = perm[start : start + BATCH]
                     opt.zero_grad()
                     # Per-sample BCE with uniqueness weights (P3c) and label
                     # smoothing (P3d). reduction='none' gives a [B,1] tensor;
@@ -2587,9 +2740,10 @@ class CoinbaseCNNAgent:
                     per_sample = F.binary_cross_entropy_with_logits(
                         model(X_train[idx]),
                         _smooth_labels(y_train[idx], _LABEL_SMOOTH),
-                        pos_weight=_pos_w, reduction="none",
+                        pos_weight=_pos_w,
+                        reduction="none",
                     )
-                    wi   = w_train[idx]
+                    wi = w_train[idx]
                     loss = (per_sample * wi).sum() / wi.sum().clamp(min=1e-9)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -2601,15 +2755,15 @@ class CoinbaseCNNAgent:
                 model.eval()
                 with torch.no_grad():
                     val_per_sample = F.binary_cross_entropy_with_logits(
-                        model(X_val), y_val, pos_weight=_pos_w, reduction="none",
+                        model(X_val),
+                        y_val,
+                        pos_weight=_pos_w,
+                        reduction="none",
                     )
-                    vl_t = float(
-                        (val_per_sample * w_val).sum()
-                        / w_val.sum().clamp(min=1e-9)
-                    )
+                    vl_t = float((val_per_sample * w_val).sum() / w_val.sum().clamp(min=1e-9))
                 model.train()
 
-                scheduler.step(vl_t)   # ReduceLROnPlateau monitors val_loss
+                scheduler.step(vl_t)  # ReduceLROnPlateau monitors val_loss
 
                 tl = round(train_loss_val, 6)
                 vl = round(vl_t, 6)
@@ -2628,8 +2782,8 @@ class CoinbaseCNNAgent:
 
                 # ── Best-model tracking ───────────────────────────────────────
                 if vl < best_val:
-                    best_val   = vl
-                    best_sd    = {k: v.cpu() for k, v in model.state_dict().items()}
+                    best_val = vl
+                    best_sd = {k: v.cpu() for k, v in model.state_dict().items()}
                     no_improve = 0
                 else:
                     no_improve += 1
@@ -2643,15 +2797,18 @@ class CoinbaseCNNAgent:
                 # ── Crash-recovery checkpoint every N epochs ──────────────────
                 if ep % _CKPT_EVERY == 0:
                     try:
-                        torch.save({
-                            "epoch":      ep,
-                            "model_sd":   {k: v.cpu() for k, v in model.state_dict().items()},
-                            "opt_sd":     opt.state_dict(),
-                            "best_val":   best_val,
-                            "best_sd":    best_sd,
-                            "no_improve": no_improve,
-                            "epoch_log":  epoch_log,
-                        }, _CKPT_PATH)
+                        torch.save(
+                            {
+                                "epoch": ep,
+                                "model_sd": {k: v.cpu() for k, v in model.state_dict().items()},
+                                "opt_sd": opt.state_dict(),
+                                "best_val": best_val,
+                                "best_sd": best_sd,
+                                "no_improve": no_improve,
+                                "epoch_log": epoch_log,
+                            },
+                            _CKPT_PATH,
+                        )
                     except Exception as _sce:
                         logger.warning(f"CNN checkpoint save failed: {_sce}")
 
@@ -2672,18 +2829,18 @@ class CoinbaseCNNAgent:
         # Offload blocking compute to thread pool — keeps event loop free
         await loop.run_in_executor(None, _sync_fit)
 
-        best_val_loss  = fit_box[0].get("best_val_loss", float("inf"))
-        stopped_epoch  = fit_box[0].get("stopped_epoch", epochs)
+        best_val_loss = fit_box[0].get("best_val_loss", float("inf"))
+        stopped_epoch = fit_box[0].get("stopped_epoch", epochs)
 
-        final      = epoch_log[-1]
+        final = epoch_log[-1]
         initial_tl = epoch_log[0]["train_loss"]
-        final_tl   = final["train_loss"]
-        final_vl   = final["val_loss"]
+        final_tl = final["train_loss"]
+        final_vl = final["val_loss"]
 
         # ── Validation probabilities (used for AUC, precision, recall) ───────
         val_auc = None
         val_precision_at_thresh = None
-        val_recall_at_thresh    = None
+        val_recall_at_thresh = None
         val_threshold = float(config.cnn_buy_threshold)
         _probs_list = None
         _labels_list = None
@@ -2699,6 +2856,7 @@ class CoinbaseCNNAgent:
         if _probs_list is not None and _labels_list is not None:
             try:
                 from sklearn.metrics import roc_auc_score as _auc
+
                 val_auc = round(float(_auc(_labels_list, _probs_list)), 4)
                 logger.info(f"CNN val AUC-ROC: {val_auc:.4f}")
             except Exception as _ae:
@@ -2711,10 +2869,12 @@ class CoinbaseCNNAgent:
         if _probs_list is not None and _labels_list is not None:
             try:
                 _p, _r = _precision_recall_at_threshold(
-                    _probs_list, _labels_list, val_threshold,
+                    _probs_list,
+                    _labels_list,
+                    val_threshold,
                 )
                 val_precision_at_thresh = round(_p, 4) if _p is not None else None
-                val_recall_at_thresh    = round(_r, 4) if _r is not None else None
+                val_recall_at_thresh = round(_r, 4) if _r is not None else None
                 logger.info(
                     f"CNN val P/R @ {val_threshold:.2f}: "
                     f"precision={val_precision_at_thresh} "
@@ -2725,14 +2885,14 @@ class CoinbaseCNNAgent:
 
         # ── Fit diagnosis ─────────────────────────────────────────────────────
         overfit_gap = (final_vl - final_tl) / max(final_tl, 1e-9)
-        loss_drop   = initial_tl - final_tl
+        loss_drop = initial_tl - final_tl
         if final_tl > 0.65 and loss_drop < 0.02:
             fit_status = "UNDERFIT"
             fit_advice = "Loss barely moved — try more epochs or more training data"
         elif overfit_gap > 0.20:
             fit_status = "OVERFIT"
             fit_advice = (
-                f"Val loss {final_vl:.4f} is {overfit_gap*100:.0f}% above train loss "
+                f"Val loss {final_vl:.4f} is {overfit_gap * 100:.0f}% above train loss "
                 f"{final_tl:.4f} — reduce epochs or collect more diverse candles"
             )
         else:
@@ -2742,7 +2902,7 @@ class CoinbaseCNNAgent:
         # ── Conditional save: only overwrite when new model is better ─────────
         prev_best = self._read_best_loss()
         if best_val_loss < prev_best:
-            self.save_model(backup=True)   # backs up existing .pt before overwriting
+            self.save_model(backup=True)  # backs up existing .pt before overwriting
             self._write_best_loss(best_val_loss)
             self._needs_retrain = False
             save_note = f"saved (val {prev_best:.4f} → {best_val_loss:.4f})"
@@ -2771,34 +2931,37 @@ class CoinbaseCNNAgent:
 
         # True if the model file was written during this training run
         _active_model_path = _model_path_for()
-        _model_saved = os.path.exists(_active_model_path) and os.path.getmtime(_active_model_path) > _train_start
+        _model_saved = (
+            os.path.exists(_active_model_path)
+            and os.path.getmtime(_active_model_path) > _train_start
+        )
 
         result = {
-            "epochs":           epochs,
-            "stopped_epoch":    stopped_epoch,
-            "samples":          len(X_list),
-            "train_samples":    len(X_train),
-            "val_samples":      len(X_val),
-            "label_pos_pct":    round(100 * n_pos / max(len(y_list), 1), 1),
-            "channels":         N_CHANNELS,
-            "arch":             getattr(self.model, "arch", "glu2"),
-            "initial_loss":     initial_tl,
+            "epochs": epochs,
+            "stopped_epoch": stopped_epoch,
+            "samples": len(X_list),
+            "train_samples": len(X_train),
+            "val_samples": len(X_val),
+            "label_pos_pct": round(100 * n_pos / max(len(y_list), 1), 1),
+            "channels": N_CHANNELS,
+            "arch": getattr(self.model, "arch", "glu2"),
+            "initial_loss": initial_tl,
             "final_train_loss": final_tl,
-            "final_val_loss":   final_vl,
-            "best_val_loss":    round(best_val_loss, 6),
-            "val_auc":          val_auc,
+            "final_val_loss": final_vl,
+            "best_val_loss": round(best_val_loss, 6),
+            "val_auc": val_auc,
             "val_precision_at_thresh": val_precision_at_thresh,
-            "val_recall_at_thresh":    val_recall_at_thresh,
-            "val_threshold":           val_threshold,
-            "overfit_gap_pct":  round(overfit_gap * 100, 1),
-            "fit_status":       fit_status,
-            "fit_advice":       fit_advice,
-            "duration_secs":    int(_t.time() - _train_start),
-            "phase1_secs":      int(_phase1_secs),
-            "phase2_secs":      int(_phase2_secs),
-            "phase3_secs":      int(_t.time() - _train_start - _phase1_secs - _phase2_secs),
-            "saved":            _model_saved,   # True = model file overwritten this run
-            "epoch_log":        epoch_log,
+            "val_recall_at_thresh": val_recall_at_thresh,
+            "val_threshold": val_threshold,
+            "overfit_gap_pct": round(overfit_gap * 100, 1),
+            "fit_status": fit_status,
+            "fit_advice": fit_advice,
+            "duration_secs": int(_t.time() - _train_start),
+            "phase1_secs": int(_phase1_secs),
+            "phase2_secs": int(_phase2_secs),
+            "phase3_secs": int(_t.time() - _train_start - _phase1_secs - _phase2_secs),
+            "saved": _model_saved,  # True = model file overwritten this run
+            "epoch_log": epoch_log,
         }
 
         try:

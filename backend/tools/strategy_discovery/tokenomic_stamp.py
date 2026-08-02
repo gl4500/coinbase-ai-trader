@@ -10,6 +10,7 @@ Adds 6 tokenomic columns to the input DataFrame:
 
 Pure functions. No I/O. Imports only stdlib + pandas + numpy.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ _TOKENOMIC_COLUMNS: Tuple[str, ...] = (
 @dataclass(frozen=True)
 class SupplySnapshot:
     """Point-in-time supply reading from CoinPaprika /v1/tickers/{cp_id}."""
+
     pid: str
     circulating: float
     total: float
@@ -79,11 +81,11 @@ def stamp_tokenomic(
     )
     out = df_hourly.copy().sort_values("ts").reset_index(drop=True)
     out["market_cap"] = stamped["market_cap"].to_numpy()
-    out["vol_24h"]    = stamped["vol_24h"].to_numpy()
-    out["fdv"]        = out["close"].astype("float64") * float(supply_row.total)
-    out["fdv_over_mc"]    = out["fdv"]     / np.maximum(out["market_cap"], 1e-12)
+    out["vol_24h"] = stamped["vol_24h"].to_numpy()
+    out["fdv"] = out["close"].astype("float64") * float(supply_row.total)
+    out["fdv_over_mc"] = out["fdv"] / np.maximum(out["market_cap"], 1e-12)
     out["circ_over_total"] = float(supply_row.circulating) / max(float(supply_row.total), 1e-12)
-    out["vol_over_mc"]    = out["vol_24h"] / np.maximum(out["market_cap"], 1e-12)
+    out["vol_over_mc"] = out["vol_24h"] / np.maximum(out["market_cap"], 1e-12)
     if drop_on_missing_volume:
         out = out[out["vol_24h"].notna()].reset_index(drop=True)
     return out

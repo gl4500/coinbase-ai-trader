@@ -1,4 +1,3 @@
-import pytest
 from tools import backfill_1m_candles as b1m
 
 
@@ -6,8 +5,7 @@ def test_days_to_cover_computes_from_1h_first_ts(monkeypatch):
     # 1h history starting 10 days before now_ts
     now_ts = 10_000_000
     first_ts = now_ts - 10 * 86400
-    monkeypatch.setattr(b1m, "load_history",
-                        lambda pid: [{"start": first_ts}, {"start": now_ts}])
+    monkeypatch.setattr(b1m, "load_history", lambda pid: [{"start": first_ts}, {"start": now_ts}])
     assert b1m._days_to_cover("BTC-USD", now_ts) == 10
 
 

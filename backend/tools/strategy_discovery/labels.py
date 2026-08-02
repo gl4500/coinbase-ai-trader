@@ -11,6 +11,7 @@ exit policy and report net PnL fraction after fees:
 Mirrors agents/exit_watcher.on_price_tick and cnn_agent._check_risk_exits.
 Pure functions. No I/O.
 """
+
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
@@ -19,9 +20,9 @@ import numpy as np
 import pandas as pd
 
 _DEFAULT_HORIZONS: Tuple[int, ...] = (1, 4, 24, 72, 168)
-_DEFAULT_STOP_LOSS_PCT  = 0.08
+_DEFAULT_STOP_LOSS_PCT = 0.08
 _DEFAULT_ATR_TRAIL_FLOOR = 0.06
-_DEFAULT_MAX_HOLD_BARS  = 168
+_DEFAULT_MAX_HOLD_BARS = 168
 _DEFAULT_ROUND_TRIP_FEE = 0.012
 
 
@@ -47,7 +48,7 @@ def _simulate_one(
     peak = entry_price
     for s in range(1, horizon_cap + 1):
         i = entry_idx + s
-        bar_low  = float(lows[i])
+        bar_low = float(lows[i])
         bar_high = float(highs[i])
         # 1. Stop-loss check (priority — matches cnn_agent._check_risk_exits)
         if bar_low / entry_price - 1.0 <= -stop_loss_pct:
@@ -83,17 +84,25 @@ def simulate_dynamic_exit_labels(
     """
     horizons_list = list(horizons) if horizons is not None else list(_DEFAULT_HORIZONS)
     out = df.copy()
-    closes   = out["close"].to_numpy(dtype="float64")
-    highs    = out["high"].to_numpy(dtype="float64")
-    lows     = out["low"].to_numpy(dtype="float64")
+    closes = out["close"].to_numpy(dtype="float64")
+    highs = out["high"].to_numpy(dtype="float64")
+    lows = out["low"].to_numpy(dtype="float64")
     atr_pcts = out["atr14_pct"].to_numpy(dtype="float64")
     n = len(out)
     for h in horizons_list:
         col = np.empty(n, dtype="float64")
         for i in range(n):
             col[i] = _simulate_one(
-                i, h, closes, highs, lows, atr_pcts,
-                stop_loss_pct, atr_trail_floor, max_hold_bars, round_trip_fee,
+                i,
+                h,
+                closes,
+                highs,
+                lows,
+                atr_pcts,
+                stop_loss_pct,
+                atr_trail_floor,
+                max_hold_bars,
+                round_trip_fee,
             )
         out[f"label_h{h}"] = col
     return out

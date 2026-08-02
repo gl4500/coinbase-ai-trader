@@ -7,7 +7,7 @@ Contract:
         - When MC_FILTERS contains an unknown name, logs a warning and skips it.
         - Filter chain order matches the comma-separated MC_FILTERS order.
 """
-import importlib
+
 import logging
 import os
 import sys
@@ -36,9 +36,13 @@ class TestRegistryDispatch:
     def test_empty_mc_filters_returns_unchanged(self, fresh_registry, monkeypatch):
         monkeypatch.setenv("MC_FILTERS", "")
         from agents.mc import registry
+
         side, tele = registry.apply_buy_filters(
-            side="BUY", model_prob=0.7, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.7,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert side == "BUY"
         assert tele == {}
@@ -46,9 +50,13 @@ class TestRegistryDispatch:
     def test_unset_mc_filters_returns_unchanged(self, fresh_registry, monkeypatch):
         monkeypatch.delenv("MC_FILTERS", raising=False)
         from agents.mc import registry
+
         side, tele = registry.apply_buy_filters(
-            side="BUY", model_prob=0.7, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.7,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert side == "BUY"
         assert tele == {}
@@ -56,10 +64,12 @@ class TestRegistryDispatch:
     def test_ci_filter_invoked_when_listed(self, fresh_registry, monkeypatch):
         monkeypatch.setenv("MC_FILTERS", "ci")
         from agents.mc import registry
+
         called = {}
 
         class SpyCI:
             name = "ci"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 called["hit"] = True
                 return side, {"ci": {"stdev": 0.01, "lower": model_prob - 0.01}}
@@ -67,8 +77,11 @@ class TestRegistryDispatch:
         monkeypatch.setattr(registry, "_FILTER_CLASSES", {"ci": SpyCI})
         registry._reset_chain_cache()
         side, tele = registry.apply_buy_filters(
-            side="BUY", model_prob=0.7, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.7,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert called.get("hit") is True
         assert "ci" in tele
@@ -76,10 +89,14 @@ class TestRegistryDispatch:
     def test_unknown_filter_warns_and_skips(self, fresh_registry, monkeypatch, caplog):
         monkeypatch.setenv("MC_FILTERS", "bogus")
         from agents.mc import registry
+
         with caplog.at_level(logging.WARNING):
             side, tele = registry.apply_buy_filters(
-                side="BUY", model_prob=0.7, pid="BTC-USD",
-                channels=[[0.0] * 60] * 28, context={},
+                side="BUY",
+                model_prob=0.7,
+                pid="BTC-USD",
+                channels=[[0.0] * 60] * 28,
+                context={},
             )
         assert side == "BUY"
         assert tele == {}
@@ -88,26 +105,31 @@ class TestRegistryDispatch:
     def test_chain_order_matches_env(self, fresh_registry, monkeypatch):
         monkeypatch.setenv("MC_FILTERS", "second,first")
         from agents.mc import registry
+
         order = []
 
         class FilterA:
             name = "first"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 order.append("first")
                 return side, {"first": {}}
 
         class FilterB:
             name = "second"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 order.append("second")
                 return side, {"second": {}}
 
-        monkeypatch.setattr(registry, "_FILTER_CLASSES",
-                            {"first": FilterA, "second": FilterB})
+        monkeypatch.setattr(registry, "_FILTER_CLASSES", {"first": FilterA, "second": FilterB})
         registry._reset_chain_cache()
         registry.apply_buy_filters(
-            side="BUY", model_prob=0.7, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.7,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert order == ["second", "first"]
 
@@ -117,14 +139,18 @@ class TestRegistryDispatch:
 
         class Blocker:
             name = "blocker"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 return "HOLD", {"blocker": {"reason": "test-block"}}
 
         monkeypatch.setattr(registry, "_FILTER_CLASSES", {"blocker": Blocker})
         registry._reset_chain_cache()
         side, tele = registry.apply_buy_filters(
-            side="BUY", model_prob=0.7, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="BUY",
+            model_prob=0.7,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert side == "HOLD"
         assert tele["blocker"]["reason"] == "test-block"
@@ -135,21 +161,25 @@ class TestRegistryDispatch:
 
         class Broken:
             name = "broken"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 raise RuntimeError("simulated crash")
 
         class Working:
             name = "working"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 return side, {"working": {"ok": True}}
 
-        monkeypatch.setattr(registry, "_FILTER_CLASSES",
-                            {"broken": Broken, "working": Working})
+        monkeypatch.setattr(registry, "_FILTER_CLASSES", {"broken": Broken, "working": Working})
         registry._reset_chain_cache()
         with caplog.at_level(logging.WARNING):
             side, tele = registry.apply_buy_filters(
-                side="BUY", model_prob=0.7, pid="BTC-USD",
-                channels=[[0.0] * 60] * 28, context={},
+                side="BUY",
+                model_prob=0.7,
+                pid="BTC-USD",
+                channels=[[0.0] * 60] * 28,
+                context={},
             )
         assert side == "BUY"
         assert "working" in tele
@@ -160,10 +190,12 @@ class TestRegistryDispatch:
         """SELL/HOLD pass through untouched (filters are entry-only for MVP)."""
         monkeypatch.setenv("MC_FILTERS", "ci")
         from agents.mc import registry
+
         called = {"hit": False}
 
         class SpyCI:
             name = "ci"
+
             def evaluate(self, side, model_prob, pid, channels, context):
                 called["hit"] = True
                 return side, {"ci": {}}
@@ -171,8 +203,11 @@ class TestRegistryDispatch:
         monkeypatch.setattr(registry, "_FILTER_CLASSES", {"ci": SpyCI})
         registry._reset_chain_cache()
         side, tele = registry.apply_buy_filters(
-            side="HOLD", model_prob=0.5, pid="BTC-USD",
-            channels=[[0.0] * 60] * 28, context={},
+            side="HOLD",
+            model_prob=0.5,
+            pid="BTC-USD",
+            channels=[[0.0] * 60] * 28,
+            context={},
         )
         assert side == "HOLD"
         assert tele == {}
