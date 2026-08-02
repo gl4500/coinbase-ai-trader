@@ -2980,7 +2980,7 @@ class TestBuildSamplesRangeOIPlumbing:
         # Strictly increasing OI gives non-degenerate std → non-zero z-scores
         oi_rates = [1_000_000.0 + i * 1000.0 for i in range(len(candles))]
 
-        seen_oi: List = []
+        seen_oi: list = []
         real_fb = FeatureBuilder()
 
         class SpyFB:
@@ -3021,7 +3021,7 @@ class TestBuildSamplesRangeOIPlumbing:
         )
 
         candles = self._hourly(120)
-        seen_oi: List = []
+        seen_oi: list = []
         real_fb = FeatureBuilder()
 
         class SpyFB:

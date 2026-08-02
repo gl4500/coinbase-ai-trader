@@ -1545,7 +1545,7 @@ class CoinbaseCNNAgent:
         self.ws     = ws_subscriber
         self.fb     = FeatureBuilder()
         self._cache: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
-        self.model: Optional["SignalCNN"] = None
+        self.model: Optional[Any] = None
         self.book   = _CNNBook()          # dry-run portfolio — tracks positions + trades table
         # ── Runtime stats ──────────────────────────────────────────────────
         self.last_scan_at:     Optional[float] = None
