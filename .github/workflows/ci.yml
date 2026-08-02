@@ -215,6 +215,8 @@ jobs:
   tag-release:
     name: Tag release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release tag ref (repo default token is read-only)
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [test-backend, sast-python, frontend-build, lint-python]
     steps:

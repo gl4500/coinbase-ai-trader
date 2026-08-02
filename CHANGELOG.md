@@ -7,6 +7,15 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.74 — 2026-08-02 — CI: grant tag-release `contents: write`
+
+After tracks 1+2 merged, main's CI was 6/7 green — only `tag-release` (main-push
+only; hadn't run since before the pipeline broke) failed with 403 "Resource not
+accessible by integration". Creating the release tag needs `contents: write`, but
+the repo's default `GITHUB_TOKEN` is read-only. Added a job-level
+`permissions: { contents: write }` to the `tag-release` job only (least-privilege —
+repo-wide default stays read-only).
+
 ### Session 58.74 — 2026-08-01 — CI pipeline repair (track 2 of 2): ruff lint + format
 
 Clears the Ruff-lint + Security-gate jobs left red by track 1. Branch
