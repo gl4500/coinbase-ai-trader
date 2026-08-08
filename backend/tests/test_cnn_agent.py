@@ -1695,21 +1695,26 @@ class TestRunLoopExitPriority:
     """
 
     def test_scan_all_runs_before_check_risk_exits_in_run_loop(self):
-        """Source-level: in CoinbaseCNNAgent.run_loop, the call to self.scan_all(
-        must appear earlier than the call to self._check_risk_exits( inside the
-        main while-loop body, so SCAN-SELL is primary and risk exits are fallback.
+        """Source-level: scan_all must run before _check_risk_exits so SCAN-SELL
+        is primary and risk exits are fallback. The ordering lives in
+        _scan_cycle (both legs wrapped in asyncio.wait_for for anti-hang, R1);
+        run_loop delegates to _scan_cycle each iteration.
         """
         import inspect
         import re
 
-        src = inspect.getsource(_cnn_mod.CoinbaseCNNAgent.run_loop)
-        m_scan = re.search(r"self\.scan_all\(", src)
-        m_risk = re.search(r"self\._check_risk_exits\(", src)
-        assert m_scan is not None, "scan_all call not found in run_loop"
-        assert m_risk is not None, "_check_risk_exits call not found in run_loop"
+        loop_src = inspect.getsource(_cnn_mod.CoinbaseCNNAgent.run_loop)
+        assert re.search(r"self\._scan_cycle\(", loop_src), (
+            "run_loop must delegate the scan cycle to self._scan_cycle()"
+        )
+        cyc_src = inspect.getsource(_cnn_mod.CoinbaseCNNAgent._scan_cycle)
+        m_scan = re.search(r"self\.scan_all\(", cyc_src)
+        m_risk = re.search(r"self\._check_risk_exits\(", cyc_src)
+        assert m_scan is not None, "scan_all call not found in _scan_cycle"
+        assert m_risk is not None, "_check_risk_exits call not found in _scan_cycle"
         assert m_scan.start() < m_risk.start(), (
-            "scan_all() must run BEFORE _check_risk_exits() each loop so CNN's "
-            "own SCAN-SELL is the primary exit and TRAIL_STOP/STOP_LOSS are "
+            "scan_all() must run BEFORE _check_risk_exits() so CNN's own "
+            "SCAN-SELL is the primary exit and TRAIL_STOP/STOP_LOSS are "
             "secondary/tertiary fallbacks."
         )
 
