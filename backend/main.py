@@ -701,6 +701,40 @@ async def sync_positions(_: None = Depends(verify_api_key)):
     return {"success": True, "summary": summary}
 
 
+# ── Health (scan-loop liveness for the launcher watchdog) ─────────────────────
+def scan_loop_stale(
+    last_scan_at: Optional[float], now: float, interval_secs: float, k: float = 3.0
+) -> bool:
+    """True if the scan loop looks hung: no scan iteration in more than
+    k*interval seconds. ``last_scan_at is None`` is the startup grace window
+    (loop hasn't scanned yet) -> not stale, so a freshly-started backend is
+    never flagged for restart.
+    """
+    if last_scan_at is None:
+        return False
+    return (now - last_scan_at) > k * interval_secs
+
+
+@app.get("/api/health")
+async def get_health():
+    """Liveness probe for the launcher watchdog. Returns 503 when the scan loop
+    is hung -- the HTTP server can stay up while the scan/trade loop is dead
+    (the 2026-08-01 stall). /api/status stays 200 for the UI; the watchdog uses
+    this endpoint so a stalled-but-serving backend auto-restarts.
+    """
+    agent = app_state.cnn_agent
+    last = agent.last_scan_at if agent else None
+    stale = scan_loop_stale(last, _time.time(), config.scan_interval_secs)
+    return JSONResponse(
+        {
+            "status": "unhealthy" if stale else "ok",
+            "last_scan_at": last,
+            "scan_interval_secs": config.scan_interval_secs,
+        },
+        status_code=503 if stale else 200,
+    )
+
+
 # ── CNN Status ────────────────────────────────────────────────────────────────
 @app.get("/api/cnn/status")
 async def get_cnn_status():

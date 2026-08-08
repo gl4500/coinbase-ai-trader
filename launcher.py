@@ -48,6 +48,7 @@ FRONTEND_DIR = ROOT / "frontend"
 
 BACKEND_URL        = "http://localhost:8001"
 BACKEND_STATUS_URL = f"{BACKEND_URL}/api/status"
+BACKEND_HEALTH_URL = f"{BACKEND_URL}/api/health"  # 503 when scan loop is hung
 FRONTEND_URL       = "http://localhost:5174"
 
 # ── Launcher file log ─────────────────────────────────────────────────────────
@@ -131,6 +132,18 @@ def _npm_cmd() -> str:
 def _is_url_up(url: str, timeout: float = 5.0) -> bool:
     try:
         urllib.request.urlopen(BACKEND_STATUS_URL, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _is_backend_healthy(timeout: float = 5.0) -> bool:
+    """Watchdog probe. /api/health returns 503 when the scan loop is hung while
+    HTTP is still serving (the 2026-08-01 stall). urlopen raises on non-2xx, so
+    a stalled-but-serving backend reads as unhealthy and the 3-strike restart
+    fires. /api/status stays the readiness probe for startup checks."""
+    try:
+        urllib.request.urlopen(BACKEND_HEALTH_URL, timeout=timeout)
         return True
     except Exception:
         return False
@@ -562,7 +575,7 @@ class LauncherApp(tk.Tk):
         def loop():
             nonlocal be_fail_count
             while self._running:
-                be_up = _is_url_up(BACKEND_URL)
+                be_up = _is_backend_healthy()
                 fe_up = _is_frontend_up()
                 self.after(0, self._update_status, be_up, fe_up)
                 if be_up:
