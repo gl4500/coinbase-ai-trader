@@ -7,6 +7,32 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.76 — 2026-08-08 — Scan-loop resilience (Aug-1 stall hardening)
+
+The 2026-08-01 Coinbase DNS/network outage hung a scan-loop network call; the
+loop's `try/except` catches exceptions but not *hangs*, so trading froze for days
+while the HTTP server stayed up — and the launcher watchdog only probed
+`/api/status` (still 200), so nothing auto-restarted it. Fixes:
+
+- `agents/cnn_agent.py` — new `_scan_cycle()` wraps `scan_all` + `_check_risk_exits`
+  in `asyncio.wait_for(_SCAN_CYCLE_TIMEOUT_SECS=600)`; a hung cycle raises
+  `TimeoutError`, is logged, and the loop continues to the next cycle instead of
+  freezing indefinitely.
+- `main.py` — new `GET /api/health` returns **503 when the scan loop is stale**
+  (`last_scan_at` older than 3× scan interval; `None` = startup grace). Pure
+  helper `scan_loop_stale()`. `/api/status` is unchanged for the UI.
+- `launcher.py` — watchdog now probes `/api/health` via `_is_backend_healthy()`,
+  so a stalled-but-serving backend trips the existing 3-strike auto-restart
+  (self-recovery). The latent `_is_url_up` arg-ignoring bug is left as-is;
+  startup readiness checks still use `/api/status`.
+- `tests/test_scan_resilience.py` — 7 tests (staleness boundaries + scan-cycle
+  timeout/normal paths).
+
+Not changed (already adequate): httpx has 15s timeouts, the WS auto-reconnects
+(ping_timeout 20). The earlier "log rotation stalled" was a transient —
+logging is healthy. Root cause stays environmental (network); this makes the
+system self-recover rather than needing a manual restart.
+
 ### Session 58.71z — 2026-06-08 — Fix misleading "balance too low" WARN for tier-suspended (task #73)
 
 `_CNNBook.buy` returns `(0.0, 0.0)` for two distinct cases:

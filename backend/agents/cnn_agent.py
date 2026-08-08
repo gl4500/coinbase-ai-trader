@@ -82,6 +82,11 @@ from services.outcome_tracker import get_tracker
 
 _CNN_DRY_RUN_BALANCE = 1_000.0
 _CNN_MAX_FRAC = 0.15  # max 15% of portfolio per position
+# Anti-hang: a scan cycle (scan_all + risk exits) that runs longer than this is
+# treated as hung on network I/O and abandoned so the loop continues (2026-08-01
+# stall: a hung socket read froze the loop for hours). Generous vs a normal
+# cycle (<60s) but far below a multi-hour freeze.
+_SCAN_CYCLE_TIMEOUT_SECS = 600
 _CNN_STOP_LOSS_PCT = 0.08  # 8% hard stop-loss below avg entry price
 _CNN_ATR_TRAIL_MULT = 2.0  # trailing stop = ATR(14) × multiplier below peak
 _CNN_ATR_TRAIL_MIN = 0.06  # floor: never tighter than 6% (Session 57 cash-flow lever 3 — was 3%, exited too early in low-ATR regimes)
@@ -2410,6 +2415,21 @@ class CoinbaseCNNAgent:
         signals.sort(key=lambda s: s["strength"], reverse=True)
         return signals
 
+    async def _scan_cycle(self, execute: bool, order_executor, timeout: float) -> None:
+        """One scan iteration bounded by a hard timeout so a hung network call
+        can't freeze the loop (2026-08-01 stall). scan_all runs first so the
+        model's own SCAN-SELL can close positions before the risk fallbacks
+        pre-empt it; both legs are wrapped in asyncio.wait_for(timeout).
+        """
+        await asyncio.wait_for(
+            self.scan_all(
+                execute=execute,
+                order_executor=order_executor if execute else None,
+            ),
+            timeout=timeout,
+        )
+        await asyncio.wait_for(self._check_risk_exits(order_executor), timeout=timeout)
+
     async def run_loop(
         self,
         interval: int = 900,
@@ -2442,21 +2462,16 @@ class CoinbaseCNNAgent:
 
                 should_execute = is_trading_fn() if is_trading_fn else False
 
-                # Primary exit: CNN's own SCAN-SELL fires first via scan_all
-                # so the model can close positions before risk fallbacks
-                # pre-empt it. Live data showed risk-first ordering caused
-                # TRAIL_STOP/STOP_LOSS to lose -$92 net while SCAN exits
-                # earned +$59 on the same window.
-                await self.scan_all(
+                # SCAN-SELL (model's own exit) runs first inside _scan_cycle so
+                # it can close positions before the risk fallbacks (TRAIL_STOP →
+                # STOP_LOSS → MAX_HOLD) pre-empt it. Both legs are bounded by a
+                # hard timeout so a hung network call can't freeze the loop
+                # (2026-08-01 stall). Risk exits still run every loop.
+                await self._scan_cycle(
                     execute=should_execute,
-                    order_executor=order_executor if should_execute else None,
+                    order_executor=order_executor,
+                    timeout=_SCAN_CYCLE_TIMEOUT_SECS,
                 )
-
-                # Secondary/tertiary fallbacks (TRAIL_STOP → STOP_LOSS →
-                # MAX_HOLD) run every loop regardless of is_trading gate —
-                # stops must fire even when scanning is paused — but only
-                # close positions CNN did not already exit via SCAN above.
-                await self._check_risk_exits(order_executor)
                 self.scan_count += 1
                 self.next_scan_at = time.time() + interval
 
@@ -2477,6 +2492,11 @@ class CoinbaseCNNAgent:
 
             except asyncio.CancelledError:
                 return
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "CNN scan cycle exceeded %ss — likely hung network I/O; skipping to next cycle",
+                    _SCAN_CYCLE_TIMEOUT_SECS,
+                )
             except Exception as e:
                 logger.error(f"CNN loop error: {e}")
             await asyncio.sleep(interval)
