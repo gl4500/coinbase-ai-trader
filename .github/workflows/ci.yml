@@ -261,8 +261,11 @@ jobs:
         working-directory: frontend
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        # Use `npm install` (not `npm ci`) to match the frontend-typecheck /
+        # frontend-build jobs: the committed lock file has known cross-platform
+        # esbuild drift, and `npm ci` aborts on any lock/package.json mismatch.
         run: |
-          npm ci --ignore-scripts
+          npm install --ignore-scripts --no-audit --no-fund
           snyk test --severity-threshold=high
 
   # ── 7. Security gate ──────────────────────────────────────────────────────────

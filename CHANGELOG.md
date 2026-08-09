@@ -7,6 +7,21 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.80 — 2026-08-09 — Fix Snyk frontend step (npm ci → npm install)
+
+After the operator set a real `SNYK_TOKEN`, the Snyk CI job ran its real steps
+for the first time (previously skipped on the empty token). The **backend**
+step passed (deps clean); the **frontend** step failed — not on a vuln, but
+because it used `npm ci`, which aborts on the repo's known cross-platform
+`package-lock.json` esbuild drift (same issue fixed for the typecheck/build
+jobs in 58.74).
+
+- `.github/workflows/ci.yml`: Snyk frontend step `npm ci --ignore-scripts` →
+  `npm install --ignore-scripts --no-audit --no-fund`, matching the other
+  frontend jobs. Verified locally: `snyk test --severity-threshold=high` on
+  frontend = **0 vulnerable paths** (5 deps). The Snyk backend step already
+  passes clean, so the full Snyk job now genuinely runs and gates.
+
 ### Session 58.79 — 2026-08-09 — Remediate backend dependency CVEs + fix Snyk CI false-green
 
 Follows 58.78: the new Snyk scan surfaced **15 High / 14 Medium / 1 Low**
