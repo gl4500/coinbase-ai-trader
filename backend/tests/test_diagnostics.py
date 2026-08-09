@@ -54,9 +54,7 @@ class TestSignalEdge:
             ("CNN", "BUY", 0.20, 0.00, "NEUTRAL", "2026-08-08T00:00:00+00:00"),
             ("TECH", "BUY", 0.90, 0.05, "WIN", "2026-08-08T00:00:00+00:00"),  # excluded
         ]
-        con.executemany(
-            "INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?)", rows
-        )
+        con.executemany("INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?)", rows)
         con.commit()
         out = d.signal_edge(con, cutoff=None)
         assert out["n"] == 4 and out["wins"] == 1 and out["losses"] == 2
@@ -69,12 +67,36 @@ class TestExitAttribution:
     def test_by_trigger_and_share(self, tmp_path: Path):
         con = _seed(tmp_path)
         rows = [
-            ("CNN", "SOL-USD", 5.0, 0.01, 3600, "SCAN", "2026-08-01T00:00:00+00:00",
-             "2026-08-08T00:00:00+00:00"),
-            ("CNN", "SOL-USD", -3.0, -0.02, 7200, "STOP_LOSS",
-             "2026-08-01T00:00:00+00:00", "2026-08-08T00:00:00+00:00"),
-            ("CNN", "ETH-USD", 2.0, 0.005, 100, "SCAN", "2026-08-01T00:00:00+00:00",
-             "2026-08-08T00:00:00+00:00"),
+            (
+                "CNN",
+                "SOL-USD",
+                5.0,
+                0.01,
+                3600,
+                "SCAN",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+            (
+                "CNN",
+                "SOL-USD",
+                -3.0,
+                -0.02,
+                7200,
+                "STOP_LOSS",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+            (
+                "CNN",
+                "ETH-USD",
+                2.0,
+                0.005,
+                100,
+                "SCAN",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
         ]
         con.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?)", rows)
         con.commit()
@@ -91,10 +113,26 @@ class TestRegimeAndAsset:
         con.executemany(
             "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?)",
             [
-                ("CNN", "SOL-USD", 5.0, 0.01, 3600, "SCAN",
-                 "2026-08-05T10:00:00+00:00", "2026-08-05T14:00:00+00:00"),
-                ("CNN", "SOL-USD", -2.0, -0.01, 3600, "STOP_LOSS",
-                 "2026-08-06T10:00:00+00:00", "2026-08-06T14:00:00+00:00"),
+                (
+                    "CNN",
+                    "SOL-USD",
+                    5.0,
+                    0.01,
+                    3600,
+                    "SCAN",
+                    "2026-08-05T10:00:00+00:00",
+                    "2026-08-05T14:00:00+00:00",
+                ),
+                (
+                    "CNN",
+                    "SOL-USD",
+                    -2.0,
+                    -0.01,
+                    3600,
+                    "STOP_LOSS",
+                    "2026-08-06T10:00:00+00:00",
+                    "2026-08-06T14:00:00+00:00",
+                ),
             ],
         )
         con.executemany(
@@ -120,8 +158,10 @@ class TestSignalFunnel:
         con.executemany(
             "INSERT INTO cnn_scans (product_id, side, model_prob, regime, scanned_at) "
             "VALUES (?,?,?,?,?)",
-            [("SOL-USD", "BUY", 0.6, "TRENDING", "2026-08-08T00:00:00+00:00"),
-             ("SOL-USD", "HOLD", 0.5, "RANGING", "2026-08-08T00:00:00+00:00")],
+            [
+                ("SOL-USD", "BUY", 0.6, "TRENDING", "2026-08-08T00:00:00+00:00"),
+                ("SOL-USD", "HOLD", 0.5, "RANGING", "2026-08-08T00:00:00+00:00"),
+            ],
         )
         con.execute(
             "INSERT INTO trades VALUES ('CNN','SOL-USD',1,0.01,10,'SCAN',"

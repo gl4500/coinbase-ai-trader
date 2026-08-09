@@ -17,11 +17,7 @@ def run(db_path: str) -> Dict[str, List[str]]:
     """
     conn = sqlite3.connect(db_path)
     try:
-        existing = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index'"
-            )
-        }
+        existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
         created, already = [], []
         for name, target in _INDEXES.items():
             if name in existing:

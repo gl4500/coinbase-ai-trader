@@ -1654,8 +1654,9 @@ async def equity_curve(days: int = 7):
 @app.get("/api/diagnostics")
 async def get_diagnostics(window: str = "30d"):
     """Read-only diagnostics dashboard aggregations (signal edge, exit
-    attribution, regime/asset breakdown, signal funnel). Never touches
-    app_state/trading; failures are isolated per invariant #16/#18.
+    attribution, regime/asset breakdown, signal funnel). Decoupled from the
+    trading loop: reads its own mode=ro DB connection, never touches
+    app_state, and a failure returns 400/500 without affecting trading.
     """
     try:
         return diagnostics.compute_diagnostics(window, db_path=_DIAG_DB_PATH)

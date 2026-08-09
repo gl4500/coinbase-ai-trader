@@ -2,6 +2,7 @@
 
 Never writes; opens its own mode=ro connection; no coupling to the trading loop.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -31,9 +32,7 @@ def window_cutoff(window: str, now: float) -> Optional[str]:
         return None
     if window not in _WINDOW_DAYS:
         raise ValueError(f"unknown window: {window!r}")
-    dt = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(
-        days=_WINDOW_DAYS[window]
-    )
+    dt = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(days=_WINDOW_DAYS[window])
     return dt.isoformat()
 
 
@@ -77,16 +76,19 @@ def signal_edge(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[str, An
     for r in conn.execute(
         "SELECT CAST(confidence*10 AS INT) AS b, COUNT(*), "
         "SUM(outcome='WIN'), SUM(outcome IN ('WIN','LOSS')), AVG(pct_change) "
-        + base + " GROUP BY b ORDER BY b",
+        + base
+        + " GROUP BY b ORDER BY b",
         params,
     ):
         bucket, cnt, w, wl, avg_ret = r
-        calibration.append({
-            "bucket": round(bucket / 10.0, 1),
-            "n": cnt,
-            "win_rate": (w / wl) if wl else 0.0,
-            "avg_ret": avg_ret or 0.0,
-        })
+        calibration.append(
+            {
+                "bucket": round(bucket / 10.0, 1),
+                "n": cnt,
+                "win_rate": (w / wl) if wl else 0.0,
+                "avg_ret": avg_ret or 0.0,
+            }
+        )
     return {
         "n": n,
         "wins": wins or 0,
@@ -121,13 +123,15 @@ def exit_attribution(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[st
         params,
     ):
         trig, cnt, sum_pnl, avg_pct, wr = r
-        by_trigger.append({
-            "trigger": trig,
-            "n": cnt,
-            "sum_pnl": sum_pnl or 0.0,
-            "avg_pct": avg_pct or 0.0,
-            "win_rate": wr or 0.0,
-        })
+        by_trigger.append(
+            {
+                "trigger": trig,
+                "n": cnt,
+                "sum_pnl": sum_pnl or 0.0,
+                "avg_pct": avg_pct or 0.0,
+                "win_rate": wr or 0.0,
+            }
+        )
         total += cnt
         if trig == "SCAN":
             scan += cnt
@@ -160,7 +164,8 @@ def regime_and_asset(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[st
         }
         for r in conn.execute(
             "SELECT product_id, COUNT(*), SUM(pnl), SUM(pnl>0)*1.0/COUNT(*) "
-            + base + " GROUP BY product_id ORDER BY SUM(pnl)",
+            + base
+            + " GROUP BY product_id ORDER BY SUM(pnl)",
             params,
         )
     ]
@@ -199,22 +204,22 @@ def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
     sc_cl, sc_p = _where_since("scanned_at", cutoff)
     op_cl, op_p = _where_since("opened_at", cutoff)
     cr_cl, cr_p = _where_since("created_at", cutoff)
-    scans = conn.execute(
-        "SELECT COUNT(*) FROM cnn_scans WHERE 1=1" + sc_cl, sc_p).fetchone()[0]
-    buys = conn.execute(
-        "SELECT COUNT(*) FROM cnn_scans WHERE side='BUY'" + sc_cl, sc_p).fetchone()[0]
+    scans = conn.execute("SELECT COUNT(*) FROM cnn_scans WHERE 1=1" + sc_cl, sc_p).fetchone()[0]
+    buys = conn.execute("SELECT COUNT(*) FROM cnn_scans WHERE side='BUY'" + sc_cl, sc_p).fetchone()[
+        0
+    ]
     executed = conn.execute(
-        "SELECT COUNT(*) FROM trades WHERE agent='CNN'" + op_cl, op_p).fetchone()[0]
+        "SELECT COUNT(*) FROM trades WHERE agent='CNN'" + op_cl, op_p
+    ).fetchone()[0]
     matured = conn.execute(
         "SELECT COUNT(*) FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
-        "AND outcome IN ('WIN','LOSS','NEUTRAL')" + cr_cl, cr_p).fetchone()[0]
-    return {"scans": scans, "buy_signals": buys, "executed": executed,
-            "matured": matured}
+        "AND outcome IN ('WIN','LOSS','NEUTRAL')" + cr_cl,
+        cr_p,
+    ).fetchone()[0]
+    return {"scans": scans, "buy_signals": buys, "executed": executed, "matured": matured}
 
 
-def compute_diagnostics(
-    window: str, db_path: str, now: Optional[float] = None
-) -> Dict:
+def compute_diagnostics(window: str, db_path: str, now: Optional[float] = None) -> Dict:
     """Orchestrate diagnostics computation with 60s TTL cache.
 
     Args:
@@ -235,9 +240,7 @@ def compute_diagnostics(
     try:
         payload = {
             "window": window,
-            "generated_at": datetime.fromtimestamp(
-                now, tz=timezone.utc
-            ).isoformat(),
+            "generated_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "signal_edge": signal_edge(conn, cutoff),
             "exit_attribution": exit_attribution(conn, cutoff),
             "regime_and_asset": regime_and_asset(conn, cutoff),
