@@ -7,6 +7,17 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.81 — 2026-08-09 — Promote Snyk to a blocking security gate
+
+Now that the Snyk job runs and passes clean end-to-end (58.79/58.80), wire it
+into the merge-blocking gate.
+
+- `.github/workflows/ci.yml`: added `snyk` to `security-gate.needs` and to the
+  gate's pass/fail check, so a high-severity Snyk finding fails the security
+  gate. The skip-on-empty-token path is safe: a job whose steps all skip
+  concludes `success`, so token-less runs (e.g. forks) stay green — the gate
+  only blocks when Snyk actually ran and found a high-severity issue.
+
 ### Session 58.80 — 2026-08-09 — Fix Snyk frontend step (npm ci → npm install)
 
 After the operator set a real `SNYK_TOKEN`, the Snyk CI job ran its real steps
