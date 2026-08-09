@@ -208,9 +208,11 @@ jobs:
         run: npm audit --audit-level=high || true
 
   # ── 6c. Snyk (SCA + Code) ────────────────────────────────────────────────────
-  # No-op until a SNYK_TOKEN repo secret is configured (then it runs and blocks
-  # on high-severity findings). Get a token at snyk.io -> Account -> Auth Token,
-  # then add it under Settings -> Secrets and variables -> Actions -> SNYK_TOKEN.
+  # BLOCKING (wired into security-gate.needs): fails the security gate on any
+  # high-severity finding. No-op (concludes success) until a SNYK_TOKEN repo
+  # secret is configured, so token-less runs (e.g. forks) don't break. Get a
+  # token at snyk.io -> Account -> Auth Token, then add it under
+  # Settings -> Secrets and variables -> Actions -> SNYK_TOKEN.
   snyk:
     name: Snyk (deps + code)
     runs-on: ubuntu-latest
@@ -272,7 +274,7 @@ jobs:
   security-gate:
     name: Security gate
     runs-on: ubuntu-latest
-    needs: [secret-scan, sast-python, test-backend, frontend-build, lint-python]
+    needs: [secret-scan, sast-python, test-backend, frontend-build, lint-python, snyk]
     if: always()
     steps:
       - name: Check all critical jobs passed
@@ -283,12 +285,17 @@ jobs:
           echo "test-backend:    ${{ needs.test-backend.result }}"
           echo "frontend-build:  ${{ needs.frontend-build.result }}"
           echo "lint-python:     ${{ needs.lint-python.result }}"
+          echo "snyk:            ${{ needs.snyk.result }}"
+          # snyk concludes 'success' (all steps skipped) when SNYK_TOKEN is
+          # absent, so this gate only blocks when Snyk actually ran and found a
+          # high-severity issue — token-less runs (e.g. forks) stay green.
           for result in \
             "${{ needs.secret-scan.result }}" \
             "${{ needs.sast-python.result }}" \
             "${{ needs.test-backend.result }}" \
             "${{ needs.frontend-build.result }}" \
-            "${{ needs.lint-python.result }}"; do
+            "${{ needs.lint-python.result }}" \
+            "${{ needs.snyk.result }}"; do
             if [ "$result" = "failure" ]; then
               echo "SECURITY GATE FAILED"
               exit 1
