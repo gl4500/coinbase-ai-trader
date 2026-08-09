@@ -132,3 +132,47 @@ def exit_attribution(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[st
         "by_trigger": by_trigger,
         "scan_sell_share": (scan / total) if total else 0.0,
     }
+
+
+def regime_and_asset(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[str, Any]:
+    """Compute per-asset PnL and per-regime PnL with nearest-scan regime join.
+
+    Args:
+        conn: SQLite connection
+        cutoff: ISO8601 timestamp or None for no cutoff
+
+    Returns:
+        Dict with keys: by_asset, by_regime
+        by_asset: list of dicts with product_id, n, sum_pnl, win_rate
+        by_regime: list of dicts with regime, n, sum_pnl
+    """
+    clause, params = _where_since("closed_at", cutoff)
+    base = "FROM trades t WHERE t.agent='CNN' AND t.closed_at IS NOT NULL" + clause
+    by_asset = [
+        {
+            "product_id": r[0],
+            "n": r[1],
+            "sum_pnl": r[2] or 0.0,
+            "win_rate": r[3] or 0.0,
+        }
+        for r in conn.execute(
+            "SELECT product_id, COUNT(*), SUM(pnl), SUM(pnl>0)*1.0/COUNT(*) "
+            + base + " GROUP BY product_id ORDER BY SUM(pnl)",
+            params,
+        )
+    ]
+    regime_agg: Dict[str, list] = {}
+    for pnl, regime in conn.execute(
+        "SELECT t.pnl, COALESCE((SELECT s.regime FROM cnn_scans s "
+        "WHERE s.product_id=t.product_id AND s.scanned_at<=t.opened_at "
+        "ORDER BY s.scanned_at DESC LIMIT 1), 'UNKNOWN') " + base,
+        params,
+    ):
+        agg = regime_agg.setdefault(regime, [0, 0.0])
+        agg[0] += 1
+        agg[1] += pnl or 0.0
+    by_regime = [
+        {"regime": k, "n": v[0], "sum_pnl": v[1]}
+        for k, v in sorted(regime_agg.items(), key=lambda kv: kv[1][1])
+    ]
+    return {"by_asset": by_asset, "by_regime": by_regime}

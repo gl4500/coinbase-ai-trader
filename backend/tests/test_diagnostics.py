@@ -83,3 +83,32 @@ class TestExitAttribution:
         assert scan["n"] == 2 and scan["sum_pnl"] == pytest.approx(7.0)
         assert scan["win_rate"] == pytest.approx(1.0)
         assert out["scan_sell_share"] == pytest.approx(2 / 3)
+
+
+class TestRegimeAndAsset:
+    def test_asset_and_nearest_scan_regime(self, tmp_path):
+        con = _seed(tmp_path)
+        con.executemany(
+            "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?)",
+            [
+                ("CNN", "SOL-USD", 5.0, 0.01, 3600, "SCAN",
+                 "2026-08-05T10:00:00+00:00", "2026-08-05T14:00:00+00:00"),
+                ("CNN", "SOL-USD", -2.0, -0.01, 3600, "STOP_LOSS",
+                 "2026-08-06T10:00:00+00:00", "2026-08-06T14:00:00+00:00"),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO cnn_scans (product_id, side, model_prob, regime, scanned_at) "
+            "VALUES (?,?,?,?,?)",
+            [
+                ("SOL-USD", "BUY", 0.6, "TRENDING", "2026-08-05T09:00:00+00:00"),
+                ("SOL-USD", "HOLD", 0.5, "RANGING", "2026-08-06T09:00:00+00:00"),
+            ],
+        )
+        con.commit()
+        out = d.regime_and_asset(con, cutoff=None)
+        sol = next(a for a in out["by_asset"] if a["product_id"] == "SOL-USD")
+        assert sol["n"] == 2 and sol["sum_pnl"] == pytest.approx(3.0)
+        regimes = {r["regime"]: r for r in out["by_regime"]}
+        assert regimes["TRENDING"]["sum_pnl"] == pytest.approx(5.0)
+        assert regimes["RANGING"]["sum_pnl"] == pytest.approx(-2.0)
