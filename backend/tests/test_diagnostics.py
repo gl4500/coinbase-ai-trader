@@ -134,3 +134,25 @@ class TestSignalFunnel:
         con.commit()
         out = d.signal_funnel(con, cutoff=None)
         assert out == {"scans": 2, "buy_signals": 1, "executed": 1, "matured": 1}
+
+
+class TestComputeDiagnostics:
+    def test_shape_and_cache(self, tmp_path):
+        con = _seed(tmp_path)
+        con.commit()
+        con.close()
+        db = str(tmp_path / "d.db")
+        d._CACHE.clear()
+        a = d.compute_diagnostics("all", db_path=db, now=_NOW)
+        assert set(a) == {
+            "window",
+            "generated_at",
+            "signal_edge",
+            "exit_attribution",
+            "regime_and_asset",
+            "signal_funnel",
+        }
+        b = d.compute_diagnostics("all", db_path=db, now=_NOW + 30)  # within TTL
+        assert a is b  # cache hit returns same object
+        c = d.compute_diagnostics("all", db_path=db, now=_NOW + 90)  # TTL expired
+        assert c is not a

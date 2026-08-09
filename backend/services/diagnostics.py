@@ -5,10 +5,13 @@ Never writes; opens its own mode=ro connection; no coupling to the trading loop.
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 _WINDOW_DAYS = {"30d": 30, "90d": 90}
+_CACHE: Dict[str, tuple] = {}  # window -> (expires_at, payload)
+_TTL_SECS = 60.0
 
 
 def window_cutoff(window: str, now: float) -> Optional[str]:
@@ -207,3 +210,40 @@ def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
         "AND outcome IN ('WIN','LOSS','NEUTRAL')" + cr_cl, cr_p).fetchone()[0]
     return {"scans": scans, "buy_signals": buys, "executed": executed,
             "matured": matured}
+
+
+def compute_diagnostics(
+    window: str, db_path: str, now: Optional[float] = None
+) -> Dict:
+    """Orchestrate diagnostics computation with 60s TTL cache.
+
+    Args:
+        window: One of "all", "30d", or "90d"
+        db_path: Path to SQLite database
+        now: Unix timestamp (seconds since epoch, float); defaults to current time
+
+    Returns:
+        Dict with keys: window, generated_at, signal_edge, exit_attribution,
+        regime_and_asset, signal_funnel
+    """
+    now = time.time() if now is None else now
+    hit = _CACHE.get(window)
+    if hit and hit[0] > now:
+        return hit[1]
+    cutoff = window_cutoff(window, now)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        payload = {
+            "window": window,
+            "generated_at": datetime.fromtimestamp(
+                now, tz=timezone.utc
+            ).isoformat(),
+            "signal_edge": signal_edge(conn, cutoff),
+            "exit_attribution": exit_attribution(conn, cutoff),
+            "regime_and_asset": regime_and_asset(conn, cutoff),
+            "signal_funnel": signal_funnel(conn, cutoff),
+        }
+    finally:
+        conn.close()
+    _CACHE[window] = (now + _TTL_SECS, payload)
+    return payload
