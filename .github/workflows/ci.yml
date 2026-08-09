@@ -183,6 +183,77 @@ jobs:
       - name: Ruff format check
         run: ruff format --check backend/
 
+  # ── 6b. Dependency audit (SCA) — pip-audit + npm audit ───────────────────────
+  # Advisory (|| true): surfaces known-CVE dependencies without blocking PRs on
+  # pre-existing findings. Promote to blocking by removing `|| true` and adding
+  # `dep-audit` to the security-gate `needs` once the backlog is clean.
+  dep-audit:
+    name: Dependency audit (pip-audit + npm audit)
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: pip-audit (backend deps)
+        run: |
+          pip install --quiet pip-audit
+          pip-audit -r backend/requirements.txt --desc || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: npm audit (frontend deps)
+        working-directory: frontend
+        run: npm audit --audit-level=high || true
+
+  # ── 6c. Snyk (SCA + Code) ────────────────────────────────────────────────────
+  # No-op until a SNYK_TOKEN repo secret is configured (then it runs and blocks
+  # on high-severity findings). Get a token at snyk.io -> Account -> Auth Token,
+  # then add it under Settings -> Secrets and variables -> Actions -> SNYK_TOKEN.
+  snyk:
+    name: Snyk (deps + code)
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SNYK_TOKEN present
+        id: tok
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "SNYK_TOKEN not set — skipping Snyk. Add the secret to enable."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.tok.outputs.present == 'true'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@v4
+        if: steps.tok.outputs.present == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: snyk/actions/setup@master
+        if: steps.tok.outputs.present == 'true'
+      - name: Snyk — backend (Python SCA)
+        if: steps.tok.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          pip install -r backend/requirements.txt
+          snyk test --file=backend/requirements.txt --package-manager=pip --severity-threshold=high
+      - name: Snyk — frontend (Node SCA)
+        if: steps.tok.outputs.present == 'true'
+        working-directory: frontend
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          npm ci --ignore-scripts
+          snyk test --severity-threshold=high
+
   # ── 7. Security gate ──────────────────────────────────────────────────────────
   security-gate:
     name: Security gate

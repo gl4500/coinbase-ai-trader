@@ -7,6 +7,21 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.78 — 2026-08-09 — Dependency (SCA) security scanning
+
+Closes the SCA gap: CI already had Bandit (Python SAST) + Gitleaks (secrets),
+but nothing scanned dependencies for known CVEs (no Snyk, Dependabot off).
+
+- Enabled repo-level Dependabot **vulnerability alerts** + **automated security
+  fixes** (via API / Settings → Code security).
+- `.github/dependabot.yml` (new): weekly version-update PRs for `pip` (backend/),
+  `npm` (frontend/), and `github-actions`.
+- `.github/workflows/ci.yml`: new **dep-audit** job (`pip-audit` + `npm audit`,
+  advisory `|| true` so pre-existing findings don't block) and a **snyk** job
+  (Python+Node SCA, a no-op until a `SNYK_TOKEN` repo secret is added, then runs
+  and blocks on high-severity findings). Neither is wired into the security-gate
+  `needs` yet — advisory until the dependency backlog is triaged.
+
 ### Session 58.77 — 2026-08-08 — Diagnostics dashboard (v3 signal/exit/regime/funnel)
 
 New read-only **Diagnostics** tab explaining *why* v3 loses (complements the
