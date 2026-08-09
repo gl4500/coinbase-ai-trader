@@ -28,6 +28,7 @@ import LogViewer             from './components/LogViewer'
 import ComparisonHeader      from './components/ComparisonHeader'
 import PriceChart            from './components/PriceChart'
 import EquityCurve           from './components/EquityCurve'
+import DiagnosticsDashboard  from './components/DiagnosticsDashboard'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -107,7 +108,7 @@ interface AppData {
   products:   Product[]
 }
 
-const TABS = ['Markets', 'Chart', 'Order Book', 'Positions', 'Signals', 'XGB', 'Agents', 'Logs'] as const
+const TABS = ['Markets', 'Chart', 'Order Book', 'Positions', 'Signals', 'XGB', 'Agents', 'Diagnostics', 'Logs'] as const
 type Tab = typeof TABS[number]
 
 // ── App ────────────────────────────────────────────────────────────────────────
@@ -317,6 +318,9 @@ export default function App() {
         )}
         {activeTab === 'Agents' && (
           <AgentsDashboard />
+        )}
+        {activeTab === 'Diagnostics' && (
+          <DiagnosticsDashboard />
         )}
         {activeTab === 'Logs' && (
           <LogViewer />

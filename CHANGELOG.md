@@ -22,6 +22,33 @@ but nothing scanned dependencies for known CVEs (no Snyk, Dependabot off).
   and blocks on high-severity findings). Neither is wired into the security-gate
   `needs` yet — advisory until the dependency backlog is triaged.
 
+### Session 58.77 — 2026-08-08 — Diagnostics dashboard (v3 signal/exit/regime/funnel)
+
+New read-only **Diagnostics** tab explaining *why* v3 loses (complements the
+PnL-only PerformanceDashboard). Built subagent-driven from the 2026-08-08
+spec/plan.
+
+- `backend/services/diagnostics.py` (new, read-only, own `mode=ro` connection,
+  60s TTL cache): `window_cutoff` + `signal_edge` (precision + confidence-decile
+  calibration) + `exit_attribution` (per-trigger PnL + SCAN-SELL share) +
+  `regime_and_asset` (per-asset + nearest-scan regime join) + `signal_funnel`
+  (scans→BUY→executed→matured) + `compute_diagnostics` orchestrator.
+- `backend/main.py`: `GET /api/diagnostics?window=30d|90d|all` (400 on bad
+  window; 500 isolated from trading; reads `database.DB_PATH`).
+- `backend/migrations/diagnostics_indexes_20260808.py` (new, operator-applied):
+  additive indexes `idx_cnn_scans_pid_scanned` + `idx_trades_agent_closed` for
+  the regime/exit queries.
+- `frontend/src/components/DiagnosticsDashboard.tsx` (new) + `App.tsx`
+  'Diagnostics' tab: 4 sections, hand-rolled SVG (no new deps), window selector
+  + refresh.
+- Tests: `test_diagnostics.py`, `test_diagnostics_migration.py`,
+  `test_diagnostics_api.py`; frontend `tsc` + `build` pass.
+
+Read-only + additive — zero effect on the trading loop. Operator preflight:
+apply the index migration once (see the plan's deployment note). Grounded
+finding the tab surfaces: v3's top-confidence slice (conf~0.9) has real edge
+(~53% WR) despite ~22% blended precision.
+
 ### Session 58.76 — 2026-08-08 — Scan-loop resilience (Aug-1 stall hardening)
 
 The 2026-08-01 Coinbase DNS/network outage hung a scan-loop network call; the
