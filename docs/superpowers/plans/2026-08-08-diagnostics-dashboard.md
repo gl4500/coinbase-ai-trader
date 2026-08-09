@@ -25,8 +25,18 @@
 - Create: `backend/migrations/diagnostics_indexes_20260808.py`
 - Test: `backend/tests/test_diagnostics_migration.py`
 
+**IMPORTANT — codebase convention (verified):** migrations in `backend/migrations/`
+are standalone modules with signature `run(db_path: str) -> Dict[str, List[str]]`
+that open their OWN sync `sqlite3` connection (see `mc_telemetry_20260516.py`).
+There is **no auto migration-runner** — nothing calls them from `database.py`/startup;
+the operator applies each one manually, once. So this task does NOT wire anything
+into `database.py`; it just creates a sibling migration module + test.
+
 **Interfaces:**
-- Produces: idempotent `run(conn)` that creates `idx_cnn_scans_pid_scanned` on `cnn_scans(product_id, scanned_at)` and `idx_trades_agent_closed` on `trades(agent, closed_at)`.
+- Produces: idempotent `run(db_path: str) -> Dict[str, List[str]]` that creates
+  `idx_cnn_scans_pid_scanned` on `cnn_scans(product_id, scanned_at)` and
+  `idx_trades_agent_closed` on `trades(agent, closed_at)`, returning
+  `{"created": [...], "already_present": [...]}`. Matches `mc_telemetry_20260516.run`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -39,18 +49,28 @@ if BACKEND not in sys.path:
 from migrations import diagnostics_indexes_20260808 as mig  # noqa: E402
 
 
-def test_creates_indexes_idempotently(tmp_path):
-    db = tmp_path / "t.db"
+def _seed(db):
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE cnn_scans (product_id TEXT, scanned_at TEXT)")
     con.execute("CREATE TABLE trades (agent TEXT, closed_at TEXT)")
     con.commit()
-    mig.run(con)
-    mig.run(con)  # idempotent
-    idx = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-    assert "idx_cnn_scans_pid_scanned" in idx
-    assert "idx_trades_agent_closed" in idx
     con.close()
+
+
+def test_creates_indexes_and_is_idempotent(tmp_path):
+    db = str(tmp_path / "t.db")
+    _seed(db)
+    first = mig.run(db)
+    assert set(first["created"]) == {"idx_cnn_scans_pid_scanned", "idx_trades_agent_closed"}
+    second = mig.run(db)  # idempotent — nothing new created
+    assert second["created"] == []
+    assert set(second["already_present"]) == {
+        "idx_cnn_scans_pid_scanned", "idx_trades_agent_closed"
+    }
+    con = sqlite3.connect(db)
+    idx = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    con.close()
+    assert {"idx_cnn_scans_pid_scanned", "idx_trades_agent_closed"} <= idx
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -62,18 +82,33 @@ Expected: FAIL (module `diagnostics_indexes_20260808` not found)
 
 ```python
 # backend/migrations/diagnostics_indexes_20260808.py
-"""Additive indexes for the diagnostics dashboard. Idempotent."""
+"""Additive indexes for the diagnostics dashboard. Idempotent. Operator-applied
+(mirrors mc_telemetry_20260516): run(db_path) opens its own sqlite3 connection."""
+import sqlite3
+from typing import Dict, List
+
+_INDEXES = {
+    "idx_cnn_scans_pid_scanned": "cnn_scans(product_id, scanned_at)",
+    "idx_trades_agent_closed": "trades(agent, closed_at)",
+}
 
 
-def run(conn):
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_cnn_scans_pid_scanned "
-        "ON cnn_scans(product_id, scanned_at)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_trades_agent_closed ON trades(agent, closed_at)"
-    )
-    conn.commit()
+def run(db_path: str) -> Dict[str, List[str]]:
+    conn = sqlite3.connect(db_path)
+    try:
+        existing = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        created, already = [], []
+        for name, target in _INDEXES.items():
+            if name in existing:
+                already.append(name)
+                continue
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {target}")
+            created.append(name)
+        conn.commit()
+        return {"created": created, "already_present": already}
+    finally:
+        conn.close()
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -81,15 +116,11 @@ def run(conn):
 Run: `cd backend && ../.venv/Scripts/python.exe -m pytest tests/test_diagnostics_migration.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Wire into the migration runner**
-
-Find the migration registry in `backend/database.py` (the list the startup runner iterates — search `migrations` / `run(`). Append an import + call to `diagnostics_indexes_20260808.run(conn)` following the existing pattern for `mc_telemetry_20260516` etc. (match the exact registration style already used).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (migration + test only — no `database.py` wiring)
 
 ```bash
-git add backend/migrations/diagnostics_indexes_20260808.py backend/tests/test_diagnostics_migration.py backend/database.py
-git commit -m "feat: additive indexes for diagnostics regime/exit queries"
+git add backend/migrations/diagnostics_indexes_20260808.py backend/tests/test_diagnostics_migration.py
+git commit -m "feat: additive indexes for diagnostics regime/exit queries (operator-applied migration)"
 ```
 
 ---
@@ -864,4 +895,4 @@ git commit -m "feat: Diagnostics dashboard tab (signal/exit/regime/funnel)"
 
 ## Deployment note
 
-Backend changes take effect on the next 8001 restart (operator-gated); the index migration applies automatically on that restart. Frontend changes require a Vite rebuild/redeploy of the 5174 app. Default behavior of the trading loop is unchanged (purely additive read-only surface).
+Backend changes take effect on the next 8001 restart (operator-gated). The index migration is applied **manually by the operator** as a one-off preflight (mirrors how `mc_telemetry_20260516` etc. are applied — there is no auto-runner): `cd backend && ../.venv/Scripts/python.exe -c "from migrations import diagnostics_indexes_20260808 as m; print(m.run('coinbase.db'))"`. The regime view works without it, just slower. Frontend changes require a Vite rebuild/redeploy of the 5174 app. Default behavior of the trading loop is unchanged (purely additive read-only surface).
