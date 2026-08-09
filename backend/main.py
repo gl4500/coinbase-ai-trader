@@ -51,6 +51,7 @@ from agents.exit_watcher import attach as attach_exit_watcher
 from agents.market_scanner import MarketScanner
 from agents.order_executor import OrderExecutor
 from agents.signal_generator import SignalGenerator
+from services import diagnostics
 from services.history_backfill import get_backfill
 from services.outcome_tracker import get_tracker
 from services.portfolio_tracker import PortfolioTracker
@@ -128,6 +129,9 @@ logger = logging.getLogger(__name__)
 _ERRORS_LOG = os.path.join(_LOG_DIR, "errors.log")
 _ALL_LOG = os.path.join(_LOG_DIR, "backend.log")
 _LOG_RE = _re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] ([\w.]+): (.+)$")
+
+# Same DB path database.py uses for all read endpoints (get_trades, get_performance, etc.)
+_DIAG_DB_PATH = database.DB_PATH
 
 
 # ── Port cleanup ──────────────────────────────────────────────────────────────
@@ -1645,6 +1649,21 @@ async def equity_curve(days: int = 7):
         ),
         "days": days,
     }
+
+
+@app.get("/api/diagnostics")
+async def get_diagnostics(window: str = "30d"):
+    """Read-only diagnostics dashboard aggregations (signal edge, exit
+    attribution, regime/asset breakdown, signal funnel). Never touches
+    app_state/trading; failures are isolated per invariant #16/#18.
+    """
+    try:
+        return diagnostics.compute_diagnostics(window, db_path=_DIAG_DB_PATH)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # never propagate into trading state
+        logger.exception("diagnostics failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/agents/decisions")
