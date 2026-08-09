@@ -63,6 +63,19 @@ class TestSignalEdge:
         assert b9["win_rate"] == pytest.approx(0.5)  # 1 win / (1 win + 1 loss)
 
 
+class TestCutoffFiltering:
+    def test_signal_edge_excludes_rows_before_cutoff(self, tmp_path: Path) -> None:
+        con = _seed(tmp_path)
+        rows = [
+            ("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-01T00:00:00+00:00"),  # OLD
+            ("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-08T00:00:00+00:00"),  # RECENT
+        ]
+        con.executemany("INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?)", rows)
+        con.commit()
+        out = d.signal_edge(con, cutoff="2026-08-05T00:00:00+00:00")
+        assert out["n"] == 1
+
+
 class TestExitAttribution:
     def test_by_trigger_and_share(self, tmp_path: Path):
         con = _seed(tmp_path)

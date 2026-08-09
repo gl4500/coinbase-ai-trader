@@ -1659,12 +1659,14 @@ async def get_diagnostics(window: str = "30d"):
     app_state, and a failure returns 400/500 without affecting trading.
     """
     try:
-        return diagnostics.compute_diagnostics(window, db_path=_DIAG_DB_PATH)
+        return await asyncio.to_thread(
+            diagnostics.compute_diagnostics, window, db_path=_DIAG_DB_PATH
+        )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    except Exception as e:  # never propagate into trading state
+    except Exception:  # never propagate into trading state
         logger.exception("diagnostics failed")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": "diagnostics failed"}, status_code=500)
 
 
 @app.get("/api/agents/decisions")
