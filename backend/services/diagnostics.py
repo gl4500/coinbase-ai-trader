@@ -93,3 +93,42 @@ def signal_edge(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[str, An
         "e_return": e_return or 0.0,
         "calibration": calibration,
     }
+
+
+def exit_attribution(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[str, Any]:
+    """Compute exit attribution by trigger and SCAN share of closes.
+
+    Args:
+        conn: SQLite connection
+        cutoff: ISO8601 timestamp or None for no cutoff
+
+    Returns:
+        Dict with keys: by_trigger, scan_sell_share
+        by_trigger: list of dicts with trigger, n, sum_pnl, avg_pct, win_rate
+        scan_sell_share: fraction of closes triggered by SCAN
+    """
+    clause, params = _where_since("closed_at", cutoff)
+    base = "FROM trades WHERE agent='CNN' AND closed_at IS NOT NULL" + clause
+    by_trigger = []
+    total = 0
+    scan = 0
+    for r in conn.execute(
+        "SELECT trigger_close, COUNT(*), SUM(pnl), AVG(pct_pnl), "
+        "SUM(pnl>0)*1.0/COUNT(*) " + base + " GROUP BY trigger_close ORDER BY SUM(pnl)",
+        params,
+    ):
+        trig, cnt, sum_pnl, avg_pct, wr = r
+        by_trigger.append({
+            "trigger": trig,
+            "n": cnt,
+            "sum_pnl": sum_pnl or 0.0,
+            "avg_pct": avg_pct or 0.0,
+            "win_rate": wr or 0.0,
+        })
+        total += cnt
+        if trig == "SCAN":
+            scan += cnt
+    return {
+        "by_trigger": by_trigger,
+        "scan_sell_share": (scan / total) if total else 0.0,
+    }

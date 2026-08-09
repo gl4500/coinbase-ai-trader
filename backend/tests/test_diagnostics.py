@@ -63,3 +63,23 @@ class TestSignalEdge:
         assert out["precision"] == pytest.approx(0.25)
         b9 = next(b for b in out["calibration"] if b["bucket"] == 0.9)
         assert b9["win_rate"] == pytest.approx(0.5)  # 1 win / (1 win + 1 loss)
+
+
+class TestExitAttribution:
+    def test_by_trigger_and_share(self, tmp_path: Path):
+        con = _seed(tmp_path)
+        rows = [
+            ("CNN", "SOL-USD", 5.0, 0.01, 3600, "SCAN", "2026-08-01T00:00:00+00:00",
+             "2026-08-08T00:00:00+00:00"),
+            ("CNN", "SOL-USD", -3.0, -0.02, 7200, "STOP_LOSS",
+             "2026-08-01T00:00:00+00:00", "2026-08-08T00:00:00+00:00"),
+            ("CNN", "ETH-USD", 2.0, 0.005, 100, "SCAN", "2026-08-01T00:00:00+00:00",
+             "2026-08-08T00:00:00+00:00"),
+        ]
+        con.executemany("INSERT INTO trades VALUES (?,?,?,?,?,?,?,?)", rows)
+        con.commit()
+        out = d.exit_attribution(con, cutoff=None)
+        scan = next(t for t in out["by_trigger"] if t["trigger"] == "SCAN")
+        assert scan["n"] == 2 and scan["sum_pnl"] == pytest.approx(7.0)
+        assert scan["win_rate"] == pytest.approx(1.0)
+        assert out["scan_sell_share"] == pytest.approx(2 / 3)
