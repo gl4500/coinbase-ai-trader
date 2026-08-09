@@ -76,7 +76,7 @@ jobs:
           "
       - name: Upload Bandit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-report
           path: backend/bandit-report.json
@@ -115,7 +115,7 @@ jobs:
             --cov-report=term-missing \
             -q
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.xml
@@ -160,7 +160,7 @@ jobs:
         env:
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist/
