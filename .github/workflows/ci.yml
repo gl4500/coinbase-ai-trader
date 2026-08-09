@@ -240,11 +240,22 @@ jobs:
         if: steps.tok.outputs.present == 'true'
       - name: Snyk — backend (Python SCA)
         if: steps.tok.outputs.present == 'true'
+        working-directory: backend
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        # Install deps into the job interpreter FIRST, then run Snyk from the
+        # backend dir so its pip plugin resolves against the installed graph
+        # (the setup-python interpreter is the default `python`). Without an
+        # installed, resolvable graph Snyk's pip plugin errors
+        # (SNYK-OS-PYTHON-0013) or under-reports — the previous run-from-root
+        # `--file=backend/requirements.txt` form gave a false green.
         run: |
-          pip install -r backend/requirements.txt
-          snyk test --file=backend/requirements.txt --package-manager=pip --severity-threshold=high
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          snyk test \
+            --package-manager=pip \
+            --file=requirements.txt \
+            --severity-threshold=high
       - name: Snyk — frontend (Node SCA)
         if: steps.tok.outputs.present == 'true'
         working-directory: frontend

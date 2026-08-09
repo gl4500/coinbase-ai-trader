@@ -7,6 +7,28 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.79 — 2026-08-09 — Remediate backend dependency CVEs + fix Snyk CI false-green
+
+Follows 58.78: the new Snyk scan surfaced **15 High / 14 Medium / 1 Low**
+backend dependency CVEs that the CI Snyk step was *not* catching (it scanned
+`requirements.txt` from the repo root without an installed/resolvable graph →
+false green).
+
+- `backend/requirements.txt`: bumped vulnerable pins — `cryptography>=48.0.1`
+  (→50.0.0), `python-multipart>=0.0.18` (→0.0.32), `PyJWT>=2.13.0`,
+  `python-dotenv>=1.2.2`, plus transitive security pins `click>=8.3.3`,
+  `idna>=3.15`, and `starlette>=1.3.1`. The starlette fix floor had moved to
+  **1.3.1** (ReDoS/SSRF/resource-throttling/name-resolution), which forced
+  **fastapi 0.115.0 → 0.141.1** (fastapi<0.141 caps starlette below 1.x).
+  pydantic stayed pinned at 2.9.2 — no cascade.
+- Validated: full CI-equivalent suite **1323 passed / 0 failed** against
+  fastapi 0.141.1 + starlette 1.6.0; `snyk test --severity-threshold=medium`
+  → **0 vulnerable paths** (was 30 findings).
+- `.github/workflows/ci.yml`: fixed the Snyk backend step — install deps into
+  the job interpreter, then run `snyk test` from `backend/` so the pip plugin
+  resolves against the installed graph (removes the false green; step now
+  genuinely gates on high-severity findings).
+
 ### Session 58.78 — 2026-08-09 — Dependency (SCA) security scanning
 
 Closes the SCA gap: CI already had Bandit (Python SAST) + Gitleaks (secrets),
