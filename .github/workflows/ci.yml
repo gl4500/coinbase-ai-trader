@@ -127,7 +127,7 @@ jobs:
     needs: secret-scan
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -146,7 +146,7 @@ jobs:
     needs: frontend-typecheck
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -200,7 +200,7 @@ jobs:
         run: |
           pip install --quiet pip-audit
           pip-audit -r backend/requirements.txt --desc || true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: npm audit (frontend deps)
@@ -232,7 +232,7 @@ jobs:
         if: steps.tok.outputs.present == 'true'
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.tok.outputs.present == 'true'
         with:
           node-version: ${{ env.NODE_VERSION }}
