@@ -176,3 +176,34 @@ def regime_and_asset(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[st
         for k, v in sorted(regime_agg.items(), key=lambda kv: kv[1][1])
     ]
     return {"by_asset": by_asset, "by_regime": by_regime}
+
+
+def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
+    """Compute signal funnel counts: scans, buy signals, executed trades, matured
+    outcomes.
+
+    Args:
+        conn: SQLite connection
+        cutoff: ISO8601 timestamp or None for no cutoff
+
+    Returns:
+        Dict with keys: scans, buy_signals, executed, matured
+        scans: total cnn_scans (cutoff on scanned_at)
+        buy_signals: cnn_scans with side='BUY' (cutoff on scanned_at)
+        executed: trades opened (cutoff on opened_at)
+        matured: signal_outcomes with outcome set (cutoff on created_at)
+    """
+    sc_cl, sc_p = _where_since("scanned_at", cutoff)
+    op_cl, op_p = _where_since("opened_at", cutoff)
+    cr_cl, cr_p = _where_since("created_at", cutoff)
+    scans = conn.execute(
+        "SELECT COUNT(*) FROM cnn_scans WHERE 1=1" + sc_cl, sc_p).fetchone()[0]
+    buys = conn.execute(
+        "SELECT COUNT(*) FROM cnn_scans WHERE side='BUY'" + sc_cl, sc_p).fetchone()[0]
+    executed = conn.execute(
+        "SELECT COUNT(*) FROM trades WHERE agent='CNN'" + op_cl, op_p).fetchone()[0]
+    matured = conn.execute(
+        "SELECT COUNT(*) FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
+        "AND outcome IN ('WIN','LOSS','NEUTRAL')" + cr_cl, cr_p).fetchone()[0]
+    return {"scans": scans, "buy_signals": buys, "executed": executed,
+            "matured": matured}

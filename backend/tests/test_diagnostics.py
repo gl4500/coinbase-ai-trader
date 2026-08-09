@@ -112,3 +112,25 @@ class TestRegimeAndAsset:
         regimes = {r["regime"]: r for r in out["by_regime"]}
         assert regimes["TRENDING"]["sum_pnl"] == pytest.approx(5.0)
         assert regimes["RANGING"]["sum_pnl"] == pytest.approx(-2.0)
+
+
+class TestSignalFunnel:
+    def test_counts(self, tmp_path):
+        con = _seed(tmp_path)
+        con.executemany(
+            "INSERT INTO cnn_scans (product_id, side, model_prob, regime, scanned_at) "
+            "VALUES (?,?,?,?,?)",
+            [("SOL-USD", "BUY", 0.6, "TRENDING", "2026-08-08T00:00:00+00:00"),
+             ("SOL-USD", "HOLD", 0.5, "RANGING", "2026-08-08T00:00:00+00:00")],
+        )
+        con.execute(
+            "INSERT INTO trades VALUES ('CNN','SOL-USD',1,0.01,10,'SCAN',"
+            "'2026-08-08T00:00:00+00:00','2026-08-08T01:00:00+00:00')"
+        )
+        con.execute(
+            "INSERT INTO signal_outcomes VALUES "
+            "('CNN','BUY',0.6,0.01,'WIN','2026-08-08T00:00:00+00:00')"
+        )
+        con.commit()
+        out = d.signal_funnel(con, cutoff=None)
+        assert out == {"scans": 2, "buy_signals": 1, "executed": 1, "matured": 1}
