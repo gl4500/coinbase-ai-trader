@@ -181,7 +181,9 @@ Profile IDs include the full content digest to distinguish changing group ordina
 New regressions first reproduced rounded-sidecar output, exact-artifact rejection,
 simulator use of display text, and fitting after a feature tensor was downcast.
 Research suite: 191 passed with one expensive synthetic test deferred; the added
-dtype guard regression separately passed. Full hook pending. Claude independently
+dtype guard regression separately passed. Full hook in 6bb57ea: 1577 passed,
+65 skipped, one deselected, one xfailed, two xpassed; 14 existing warnings,
+373.95 seconds. Claude independently
 reviewed codec/producer design; its dtype finding is addressed by rejecting any
 actual non-float64 feature tensor before fitting, not merely changing its hash.
 Generated-tree tests check exactly one matching leaf and equivalence to the real
@@ -191,3 +193,8 @@ Digest integrity is not provenance attestation or fixed-policy performance.
 The selected-only group aggregation, representative-leaf mismatch, overlapping
 policy exposure and additive-return drawdown remain unresolved. No live orders,
 retraining, data migration, archive rewriting, merge or deployment occurred.
+
+Claude's final consumer review found the report still labels rounded display text
+as rule_path and an unused production display parser remains importable. Task
+`exact-rule-reporting` is open for a separate tested follow-up. This implementation
+is a draft; these reporting items are not claimed closed.
