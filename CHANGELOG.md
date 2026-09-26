@@ -7,6 +7,16 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Distinct outer-fold evidence - 2026-09-26
+
+- Count each held-out period once per root-direction group, even when several
+  qualifying leaves share that group; one period cannot satisfy the four-fold gate.
+- Emit and require `chronological_distinct_folds_v2`. Previous `chronological_v1`
+  counts cannot distinguish leaf inflation from genuine period coverage, so those
+  artifacts are excluded with provenance diagnostics, without rewriting archives.
+- This narrow repair does not fix selected-only trade aggregation, changing
+  rules across folds, exact rule serialization, or establish deployable profitability.
+
 ### Fail-closed research rule loading - 2026-09-26
 
 - Exclude profiles with missing, blank or non-string sidecar rules; never

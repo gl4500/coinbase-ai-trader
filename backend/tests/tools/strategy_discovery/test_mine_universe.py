@@ -51,7 +51,7 @@ def test_write_profile_parquet_round_trips_all_columns(tmp_path: Path):
             chosen_depth=5,
             chosen_min_leaf=50,
             n_folds_evaluated=5,
-            validation_version="chronological_v1",
+            validation_version="chronological_distinct_folds_v2",
         ),
         LeafProfile(
             leaf_id=1,
@@ -111,7 +111,10 @@ def test_write_profile_parquet_round_trips_all_columns(tmp_path: Path):
     assert (df["horizon"] == 24).all()
     assert (df["schema_version"] == 2).all()
     assert df["n_folds_evaluated"].tolist() == [5, 0]
-    assert df["validation_version"].tolist() == ["chronological_v1", "legacy_unverified"]
+    assert df["validation_version"].tolist() == [
+        "chronological_distinct_folds_v2",
+        "legacy_unverified",
+    ]
 
 
 def test_iterates_all_pid_horizon_pairs(tmp_path, monkeypatch):
