@@ -343,3 +343,642 @@ def test_unknown_cannot_be_resolved_without_terminal_evidence():
 def test_unknown_is_not_cleared_by_an_ordinary_event():
     with pytest.raises(IllegalTransition):
         next_order_state(OrderState.UNKNOWN, "accepted", _ACCEPTED)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review round 2 (Codex). A DIFFERENT root cause from the block above.
+#
+# Round 1 was presence-versus-validity: evidence keys existed but their contents
+# were never checked. These four are STATE-VERSUS-EVIDENCE CONSISTENCY: each
+# transition validated its evidence in isolation while ignoring what the CURRENT
+# STATE already proves. WORKING_PARTIAL witnesses a positive fill, so a claim of
+# zero cumulative fill is not merely unproven — it is contradicted, and the
+# validator accepted it, erasing a known fill.
+#
+# Contradictory evidence must fail closed, whichever branch would otherwise win.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── 7. a rejection must prove identity and zero fills ────────────────────────
+
+
+def test_rejected_requires_identity():
+    ev = {
+        "terminal_status": "REJECTED",
+        "reason": "x",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+    }
+    with pytest.raises(InsufficientEvidence):
+        next_order_state(OrderState.SUBMITTING, "rejected", ev)
+
+
+def test_rejected_with_fills_is_not_a_rejection():
+    """A "rejection" carrying a fill is a reconciliation case, not a rejection."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "REJECTED",
+        "reason": "x",
+        "observed_at": 1,
+        "filled_size": Decimal("1"),
+        "filled_value": Decimal("100"),
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.ACCEPTED, "rejected", ev)
+
+
+def test_resolving_unknown_as_rejected_requires_identity_and_zero_fills():
+    bare = {
+        "terminal_status": "REJECTED",
+        "reason": "x",
+        "observed_at": 1,
+        "filled_size": Decimal("1"),
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.UNKNOWN, "state_resolved", bare)
+
+    no_identity = {
+        "terminal_status": "REJECTED",
+        "reason": "x",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+    }
+    with pytest.raises(InsufficientEvidence):
+        next_order_state(OrderState.UNKNOWN, "state_resolved", no_identity)
+
+
+def test_resolving_unknown_as_rejected_succeeds_with_full_proof():
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "REJECTED",
+        "reason": "x",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+    }
+    assert next_order_state(OrderState.UNKNOWN, "state_resolved", ev) is OrderState.REJECTED
+
+
+# ── 8. a cancel may never erase a fill the state already witnesses ───────────
+
+
+def test_cancel_confirmed_from_working_partial_cannot_claim_zero_fill():
+    """WORKING_PARTIAL means a positive fill was observed. Zero cumulative fill
+    contradicts the state rather than merely lacking proof."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.WORKING_PARTIAL, "cancel_confirmed", ev)
+
+
+def test_cancel_confirmed_from_working_partial_settles_the_partial():
+    """The legitimate outcome: the remainder is cancelled, the fill is preserved."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0.4"),
+        "filled_value": Decimal("40"),
+        "avg_fill_price": Decimal("100"),
+        "fill_ids": ["f-1"],
+        "remaining_size": Decimal("0"),
+        "remainder_live": False,
+    }
+    assert (
+        next_order_state(OrderState.WORKING_PARTIAL, "cancel_confirmed", ev)
+        is OrderState.SETTLED_PARTIAL
+    )
+
+
+def test_cancel_confirmed_from_accepted_with_zero_fill_is_still_cancelled():
+    """Unchanged: from ACCEPTED, nothing has been witnessed, so zero is coherent."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+    }
+    assert next_order_state(OrderState.ACCEPTED, "cancel_confirmed", ev) is OrderState.CANCELLED
+
+
+# ── 9. remainder_terminal must reuse the positive-fill classifier ────────────
+
+
+def test_remainder_terminal_requires_a_positive_cumulative_fill():
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "remaining_size": Decimal("0"),
+        "remainder_live": False,
+        "fill_ids": ["f-1"],
+        "avg_fill_price": Decimal("100"),
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.WORKING_PARTIAL, "remainder_terminal", ev)
+
+
+def test_remainder_that_fully_filled_classifies_as_filled_not_settled_partial():
+    """Without an intended_size comparison a fully-filled remainder was
+    mislabelled SETTLED_PARTIAL."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "FILLED",
+        "observed_at": 1,
+        "filled_size": Decimal("1.0"),
+        "intended_size": Decimal("1.0"),
+        "remaining_size": Decimal("0"),
+        "remainder_live": False,
+        "fill_ids": ["f-1", "f-2"],
+        "avg_fill_price": Decimal("100"),
+    }
+    assert (
+        next_order_state(OrderState.WORKING_PARTIAL, "remainder_terminal", ev) is OrderState.FILLED
+    )
+
+
+def test_remainder_terminal_partial_still_settles_partial():
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0.4"),
+        "intended_size": Decimal("1.0"),
+        "remaining_size": Decimal("0"),
+        "remainder_live": False,
+        "fill_ids": ["f-1"],
+        "avg_fill_price": Decimal("100"),
+    }
+    assert (
+        next_order_state(OrderState.WORKING_PARTIAL, "remainder_terminal", ev)
+        is OrderState.SETTLED_PARTIAL
+    )
+
+
+# ── 10. contradictory evidence must fail closed on every branch ──────────────
+
+
+def test_full_fill_with_a_live_remainder_fails_closed():
+    """filled == intended cannot coexist with a live 0.5 remainder. The FILLED
+    branch returned before ever reading the remainder fields."""
+    ev = {**_FILL, "remainder_live": True, "remaining_size": Decimal("0.5")}
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.ACCEPTED, "fill_observed", ev)
+
+
+def test_full_fill_with_a_positive_remaining_size_fails_closed():
+    ev = {**_FILL, "remaining_size": Decimal("0.5")}
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.ACCEPTED, "fill_observed", ev)
+
+
+def test_full_fill_with_an_explicitly_dead_zero_remainder_is_fine():
+    """Consistent evidence still passes: nothing left, and it is not live."""
+    ev = {**_FILL, "remainder_live": False, "remaining_size": Decimal("0")}
+    assert next_order_state(OrderState.ACCEPTED, "fill_observed", ev) is OrderState.FILLED
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review round 3 (Codex): CLASS closure, not another example.
+#
+# Round 2's fixes were written branch by branch and promptly diverged: a
+# hand-written `is True` bypassed the strict-bool validator (an int 1 and the
+# string "true" both passed), the partial-cancel branch omitted the overfill
+# comparison, and remainder_terminal disagreed with fill_observed about whether a
+# complete fill reported CANCELLED is FILLED.
+#
+# Codex's instruction was to centralise rather than patch, so these tests are
+# PARAMETERISED ACROSS EVENTS. Each invariant is asserted once against every
+# event that reasons about fills, so a future divergence between branches fails
+# here rather than being found by probing again.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BASE = {
+    "client_order_id": "cid-1",
+    "order_id": "ex-1",
+    "observed_at": 1,
+    "avg_fill_price": Decimal("100"),
+    "fill_ids": ["f-1"],
+    "product_id": "BTC-USD",
+    "side": "BUY",
+    "execution_mode": "live",
+    "run_id": "r",
+    "config_version": "c",
+    "model_hash": "m",
+    "created_at": 1,
+    "submitted_at": 1,
+    "accepted_at": 1,
+}
+
+
+def _drive(event, extra, state=None):
+    """Apply `event` with _BASE + extra from the state that event is valid in."""
+    states = {
+        "fill_observed": OrderState.ACCEPTED,
+        "remainder_terminal": OrderState.WORKING_PARTIAL,
+        "cancel_confirmed": OrderState.WORKING_PARTIAL,
+        "state_resolved": OrderState.UNKNOWN,
+    }
+    return next_order_state(state or states[event], event, {**_BASE, **extra})
+
+
+_FILL_EVENTS = ["fill_observed", "remainder_terminal", "cancel_confirmed", "state_resolved"]
+
+
+def _terminal_for(event):
+    """A terminal status each event will accept, so the parameterised cases
+    isolate the invariant under test rather than tripping on status policy."""
+    return "CANCELLED" if event == "cancel_confirmed" else "FILLED"
+
+
+# ── Invariant: a non-boolean remainder_live is never accepted, on any event ───
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+@pytest.mark.parametrize("truthy", [1, 0, "true", "false", "True", [], [1], 1.0])
+def test_no_event_accepts_a_non_boolean_remainder_live(event, truthy):
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("40"),
+                "remainder_live": truthy,
+            },
+        )
+
+
+# ── Invariant: overfill is refused on every event ────────────────────────────
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+def test_no_event_accepts_an_overfill(event):
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("2"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("200"),
+                "remainder_live": False,
+            },
+        )
+
+
+# ── Invariant: filled + remaining may not exceed intended, on every event ────
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+def test_no_event_accepts_inconsistent_remaining(event):
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("5"),
+                "filled_value": Decimal("40"),
+                "remainder_live": True,
+            },
+        )
+
+
+# ── Invariant: a non-finite or negative quantity is refused on every event ───
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+@pytest.mark.parametrize("bad", [_INF, _NAN, Decimal("-1")])
+def test_no_event_accepts_a_nonfinite_or_negative_fill(event, bad):
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": bad,
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("0"),
+                "remainder_live": False,
+            },
+        )
+
+
+# ── Invariant: identity is required on every event ────────────────────────────
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+def test_no_event_accepts_missing_identity(event):
+    evidence = {k: v for k, v in _BASE.items() if k not in ("order_id", "client_order_id")}
+    with pytest.raises(InsufficientEvidence):
+        next_order_state(
+            {
+                "fill_observed": OrderState.ACCEPTED,
+                "remainder_terminal": OrderState.WORKING_PARTIAL,
+                "cancel_confirmed": OrderState.WORKING_PARTIAL,
+                "state_resolved": OrderState.UNKNOWN,
+            }[event],
+            event,
+            {
+                **evidence,
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("40"),
+                "remainder_live": False,
+            },
+        )
+
+
+# ── Invariant: empty fill ids are refused on every event ─────────────────────
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+def test_no_event_accepts_empty_fill_ids(event):
+    with pytest.raises(InsufficientEvidence):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("40"),
+                "remainder_live": False,
+                "fill_ids": [],
+            },
+        )
+
+
+# ── ONE classification policy: quantity decides, across every event ──────────
+
+
+@pytest.mark.parametrize("event", ["fill_observed", "remainder_terminal", "cancel_confirmed"])
+def test_a_complete_fill_classifies_as_filled_on_every_event(event):
+    """The round-2 inconsistency: remainder_terminal said FILLED while
+    fill_observed raised, for identical evidence. Quantity decides now."""
+    assert (
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("1"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("100"),
+                "remainder_live": False,
+            },
+        )
+        is OrderState.FILLED
+    )
+
+
+@pytest.mark.parametrize("event", ["fill_observed", "remainder_terminal", "cancel_confirmed"])
+def test_a_partial_settles_partial_on_every_event(event):
+    assert (
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("40"),
+                "remainder_live": False,
+            },
+        )
+        is OrderState.SETTLED_PARTIAL
+    )
+
+
+def test_a_complete_fill_reported_cancelled_is_filled_not_cancelled():
+    """The cancel lost the race. The fill happened, so the order is FILLED — and
+    this must not depend on which event carried the evidence."""
+    for event in ("fill_observed", "remainder_terminal"):
+        assert (
+            _drive(
+                event,
+                {
+                    "terminal_status": "CANCELLED",
+                    "filled_size": Decimal("1"),
+                    "intended_size": Decimal("1"),
+                    "remaining_size": Decimal("0"),
+                    "filled_value": Decimal("100"),
+                    "remainder_live": False,
+                },
+            )
+            is OrderState.FILLED
+        )
+
+
+# ── A non-terminal status is never terminal evidence, on every event ─────────
+
+
+@pytest.mark.parametrize("event", _FILL_EVENTS)
+@pytest.mark.parametrize("bad_status", ["OPEN", "PENDING", "WORKING", "", "   "])
+def test_no_event_treats_a_nonterminal_status_as_terminal(event, bad_status):
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": bad_status,
+                "filled_size": Decimal("1"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("100"),
+                "remainder_live": False,
+            },
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review round 4 (Codex): terminality is shared evidence too.
+#
+# Round 3 centralised the QUANTITY rules into `_validated_fill` and fixed the
+# three bypasses — but centralising is only half the job if the other half of
+# the evidence stays per-branch. Two defects came directly out of that gap, and
+# reproducing them exposed two more Codex had not named:
+#
+#   1. `_ALL_TERMINALS` was substituted for `_FILL_TERMINALS` while unifying the
+#      classification policy, which let the REJECT family stand as proof of a
+#      fill — so a REJECTED status carrying a complete fill returned FILLED,
+#      contradicting the rejection zero-fill contract two branches away.
+#      (Also true of `remainder_terminal`, which Codex did not list.)
+#   2. No branch asked whether a TERMINAL outcome still had something working.
+#      A confirmed cancellation was accepted with `remainder_live=True` and a
+#      positive `remaining_size` — including the zero-fill cancellation paths on
+#      both `cancel_confirmed` and UNKNOWN resolution, which is precisely where
+#      an unreconciled live order would be silently forgotten.
+#
+# Terminality therefore gets the same treatment quantities got: one validator,
+# applied at every terminal exit, parameterised across events here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TERMINAL_EVENTS = ["fill_observed", "remainder_terminal", "cancel_confirmed", "state_resolved"]
+
+
+# ── The reject family is never proof of a fill ────────────────────────────────
+
+
+@pytest.mark.parametrize("event", ["fill_observed", "remainder_terminal", "state_resolved"])
+@pytest.mark.parametrize("status", ["REJECTED", "FAILED"])
+def test_a_reject_status_is_never_proof_of_a_fill(event, status):
+    """A rejection carrying fills is a reconciliation case. `_ALL_TERMINALS`
+    admitted the reject family into the fill path and returned FILLED."""
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": status,
+                "reason": "x",
+                "filled_size": Decimal("1"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0"),
+                "filled_value": Decimal("100"),
+                "remainder_live": False,
+            },
+        )
+
+
+# ── A terminal outcome cannot leave anything working ─────────────────────────
+
+
+@pytest.mark.parametrize("event", _TERMINAL_EVENTS)
+def test_no_terminal_event_accepts_a_live_remainder(event):
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0.6"),
+                "filled_value": Decimal("40"),
+                "remainder_live": True,
+            },
+        )
+
+
+@pytest.mark.parametrize("event", _TERMINAL_EVENTS)
+def test_no_terminal_event_accepts_a_positive_working_remainder(event):
+    """Even without a remainder_live claim, a positive remaining_size contradicts
+    terminality."""
+    with pytest.raises(_REJECTED):
+        _drive(
+            event,
+            {
+                "terminal_status": _terminal_for(event),
+                "filled_size": Decimal("0.4"),
+                "intended_size": Decimal("1"),
+                "remaining_size": Decimal("0.6"),
+                "filled_value": Decimal("40"),
+            },
+        )
+
+
+# ── Zero-fill cancellation is terminal too ───────────────────────────────────
+
+
+def test_a_zero_fill_cancellation_cannot_leave_a_live_remainder_from_accepted():
+    """The most dangerous shape: nothing filled, the cancel is recorded as
+    confirmed, and a live remainder is still working at the exchange with no
+    record that anything is outstanding."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+        "remaining_size": Decimal("1"),
+        "remainder_live": True,
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.ACCEPTED, "cancel_confirmed", ev)
+
+
+def test_a_zero_fill_cancellation_cannot_leave_a_live_remainder_from_unknown():
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+        "remaining_size": Decimal("1"),
+        "remainder_live": True,
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.UNKNOWN, "state_resolved", ev)
+
+
+def test_a_clean_zero_fill_cancellation_still_passes():
+    """The honest version of the same shape stays accepted, so the rule above is
+    a contradiction check and not a blanket refusal."""
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "CANCELLED",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+        "remaining_size": Decimal("0"),
+        "remainder_live": False,
+    }
+    assert next_order_state(OrderState.ACCEPTED, "cancel_confirmed", ev) is OrderState.CANCELLED
+    assert next_order_state(OrderState.UNKNOWN, "state_resolved", ev) is OrderState.CANCELLED
+
+
+def test_a_rejection_cannot_leave_a_live_remainder():
+    ev = {
+        **_ACCEPTED,
+        "terminal_status": "REJECTED",
+        "reason": "x",
+        "observed_at": 1,
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
+        "remainder_live": True,
+        "remaining_size": Decimal("1"),
+    }
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.ACCEPTED, "rejected", ev)
+    with pytest.raises(_REJECTED):
+        next_order_state(OrderState.UNKNOWN, "state_resolved", ev)
+
+
+# ── Equivalent evidence must produce equivalent verdicts ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "filled,expected",
+    [
+        (Decimal("1"), OrderState.FILLED),
+        (Decimal("0.4"), OrderState.SETTLED_PARTIAL),
+    ],
+)
+def test_identical_evidence_agrees_across_every_event_that_can_carry_it(filled, expected):
+    """The round-3 inconsistency generalised: one evidence dict, every event that
+    accepts it, one verdict. This is the regression that catches a future branch
+    drifting away from the shared validators."""
+    evidence = {
+        "terminal_status": "CANCELLED",
+        "filled_size": filled,
+        "intended_size": Decimal("1"),
+        "remaining_size": Decimal("0"),
+        "filled_value": filled * Decimal("100"),
+        "remainder_live": False,
+    }
+    verdicts = {event: _drive(event, evidence) for event in _TERMINAL_EVENTS}
+    assert set(verdicts.values()) == {expected}, verdicts

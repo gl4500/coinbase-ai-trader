@@ -179,6 +179,16 @@ contract generalises it so the next caller cannot reintroduce it.
   placeholder in either field is the `"unknown"` defect wearing a different hat. Without the rest,
   the accounting reconciliation stays archaeology — the same provenance §5 of
   `2026-09-26-accounting-reconciliation.md` already requires.
+- **I9 — A terminal outcome may never coexist with a live remainder.** Not for a full fill, not for a
+  partial, and not for a cancellation that filled nothing. The zero-fill case is the dangerous one: a
+  cancellation recorded as confirmed while the order is still working at the exchange leaves real
+  exposure with nothing in the record saying anything is outstanding. Symmetrically, evidence that
+  claims a live remainder may not also supply a terminal status — that contradiction fails closed
+  rather than silently resolving to "still working".
+- **I10 — The reject family is never proof of a fill.** `REJECTED`/`FAILED` carry their own contract
+  (§4: zero `filled_size`, zero `filled_value`), so they may not stand as the terminal status of an
+  outcome that carried fills. Admitting them there contradicts the zero-fill rule from two branches
+  away — which is exactly what happened, see §9a round 4.
 
 ---
 
@@ -302,3 +312,32 @@ legal and adequately evidenced.
 rules above hold as written. They are **not** evidence of end-to-end execution correctness: they
 exercise no exchange, no database, no concurrency and no clock. Treating a green validator suite as
 proof that execution is safe would repeat the mistake this whole document exists to correct.
+
+---
+
+## 9a. Validation policy, and how four review rounds arrived at it
+
+The first implementation of this validator committed, inside itself, the very mistake §0 describes. The
+parallel Codex session found it by importing the module and driving it with hostile inputs, four times
+in a row. Each round had a *different* root cause, and the later ones were introduced by the fixes for
+the earlier ones — which is why the policy, not just the fixes, is recorded here.
+
+| Round | Root cause | Shape of the defect |
+|---|---|---|
+| 1 | **Presence checked instead of validity.** | Evidence keys existed, so the transition passed. `order_id` could be `"unknown"`, quantities could be `NaN`, booleans could be any truthy value. |
+| 2 | **Evidence validated in isolation from the state.** | `WORKING_PARTIAL` witnesses a positive fill, so a cancellation claiming zero cumulative fill is *contradicted*, not merely unproven — and accepting it erased a known fill. |
+| 3 | **Fixes written branch by branch diverged.** | A hand-written `is True` bypassed the strict-bool validator (int `1` and `"true"` slipped through), one branch omitted the overfill check, and two events classified identical evidence differently. |
+| 4 | **Only half the evidence was centralised.** | Quantities were shared; terminality stayed per-branch. Widening the allowed status set while unifying classification let the reject family prove a fill, and no branch asked whether a terminal outcome still had something working. |
+
+The resulting policy, which any future change must preserve:
+
+1. **Validity, never presence.** A key that exists proves nothing. Identifiers must be real non-placeholder strings, quantities finite `Decimal`s of the right sign, booleans actual `bool`s.
+2. **Consistency with the current state.** A transition out of a state must remain consistent with what that state already established.
+3. **One validator per concern, applied everywhere.** `_validated_fill` owns quantity evidence; `_validated_terminal` owns terminality. Duplicated validation diverges — round 3 is the proof.
+4. **One classification policy, stated once.** `_classify_terminal_fill`: **quantity decides the state, the status need only be a non-reject terminal status.** A complete fill reported alongside `CANCELLED` is the cancel losing the race, so it is `FILLED` regardless of which event carried the evidence. The non-reject qualifier is I10, and it is load-bearing rather than pedantic: dropping it is exactly how round 4 let `REJECTED` prove a fill.
+5. **Optional fields are validated whenever supplied**, not only when a branch happens to need them. An unvalidated optional field is precisely how a truthy non-boolean gets in — and an *unread* one is how a contradictory terminal status got treated as "still working".
+6. **Contradictions fail closed**, whichever branch would otherwise win.
+
+**These are validator-level guarantees only.** Per §8b they rest on a trusted-caller boundary: the
+module cannot confirm that a supplied identifier corresponds to anything the exchange issued. A green
+suite here says the rules hold, not that execution is safe.
