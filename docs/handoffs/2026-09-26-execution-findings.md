@@ -317,3 +317,35 @@ partial is not a zero-fill cancellation.
 closure, reconciliation workers, or live integration, and it does not change routing, sizing or
 thresholds. `USE_MAKER_EXECUTION` semantics (invariant #21) are untouched, and the maker regression
 suite passes unchanged.
+
+### Review round on the fix itself — two ways evidence was still lost
+
+The parallel Codex session probed the first version of this repair and found two defects. Both were
+reproduced before being fixed, and both are the same underlying error: **an accepted placement, or a
+cancellation snapshot, was treated as less valuable than the exception or the status that accompanied
+it.**
+
+**Persistence discarded an accepted order id.** Once `_accepted_placement` returns an id, a real order
+exists at the exchange. The `save_order` and `mark_signal_acted` calls that follow were unguarded, so a
+database failure propagated the exception *and took the identifier with it* — leaving an order that
+nothing in the system names. `/api/orders` has no handler for it either, so the caller got an HTTP 500
+and lost the id entirely. Note the first version was still an improvement on the original, where those
+writes sat *inside* the retry loop and a failed write triggered another placement; but "no longer
+retries" is not the same as "does not lose the order". All three placement paths now share
+`_persist_accepted_order`, which reports `reconciliation_required` **with the accepted id** rather than
+raising. The maker path returns before its fill poll and market fallback, because replacing an order
+that could not be recorded is how one signal becomes two positions.
+
+**A cancellation snapshot for a different order contributed its evidence.** The identity check lived
+*inside* the `FILLED` branch, so a snapshot naming another order fell through to
+`_confirmed_unfilled_cancel` — which correctly refused the database write on identity — and the result
+was then built with that other order's `status`, `filled_size` and `filled_value` attached to the order
+we had asked about. Refusing to persist is not sufficient: a reconciliation record citing another
+order's 100 units is *worse* than one citing none, because it looks like evidence. Identity is now
+established before any field is trusted, and a mismatch returns a distinct reason with no status or
+fills at all.
+
+This is worth recording for the same reason §9a of the lifecycle contract exists: the first fix was
+correct about the thing it was aimed at and still lost evidence two different ways, so the rule is not
+"validate the response" but **"an identifier or a fill is the most valuable thing in the record, and
+nothing — not an exception, not a status field — may be allowed to discard or misattribute it."**

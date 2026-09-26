@@ -91,6 +91,31 @@ def _explicit_rejection(resp: Any) -> bool:
     return isinstance(resp, dict) and resp.get("success") is False
 
 
+async def _persist_accepted_order(row: Dict, signal_id: Any = None) -> Optional[str]:
+    """Record an ACCEPTED placement. Returns None on success, else a failure reason.
+
+    Once a placement is accepted a real order exists at the exchange, so the
+    accepted identifier is the most valuable thing the caller can be given. An
+    unguarded write discarded it: the exception propagated and took the id with
+    it, leaving an order nothing names. Reporting "persistence failed, here is
+    the id" is strictly better than raising, because the id is what makes the
+    exposure reconcilable.
+    """
+    order_id = row["order_id"]
+    try:
+        await database.save_order(row)
+    except Exception as e:
+        logger.error("Order %s was accepted but could not be recorded: %s", order_id, e)
+        return f"Order was accepted but could not be recorded: {e}"
+    if signal_id:
+        try:
+            await database.mark_signal_acted(signal_id, order_id)
+        except Exception as e:
+            logger.error("Order %s recorded but signal link failed: %s", order_id, e)
+            return f"Order was accepted but the signal link failed: {e}"
+    return None
+
+
 def _acknowledged_cancel(resp: Any, order_id: str) -> bool:
     """True when the exchange acknowledged the cancel request for THIS order.
 
@@ -355,7 +380,7 @@ class OrderExecutor:
                 "reason": "Order placement was neither accepted nor rejected",
             }
 
-        await database.save_order(
+        failure = await _persist_accepted_order(
             {
                 "order_id": order_id,
                 "product_id": pid,
@@ -366,10 +391,18 @@ class OrderExecutor:
                 "quote_size": quote_size,
                 "status": "live",
                 "strategy": signal.get("signal_type", "TA"),
-            }
+            },
+            signal.get("id"),
         )
-        if signal.get("id"):
-            await database.mark_signal_acted(signal["id"], order_id)
+        if failure:
+            # The order exists. Hand back its id rather than an exception, and
+            # place nothing else.
+            return {
+                "success": False,
+                "order_id": order_id,
+                "reconciliation_required": True,
+                "reason": failure,
+            }
 
         logger.info(f"ORDER: {side} {base_size} {pid} @ ${price:,.4f} → {order_id}")
         return {"success": True, "order_id": order_id, "status": "live"}
@@ -503,7 +536,7 @@ class OrderExecutor:
                 "reason": "Maker placement was rejected or unconfirmed",
                 "reconciliation_required": not _explicit_rejection(resp),
             }
-        await database.save_order(
+        failure = await _persist_accepted_order(
             {
                 "order_id": order_id,
                 "product_id": pid,
@@ -514,10 +547,20 @@ class OrderExecutor:
                 "quote_size": quote_size,
                 "status": "live",
                 "strategy": signal.get("signal_type", "TA"),
-            }
+            },
+            signal.get("id"),
         )
-        if signal.get("id"):
-            await database.mark_signal_acted(signal["id"], order_id)
+        if failure:
+            # Stop before the fill poll and the market fallback: replacing an
+            # order we could not record is how one signal becomes two positions.
+            return {
+                "success": False,
+                "order_id": order_id,
+                "maker_order_id": order_id,
+                "fill_mode": "RECONCILIATION_REQUIRED",
+                "reconciliation_required": True,
+                "reason": failure,
+            }
         logger.info(f"MAKER ORDER: {side} {base_size} {pid} @ ${maker_price:,.4f} → {order_id}")
 
         # 6 — Poll for fill within timeout
@@ -663,7 +706,7 @@ class OrderExecutor:
                 "reason": "Market order was neither accepted nor rejected",
             }
 
-        await database.save_order(
+        failure = await _persist_accepted_order(
             {
                 "order_id": order_id,
                 "product_id": product_id,
@@ -674,6 +717,13 @@ class OrderExecutor:
                 "strategy": "MANUAL_MARKET",
             }
         )
+        if failure:
+            return {
+                "success": False,
+                "order_id": order_id,
+                "reconciliation_required": True,
+                "reason": failure,
+            }
         return {"success": True, "order_id": order_id}
 
     # ── Cancel ─────────────────────────────────────────────────────────────────
@@ -719,13 +769,24 @@ class OrderExecutor:
         if not isinstance(final, dict):
             return {**unresolved, "reason": "Cancellation status was malformed"}
 
+        # Identity FIRST. A snapshot naming another order is not weak evidence
+        # about this one, it is evidence about something else: attaching its
+        # status or fills here would manufacture a reconciliation record citing
+        # quantities that belong to a different order.
+        if _usable_order_id(final.get("order_id")) != order_id:
+            logger.error(
+                "Cancellation status for %s named a different order; evidence discarded",
+                order_id,
+            )
+            return {**unresolved, "reason": "Cancellation status named a different order"}
+
         fills = {
             "filled_size": final.get("filled_size"),
             "filled_value": final.get("filled_value"),
         }
         status = str(final.get("status", "")).upper()
 
-        if _usable_order_id(final.get("order_id")) == order_id and status == "FILLED":
+        if status == "FILLED":
             # The cancel lost the race. The fill is the truth; recording a
             # cancellation here would erase a real position.
             await database.update_order_status(order_id, "filled")
