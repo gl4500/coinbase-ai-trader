@@ -89,7 +89,9 @@ they do not appear in this worktree; the audit documents were read from the main
 | 10 | `main.py` / `exit_watcher` | Executor captured by value; `enable_trading` rebinding cannot reach it | **CONFIRMED, NOT FIXED** — Task 5 is investigate-only; fix proposed |
 | 11 | `exit_execution.execute_live_exit` | Exits no-op while the maker flag is off, but entries route live — asymmetric gate | **CONFIRMED, NOT FIXED** — documented as intentional (invariant #21); needs operator decision |
 | 12 | exit paths | Paper book closes before exchange confirmation | **CONFIRMED, NOT FIXED** — invariant #21; needs schema work |
-| 13 | `order_executor.execute_maker_signal` | Market fallback runs after a failed cancel; cancel response never inspected; partial fill treated as no fill | **CONFIRMED, NOT FIXED** — highest real-money risk; fix proposed |
+| 13 | `order_executor.execute_maker_signal` | Market fallback runs after a failed cancel; cancel response never inspected; partial fill treated as no fill | **FIXED** 2026-09-26 on `fix/maker-fallback-cancel-confirm` — fallback now requires a confirmed cancel and is sized to the unfilled remainder |
+| 14 | `tests/test_order_executor_maker.py` | `test_timeout_cancels_and_falls_back_to_market` pinned the old unconditional fallback (mocked `get_orders` as permanently OPEN) | **FIXED** — same intent, updated so the exchange confirms the cancel after `cancel_orders` |
+| 15 | `tests/test_execution_findings.py` | The three finding-4 characterisation tests pinned the defect they were written to expose | **FIXED** — deliberately inverted; they now pin the corrected behaviour |
 
 ---
 
@@ -246,7 +248,7 @@ All four **CONFIRMED**. Detail and fix proposals: `docs/handoffs/2026-09-26-exec
 | 1 | Enabling trading replaces the executor; background handlers keep the old instance | **CONFIRMED** | No | 2nd |
 | 2 | Live risk exits suppressed while the maker flag is off | **CONFIRMED** | Yes, #21 | 3rd — needs operator decision |
 | 3 | Paper book closes before exchange confirmation | **CONFIRMED** | Yes, #21 | 4th — needs schema |
-| 4 | Maker timeout fallback can market-order after a failed cancel | **CONFIRMED, broader than reported** | No | **1st — real money** |
+| 4 | Maker timeout fallback can market-order after a failed cancel | **FIXED 2026-09-26** | Now yes, #21 | done |
 
 Finding 1 mechanism: `main.py:459` and `:502` pass the executor **by value** while the adjacent
 `is_trading_fn=lambda: app_state.is_trading` is passed as a **callable**. `enable_trading`
@@ -315,7 +317,7 @@ Full detail: `docs/handoffs/2026-09-26-accounting-reconciliation.md`. Read-only
 
 ## 13. Next recommended task
 
-**Fix execution finding 4 (maker timeout fallback), TDD, before the 8002 maker shadow is promoted.**
+~~Fix execution finding 4 (maker timeout fallback), TDD, before the 8002 maker shadow is promoted.~~ **DONE 2026-09-26** on `fix/maker-fallback-cancel-confirm` (stacked on this branch). **The next task is now execution finding 1** — the executor late-binding fix: small, self-contained, and it removes a state-drift source that feeds the accounting problem.
 
 It is the only one of the four that can lose real money, it is reachable the moment
 `USE_MAKER_EXECUTION=true` runs against a funded account, and its fix is self-contained: make the

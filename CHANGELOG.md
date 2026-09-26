@@ -7,6 +7,50 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.84 — 2026-09-26 — fix: maker market fallback requires a confirmed cancel (execution finding 4)
+
+First fix from the 2026-09-26 audit's execution findings, and the only one that can
+lose real money. Stacked on `feat/outcome-label-provenance`.
+
+**The defect.** On maker fill-poll timeout, `execute_maker_signal` cancelled the
+resting post-only limit and then placed a market order **unconditionally**:
+
+- the cancel exception was caught, logged, and execution fell through;
+- `cancel_orders`' response body was never inspected, so a cancel that reported
+  failure without raising also fell through;
+- `_wait_for_fill` accepts only `status == "FILLED"`, so a **partial** fill was
+  treated as no fill and got a **full-size** market order on top of it.
+
+Any of the three could leave the account holding the limit *and* the market order —
+roughly double the intended exposure.
+
+**The fix.** The fallback is now gated on a confirmed cancel:
+
+1. `_cancel_confirmed` returns False on a raised exception **and** on a
+   `results[].success == false` body.
+2. `_order_state` re-queries the order through the existing `get_orders` client call.
+3. Branch on what the exchange actually says — `FILLED` is reported as a MAKER fill
+   (the cancel lost the race); `CANCELLED`/`CANCELED` allows a market order sized to
+   the **unfilled remainder** (`quote_size - filled_size*avg_fill_price`); a
+   remainder below the $1 minimum returns `MAKER_PARTIAL`; anything else, including
+   an unknown state or a failed query, places **nothing** and returns
+   `success=False`.
+
+A missed entry is cheap; double exposure is not.
+
+**Files:** `backend/agents/order_executor.py` (+`_cancel_confirmed`, `_order_state`,
+`_as_float`, `_CANCELLED_STATUSES`), `backend/tests/test_maker_fallback.py` (new, 10
+tests), `backend/tests/test_execution_findings.py` (the three finding-4
+characterisation tests deliberately inverted to pin the corrected behaviour),
+`CLAUDE.md` invariant #21 amended, `docs/handoffs/2026-09-26-execution-findings.md`
+marked FIXED.
+
+**Unchanged:** this is entirely inside the maker path, which is gated by
+`USE_MAKER_EXECUTION` (default **false**). Flag-off behaviour is byte-for-byte
+identical, so the live 8001 paper path is untouched. Findings 1, 2 and 3 remain
+CONFIRMED and unfixed; 2 and 3 still need an operator decision.
+
+
 ### Session 58.83 — 2026-09-26 — Outcome-label contract v2 + diagnostics separation + execution findings
 
 Prerequisite work for any further model or strategy experiment, driven by

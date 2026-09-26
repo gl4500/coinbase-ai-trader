@@ -5,11 +5,15 @@ Analysis + proposed fixes: docs/handoffs/strategy-prerequisites.md section 9
 
 READ THIS BEFORE "FIXING" A FAILURE HERE.
 
-These tests pin **current** behaviour, including behaviour that is defective.
-They exist so that the defect cannot change silently and so a deliberate fix has
-to update an explicit assertion. Task 5 was scoped to investigate without
-altering live-execution semantics, and findings 2 and 3 are documented as
-intentional in CLAUDE.md invariant #21.
+Findings 1, 2 and 3 pin **current** behaviour, including behaviour that is
+defective. They exist so the defect cannot change silently and so a deliberate
+fix has to update an explicit assertion. Findings 2 and 3 are documented as
+intentional in CLAUDE.md invariant #21 and still await an operator decision.
+
+**Finding 4 is now FIXED** (branch fix/maker-fallback-cancel-confirm). Its three
+assertions below were inverted deliberately and now pin the corrected behaviour:
+the market fallback runs only on a confirmed cancel, sized to the unfilled
+remainder. The exhaustive cases live in tests/test_maker_fallback.py.
 
 No test here places an order: every exchange call is a stub.
 """
@@ -191,7 +195,7 @@ async def test_f3_paper_close_stands_even_when_the_live_exit_raises(monkeypatch)
     assert sold == ["WS_STOP_LOSS"], "paper book recorded the close"
 
 
-# ── Finding 4: market fallback runs even when the cancel failed ────────────────
+# ── Finding 4 (FIXED): no market fallback without a confirmed cancel ──────────
 
 
 @pytest.fixture
@@ -228,12 +232,18 @@ def maker_env(monkeypatch):
     return executor
 
 
-async def test_f4_market_order_is_placed_even_when_cancel_raises(maker_env, monkeypatch):
-    """CONFIRMED. The cancel exception is logged and execution falls through.
+def _stub_order_state(monkeypatch, order):
+    async def _get_orders(product_id=None, order_status=None, limit=100):
+        return [] if order is None else [order]
 
-    Consequence: if the resting limit is still live (or filled in the race
-    between the poll timing out and the cancel landing), the account can end up
-    with roughly double the intended exposure.
+    monkeypatch.setattr(oe.coinbase_client, "get_orders", _get_orders)
+
+
+async def test_f4_no_market_order_when_cancel_raises(maker_env, monkeypatch):
+    """FIXED (was: the exception was swallowed and the fallback ran anyway).
+
+    While the resting limit may still be live, adding a market order would
+    roughly double the intended exposure.
     """
     market_calls = []
 
@@ -246,19 +256,20 @@ async def test_f4_market_order_is_placed_even_when_cancel_raises(maker_env, monk
 
     monkeypatch.setattr(oe.coinbase_client, "cancel_orders", _cancel_raises)
     monkeypatch.setattr(oe.coinbase_client, "place_market_order", _place_market)
+    _stub_order_state(monkeypatch, {"order_id": "limit-1", "status": "OPEN", "filled_size": "0"})
 
     result = await maker_env.execute_maker_signal(
         {"product_id": "BTC-USD", "side": "BUY", "bid": 100.0, "ask": 100.1, "quote_size": 50.0},
         timeout_secs=0.01,
     )
 
-    assert market_calls == [("BTC-USD", "BUY", 50.0)]
-    assert result["fill_mode"] == "TAKER_FALLBACK"
-    assert result["success"] is True
+    assert market_calls == []
+    assert result["success"] is False
+    assert "cancel" in result["reason"].lower()
 
 
-async def test_f4_cancel_response_body_is_never_inspected(maker_env, monkeypatch):
-    """A cancel that reports failure *without raising* also falls through."""
+async def test_f4_cancel_response_body_is_inspected(maker_env, monkeypatch):
+    """FIXED (was: the body was never read, so a reported failure fell through)."""
     market_calls = []
 
     async def _cancel_reports_failure(order_ids):
@@ -270,18 +281,20 @@ async def test_f4_cancel_response_body_is_never_inspected(maker_env, monkeypatch
 
     monkeypatch.setattr(oe.coinbase_client, "cancel_orders", _cancel_reports_failure)
     monkeypatch.setattr(oe.coinbase_client, "place_market_order", _place_market)
+    _stub_order_state(monkeypatch, {"order_id": "limit-1", "status": "OPEN", "filled_size": "0"})
 
-    await maker_env.execute_maker_signal(
+    result = await maker_env.execute_maker_signal(
         {"product_id": "ETH-USD", "side": "BUY", "bid": 10.0, "ask": 10.01, "quote_size": 25.0},
         timeout_secs=0.01,
     )
 
-    assert market_calls == [25.0], "fallback ran despite a failed cancel"
+    assert market_calls == [], "a cancel that reports failure must block the fallback"
+    assert result["success"] is False
 
 
-async def test_f4_partial_fill_is_treated_as_no_fill(maker_env, monkeypatch):
-    """`_wait_for_fill` only accepts status == FILLED, so a partially filled
-    maker order still triggers a full-size market order on top of it."""
+async def test_f4_partial_fill_only_tops_up_the_remainder(maker_env, monkeypatch):
+    """FIXED (was: a partial fill was treated as no fill and got a FULL-size
+    market order on top of the filled portion)."""
     market_calls = []
 
     async def _cancel_ok(order_ids):
@@ -293,11 +306,20 @@ async def test_f4_partial_fill_is_treated_as_no_fill(maker_env, monkeypatch):
 
     monkeypatch.setattr(oe.coinbase_client, "cancel_orders", _cancel_ok)
     monkeypatch.setattr(oe.coinbase_client, "place_market_order", _place_market)
+    _stub_order_state(
+        monkeypatch,
+        {
+            "order_id": "limit-1",
+            "status": "CANCELLED",
+            "filled_size": "1.0",
+            "average_filled_price": "20.0",
+        },
+    )
 
     await maker_env.execute_maker_signal(
         {"product_id": "SOL-USD", "side": "BUY", "bid": 20.0, "ask": 20.02, "quote_size": 40.0},
         timeout_secs=0.01,
     )
 
-    # Full quote_size, not the unfilled remainder.
-    assert market_calls == [40.0]
+    # $20 of the $40 order already filled -> only the $20 remainder may be bought.
+    assert market_calls == [20.0]

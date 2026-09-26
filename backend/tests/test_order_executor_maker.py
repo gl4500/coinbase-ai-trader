@@ -134,13 +134,24 @@ class TestExecuteMakerSignal:
                     "success_response": {"order_id": "ord-3"},
                 }
             )
-            # Order never fills — always returns OPEN
-            cb.get_orders = AsyncMock(
-                return_value=[
-                    {"order_id": "ord-3", "status": "OPEN"},
-                ]
-            )
-            cb.cancel_orders = AsyncMock(return_value={"success": True})
+            # Order never fills while polling; after the cancel the exchange
+            # confirms it as CANCELLED with nothing filled. The fallback now
+            # requires that confirmation (CLAUDE.md invariant #21) — an order
+            # still reporting OPEN blocks it, which is covered in
+            # tests/test_maker_fallback.py.
+            cancelled = {"done": False}
+
+            async def _get_orders(product_id=None, order_status=None, limit=100):
+                if cancelled["done"]:
+                    return [{"order_id": "ord-3", "status": "CANCELLED", "filled_size": "0"}]
+                return [{"order_id": "ord-3", "status": "OPEN"}]
+
+            async def _cancel_orders(order_ids):
+                cancelled["done"] = True
+                return {"results": [{"success": True}]}
+
+            cb.get_orders = _get_orders
+            cb.cancel_orders = AsyncMock(side_effect=_cancel_orders)
             cb.place_market_order = AsyncMock(
                 return_value={
                     "success": True,

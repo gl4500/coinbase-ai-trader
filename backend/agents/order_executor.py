@@ -42,6 +42,17 @@ def _maker_price(side: str, bid: float, ask: float) -> float:
     return bid if side.upper() == "BUY" else ask
 
 
+_CANCELLED_STATUSES = ("CANCELLED", "CANCELED")
+
+
+def _as_float(value) -> float:
+    """Exchange numerics arrive as strings; absent/unparseable means 0.0."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class OrderExecutor:
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
@@ -299,6 +310,46 @@ class OrderExecutor:
                 return False
             await asyncio.sleep(min(0.5, max(0.01, remaining / 4)))
 
+    async def _cancel_confirmed(self, order_id: str) -> bool:
+        """Cancel `order_id` and report whether the exchange confirmed it.
+
+        Returns False both when the call raises and when the response body
+        reports failure — a cancel that fails without raising is still a failed
+        cancel, and the caller must not assume the order is gone.
+        """
+        try:
+            resp = await coinbase_client.cancel_orders([order_id])
+        except Exception as e:
+            logger.error(f"Cancel during maker timeout raised: {e}")
+            return False
+
+        results = (resp or {}).get("results") or []
+        for entry in results:
+            if entry.get("success") is False:
+                logger.error(
+                    f"Cancel of {order_id} reported failure: "
+                    f"{entry.get('failure_reason', 'unspecified')}"
+                )
+                return False
+        return True
+
+    async def _order_state(self, product_id: str, order_id: str) -> Optional[Dict]:
+        """Current exchange-reported state of one order, or None if unknown.
+
+        None means "do not act": either the query failed or the exchange did not
+        return the order, and neither justifies adding exposure.
+        """
+        try:
+            orders = await coinbase_client.get_orders(product_id=product_id)
+        except Exception as e:
+            logger.error(f"Order state query failed for {order_id}: {e}")
+            return None
+
+        for order in orders or []:
+            if order.get("order_id") == order_id:
+                return order
+        return None
+
     async def execute_maker_signal(
         self,
         signal: Dict,
@@ -415,18 +466,67 @@ class OrderExecutor:
         if filled:
             return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
 
-        # 7 — Timeout: cancel + market fallback so the entry isn't lost
-        logger.info(
-            f"MAKER timeout after {timeout_secs}s — canceling {order_id} and falling back to MARKET"
-        )
-        try:
-            await coinbase_client.cancel_orders([order_id])
-            await database.update_order_status(order_id, "canceled")
-        except Exception as e:
-            logger.error(f"Cancel during maker timeout failed: {e}")
+        # 7 — Timeout: cancel, then CONFIRM the order's actual state before any
+        # fallback. An unconfirmed cancel must never be topped up with a market
+        # order — if the resting limit is still live, or filled in the race
+        # between the poll expiring and the cancel landing, that would roughly
+        # double the intended exposure. A missed entry is cheap; double exposure
+        # is not. See docs/handoffs/2026-09-26-execution-findings.md finding 4.
+        logger.info(f"MAKER timeout after {timeout_secs}s — canceling {order_id}")
+        cancel_confirmed = await self._cancel_confirmed(order_id)
+        state = await self._order_state(pid, order_id)
+
+        if state is None:
+            logger.error(
+                f"Maker timeout: order {order_id} state unknown after cancel — "
+                f"no market fallback placed"
+            )
+            return {
+                "success": False,
+                "reason": "Maker timed out and the order state could not be confirmed; "
+                "no market fallback placed",
+            }
+
+        status = str(state.get("status", "")).upper()
+        filled_size = _as_float(state.get("filled_size"))
+        fill_price = _as_float(state.get("average_filled_price")) or maker_price
+        filled_notional = filled_size * fill_price
+
+        if status == "FILLED":
+            # The cancel lost the race: this is a maker fill, not a reason to buy again.
+            await database.update_order_status(order_id, "filled")
+            logger.info(f"MAKER filled during cancel race: {order_id}")
+            return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
+
+        if not cancel_confirmed or status not in _CANCELLED_STATUSES:
+            logger.error(
+                f"Maker timeout: cancel of {order_id} unconfirmed (status={status or 'unknown'}) "
+                f"— no market fallback placed"
+            )
+            return {
+                "success": False,
+                "reason": f"Maker timed out and the cancel was not confirmed "
+                f"(status={status or 'unknown'}); no market fallback placed",
+            }
+
+        await database.update_order_status(order_id, "canceled")
+
+        remainder = quote_size - filled_notional
+        if remainder < 1.0:
+            # Effectively filled as a maker order; topping up would overshoot.
+            logger.info(
+                f"MAKER partial fill {filled_size} of {pid} (${filled_notional:,.2f}); "
+                f"${remainder:,.2f} remainder is below the $1 minimum — no fallback"
+            )
+            return {
+                "success": True,
+                "order_id": order_id,
+                "fill_mode": "MAKER_PARTIAL",
+                "filled_notional": filled_notional,
+            }
 
         try:
-            mkt_resp = await coinbase_client.place_market_order(pid, side, quote_size)
+            mkt_resp = await coinbase_client.place_market_order(pid, side, remainder)
             mkt_order = mkt_resp.get("success_response", mkt_resp)
             mkt_id = mkt_order.get("order_id", "unknown")
             await database.save_order(
@@ -435,7 +535,7 @@ class OrderExecutor:
                     "product_id": pid,
                     "side": side,
                     "order_type": "MARKET",
-                    "quote_size": quote_size,
+                    "quote_size": remainder,
                     "status": "live",
                     "strategy": signal.get("signal_type", "TA") + "_TAKER_FALLBACK",
                 }

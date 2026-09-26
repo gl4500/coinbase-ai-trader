@@ -176,7 +176,7 @@ Make the book state reflect exchange reality rather than intent:
 
 ---
 
-## Finding 4 — Maker timeout fallback can submit a market order after cancellation fails
+## Finding 4 — Maker timeout fallback can submit a market order after cancellation fails — **FIXED 2026-09-26**
 
 **CONFIRMED — and broader than the finding as stated.**
 
@@ -210,11 +210,21 @@ Three distinct problems:
 There is also an inherent race: the limit can fill between the poll timing out and the cancel
 landing, which is exactly the case where cancel legitimately fails.
 
+### Status: FIXED on `fix/maker-fallback-cancel-confirm`
+
+Implemented exactly as proposed below. `_cancel_confirmed` treats a raised exception **and** a
+`results[].success == false` body as a failed cancel; `_order_state` then re-queries the order via
+the existing `get_orders` client call. A market order is placed only when the cancel is confirmed
+**and** the exchange reports CANCELLED/CANCELED, sized to the unfilled remainder. FILLED is reported
+as a MAKER fill (the cancel lost the race); a sub-\ remainder returns `MAKER_PARTIAL`; an unknown
+state places nothing and returns `success=False`. CLAUDE.md invariant #21 amended to match.
+
 ### Tests
 
-`test_f4_market_order_is_placed_even_when_cancel_raises`,
-`test_f4_cancel_response_body_is_never_inspected`,
-`test_f4_partial_fill_is_treated_as_no_fill`
+Exhaustive cases: `backend/tests/test_maker_fallback.py` (10 tests). The three characterisation
+tests in `test_execution_findings.py` were deliberately inverted and now pin the corrected
+behaviour: `test_f4_no_market_order_when_cancel_raises`,
+`test_f4_cancel_response_body_is_inspected`, `test_f4_partial_fill_only_tops_up_the_remainder`
 
 ### Proposed fix
 
@@ -249,8 +259,8 @@ Never place the fallback while the limit's state is unknown. Sizing must come fr
 
 | # | Finding | Verdict | Documented in CLAUDE.md | Fix risk | Recommended order |
 |---|---|---|---|---|---|
-| 4 | Market fallback after failed cancel | CONFIRMED (+2 extra defects) | No | Low | **1st — real-money exposure** |
-| 1 | Stale executor after enable | CONFIRMED | No | Low | 2nd |
+| 4 | Market fallback after failed cancel | **FIXED** | Now yes, #21 | — | done 2026-09-26 |
+| 1 | Stale executor after enable | CONFIRMED | No | Low | **1st — next** |
 | 2 | Exits suppressed by maker flag | CONFIRMED | Yes, invariant #21 | Medium — needs operator decision | 3rd |
 | 3 | Paper close before confirmation | CONFIRMED | Yes, invariant #21 | High — schema + two-phase exits | 4th, with provenance work |
 
