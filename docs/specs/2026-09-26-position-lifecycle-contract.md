@@ -4,7 +4,10 @@
 **Purpose:** the shared contract that execution findings 2 and 3 need before they can be fixed safely,
 plus the two taker-surface defects found while reviewing.
 **Authors:** drafted by the Claude session, reviewed and materially corrected by the parallel Codex
-session over the shared session link on 2026-09-26.
+session over the shared session link on 2026-09-26. The implementation then went through two
+further adversarial review rounds which found ten defects in it — six of presence-versus-validity
+and four of state-versus-evidence consistency — recorded in
+`backend/tests/test_position_lifecycle_adversarial.py`.
 
 ---
 
@@ -259,6 +262,32 @@ Explicitly **out of scope** of this document: any change to live routing, the pa
 models, or strategy.
 
 ---
+
+## 8b. Trusted caller boundary — what the validator cannot check
+
+Added after two adversarial review rounds against the implementation, because the
+rules below are weaker than they look and a reader should not mistake them for
+verification.
+
+The validator requires a linked `order_id` and a non-empty `fill_ids` list before
+it will move a position, and requires a real boolean for the reconciler's
+`exchange_terminal`. **None of that is verification.** This module cannot confirm
+that an identifier corresponds to anything the exchange ever issued, because no
+persisted correlation exists: `orders` has zero rows, `trades` has no order or
+fill column, and nothing cross-checks a claimed `fill_id` against a real fill.
+
+So "linked" currently means **"the caller supplied a well-formed identifier"**,
+nothing stronger. A caller that fabricates `order_id="ex-1"` and
+`fill_ids=["f-1"]` will pass every check here. That is acceptable only because the
+validator is one layer inside a system whose next step (§8 step 1) is to persist
+intents, orders and fills and make the correlation real. Until then this is a
+trusted-caller boundary, and the trust is doing load-bearing work.
+
+Two consequences:
+
+- Do not cite a green validator as evidence that execution state is correct.
+- The reconciler (§7) cannot be built on the validator alone. It needs the
+  persisted records, which is why §8 puts persistence first.
 
 ## 9. What the validator implements
 
