@@ -7,6 +7,18 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Fail-closed research rule loading - 2026-09-26
+
+- Exclude profiles with missing, blank or non-string sidecar rules; never
+  execute a display-summary fallback. Only explicit `(root)` is unconditional.
+- Reject duplicate complete profile identities before loading or simulation
+  can overwrite a rule. Rename the per-horizon lookup key to `sidecar_key`.
+- Reject row horizons that do not exactly match their parquet/sidecar horizon;
+  exclude missing, fractional, boolean and non-numeric values without coercion.
+- Exact-threshold rule provenance remains unresolved: the current producer
+  writes rounded summaries into sidecars too. Research deployment stays blocked.
+
+
 ### Horizon-qualified research profile identities - 2026-09-26
 
 - Qualify loaded profile IDs by product, horizon and leaf; use that identity

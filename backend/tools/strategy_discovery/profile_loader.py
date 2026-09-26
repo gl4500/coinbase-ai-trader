@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Dict, List
 
@@ -62,6 +63,7 @@ def load_all_profiles(
         horizons = [1, 4, 24, 72, 168]
     phase3_dir = Path(phase3_dir)
     out: List[LoadedProfile] = []
+    seen_identities = set()
     for h in horizons:
         parquet_path = phase3_dir / f"profiles_h{int(h)}.parquet"
         sidecar_path = phase3_dir / f"rule_paths_h{int(h)}.json"
@@ -96,10 +98,32 @@ def load_all_profiles(
             with open(sidecar_path, "r", encoding="utf-8") as f:
                 rule_paths = json.load(f)
         for _, row in df.iterrows():
+            row_horizon = row.get("horizon")
+            if (
+                not isinstance(row_horizon, Real)
+                or isinstance(row_horizon, bool)
+                or row_horizon != int(h)
+            ):
+                logger.warning(
+                    "%s: excluded profile with invalid or mismatched horizon %r",
+                    parquet_path.name,
+                    row_horizon,
+                )
+                continue
             pid = str(row["pid"])
             leaf_id = int(row["leaf_id"])
-            profile_id = f"{pid}__{leaf_id}"
-            rule_str = rule_paths.get(profile_id, str(row.get("rule_path_summary", "")))
+            identity = (pid, int(row["horizon"]), leaf_id)
+            if identity in seen_identities:
+                raise ValueError(f"duplicate research profile identity: {identity}")
+            seen_identities.add(identity)
+            # Sidecars are per-horizon; their keys deliberately omit the horizon.
+            sidecar_key = f"{pid}__{leaf_id}"
+            rule_str = rule_paths.get(sidecar_key)
+            if not isinstance(rule_str, str) or not rule_str.strip():
+                logger.warning(
+                    "%s: excluded profile %s with unresolved rule", parquet_path.name, identity
+                )
+                continue
             out.append(
                 LoadedProfile(
                     pid=pid,

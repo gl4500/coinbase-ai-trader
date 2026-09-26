@@ -110,3 +110,32 @@ terminal consistency/overfill/strict-boolean probes now reject invalid evidence.
 No blocker remains for those reported cases in the reviewed source; final
 commit/full suite still pending. Persisted exchange correlation remains outside
 this pure validator and is required before live integration.
+
+## Missing-rule and duplicate-identity follow-up
+
+Claude independently reviewed PR #64 and found no blocker in the horizon fix,
+but reproduced a pre-existing missing-rule-to-always-fire path. The loader
+also executed a rounded display summary when its sidecar lookup missed.
+New isolated branch `fix/fail-closed-research-rules` excludes unresolved rules,
+removes summary fallback, keeps explicit `(root)` distinct, and rejects duplicate
+complete identities in loader and simulator. Eleven regressions failed before
+the fix; 48 targeted loader/simulator/driver/selection tests now pass. Full
+pre-commit validation completed in 5b1e950: 1522 passed, 65 skipped, one
+deselected, one xfailed, two xpassed; 14 existing warnings, 363.60 seconds.
+Draft PR #65 was published and its initial CI passed.
+
+Additional producer defect verified in `mine_universe.py`: the sidecar value
+is `p.rule_path_summary`, so the sidecar itself is not exact-threshold evidence.
+A separate versioned exact-rule producer/consumer contract is required, including
+legacy exclusion and precision-preserving serialization. This first follow-up
+does not claim to fix sidecar precision, changing trees across folds, or
+selection-only profit reporting. Deployment remains blocked.
+
+Claude PR #65 review found row/file horizon provenance unchecked. Seven new
+regressions failed first; the follow-up excludes mismatched or malformed
+horizons without integer truncation. All 55 targeted tests pass. Commit 2002a6b passed the full hook: 1529 passed,
+65 skipped, one deselected, one xfailed, two xpassed; 14 existing warnings,
+369.45 seconds. Pinned Ruff 0.9.0 check and format pass on all 253 backend files. Duplicate identity raises fail the
+entire load deliberately; unresolved rules and bad horizons exclude individual
+rows with warnings. All artifacts emitted by the current producer, including
+existing sidecars, use rounded summaries and must not be grandfathered as exact.
