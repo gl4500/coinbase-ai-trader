@@ -125,14 +125,28 @@ A transition without its evidence is not a transition. It is `RECONCILIATION_REQ
 | `SUBMITTING` | the above plus `submitted_at` |
 | `ACCEPTED` | exchange `order_id`, `accepted_at` |
 | `FILLED` | exchange `order_id`, terminal status, `filled_size`, `avg_fill_price`, `fee`, `fill_id`(s), `observed_at` |
-| `WORKING_PARTIAL` / `SETTLED_PARTIAL` | as `FILLED`, plus `remaining_size` and whether the remainder is still live |
+| `WORKING_PARTIAL` | confirmed fill evidence (`filled_size`, `avg_fill_price`, `fill_id`(s)) **and** positive evidence that the remainder is still live. **Not** a terminal status — requiring one here contradicted this state's own non-terminality in the first draft. |
+| `SETTLED_PARTIAL` | confirmed fill evidence **plus** terminal confirmation that the remainder is gone (cancelled or expired), and the resulting `remaining_size` of zero working |
 | `CANCELLED` | terminal status **and** explicit zero `filled_size` **and** zero `filled_value` |
 | `REJECTED` | terminal status plus the exchange's reason |
 | `OPEN` / `OPEN_WITH_RESIDUAL` / `CLOSED` | the order evidence above, plus the resulting position size |
 
-**A placement or cancellation may be reported as success only when the exchange identifies the order.**
-`"unknown"` is an error path, never an identifier. This single rule closes
-`execute_market_order` and `cancel_order` directly.
+**A placement or cancellation may be reported as success only when the exchange identifies the
+order.** `"unknown"` is an error path, never an identifier. This closes `execute_market_order` and
+`cancel_order` directly.
+
+**Identification is necessary but not sufficient.** Three things must stay distinct, and collapsing any
+two of them is the same class of bug as the four sites in §0:
+
+| | Means | Does **not** mean |
+|---|---|---|
+| **Submission accepted** | the exchange has the order and named it | anything about fills |
+| **Cancellation acknowledged** | the exchange received the cancel *request* | the order is off the book |
+| **Cancellation terminally confirmed** | the order is terminal with a known final `filled_size` | — |
+
+A cancellation **acknowledgement** never implies flat exposure and never grants permission to replace
+the order. Only terminal confirmation does. PR #60 already enforces this in the maker path; the
+contract generalises it so the next caller cannot reintroduce it.
 
 ---
 
@@ -155,9 +169,13 @@ A transition without its evidence is not a transition. It is `RECONCILIATION_REQ
   Sequence numbers and timestamps are not identities.
 - **I7 — Quantities compare as `Decimal` at the product's increment.** Never float equality. "Filled
   size equals held size" is meaningless without the increment.
-- **I8 — Every row carries `run_id`, `model_hash`, `config_version`, `client_order_id`, exchange
-  `order_id` and `fill_id`.** Without these the accounting reconciliation stays archaeology — the same
-  provenance §5 of `2026-09-26-accounting-reconciliation.md` already requires.
+- **I8 — Every row carries `run_id`, `model_hash`, `config_version` and `client_order_id`.**
+  Exchange `order_id` and `fill_id` are **nullable until observed** and must never be fabricated or
+  defaulted: an `INTENT_CREATED` row cannot carry an identifier the exchange has not yet issued, and
+  the first draft's demand that *every* row carry them contradicted its own §4 evidence table. A
+  placeholder in either field is the `"unknown"` defect wearing a different hat. Without the rest,
+  the accounting reconciliation stays archaeology — the same provenance §5 of
+  `2026-09-26-accounting-reconciliation.md` already requires.
 
 ---
 
@@ -230,6 +248,13 @@ exchange truth over local belief, and today no exchange truth is recorded.
 5. I1 and I2 as behaviour changes, once 1–4 are proven
 6. `execute_market_order` and `cancel_order` brought under §4's identification rule
 
+**Step 6 is not gated on steps 1–5.** Those two repairs are *fail-closed*: they convert a false success
+into an explicit error and place no orders that were not already being placed. They are independently
+testable and reviewable without changing deployed routing, so gating them behind reconciliation would
+delay a safety improvement for no benefit. What **is** gated on reconciliation is the full
+exit-accounting integration — I1 and I2 — because those depend on exchange truth that is not yet
+recorded.
+
 Explicitly **out of scope** of this document: any change to live routing, the paper book, thresholds,
 models, or strategy.
 
@@ -243,3 +268,8 @@ isolation before anything persists or acts on them.
 
 Deliberately **not** in the validator: what to *do* in a state. It answers only whether a transition is
 legal and adequately evidenced.
+
+**What its tests do and do not establish.** Passing validator tests demonstrate that the transition
+rules above hold as written. They are **not** evidence of end-to-end execution correctness: they
+exercise no exchange, no database, no concurrency and no clock. Treating a green validator suite as
+proof that execution is safe would repeat the mistake this whole document exists to correct.
