@@ -139,3 +139,22 @@ horizons without integer truncation. All 55 targeted tests pass. Commit 2002a6b 
 entire load deliberately; unresolved rules and bad horizons exclude individual
 rows with warnings. All artifacts emitted by the current producer, including
 existing sidecars, use rounded summaries and must not be grandfathered as exact.
+
+
+## Distinct outer-fold count follow-up
+
+Task `distinct-outer-fold-count`, branch `fix/distinct-outer-folds`, stacked on
+PR #65 at f860782. Four regressions reproduced one successful period counted as
+four passes, four periods as sixteen, and five as twenty. Count each direction
+once per outer period. A fifth RED regression showed that old `chronological_v1`
+artifacts were still accepted; producer and loader now require
+`chronological_distinct_folds_v2`, with no archive relabeling.
+
+57 targeted miner/loader/writer/driver tests passed; one expensive synthetic
+mining test is reserved for the full hook. Pinned Ruff 0.9.0 lint/format pass on
+253 backend files. Full validation and commit wait for Claude's test-slot release.
+The deflation search count is a separate constant (nine combinations) and the
+standard deviation comes from inner scores; neither reads fold_pass_count.
+Selected-only trade aggregation and the latest-leaf summary remain unresolved,
+so a counted period still means at least one qualifying leaf in that direction,
+not a validated frozen strategy. No profitable/deployable strategy is claimed.

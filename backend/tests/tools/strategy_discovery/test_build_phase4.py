@@ -112,7 +112,7 @@ def _write_minimal_phase3(phase3_dir: Path):
     ]
     df = pd.DataFrame(rows, columns=_PROFILE_COLUMNS)
     df["schema_version"] = 2
-    df["validation_version"] = "chronological_v1"
+    df["validation_version"] = "chronological_distinct_folds_v2"
     df["n_folds_evaluated"] = 5
     phase3_dir.mkdir(parents=True, exist_ok=True)
     pq.write_table(
