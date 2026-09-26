@@ -16,7 +16,9 @@ Run (after all 3 horizons trained via train_xgb_v4_5.py):
     cd backend && python -m tools.v4_5_horizon_compare \
       --horizons 24,72,168 --pids BTC-USD,ETH-USD,...
 """
+
 from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -40,6 +42,7 @@ _HORIZON_THRESHOLDS: Dict[int, float] = {24: 0.015, 72: 0.03, 168: 0.06}
 
 # ── Pure helpers ──────────────────────────────────────────────────────────
 
+
 def _load_horizon_artifacts(horizon: int, base_dir: str) -> Dict[str, object]:
     """Load v4.5 booster + feature_names for one horizon.
 
@@ -50,7 +53,7 @@ def _load_horizon_artifacts(horizon: int, base_dir: str) -> Dict[str, object]:
     import xgboost as xgb
 
     model_path = os.path.join(base_dir, f"xgb_model_v4_5_h{horizon}.json")
-    feat_path  = os.path.join(base_dir, f"xgb_features_v4_5_h{horizon}.json")
+    feat_path = os.path.join(base_dir, f"xgb_features_v4_5_h{horizon}.json")
     for p in (model_path, feat_path):
         if not os.path.exists(p):
             raise FileNotFoundError(f"v4.5 horizon h{horizon} artifact missing: {p}")
@@ -62,7 +65,10 @@ def _load_horizon_artifacts(horizon: int, base_dir: str) -> Dict[str, object]:
 
 
 def _evaluate_on_holdout_3class(
-    booster, X: np.ndarray, y: np.ndarray, feature_names: List[str],
+    booster,
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: List[str],
 ) -> Dict[str, float]:
     """Compute per-class AUC + macro-AUC + logloss + class distribution.
 
@@ -71,19 +77,24 @@ def _evaluate_on_holdout_3class(
     class is NaN if no positive examples of that class in holdout.
     """
     import xgboost as xgb
-    from sklearn.metrics import roc_auc_score, log_loss
+    from sklearn.metrics import log_loss, roc_auc_score
 
     n = X.shape[0]
     out: Dict[str, float] = {
         "n_samples": n,
-        "pos_frac_down":    float((y == 0).mean()) if n > 0 else 0.0,
+        "pos_frac_down": float((y == 0).mean()) if n > 0 else 0.0,
         "pos_frac_neutral": float((y == 1).mean()) if n > 0 else 0.0,
-        "pos_frac_up":      float((y == 2).mean()) if n > 0 else 0.0,
+        "pos_frac_up": float((y == 2).mean()) if n > 0 else 0.0,
     }
     if n == 0:
-        return {**out, "auc_down": float("nan"), "auc_neutral": float("nan"),
-                "auc_up": float("nan"), "auc_macro": float("nan"),
-                "logloss": float("nan")}
+        return {
+            **out,
+            "auc_down": float("nan"),
+            "auc_neutral": float("nan"),
+            "auc_up": float("nan"),
+            "auc_macro": float("nan"),
+            "logloss": float("nan"),
+        }
     dmat = xgb.DMatrix(X, feature_names=feature_names)
     probs = booster.predict(dmat)  # (N, 3)
     probs = np.clip(probs, 1e-6, 1 - 1e-6)
@@ -94,15 +105,14 @@ def _evaluate_on_holdout_3class(
             aucs.append(float("nan"))
             continue
         try:
-            aucs.append(float(roc_auc_score((y == cls).astype(np.int8),
-                                              probs[:, cls])))
+            aucs.append(float(roc_auc_score((y == cls).astype(np.int8), probs[:, cls])))
         except ValueError:
             aucs.append(float("nan"))
     valid_aucs = [a for a in aucs if not np.isnan(a)]
-    out["auc_down"]    = aucs[0]
+    out["auc_down"] = aucs[0]
     out["auc_neutral"] = aucs[1]
-    out["auc_up"]      = aucs[2]
-    out["auc_macro"]   = float(np.mean(valid_aucs)) if valid_aucs else float("nan")
+    out["auc_up"] = aucs[2]
+    out["auc_macro"] = float(np.mean(valid_aucs)) if valid_aucs else float("nan")
 
     if len(set(y.tolist())) >= 2:
         out["logloss"] = float(log_loss(y, probs, labels=[0, 1, 2]))
@@ -112,8 +122,8 @@ def _evaluate_on_holdout_3class(
 
 
 def _evaluate_decision_rules(
-    probs: np.ndarray,    # shape (N, 3)
-    labels: np.ndarray,   # shape (N,) — 0/1/2
+    probs: np.ndarray,  # shape (N, 3)
+    labels: np.ndarray,  # shape (N,) — 0/1/2
 ) -> Dict[str, Dict[str, float]]:
     """Per-rule scorecard.
 
@@ -127,7 +137,7 @@ def _evaluate_decision_rules(
       trade_rate (BUY + SELL fraction), hold_rate.
     """
     n = probs.shape[0]
-    p_down, p_neutral, p_up = probs[:, 0], probs[:, 1], probs[:, 2]
+    p_down, _p_neutral, p_up = probs[:, 0], probs[:, 1], probs[:, 2]
     argmax = probs.argmax(axis=1)
 
     rules_buy_sell: Dict[str, tuple] = {
@@ -146,8 +156,8 @@ def _evaluate_decision_rules(
     }
 
     out: Dict[str, Dict[str, float]] = {}
-    label_up = (labels == 2)
-    label_dn = (labels == 0)
+    label_up = labels == 2
+    label_dn = labels == 0
 
     def _prf(signal: np.ndarray, truth: np.ndarray) -> tuple:
         if signal.sum() == 0:
@@ -169,26 +179,35 @@ def _evaluate_decision_rules(
         sp, sr, sf1 = _prf(sell, label_dn)
         trade_rate = float((buy | sell).mean()) if n > 0 else 0.0
         out[name] = {
-            "buy_precision": bp, "buy_recall": br, "buy_f1": bf1,
-            "sell_precision": sp, "sell_recall": sr, "sell_f1": sf1,
-            "trade_rate": trade_rate, "hold_rate": 1.0 - trade_rate,
+            "buy_precision": bp,
+            "buy_recall": br,
+            "buy_f1": bf1,
+            "sell_precision": sp,
+            "sell_recall": sr,
+            "sell_f1": sf1,
+            "trade_rate": trade_rate,
+            "hold_rate": 1.0 - trade_rate,
         }
     return out
 
 
 def _build_holdout_dataset(
-    pids: List[str], horizon: int, label_thresh: float,
-    history_dir: str, holdout_frac: float = 0.15,
+    pids: List[str],
+    horizon: int,
+    label_thresh: float,
+    history_dir: str,
+    holdout_frac: float = 0.15,
 ):
     """Build held-out (X, y) test set per pid using the LAST holdout_frac
     of each pid's history. Uses _build_samples_for_pid from train_xgb_v4_5."""
     from tools.train_xgb_v4_5 import (
-        _build_samples_for_pid, _load_candles_for_pid,
+        _build_samples_for_pid,
+        _load_candles_for_pid,
     )
-    from tools.xgb_v4_5_features import TIER_WINDOWS_V45, N_FEATURES_V45
+    from tools.xgb_v4_5_features import N_FEATURES_V45, TIER_WINDOWS_V45
 
     micro = TIER_WINDOWS_V45["micro"]
-    meso  = TIER_WINDOWS_V45["meso"]
+    meso = TIER_WINDOWS_V45["meso"]
     macro = TIER_WINDOWS_V45["macro"]
 
     all_X: List[np.ndarray] = []
@@ -198,8 +217,12 @@ def _build_holdout_dataset(
         if not candles:
             continue
         X, y, _ts = _build_samples_for_pid(
-            candles, label_thresh=label_thresh, forward_hours=horizon,
-            micro=micro, meso=meso, macro=macro,
+            candles,
+            label_thresh=label_thresh,
+            forward_hours=horizon,
+            micro=micro,
+            meso=meso,
+            macro=macro,
         )
         if X.shape[0] == 0:
             continue
@@ -207,8 +230,7 @@ def _build_holdout_dataset(
         all_X.append(X[-n_hold:])
         all_y.append(y[-n_hold:])
     if not all_X:
-        return (np.zeros((0, N_FEATURES_V45), dtype=np.float64),
-                np.zeros(0, dtype=np.int8))
+        return (np.zeros((0, N_FEATURES_V45), dtype=np.float64), np.zeros(0, dtype=np.int8))
     return np.vstack(all_X), np.concatenate(all_y)
 
 
@@ -221,8 +243,11 @@ def _render_html_report(
     Highlights winning horizon (best auc_macro) and winning rule per horizon
     (best composite buy_f1 + sell_f1)."""
     # Winning horizon by macro AUC (ignore NaN)
-    valid_h = {h: m for h, m in metrics_by_horizon.items()
-               if not np.isnan(m.get("auc_macro", float("nan")))}
+    valid_h = {
+        h: m
+        for h, m in metrics_by_horizon.items()
+        if not np.isnan(m.get("auc_macro", float("nan")))
+    }
     winner_h = max(valid_h, key=lambda h: valid_h[h]["auc_macro"]) if valid_h else None
 
     # Winning rule per horizon by buy_f1+sell_f1
@@ -270,14 +295,19 @@ def _render_html_report(
             f"<h3>h{h} decision rules</h3><table>"
             "<tr><th>rule</th><th>buy_p</th><th>buy_r</th><th>buy_f1</th>"
             "<th>sell_p</th><th>sell_r</th><th>sell_f1</th><th>trade_rate</th></tr>"
-            + "".join(rule_rows) + "</table>"
+            + "".join(rule_rows)
+            + "</table>"
         )
 
     winner_banner = (
-        f"<div class='banner'>Winning horizon: <strong>h{winner_h}</strong> "
-        f"(auc_macro={valid_h[winner_h]['auc_macro']:.4f}) · "
-        f"Winning rule: <strong>{winner_rule_by_h.get(winner_h, 'n/a')}</strong></div>"
-    ) if winner_h is not None else "<div class='banner'>No valid metrics.</div>"
+        (
+            f"<div class='banner'>Winning horizon: <strong>h{winner_h}</strong> "
+            f"(auc_macro={valid_h[winner_h]['auc_macro']:.4f}) · "
+            f"Winning rule: <strong>{winner_rule_by_h.get(winner_h, 'n/a')}</strong></div>"
+        )
+        if winner_h is not None
+        else "<div class='banner'>No valid metrics.</div>"
+    )
 
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -301,9 +331,9 @@ def _render_html_report(
 <table>
   <tr><th>horizon</th><th>auc_macro</th><th>auc_down</th><th>auc_neutral</th>
       <th>auc_up</th><th>logloss</th><th>n</th><th>class_fracs (D/N/U)</th></tr>
-  {''.join(horizons_rows)}
+  {"".join(horizons_rows)}
 </table>
-{''.join(rule_blocks)}
+{"".join(rule_blocks)}
 </body></html>"""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -312,12 +342,11 @@ def _render_html_report(
 
 # ── Orchestrator ──────────────────────────────────────────────────────────
 
+
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--horizons", required=True,
-                   help="comma-separated, e.g. 24,72,168")
-    p.add_argument("--pids", required=True,
-                   help="comma-separated pid list")
+    p.add_argument("--horizons", required=True, help="comma-separated, e.g. 24,72,168")
+    p.add_argument("--pids", required=True, help="comma-separated pid list")
     p.add_argument("--base-dir", default=_DEFAULT_BASE_DIR)
     p.add_argument("--history-dir", default=_DEFAULT_HISTORY_DIR)
     p.add_argument("--out-path", default=_DEFAULT_OUT_PATH)
@@ -346,10 +375,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         X, y = _build_holdout_dataset(pids, h, thresh, args.history_dir)
         print(f"  h{h}: evaluating on {X.shape[0]} samples...", flush=True)
         metrics[h] = _evaluate_on_holdout_3class(
-            artifacts["booster"], X, y, artifacts["feature_names"],
+            artifacts["booster"],
+            X,
+            y,
+            artifacts["feature_names"],
         )
         # Re-predict for decision-rule eval (same probs)
         import xgboost as xgb
+
         if X.shape[0] > 0:
             dmat = xgb.DMatrix(X, feature_names=artifacts["feature_names"])
             probs = artifacts["booster"].predict(dmat)
@@ -357,10 +390,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             rules[h] = {}
         m = metrics[h]
-        print(f"  h{h}: auc_macro={m['auc_macro']:.4f} logloss={m['logloss']:.4f} "
-              f"n={m['n_samples']} class_fracs="
-              f"{m['pos_frac_down']:.2f}/{m['pos_frac_neutral']:.2f}/{m['pos_frac_up']:.2f}",
-              flush=True)
+        print(
+            f"  h{h}: auc_macro={m['auc_macro']:.4f} logloss={m['logloss']:.4f} "
+            f"n={m['n_samples']} class_fracs="
+            f"{m['pos_frac_down']:.2f}/{m['pos_frac_neutral']:.2f}/{m['pos_frac_up']:.2f}",
+            flush=True,
+        )
 
     _render_html_report(metrics, rules, args.out_path)
     print(f"\nHTML report: {args.out_path}", flush=True)

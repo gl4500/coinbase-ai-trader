@@ -5,6 +5,7 @@ Builds XGB training samples on either dollar bars (data/history/dollar/) or
 triple-barrier) across a horizon sweep, and produces out-of-fold predictions
 for the deployment scorecard. See 2026-05-21-offclock-xgb-track-design.md.
 """
+
 from __future__ import annotations
 
 import os
@@ -114,12 +115,12 @@ def build_product_samples(
         ValueError: if label_variant is not 'direction' or 'triple_barrier'.
     """
     import numpy as np
+
     from tools.xgb_v4_features import N_FEATURES_V4, extract_v4
 
     if label_variant not in ("direction", "triple_barrier"):
         raise ValueError(
-            f"unknown label_variant {label_variant!r}; "
-            "expected 'direction' or 'triple_barrier'"
+            f"unknown label_variant {label_variant!r}; expected 'direction' or 'triple_barrier'"
         )
 
     empty = {
@@ -138,9 +139,9 @@ def build_product_samples(
     feats, ys, ec, xc, ts = [], [], [], [], []
     for t in range(_MACRO_WINDOW, last_t, sample_step):
         tier_slices = {
-            "micro": bars[t - 60:t],
-            "meso": bars[t - 168:t],
-            "macro": bars[t - 336:t],
+            "micro": bars[t - 60 : t],
+            "meso": bars[t - 168 : t],
+            "macro": bars[t - 336 : t],
         }
         f, _ = extract_v4(tier_slices)
         if label_variant == "direction":
@@ -268,9 +269,7 @@ def run_config(
     scores, fold_ids, fold_spans_days = oof_predict_offclock(
         pooled["X"], pooled["y"], pooled["entry_ts"]
     )
-    returns = realized_log_returns_per_sample(
-        pooled["entry_close"], pooled["exit_close"]
-    )
+    returns = realized_log_returns_per_sample(pooled["entry_close"], pooled["exit_close"])
     return {
         "scores": scores,
         "labels": pooled["y"].astype(int),

@@ -4,6 +4,7 @@ Mirrors the rule in backend/tools/v4_5_horizon_compare.py:138 exactly:
   BUY  when p_up   > thresh_up   AND p_up   >= p_down (tie -> BUY)
   SELL when p_down > thresh_down AND p_down >  p_up  (strict)
 """
+
 import os
 import sys
 
@@ -13,12 +14,10 @@ if BACKEND not in sys.path:
 
 from agents.cnn_agent import _indep_thresholds_decision
 
-
 THRESH = 0.50  # matches horizon_compare default
 
 
 class TestIndepThresholdsDecision:
-
     def test_indep_strong_up(self):
         side, strength = _indep_thresholds_decision(0.10, 0.10, 0.80, THRESH, THRESH)
         assert side == "BUY"

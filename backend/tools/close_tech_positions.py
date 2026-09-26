@@ -11,6 +11,7 @@ Run from repo root:
 Run from backend/:
     ../.venv/Scripts/python.exe -m tools.close_tech_positions
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,7 @@ async def _get_price(pid: str, fallback: float) -> float:
     """Fetch current Coinbase price; fall back to caller-provided value."""
     try:
         from clients import coinbase_client
+
         data = await coinbase_client.get_product(pid)
         price = float(data.get("price") or 0)
         return price if price > 0 else fallback
@@ -48,26 +50,33 @@ async def close_tech_positions(db_path: Optional[str] = None) -> dict:
     db = sqlite3.connect(db_path)
     try:
         row = db.execute(
-            "SELECT positions_json, balance, realized_pnl FROM agent_state "
-            "WHERE agent='TECH'"
+            "SELECT positions_json, balance, realized_pnl FROM agent_state WHERE agent='TECH'"
         ).fetchone()
         if not row or not row[0]:
             print("No TECH agent_state row or empty positions_json. Nothing to do.")
-            return {"n_closed": 0, "final_balance": 0.0, "final_realized_pnl": 0.0,
-                    "fallback_used": 0}
+            return {
+                "n_closed": 0,
+                "final_balance": 0.0,
+                "final_realized_pnl": 0.0,
+                "fallback_used": 0,
+            }
         positions = json.loads(row[0])
         balance = float(row[1])
         realized = float(row[2])
         if not positions:
             print("TECH has zero open positions. Nothing to do.")
-            return {"n_closed": 0, "final_balance": balance,
-                    "final_realized_pnl": realized, "fallback_used": 0}
+            return {
+                "n_closed": 0,
+                "final_balance": balance,
+                "final_realized_pnl": realized,
+                "fallback_used": 0,
+            }
 
-        print(f"Closing {len(positions)} TECH positions; "
-              f"starting balance ${balance:.2f}, realized ${realized:.2f}")
-        closed_at_iso = time.strftime(
-            "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()
+        print(
+            f"Closing {len(positions)} TECH positions; "
+            f"starting balance ${balance:.2f}, realized ${realized:.2f}"
         )
+        closed_at_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
         new_realized = realized
         new_balance = balance
         fallback_used = 0
@@ -94,23 +103,34 @@ async def close_tech_positions(db_path: Optional[str] = None) -> dict:
                           'PRE_RETIREMENT', 'MANUAL_TECH_RETIREMENT',
                           ?, ?, ?)
                 """,
-                (pid, avg, price, size, usd_open, usd_close, pnl, pct,
-                 balance + pnl, opened_at, closed_at_iso),
+                (
+                    pid,
+                    avg,
+                    price,
+                    size,
+                    usd_open,
+                    usd_close,
+                    pnl,
+                    pct,
+                    balance + pnl,
+                    opened_at,
+                    closed_at_iso,
+                ),
             )
             new_realized += pnl
             new_balance += usd_close
-            print(f"  {pid:<14} sz={size:.6f} avg={avg:.4f} "
-                  f"now={price:.4f} pnl=${pnl:+.2f}")
+            print(f"  {pid:<14} sz={size:.6f} avg={avg:.4f} now={price:.4f} pnl=${pnl:+.2f}")
 
         db.execute(
-            "UPDATE agent_state SET positions_json=?, balance=?, realized_pnl=? "
-            "WHERE agent='TECH'",
+            "UPDATE agent_state SET positions_json=?, balance=?, realized_pnl=? WHERE agent='TECH'",
             ("{}", new_balance, new_realized),
         )
         db.commit()
-        print(f"Done. Final TECH balance ${new_balance:.2f}  "
-              f"realized_pnl ${new_realized:+.2f}  "
-              f"(fallback price used for {fallback_used} positions)")
+        print(
+            f"Done. Final TECH balance ${new_balance:.2f}  "
+            f"realized_pnl ${new_realized:+.2f}  "
+            f"(fallback price used for {fallback_used} positions)"
+        )
         return {
             "n_closed": len(positions),
             "final_balance": new_balance,

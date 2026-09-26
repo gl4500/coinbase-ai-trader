@@ -8,11 +8,10 @@ Contract:
           already-applied state.
         - Returns {"added": [...col_names], "already_present": [...col_names]}.
 """
+
 import os
 import sqlite3
 import sys
-
-import pytest
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
@@ -40,7 +39,8 @@ def _make_legacy_cnn_scans(db_path):
             atr REAL, vwap_dist REAL, fast_rsi REAL, velocity REAL,
             vol_z REAL, xgb_prob REAL, scanned_at TEXT
         )""")
-    c.commit(); c.close()
+    c.commit()
+    c.close()
 
 
 class TestMCMigration:
@@ -48,6 +48,7 @@ class TestMCMigration:
         db = tmp_path / "test.db"
         _make_legacy_cnn_scans(db)
         from migrations import mc_telemetry_20260516 as mig
+
         result = mig.run(str(db))
         assert "xgb_prob_stdev" in result["added"]
         assert "mc_telemetry" in result["added"]
@@ -61,6 +62,7 @@ class TestMCMigration:
         db = tmp_path / "test.db"
         _make_legacy_cnn_scans(db)
         from migrations import mc_telemetry_20260516 as mig
+
         mig.run(str(db))
         result = mig.run(str(db))
         assert result["added"] == []
@@ -73,14 +75,13 @@ class TestMCMigration:
 class TestXgbV4ShadowMigration:
     def test_migration_adds_xgb_prob_v4_column(self, tmp_path):
         import sqlite3
+
         from migrations.xgb_v4_shadow_20260517 import run
 
         db = str(tmp_path / "test.db")
         c = sqlite3.connect(db)
         c.execute(
-            "CREATE TABLE cnn_scans ("
-            " id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER"
-            ")"
+            "CREATE TABLE cnn_scans ( id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER)"
         )
         c.commit()
         c.close()
@@ -97,14 +98,13 @@ class TestXgbV4ShadowMigration:
 
     def test_migration_idempotent(self, tmp_path):
         import sqlite3
+
         from migrations.xgb_v4_shadow_20260517 import run
 
         db = str(tmp_path / "test.db")
         c = sqlite3.connect(db)
         c.execute(
-            "CREATE TABLE cnn_scans ("
-            " id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER"
-            ")"
+            "CREATE TABLE cnn_scans ( id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER)"
         )
         c.commit()
         c.close()
@@ -124,14 +124,13 @@ class TestXgbV4ShadowMigration:
 class TestXgbV4_5ShadowMigration:
     def test_migration_adds_three_columns(self, tmp_path):
         import sqlite3
+
         from migrations.xgb_v4_5_shadow_20260517 import run
 
         db = str(tmp_path / "test.db")
         c = sqlite3.connect(db)
         c.execute(
-            "CREATE TABLE cnn_scans ("
-            " id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER"
-            ")"
+            "CREATE TABLE cnn_scans ( id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER)"
         )
         c.commit()
         c.close()
@@ -149,14 +148,13 @@ class TestXgbV4_5ShadowMigration:
 
     def test_migration_idempotent(self, tmp_path):
         import sqlite3
+
         from migrations.xgb_v4_5_shadow_20260517 import run
 
         db = str(tmp_path / "test.db")
         c = sqlite3.connect(db)
         c.execute(
-            "CREATE TABLE cnn_scans ("
-            " id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER"
-            ")"
+            "CREATE TABLE cnn_scans ( id INTEGER PRIMARY KEY, product_id TEXT, scanned_at INTEGER)"
         )
         c.commit()
         c.close()

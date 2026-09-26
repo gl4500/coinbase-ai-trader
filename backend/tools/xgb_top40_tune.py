@@ -5,6 +5,7 @@ with default params (depth=4, lr=0.05, n=200). This sweeps depth,
 min_child_weight, subsample, colsample_bytree, learning_rate, and
 n_estimators to see whether the 0.55 gate is reachable on these features.
 """
+
 from __future__ import annotations
 
 import os
@@ -23,7 +24,6 @@ import torch  # noqa: E402
 from tools.feature_set_compare import _pooled_top_n  # noqa: E402
 from tools.walk_forward import purged_walk_forward_splits  # noqa: E402
 from tools.xgb_features import extract_features  # noqa: E402
-
 
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 
@@ -51,10 +51,14 @@ def main():
 
     # Rank features by gain on full 270.
     base_params = {
-        "objective": "binary:logistic", "eval_metric": "auc",
-        "learning_rate": 0.05, "max_depth": 4,
-        "min_child_weight": 1, "subsample": 1.0,
-        "seed": 0, "verbosity": 0,
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "learning_rate": 0.05,
+        "max_depth": 4,
+        "min_child_weight": 1,
+        "subsample": 1.0,
+        "seed": 0,
+        "verbosity": 0,
     }
     full = xgb.train(
         base_params,
@@ -75,35 +79,62 @@ def main():
     for depth in (3, 4, 5, 6):
         for lr in (0.03, 0.05, 0.1):
             for n_est in (200, 400, 600):
-                grid.append({"max_depth": depth, "learning_rate": lr,
-                             "n_est": n_est, "min_child_weight": 1,
-                             "subsample": 1.0, "colsample_bytree": 1.0,
-                             "reg_lambda": 1.0, "reg_alpha": 0.0})
+                grid.append(
+                    {
+                        "max_depth": depth,
+                        "learning_rate": lr,
+                        "n_est": n_est,
+                        "min_child_weight": 1,
+                        "subsample": 1.0,
+                        "colsample_bytree": 1.0,
+                        "reg_lambda": 1.0,
+                        "reg_alpha": 0.0,
+                    }
+                )
 
     # Grid 2: regularization at depth=4
     for mcw in (1, 5, 10, 20):
         for sub in (0.6, 0.8, 1.0):
             for cs in (0.6, 0.8, 1.0):
-                grid.append({"max_depth": 4, "learning_rate": 0.05,
-                             "n_est": 400, "min_child_weight": mcw,
-                             "subsample": sub, "colsample_bytree": cs,
-                             "reg_lambda": 1.0, "reg_alpha": 0.0})
+                grid.append(
+                    {
+                        "max_depth": 4,
+                        "learning_rate": 0.05,
+                        "n_est": 400,
+                        "min_child_weight": mcw,
+                        "subsample": sub,
+                        "colsample_bytree": cs,
+                        "reg_lambda": 1.0,
+                        "reg_alpha": 0.0,
+                    }
+                )
 
     # Grid 3: stronger L1/L2
     for la in (1.0, 5.0, 20.0):
         for al in (0.0, 1.0, 5.0):
-            grid.append({"max_depth": 4, "learning_rate": 0.05,
-                         "n_est": 400, "min_child_weight": 5,
-                         "subsample": 0.8, "colsample_bytree": 0.8,
-                         "reg_lambda": la, "reg_alpha": al})
+            grid.append(
+                {
+                    "max_depth": 4,
+                    "learning_rate": 0.05,
+                    "n_est": 400,
+                    "min_child_weight": 5,
+                    "subsample": 0.8,
+                    "colsample_bytree": 0.8,
+                    "reg_lambda": la,
+                    "reg_alpha": al,
+                }
+            )
 
     print(f"\nrunning {len(grid)} configs on top-40 ({len(keep)} features)\n")
-    print(f"{'depth':>5} {'lr':>5} {'n':>4} {'mcw':>4} {'sub':>4} {'cs':>4} "
-          f"{'la':>5} {'al':>4}  {'mean_auc':>9}")
+    print(
+        f"{'depth':>5} {'lr':>5} {'n':>4} {'mcw':>4} {'sub':>4} {'cs':>4} "
+        f"{'la':>5} {'al':>4}  {'mean_auc':>9}"
+    )
     print("-" * 72)
     for cfg in grid:
         params = {
-            "objective": "binary:logistic", "eval_metric": "auc",
+            "objective": "binary:logistic",
+            "eval_metric": "auc",
             "learning_rate": cfg["learning_rate"],
             "max_depth": cfg["max_depth"],
             "min_child_weight": cfg["min_child_weight"],
@@ -111,13 +142,16 @@ def main():
             "colsample_bytree": cfg["colsample_bytree"],
             "reg_lambda": cfg["reg_lambda"],
             "reg_alpha": cfg["reg_alpha"],
-            "seed": 0, "verbosity": 0,
+            "seed": 0,
+            "verbosity": 0,
         }
         ma, _ = _eval(masked, y, ts, names, splits, params, cfg["n_est"])
-        print(f"{cfg['max_depth']:>5} {cfg['learning_rate']:>5.2f} "
-              f"{cfg['n_est']:>4} {cfg['min_child_weight']:>4} "
-              f"{cfg['subsample']:>4.1f} {cfg['colsample_bytree']:>4.1f} "
-              f"{cfg['reg_lambda']:>5.1f} {cfg['reg_alpha']:>4.1f}  {ma:>9.4f}")
+        print(
+            f"{cfg['max_depth']:>5} {cfg['learning_rate']:>5.2f} "
+            f"{cfg['n_est']:>4} {cfg['min_child_weight']:>4} "
+            f"{cfg['subsample']:>4.1f} {cfg['colsample_bytree']:>4.1f} "
+            f"{cfg['reg_lambda']:>5.1f} {cfg['reg_alpha']:>4.1f}  {ma:>9.4f}"
+        )
         if ma > best[0]:
             best = (ma, cfg)
 

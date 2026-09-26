@@ -10,7 +10,9 @@ All three must be written together or all NULL (per CLAUDE.md invariant #17).
 Idempotent — safe to re-run. Matches the pattern of mc_telemetry_20260516.py
 and xgb_v4_shadow_20260517.py.
 """
+
 from __future__ import annotations
+
 import sqlite3
 from typing import Dict, List
 
@@ -21,9 +23,9 @@ def run(db_path: str) -> Dict[str, List[str]]:
     Returns {"added": [cols added this run], "already_present": [cols skipped]}.
     """
     new_cols = [
-        ("xgb_prob_v4_5_down",    "REAL"),
+        ("xgb_prob_v4_5_down", "REAL"),
         ("xgb_prob_v4_5_neutral", "REAL"),
-        ("xgb_prob_v4_5_up",      "REAL"),
+        ("xgb_prob_v4_5_up", "REAL"),
     ]
     c = sqlite3.connect(db_path)
     try:

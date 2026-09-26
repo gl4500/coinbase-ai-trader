@@ -3,6 +3,7 @@
 Composes per-metric computers from tools._scorecard.* into a single
 ScorecardReport for a model variant, plus a CLI runner for the v3 driver.
 """
+
 from __future__ import annotations
 
 import os
@@ -18,7 +19,16 @@ from tools._scorecard._report import ScorecardReport
 
 FEE_TIERS: Mapping[str, float] = {"retail": 0.006, "mid": 0.0025, "pro": 0.0005}
 DEFAULT_TAU_GRID: tuple[float, ...] = (
-    0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95,
+    0.50,
+    0.55,
+    0.60,
+    0.65,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95,
 )
 N_FIRED_FLOOR = 100
 
@@ -77,7 +87,8 @@ def compute_scorecard(
 
     rec_tau: float = float("nan")
     eligible = [
-        row for row in per_tau_rows
+        row
+        for row in per_tau_rows
         if row["n_fired"] >= N_FIRED_FLOOR
         and not np.isnan(row[f"e_return_{gate_tier}"])
         and row[f"e_return_{gate_tier}"] > 0
@@ -100,8 +111,7 @@ def compute_scorecard(
             "precision": op["precision"] >= pos_rate + 0.03,
             "expected_return": op[f"e_return_{gate_tier}"] > 0,
             "paper_sharpe": (
-                not np.isnan(op[f"sharpe_mean_{gate_tier}"])
-                and op[f"sharpe_mean_{gate_tier}"] > 0
+                not np.isnan(op[f"sharpe_mean_{gate_tier}"]) and op[f"sharpe_mean_{gate_tier}"] > 0
             ),
             "ece": ece < 0.05,
         }
@@ -161,8 +171,7 @@ def _format_report(report: ScorecardReport, track: str, extra: dict) -> str:
     lines = [
         f"=== Scorecard for track={track} (gate_tier={report.gate_tier}) ===",
         f"samples: {extra['n_valid']} scored / {extra['n_total']} pooled",
-        f"OOF mean AUC: {extra['auc']:.4f}  "
-        f"(sanity anchor — v3 should land near 0.528)",
+        f"OOF mean AUC: {extra['auc']:.4f}  (sanity anchor — v3 should land near 0.528)",
         f"pos_rate: {report.pos_rate:.4f}",
         f"ECE: {report.ece:.4f}  "
         f"(gate <0.05 => {'PASS' if report.gates_passed['ece'] else 'FAIL'})",
@@ -183,9 +192,7 @@ def _format_report(report: ScorecardReport, track: str, extra: dict) -> str:
             f"{row['sharpe_mean_pro']:>7.3f}"
         )
     lines.append("")
-    lines.append(
-        "Gates passed: " + ", ".join(f"{k}={v}" for k, v in report.gates_passed.items())
-    )
+    lines.append("Gates passed: " + ", ".join(f"{k}={v}" for k, v in report.gates_passed.items()))
     return "\n".join(lines)
 
 
@@ -195,18 +202,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="XGB deployment-aligned scorecard runner (v3 driver track)"
     )
-    parser.add_argument("--track", required=True, choices=["v3", "v4", "v4.5"],
-                        help="Which XGB head to score (v1 implements v3 only)")
-    parser.add_argument("--cache", default=_DEFAULT_CACHE,
-                        help="cnn_dataset_cache.pt — used only for the "
-                             "survivorship-aware top-20 pid ranking")
-    parser.add_argument("--parquet-dir", default=_DEFAULT_PARQUET_DIR,
-                        help="OHLCV parquet directory (default: ./data/history)")
-    parser.add_argument("--sample-step", type=int, default=_DEFAULT_SAMPLE_STEP,
-                        help="Roll one sample every N bars (default: 24, matches "
-                             "train_xgb_v3; lower = denser evaluation, slower)")
-    parser.add_argument("--gate-tier", default="retail", choices=list(FEE_TIERS),
-                        help="Fee tier used to evaluate hard gates (default: retail)")
+    parser.add_argument(
+        "--track",
+        required=True,
+        choices=["v3", "v4", "v4.5"],
+        help="Which XGB head to score (v1 implements v3 only)",
+    )
+    parser.add_argument(
+        "--cache",
+        default=_DEFAULT_CACHE,
+        help="cnn_dataset_cache.pt — used only for the survivorship-aware top-20 pid ranking",
+    )
+    parser.add_argument(
+        "--parquet-dir",
+        default=_DEFAULT_PARQUET_DIR,
+        help="OHLCV parquet directory (default: ./data/history)",
+    )
+    parser.add_argument(
+        "--sample-step",
+        type=int,
+        default=_DEFAULT_SAMPLE_STEP,
+        help="Roll one sample every N bars (default: 24, matches "
+        "train_xgb_v3; lower = denser evaluation, slower)",
+    )
+    parser.add_argument(
+        "--gate-tier",
+        default="retail",
+        choices=list(FEE_TIERS),
+        help="Fee tier used to evaluate hard gates (default: retail)",
+    )
     args = parser.parse_args()
 
     if args.track != "v3":
@@ -219,19 +243,26 @@ def main() -> int:
 
     data = _load_v3_track(args.cache, args.parquet_dir, args.sample_step)
     report = compute_scorecard(
-        data["scores"], data["labels"], data["returns"],
-        data["fold_ids"], data["fold_spans_days"],
+        data["scores"],
+        data["labels"],
+        data["returns"],
+        data["fold_ids"],
+        data["fold_spans_days"],
         gate_tier=args.gate_tier,
     )
     try:
         from sklearn.metrics import roc_auc_score
+
         auc = float(roc_auc_score(data["labels"], data["scores"]))
     except Exception:
         auc = float("nan")
-    print(_format_report(
-        report, args.track,
-        {"auc": auc, "n_total": data["n_total"], "n_valid": data["n_valid"]},
-    ))
+    print(
+        _format_report(
+            report,
+            args.track,
+            {"auc": auc, "n_total": data["n_total"], "n_valid": data["n_valid"]},
+        )
+    )
     return 0
 
 

@@ -5,8 +5,8 @@ Computes iv_rv20_spread and iv_rv60_spread (IV minus realized vol) as
 CNN feature channels. Positive spread = options overpriced (fear premium).
 Results cached for 10 minutes to avoid hammering Deribit public API.
 """
+
 import logging
-import math
 import time
 from typing import Dict, Optional
 
@@ -15,8 +15,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _DERIBIT_BASE = "https://www.deribit.com/api/v2/public"
-_CACHE_TTL    = 600   # seconds
-_cache: Dict[str, tuple] = {}   # currency -> (timestamp, iv_float)
+_CACHE_TTL = 600  # seconds
+_cache: Dict[str, tuple] = {}  # currency -> (timestamp, iv_float)
 
 # Map Coinbase product_id → Deribit currency
 _PRODUCT_TO_CURRENCY = {
@@ -41,7 +41,8 @@ async def _fetch_atm_iv(currency: str, spot_price: float) -> Optional[float]:
 
         # Keep only calls with IV available and pick closest strike to spot
         candidates = [
-            i for i in instruments
+            i
+            for i in instruments
             if i.get("mark_iv") and i.get("instrument_name", "").endswith("-C")
         ]
         if not candidates:
@@ -58,7 +59,7 @@ async def _fetch_atm_iv(currency: str, spot_price: float) -> Optional[float]:
         iv_pct = atm.get("mark_iv")
         if iv_pct is None:
             return None
-        return float(iv_pct) / 100.0   # Deribit returns percentage
+        return float(iv_pct) / 100.0  # Deribit returns percentage
 
     except Exception as e:
         logger.debug("Deribit IV fetch failed for %s: %s", currency, e)
@@ -93,5 +94,4 @@ def compute_iv_rv_spreads(iv: float, rv20: float, rv60: float) -> Dict[str, floa
     """
     spread20 = max(-1.0, min(1.0, iv - rv20))
     spread60 = max(-1.0, min(1.0, iv - rv60))
-    return {"iv_rv20_spread": round(spread20, 4),
-            "iv_rv60_spread": round(spread60, 4)}
+    return {"iv_rv20_spread": round(spread20, 4), "iv_rv60_spread": round(spread60, 4)}

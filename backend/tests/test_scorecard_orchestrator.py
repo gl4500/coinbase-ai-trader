@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from tools.scorecard import compute_scorecard, FEE_TIERS
+
+from tools.scorecard import FEE_TIERS, compute_scorecard
 
 
 def _synth_dataset(n: int = 500, seed: int = 0):
@@ -14,8 +15,8 @@ def _synth_dataset(n: int = 500, seed: int = 0):
 
 
 def test_compute_scorecard_returns_report_with_all_fields():
-    s, l, r, f, spans = _synth_dataset()
-    report = compute_scorecard(s, l, r, f, spans)
+    s, labels, r, f, spans = _synth_dataset()
+    report = compute_scorecard(s, labels, r, f, spans)
     assert len(report.per_tau_rows) == 10
     for row in report.per_tau_rows:
         assert "precision" in row
@@ -29,19 +30,21 @@ def test_compute_scorecard_returns_report_with_all_fields():
     taus = [r["tau"] for r in report.per_tau_rows]
     assert rec in taus or np.isnan(rec)
     assert isinstance(report.gates_passed, dict)
-    assert {"precision", "expected_return", "paper_sharpe", "ece"} <= set(report.gates_passed.keys())
+    assert {"precision", "expected_return", "paper_sharpe", "ece"} <= set(
+        report.gates_passed.keys()
+    )
 
 
 def test_compute_scorecard_invalid_gate_tier():
-    s, l, r, f, spans = _synth_dataset()
+    s, labels, r, f, spans = _synth_dataset()
     with pytest.raises(ValueError, match="gate_tier"):
-        compute_scorecard(s, l, r, f, spans, gate_tier="nonexistent")
+        compute_scorecard(s, labels, r, f, spans, gate_tier="nonexistent")
 
 
 def test_compute_scorecard_recommended_tau_meets_n_fired_floor():
     """Recommended tau must have >= 100 fires per spec; else NaN."""
-    s, l, r, f, spans = _synth_dataset(n=50)
-    report = compute_scorecard(s, l, r, f, spans)
+    s, labels, r, f, spans = _synth_dataset(n=50)
+    report = compute_scorecard(s, labels, r, f, spans)
     rec = report.recommended_operating_tau
     matching = [row for row in report.per_tau_rows if row["tau"] == rec]
     if not np.isnan(rec):

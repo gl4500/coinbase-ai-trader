@@ -1,4 +1,5 @@
 """Tests for the CoinPaprika current-ticker supply-snapshot fetcher."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ class _MockResp:
     def __init__(self, *, status_code: int, payload):
         self.status_code = status_code
         self._payload = payload
+
     def json(self):
         return self._payload
 
@@ -30,8 +32,8 @@ async def test_fetch_supply_snapshot_returns_tuple_for_mapped_pid():
         "id": "btc-bitcoin",
         "symbol": "BTC",
         "circulating_supply": 19_700_000.0,
-        "total_supply":       19_700_000.0,
-        "max_supply":         21_000_000.0,
+        "total_supply": 19_700_000.0,
+        "max_supply": 21_000_000.0,
         "quotes": {"USD": {"price": 70000.0, "market_cap": 1.4e12}},
     }
     with patch(
@@ -42,7 +44,7 @@ async def test_fetch_supply_snapshot_returns_tuple_for_mapped_pid():
 
     assert result is not None
     circ, total, max_supply = result
-    assert circ  == 19_700_000.0
+    assert circ == 19_700_000.0
     assert total == 19_700_000.0
     assert max_supply == 21_000_000.0
 
@@ -70,8 +72,8 @@ async def test_fetch_supply_snapshot_handles_missing_max_supply():
     payload = {
         "id": "eth-ethereum",
         "circulating_supply": 120_000_000.0,
-        "total_supply":       120_000_000.0,
-        "max_supply":         None,
+        "total_supply": 120_000_000.0,
+        "max_supply": None,
     }
     with patch(
         "services.coinpaprika_marketcap.httpx.AsyncClient",

@@ -4,6 +4,7 @@ Top-50 lifted pooled AUC by +0.014 over the 270-feature baseline.
 This sweeps N in {20, 30, 40, 50, 60, 75, 100, 150, 210} to find the
 inflection. Also dumps which channels dominate the top-N at each cut.
 """
+
 from __future__ import annotations
 
 import os
@@ -24,13 +25,16 @@ from tools.feature_set_compare import _pooled_top_n  # noqa: E402
 from tools.walk_forward import purged_walk_forward_splits  # noqa: E402
 from tools.xgb_features import extract_features  # noqa: E402
 
-
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _PARAMS = {
-    "objective": "binary:logistic", "eval_metric": "auc",
-    "learning_rate": 0.05, "max_depth": 4,
-    "min_child_weight": 1, "subsample": 1.0,
-    "seed": 0, "verbosity": 0,
+    "objective": "binary:logistic",
+    "eval_metric": "auc",
+    "learning_rate": 0.05,
+    "max_depth": 4,
+    "min_child_weight": 1,
+    "subsample": 1.0,
+    "seed": 0,
+    "verbosity": 0,
 }
 
 
@@ -61,7 +65,7 @@ def main():
     sorted_gain = sorted(gain.items(), key=lambda x: -x[1])
     ranked = [n for n, _ in sorted_gain]
 
-    print(f"\nbaseline 270-feature pooled v1 = 0.5127 (from prior run)")
+    print("\nbaseline 270-feature pooled v1 = 0.5127 (from prior run)")
     print(f"\n{'N':>4} {'mean_auc':>10} {'delta':>8}  top channels")
     print("-" * 70)
 
@@ -84,12 +88,12 @@ def main():
         ma = float(np.mean(aucs))
 
         chans: Counter = Counter()
-        for nm in (ranked[:n] if n < 270 else ranked):
+        for nm in ranked[:n] if n < 270 else ranked:
             c = _channel_of(nm)
             if c is not None:
                 chans[c] += 1
         top_ch = ", ".join(f"ch{c}({k})" for c, k in chans.most_common(6))
-        print(f"{n:>4} {ma:>10.4f} {ma-0.5127:>+8.4f}  {top_ch}")
+        print(f"{n:>4} {ma:>10.4f} {ma - 0.5127:>+8.4f}  {top_ch}")
 
 
 if __name__ == "__main__":

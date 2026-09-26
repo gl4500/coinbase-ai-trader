@@ -7,6 +7,7 @@ The split metric is `max(cum_pnl_left, cum_pnl_right)`.
 Pure functions on torch.Tensor. No I/O, no tree state, no filesystem.
 Mirrors backend/tools/xgb_v4_5_features_batch.py conventions for device handling.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from typing import Optional
 
 import torch
 
-_MS_PER_BAR: int = 3_600_000   # one 1h bar in epoch milliseconds
+_MS_PER_BAR: int = 3_600_000  # one 1h bar in epoch milliseconds
 
 
 @dataclass
@@ -24,10 +25,11 @@ class SplitResult:
     Treat as immutable — not frozen because the `left_mask` torch.Tensor is
     unhashable, so `frozen=True` would create a misleading hashability contract.
     """
+
     feature: int
     threshold: float
-    left_mask: torch.Tensor   # (n,) bool — True for rows going to left subtree
-    score: float              # the split_metric value (cum_pnl of better side)
+    left_mask: torch.Tensor  # (n,) bool — True for rows going to left subtree
+    score: float  # the split_metric value (cum_pnl of better side)
 
 
 def build_next_eligible(ts_ms: torch.Tensor, horizon_bars: int) -> torch.Tensor:
@@ -54,20 +56,20 @@ def walk_and_sum(
     next_eligible. Padding (-1) is treated as "no row".
     """
     B, K = subset_indices.shape
-    N = labels.shape[0]
+    labels.shape[0]
     valid = subset_indices >= 0
     safe_idx = subset_indices.clamp_min(0)
     row_labels = labels.gather(0, safe_idx.reshape(-1)).reshape(B, K)
-    row_next   = next_eligible.gather(0, safe_idx.reshape(-1)).reshape(B, K)
+    row_next = next_eligible.gather(0, safe_idx.reshape(-1)).reshape(B, K)
     open_until = torch.full((B,), -1, dtype=torch.int64, device=subset_indices.device)
-    total      = torch.zeros((B,), dtype=labels.dtype, device=subset_indices.device)
+    total = torch.zeros((B,), dtype=labels.dtype, device=subset_indices.device)
     for k in range(K):
-        col_idx   = safe_idx[:, k]
-        col_lab   = row_labels[:, k]
-        col_next  = row_next[:, k]
+        col_idx = safe_idx[:, k]
+        col_lab = row_labels[:, k]
+        col_next = row_next[:, k]
         col_valid = valid[:, k]
         fire = col_valid & (col_idx >= open_until)
-        total      = total + torch.where(fire, col_lab, torch.zeros_like(col_lab))
+        total = total + torch.where(fire, col_lab, torch.zeros_like(col_lab))
         open_until = torch.where(fire, col_next, open_until)
     return total
 
@@ -120,8 +122,7 @@ def best_split(
             if counts.max().item() == 0:
                 continue
             max_k = int(counts.max().item())
-            subset_idx = torch.full((T, max_k), -1, dtype=torch.int64,
-                                    device=features.device)
+            subset_idx = torch.full((T, max_k), -1, dtype=torch.int64, device=features.device)
             row_pos = mask.cumsum(dim=1) - 1
             abs_idx_broadcast = indices.unsqueeze(0).expand(T, n)
             r_t, r_n = torch.where(mask)

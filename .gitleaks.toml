@@ -1,0 +1,12 @@
+# Gitleaks configuration.
+# Extends the full default ruleset (so real secrets are still detected
+# everywhere) and allowlists the pytest fixtures file, which intentionally holds
+# an all-zero DUMMY EC private key so tests never need real credentials.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "backend/tests/conftest.py holds an all-zero dummy EC key (pytest fixture), not a real credential"
+paths = [
+    '''backend/tests/conftest\.py''',
+]

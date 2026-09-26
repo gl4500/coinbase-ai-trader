@@ -1,9 +1,9 @@
 """Tests for tools.strategy_discovery.features (Phase 2)."""
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from tools.strategy_discovery.features import (
     _TREND_COLUMNS,
@@ -47,11 +47,14 @@ def test_atr14_wilder_smoothing_formula():
     out = add_trend_features(df)
     # Recompute Wilder ATR-14 from first principles and compare.
     prev_close = df["close"].shift(1)
-    tr = pd.concat([
-        (df["high"] - df["low"]).abs(),
-        (df["high"] - prev_close).abs(),
-        (df["low"]  - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            (df["high"] - df["low"]).abs(),
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     # Wilder smoothing = ewm with alpha = 1/14, adjust=False.
     atr = tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
     expected = atr / df["close"]
@@ -68,14 +71,14 @@ def test_ret_sign_at_zero_returns_zero():
     n = 300
     df = _synthetic_ohlcv(n)
     df["close"] = 100.0  # all closes identical → sign of any diff is 0
-    df["high"]  = 100.5
-    df["low"]   = 99.5
-    df["open"]  = 100.0
+    df["high"] = 100.5
+    df["low"] = 99.5
+    df["open"] = 100.0
     out = add_trend_features(df)
-    tail = out.iloc[200:]   # post-warmup
-    assert (tail["ret_1h_sign"]  == 0).all()
+    tail = out.iloc[200:]  # post-warmup
+    assert (tail["ret_1h_sign"] == 0).all()
     assert (tail["ret_24h_sign"] == 0).all()
-    assert (tail["ret_7d_sign"]  == 0).all()
+    assert (tail["ret_7d_sign"] == 0).all()
 
 
 def test_first_valid_index_at_200():

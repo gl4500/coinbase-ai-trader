@@ -1,4 +1,5 @@
 """Tests for tools.strategy_discovery.mine_universe (Phase 3 CLI driver)."""
+
 from __future__ import annotations
 
 import json
@@ -6,22 +7,20 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
+from tools.strategy_discovery.mine_profiles import LeafProfile
 from tools.strategy_discovery.mine_universe import (
-    _DEFAULT_HORIZONS,
     pids_from_universe_json,
     write_profile_parquet,
 )
-from tools.strategy_discovery.mine_profiles import LeafProfile
 
 
 def test_pids_from_universe_json_flattens_cohorts(tmp_path: Path):
     universe = {
-        "large":          ["BTC-USD", "ETH-USD"],
-        "mid":            ["LINK-USD"],
+        "large": ["BTC-USD", "ETH-USD"],
+        "mid": ["LINK-USD"],
         "high_fdv_ratio": ["NEAR-USD", "BTC-USD"],
-        "low_turnover":   [],
+        "low_turnover": [],
     }
     universe_path = tmp_path / "universe.json"
     universe_path.write_text(json.dumps(universe), encoding="utf-8")
@@ -80,12 +79,28 @@ def test_write_profile_parquet_round_trips_all_columns(tmp_path: Path):
     df = pq.read_table(out_path).to_pandas()
     assert len(df) == 2
     expected_cols = {
-        "pid", "horizon", "leaf_id", "rule_path_summary",
-        "trade_count", "win_rate", "avg_win", "avg_loss", "max_dd",
-        "cumulative_profit_raw", "cumulative_profit_deflated", "deflation_pp",
-        "n_combos_searched", "inner_cv_se", "sortino", "n_folds_passed_q0",
-        "bootstrap_triggered", "bootstrap_ci_lower", "bootstrap_ci_upper",
-        "chosen_depth", "chosen_min_leaf", "schema_version",
+        "pid",
+        "horizon",
+        "leaf_id",
+        "rule_path_summary",
+        "trade_count",
+        "win_rate",
+        "avg_win",
+        "avg_loss",
+        "max_dd",
+        "cumulative_profit_raw",
+        "cumulative_profit_deflated",
+        "deflation_pp",
+        "n_combos_searched",
+        "inner_cv_se",
+        "sortino",
+        "n_folds_passed_q0",
+        "bootstrap_triggered",
+        "bootstrap_ci_lower",
+        "bootstrap_ci_upper",
+        "chosen_depth",
+        "chosen_min_leaf",
+        "schema_version",
     }
     assert set(df.columns) == expected_cols
     assert (df["pid"] == "BTC-USD").all()
@@ -105,9 +120,11 @@ def test_iterates_all_pid_horizon_pairs(tmp_path, monkeypatch):
         pq.write_table(pa_table, phase2_dir / f"{pid}.parquet")
     calls = []
     from tools.strategy_discovery import mine_universe as mu
+
     def fake_mine(pid, horizon, parquet_path, device="cuda", seed=42):
         calls.append((pid, horizon))
         return []
+
     monkeypatch.setattr(mu, "mine_profiles_for_pid_horizon", fake_mine)
     mu.mine_universe(
         universe_path=universe_path,

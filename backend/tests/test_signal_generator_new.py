@@ -5,6 +5,7 @@ Tests for new signal_generator functions added from GitHub research:
   - _dissimilarity_index(): DI gate to suppress unreliable CNN/LSTM output
   - _kelly_fraction()     : Kelly Criterion position sizing
 """
+
 import os
 import sys
 
@@ -15,14 +16,14 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 from agents.signal_generator import (
-    _hurst_exponent,
-    _multi_rsi,
     _dissimilarity_index,
+    _hurst_exponent,
     _kelly_fraction,
+    _multi_rsi,
 )
 
-
 # ── helpers ────────────────────────────────────────────────────────────────────
+
 
 def _trending_closes(n: int = 100) -> list:
     """Strongly trending up — Hurst should be > 0.5."""
@@ -32,12 +33,14 @@ def _trending_closes(n: int = 100) -> list:
 def _ranging_closes(n: int = 100) -> list:
     """Oscillating mean-reverting series — Hurst should be < 0.5."""
     import math
+
     return [100.0 + 5.0 * math.sin(i * 0.4) for i in range(n)]
 
 
 def _random_closes(n: int = 200) -> list:
     """Pseudo-random walk — Hurst near 0.5."""
     import random
+
     random.seed(42)
     closes = [100.0]
     for _ in range(n - 1):
@@ -47,8 +50,8 @@ def _random_closes(n: int = 200) -> list:
 
 # ── _hurst_exponent ────────────────────────────────────────────────────────────
 
-class TestHurstExponent:
 
+class TestHurstExponent:
     def test_returns_float(self):
         closes = _trending_closes(80)
         h = _hurst_exponent(closes)
@@ -77,7 +80,7 @@ class TestHurstExponent:
     def test_minimum_length_parameter(self):
         """min_len parameter controls when to return the default 0.5."""
         closes = _trending_closes(40)
-        h_default = _hurst_exponent(closes, min_len=50)   # below threshold → neutral
+        h_default = _hurst_exponent(closes, min_len=50)  # below threshold → neutral
         h_computed = _hurst_exponent(closes, min_len=30)  # above threshold → computed
         assert h_default == pytest.approx(0.5, abs=0.01)
         assert h_computed != pytest.approx(0.5, abs=0.1)  # actually computed
@@ -85,8 +88,8 @@ class TestHurstExponent:
 
 # ── _multi_rsi ─────────────────────────────────────────────────────────────────
 
-class TestMultiRSI:
 
+class TestMultiRSI:
     def test_returns_dict_with_required_keys(self):
         closes = _trending_closes(60)
         result = _multi_rsi(closes)
@@ -102,7 +105,7 @@ class TestMultiRSI:
     def test_votes_bounded(self):
         closes = _ranging_closes(80)
         result = _multi_rsi(closes)
-        assert 0 <= result["buy_votes"]  <= 3
+        assert 0 <= result["buy_votes"] <= 3
         assert 0 <= result["sell_votes"] <= 3
 
     def test_downtrend_triggers_buy_votes(self):
@@ -124,7 +127,7 @@ class TestMultiRSI:
     def test_insufficient_data_returns_neutral(self):
         """Too few closes → all RSIs neutral, votes = 0."""
         result = _multi_rsi([100.0, 101.0])
-        assert result["buy_votes"]  == 0
+        assert result["buy_votes"] == 0
         assert result["sell_votes"] == 0
 
     def test_buy_and_sell_votes_mutually_exclusive(self):
@@ -140,8 +143,8 @@ class TestMultiRSI:
 
 # ── _dissimilarity_index ───────────────────────────────────────────────────────
 
-class TestDissimilarityIndex:
 
+class TestDissimilarityIndex:
     def test_returns_float(self):
         closes = _trending_closes(40)
         di = _dissimilarity_index(closes)
@@ -161,7 +164,7 @@ class TestDissimilarityIndex:
 
     def test_volatile_series_higher_di(self):
         """A highly volatile series should produce higher DI than a flat one."""
-        flat    = [100.0] * 40
+        flat = [100.0] * 40
         volatile = [100.0 + ((-1) ** i) * 20 for i in range(40)]
         assert _dissimilarity_index(volatile) > _dissimilarity_index(flat)
 
@@ -181,8 +184,8 @@ class TestDissimilarityIndex:
 
 # ── _kelly_fraction ────────────────────────────────────────────────────────────
 
-class TestKellyFraction:
 
+class TestKellyFraction:
     def test_returns_float(self):
         f = _kelly_fraction(confidence=0.7)
         assert isinstance(f, float)

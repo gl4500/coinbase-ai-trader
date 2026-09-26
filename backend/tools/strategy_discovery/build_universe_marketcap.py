@@ -9,6 +9,7 @@ Run:
     cd backend && python -m tools.strategy_discovery.build_universe_marketcap \\
         --start 2025-05-23 --end 2026-05-23
 """
+
 from __future__ import annotations
 
 import argparse
@@ -68,9 +69,7 @@ def _date_to_ms(s: str) -> int:
     return int(d.timestamp() * 1000)
 
 
-async def backfill_one(
-    pid: str, *, start_ms: int, end_ms: int, marketcap_dir: str
-) -> int:
+async def backfill_one(pid: str, *, start_ms: int, end_ms: int, marketcap_dir: str) -> int:
     """Fetch + save one pid. Returns rows written (0 on failure)."""
     history = await fetch_marketcap_history(pid, start_ms, end_ms)
     if not history:
@@ -91,11 +90,9 @@ async def backfill_universe(
 ) -> Dict[str, int]:
     results: Dict[str, int] = {}
     for i, pid in enumerate(pids):
-        n = await backfill_one(
-            pid, start_ms=start_ms, end_ms=end_ms, marketcap_dir=marketcap_dir
-        )
+        n = await backfill_one(pid, start_ms=start_ms, end_ms=end_ms, marketcap_dir=marketcap_dir)
         results[pid] = n
-        print(f"  [{i+1}/{len(pids)}] {pid}: {n} rows", flush=True)
+        print(f"  [{i + 1}/{len(pids)}] {pid}: {n} rows", flush=True)
         if i + 1 < len(pids) and sleep_secs > 0.0:
             await asyncio.sleep(sleep_secs)
     return results
@@ -105,16 +102,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--universe-json",
-        default=os.path.join(BACKEND, "..", "docs", "superpowers", "specs",
-                             "2026-05-23-universe-50.json"),
+        default=os.path.join(
+            BACKEND, "..", "docs", "superpowers", "specs", "2026-05-23-universe-50.json"
+        ),
     )
     parser.add_argument("--marketcap-dir", default=_MARKETCAP_DIR)
     parser.add_argument("--start", required=True, help="YYYY-MM-DD UTC")
-    parser.add_argument("--end",   required=True, help="YYYY-MM-DD UTC")
+    parser.add_argument("--end", required=True, help="YYYY-MM-DD UTC")
     parser.add_argument("--min-days", type=int, default=180)
     parser.add_argument("--sleep", type=float, default=0.5)
-    parser.add_argument("--force", action="store_true",
-                        help="re-fetch even for pids with sufficient coverage")
+    parser.add_argument(
+        "--force", action="store_true", help="re-fetch even for pids with sufficient coverage"
+    )
     args = parser.parse_args()
 
     pids = universe_pids_from_curation(args.universe_json)
@@ -133,19 +132,21 @@ def main() -> int:
         return 0
 
     start_ms = _date_to_ms(args.start)
-    end_ms   = _date_to_ms(args.end)
+    end_ms = _date_to_ms(args.end)
     print(f"  range: {args.start} -> {args.end}", flush=True)
 
-    results = asyncio.run(backfill_universe(
-        pids=needs,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        marketcap_dir=args.marketcap_dir,
-        sleep_secs=args.sleep,
-    ))
+    results = asyncio.run(
+        backfill_universe(
+            pids=needs,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            marketcap_dir=args.marketcap_dir,
+            sleep_secs=args.sleep,
+        )
+    )
 
     succeeded = [p for p, n in results.items() if n > 0]
-    failed    = [p for p, n in results.items() if n == 0]
+    failed = [p for p, n in results.items() if n == 0]
     print(f"\n  succeeded: {len(succeeded)}", flush=True)
     print(f"  failed:    {len(failed)}  -> {failed}", flush=True)
     return 0 if not failed else 1

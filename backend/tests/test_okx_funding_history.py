@@ -15,6 +15,7 @@ Differences vs Binance fetcher this test file covers:
 
 No live API calls — httpx.AsyncClient.get is mocked in every async test.
 """
+
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,10 +26,10 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from services import okx_funding_history as okx  # noqa: E402
 
@@ -53,12 +54,12 @@ def _http(status, body=None):
 
 # ── Symbol mapping ───────────────────────────────────────────────────────────
 
-class TestProductSymbolMapping:
 
+class TestProductSymbolMapping:
     def test_known_products_map_to_okx_swap_ids(self):
-        assert okx._coinbase_to_okx("BTC-USD")  == "BTC-USDT-SWAP"
-        assert okx._coinbase_to_okx("ETH-USD")  == "ETH-USDT-SWAP"
-        assert okx._coinbase_to_okx("SOL-USD")  == "SOL-USDT-SWAP"
+        assert okx._coinbase_to_okx("BTC-USD") == "BTC-USDT-SWAP"
+        assert okx._coinbase_to_okx("ETH-USD") == "ETH-USDT-SWAP"
+        assert okx._coinbase_to_okx("SOL-USD") == "SOL-USDT-SWAP"
         assert okx._coinbase_to_okx("DOGE-USD") == "DOGE-USDT-SWAP"
 
     def test_unsupported_product_returns_none(self):
@@ -72,25 +73,25 @@ class TestProductSymbolMapping:
         sibling so both fetchers honour the same supported-symbol set.
         Verified live on OKX SWAP listing 2026-05-08."""
         expected = {
-            "PENGU-USD":   "PENGU-USDT-SWAP",
-            "JTO-USD":     "JTO-USDT-SWAP",
-            "POPCAT-USD":  "POPCAT-USDT-SWAP",
-            "BONK-USD":    "BONK-USDT-SWAP",
-            "ZK-USD":      "ZK-USDT-SWAP",
-            "PEPE-USD":    "PEPE-USDT-SWAP",
+            "PENGU-USD": "PENGU-USDT-SWAP",
+            "JTO-USD": "JTO-USDT-SWAP",
+            "POPCAT-USD": "POPCAT-USDT-SWAP",
+            "BONK-USD": "BONK-USDT-SWAP",
+            "ZK-USD": "ZK-USDT-SWAP",
+            "PEPE-USD": "PEPE-USDT-SWAP",
             "MOODENG-USD": "MOODENG-USDT-SWAP",
-            "ONDO-USD":    "ONDO-USDT-SWAP",
-            "ALGO-USD":    "ALGO-USDT-SWAP",
-            "ZORA-USD":    "ZORA-USDT-SWAP",
-            "WIF-USD":     "WIF-USDT-SWAP",
-            "RENDER-USD":  "RENDER-USDT-SWAP",
-            "FLOKI-USD":   "FLOKI-USDT-SWAP",
-            "WLD-USD":     "WLD-USDT-SWAP",
-            "BERA-USD":    "BERA-USDT-SWAP",
-            "ENA-USD":     "ENA-USDT-SWAP",
-            "STRK-USD":    "STRK-USDT-SWAP",
-            "TON-USD":     "TON-USDT-SWAP",
-            "JUP-USD":     "JUP-USDT-SWAP",
+            "ONDO-USD": "ONDO-USDT-SWAP",
+            "ALGO-USD": "ALGO-USDT-SWAP",
+            "ZORA-USD": "ZORA-USDT-SWAP",
+            "WIF-USD": "WIF-USDT-SWAP",
+            "RENDER-USD": "RENDER-USDT-SWAP",
+            "FLOKI-USD": "FLOKI-USDT-SWAP",
+            "WLD-USD": "WLD-USDT-SWAP",
+            "BERA-USD": "BERA-USDT-SWAP",
+            "ENA-USD": "ENA-USDT-SWAP",
+            "STRK-USD": "STRK-USDT-SWAP",
+            "TON-USD": "TON-USDT-SWAP",
+            "JUP-USD": "JUP-USDT-SWAP",
         }
         for pid, inst_id in expected.items():
             assert okx._coinbase_to_okx(pid) == inst_id, (pid, inst_id)
@@ -100,32 +101,35 @@ class TestProductSymbolMapping:
         NOT listed on OKX SWAP must continue returning None (no wasted
         HTTP)."""
         for pid in (
-            "NKN-USD", "AIOZ-USD", "JASMY-USD", "TRU-USD",
-            "SKL-USD", "FET-USD", "XCN-USD", "LRDS-USD",
+            "NKN-USD",
+            "AIOZ-USD",
+            "JASMY-USD",
+            "TRU-USD",
+            "SKL-USD",
+            "FET-USD",
+            "XCN-USD",
+            "LRDS-USD",
         ):
             assert okx._coinbase_to_okx(pid) is None, pid
 
 
 # ── Happy path: single-page fetch ────────────────────────────────────────────
 
-class TestFetchFundingHistorySinglePage:
 
+class TestFetchFundingHistorySinglePage:
     @pytest.mark.asyncio
     async def test_returns_sorted_tuples_of_ms_time_and_float_rate(self):
         # OKX sends NEWEST first; both fields are STRINGS.
         payload = [
-            {"instId": "BTC-USDT-SWAP",
-             "fundingTime": "1700028800000", "fundingRate": "-0.00005"},
-            {"instId": "BTC-USDT-SWAP",
-             "fundingTime": "1700000000000", "fundingRate": "0.00010"},
+            {"instId": "BTC-USDT-SWAP", "fundingTime": "1700028800000", "fundingRate": "-0.00005"},
+            {"instId": "BTC-USDT-SWAP", "fundingTime": "1700000000000", "fundingRate": "0.00010"},
         ]
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(payload))
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx.fetch_funding_history(
                 "BTC-USD",
                 start_ms=1_700_000_000_000,
@@ -145,8 +149,7 @@ class TestFetchFundingHistorySinglePage:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok([]))
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
             await okx.fetch_funding_history(
                 "ETH-USD",
                 start_ms=1_700_000_000_000,
@@ -164,14 +167,12 @@ class TestFetchFundingHistorySinglePage:
 
 # ── Failure modes ────────────────────────────────────────────────────────────
 
-class TestFetchFundingHistoryFailureModes:
 
+class TestFetchFundingHistoryFailureModes:
     @pytest.mark.asyncio
     async def test_unsupported_product_returns_empty_no_http(self):
         with patch("services.okx_funding_history.httpx.AsyncClient") as MockClient:
-            result = await okx.fetch_funding_history(
-                "UNSUPPORTED-USD", start_ms=0, end_ms=1_000
-            )
+            result = await okx.fetch_funding_history("UNSUPPORTED-USD", start_ms=0, end_ms=1_000)
         assert result == []
         MockClient.assert_not_called()
 
@@ -182,11 +183,8 @@ class TestFetchFundingHistoryFailureModes:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_http(429, {"err": "rate limit"}))
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
-            result = await okx.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
+            result = await okx.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
 
     @pytest.mark.asyncio
@@ -195,14 +193,12 @@ class TestFetchFundingHistoryFailureModes:
         mock_client = AsyncMock()
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = None
-        mock_client.get = AsyncMock(return_value=_ok([], code="51001",
-                                                    msg="Instrument id does not exist"))
+        mock_client.get = AsyncMock(
+            return_value=_ok([], code="51001", msg="Instrument id does not exist")
+        )
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
-            result = await okx.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
+            result = await okx.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
 
     @pytest.mark.asyncio
@@ -212,19 +208,16 @@ class TestFetchFundingHistoryFailureModes:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(side_effect=Exception("dns failure"))
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
-            result = await okx.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
+            result = await okx.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
 
     @pytest.mark.asyncio
     async def test_skips_malformed_rows(self):
         payload = [
             {"fundingTime": "1700000000000", "fundingRate": "0.0001"},
-            {"fundingTime": "abc", "fundingRate": "0.0002"},   # bad ts
-            {"fundingTime": "1700028800000"},                   # missing rate
+            {"fundingTime": "abc", "fundingRate": "0.0002"},  # bad ts
+            {"fundingTime": "1700028800000"},  # missing rate
             {"fundingTime": "1700057600000", "fundingRate": "0.0003"},
         ]
         mock_client = AsyncMock()
@@ -232,8 +225,7 @@ class TestFetchFundingHistoryFailureModes:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(payload))
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
             result = await okx.fetch_funding_history(
                 "BTC-USD",
                 start_ms=1_700_000_000_000,
@@ -249,15 +241,13 @@ class TestFetchFundingHistoryFailureModes:
 
 # ── Kill switch ──────────────────────────────────────────────────────────────
 
-class TestKillSwitch:
 
+class TestKillSwitch:
     @pytest.mark.asyncio
     async def test_disabled_env_var_short_circuits_without_http(self, monkeypatch):
         monkeypatch.setenv("OKX_FUNDING_DISABLED", "1")
         with patch("services.okx_funding_history.httpx.AsyncClient") as MockClient:
-            result = await okx.fetch_funding_history(
-                "BTC-USD", start_ms=0, end_ms=1_000
-            )
+            result = await okx.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         assert result == []
         MockClient.assert_not_called()
 
@@ -268,13 +258,13 @@ class TestKillSwitch:
         mock_client.__aenter__.return_value = mock_client
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok([]))
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
             await okx.fetch_funding_history("BTC-USD", start_ms=0, end_ms=1_000)
         mock_client.get.assert_called()
 
 
 # ── Pagination via after= cursor ─────────────────────────────────────────────
+
 
 class TestPagination:
     """OKX caps `limit` at 100; long windows require multiple calls."""
@@ -286,15 +276,15 @@ class TestPagination:
         # is observable but fast.
         page1 = [
             {"fundingTime": "1000", "fundingRate": "0.0010"},
-            {"fundingTime": "999",  "fundingRate": "0.0009"},
+            {"fundingTime": "999", "fundingRate": "0.0009"},
         ]
         page2 = [
-            {"fundingTime": "998",  "fundingRate": "0.0008"},
-            {"fundingTime": "997",  "fundingRate": "0.0007"},
+            {"fundingTime": "998", "fundingRate": "0.0008"},
+            {"fundingTime": "997", "fundingRate": "0.0007"},
         ]
         page3 = [
-            {"fundingTime": "996",  "fundingRate": "0.0006"},
-            {"fundingTime": "995",  "fundingRate": "0.0005"},
+            {"fundingTime": "996", "fundingRate": "0.0006"},
+            {"fundingTime": "995", "fundingRate": "0.0005"},
         ]
         page_empty: list = []
 
@@ -305,11 +295,8 @@ class TestPagination:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(side_effect=responses)
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
-            result = await okx.fetch_funding_history(
-                "BTC-USD", start_ms=995, end_ms=1000
-            )
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
+            result = await okx.fetch_funding_history("BTC-USD", start_ms=995, end_ms=1000)
 
         # All three populated pages should have been merged + sorted ascending.
         times = [t for t, _ in result]
@@ -339,11 +326,8 @@ class TestPagination:
         mock_client.__aexit__.return_value = None
         mock_client.get = AsyncMock(return_value=_ok(page1))
 
-        with patch("services.okx_funding_history.httpx.AsyncClient",
-                   return_value=mock_client):
-            result = await okx.fetch_funding_history(
-                "BTC-USD", start_ms=4000, end_ms=5000
-            )
+        with patch("services.okx_funding_history.httpx.AsyncClient", return_value=mock_client):
+            result = await okx.fetch_funding_history("BTC-USD", start_ms=4000, end_ms=5000)
 
         # Only one HTTP call — oldest in page1 (3000) < start_ms (4000),
         # so no further pagination.

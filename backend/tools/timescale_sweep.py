@@ -14,6 +14,7 @@ No cache rebuild — features stay frozen. Only y changes.
 Run:
     python tools/timescale_sweep.py
 """
+
 from __future__ import annotations
 
 import argparse
@@ -80,7 +81,12 @@ def _relabel_at_horizon(
         if idx is None:
             continue
         lab = _label_triple_barrier(
-            candles, idx, forward_hours, up_mult, dn_mult, label_thresh,
+            candles,
+            idx,
+            forward_hours,
+            up_mult,
+            dn_mult,
+            label_thresh,
         )
         if lab is None:
             continue
@@ -176,14 +182,22 @@ def _run_horizon(
     print(f"  labeled samples: {n_ok:,} / {n:,}  pos_rate={pos_rate:.3f}", flush=True)
 
     mean_auc, fold_aucs = _cv_mean_auc(
-        feats[mask], y[mask], ts[mask], names,
-        n_folds=5, embargo_hours=4, n_estimators=200,
+        feats[mask],
+        y[mask],
+        ts[mask],
+        names,
+        n_folds=5,
+        embargo_hours=4,
+        n_estimators=200,
     )
     fold_str = ", ".join(f"{a:.3f}" for a in fold_aucs)
     print(f"  mean_auc={mean_auc:.4f}  folds=[{fold_str}]", flush=True)
     return {
-        "horizon": h, "n": n_ok, "pos_rate": pos_rate,
-        "mean_auc": mean_auc, "fold_aucs": fold_aucs,
+        "horizon": h,
+        "n": n_ok,
+        "pos_rate": pos_rate,
+        "mean_auc": mean_auc,
+        "fold_aucs": fold_aucs,
     }
 
 
@@ -193,8 +207,8 @@ def main():
         "--snapshot-ts",
         default=None,
         help="Survivorship-aware top-N cutoff (#163). Pass 'auto' for the "
-             "median-first_ts default, or an explicit Unix-seconds int. "
-             "Omit to keep the legacy len(X) ranking.",
+        "median-first_ts default, or an explicit Unix-seconds int. "
+        "Omit to keep the legacy len(X) ranking.",
     )
     args = parser.parse_args()
 
@@ -227,8 +241,7 @@ def main():
             print(f"{r['horizon']:>9}h {'-':>10} {'-':>10} {'-':>10}", flush=True)
         else:
             print(
-                f"{r['horizon']:>9}h {r['n']:>10,} "
-                f"{r['pos_rate']:>10.3f} {r['mean_auc']:>10.4f}",
+                f"{r['horizon']:>9}h {r['n']:>10,} {r['pos_rate']:>10.3f} {r['mean_auc']:>10.4f}",
                 flush=True,
             )
 

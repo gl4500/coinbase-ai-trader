@@ -1,8 +1,8 @@
 """Tests for tools.strategy_discovery.profit_tree (Phase 3)."""
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
 
 from tools.strategy_discovery.profit_split import build_next_eligible
@@ -42,7 +42,9 @@ def test_fit_respects_min_samples_per_leaf():
 def test_fit_stops_on_unprofitable_split():
     n = 200
     ts = torch.arange(n, dtype=torch.int64) * 3_600_000
-    features = torch.from_numpy(np.random.default_rng(1).normal(0.0, 1.0, size=(n, 4)).astype("float64"))
+    features = torch.from_numpy(
+        np.random.default_rng(1).normal(0.0, 1.0, size=(n, 4)).astype("float64")
+    )
     labels = torch.full((n,), -0.05, dtype=torch.float64)
     next_eligible = build_next_eligible(ts, horizon_bars=1)
     root = fit_tree(features, labels, next_eligible, max_depth=5, min_leaf=20)
@@ -54,7 +56,7 @@ def test_fit_stops_on_unprofitable_split():
 
 def test_collect_leaves_returns_all_leaves_in_dfs_order():
     leaf_a = TreeNode(indices=torch.tensor([0, 1, 2], dtype=torch.int64), cumulative_pnl=1.0)
-    leaf_b = TreeNode(indices=torch.tensor([3, 4],    dtype=torch.int64), cumulative_pnl=2.0)
+    leaf_b = TreeNode(indices=torch.tensor([3, 4], dtype=torch.int64), cumulative_pnl=2.0)
     leaf_c = TreeNode(indices=torch.tensor([5, 6, 7], dtype=torch.int64), cumulative_pnl=3.0)
     right_subtree = TreeNode(feature=0, threshold=0.5, left=leaf_b, right=leaf_c)
     root = TreeNode(feature=1, threshold=0.0, left=leaf_a, right=right_subtree)

@@ -4,9 +4,10 @@ Tests for MarketScanner minimum-price filter.
 Micro-priced tokens (< $0.001) have spreads that wipe out agent profit targets
 and produce degenerate CNN features — they must be excluded from tracking.
 """
+
 import os
 import sys
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,25 +15,25 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
-from agents.market_scanner import MarketScanner, MIN_PRICE
+from agents.market_scanner import MIN_PRICE, MarketScanner
 
 
 def _make_product(pid: str, price: float, volume: float = 5_000_000) -> dict:
     return {
-        "product_id":                     pid,
-        "quote_currency_id":              "USD",
-        "base_currency_id":               pid.split("-")[0],
-        "display_name":                   pid,
-        "status":                         "online",
-        "trading_disabled":               False,
-        "volume_24h":                     str(volume),
-        "price":                          str(price),
-        "price_percentage_change_24h":    "0.5",
+        "product_id": pid,
+        "quote_currency_id": "USD",
+        "base_currency_id": pid.split("-")[0],
+        "display_name": pid,
+        "status": "online",
+        "trading_disabled": False,
+        "volume_24h": str(volume),
+        "price": str(price),
+        "price_percentage_change_24h": "0.5",
     }
 
 
@@ -48,7 +49,11 @@ class TestScannerPriceFilter:
 
     def _mock_bba(self, products: list) -> dict:
         return {
-            p["product_id"]: {"price": float(p["price"]), "bid": float(p["price"]) * 0.999, "ask": float(p["price"]) * 1.001}
+            p["product_id"]: {
+                "price": float(p["price"]),
+                "bid": float(p["price"]) * 0.999,
+                "ask": float(p["price"]) * 1.001,
+            }
             for p in products
         }
 
@@ -56,25 +61,30 @@ class TestScannerPriceFilter:
     async def test_micro_price_product_not_tracked(self):
         """A product priced at $0.000012 (e.g. SHIB) must not be tracked."""
         products = [
-            _make_product("XRP-USD",  price=1.33),
-            _make_product("SHIB-USD", price=0.000012),   # below MIN_PRICE
+            _make_product("XRP-USD", price=1.33),
+            _make_product("SHIB-USD", price=0.000012),  # below MIN_PRICE
         ]
         scanner = MarketScanner()
 
         with (
-            patch("agents.market_scanner.coinbase_client.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.market_scanner.coinbase_client.get_best_bid_ask",
-                  new=AsyncMock(return_value=self._mock_bba(products))),
-            patch("agents.market_scanner.coinbase_client.get_candles",
-                  new=AsyncMock(return_value=[])),
+            patch(
+                "agents.market_scanner.coinbase_client.get_products",
+                new=AsyncMock(return_value=products),
+            ),
+            patch(
+                "agents.market_scanner.coinbase_client.get_best_bid_ask",
+                new=AsyncMock(return_value=self._mock_bba(products)),
+            ),
+            patch(
+                "agents.market_scanner.coinbase_client.get_candles", new=AsyncMock(return_value=[])
+            ),
             patch("agents.market_scanner.database.upsert_product", new=AsyncMock()),
-            patch("agents.market_scanner.database.save_candles",   new=AsyncMock()),
+            patch("agents.market_scanner.database.save_candles", new=AsyncMock()),
         ):
             result = await scanner._do_scan()
 
         pids = {p["product_id"] for p in result}
-        assert "XRP-USD"  in pids,  "XRP-USD should be tracked"
+        assert "XRP-USD" in pids, "XRP-USD should be tracked"
         assert "SHIB-USD" not in pids, "SHIB-USD price < MIN_PRICE — must be excluded"
         assert "SHIB-USD" not in scanner.tracked_ids
 
@@ -86,14 +96,19 @@ class TestScannerPriceFilter:
         scanner = MarketScanner()
 
         with (
-            patch("agents.market_scanner.coinbase_client.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.market_scanner.coinbase_client.get_best_bid_ask",
-                  new=AsyncMock(return_value=self._mock_bba(products))),
-            patch("agents.market_scanner.coinbase_client.get_candles",
-                  new=AsyncMock(return_value=[])),
+            patch(
+                "agents.market_scanner.coinbase_client.get_products",
+                new=AsyncMock(return_value=products),
+            ),
+            patch(
+                "agents.market_scanner.coinbase_client.get_best_bid_ask",
+                new=AsyncMock(return_value=self._mock_bba(products)),
+            ),
+            patch(
+                "agents.market_scanner.coinbase_client.get_candles", new=AsyncMock(return_value=[])
+            ),
             patch("agents.market_scanner.database.upsert_product", new=AsyncMock()),
-            patch("agents.market_scanner.database.save_candles",   new=AsyncMock()),
+            patch("agents.market_scanner.database.save_candles", new=AsyncMock()),
         ):
             result = await scanner._do_scan()
 
@@ -109,14 +124,19 @@ class TestScannerPriceFilter:
         scanner = MarketScanner()
 
         with (
-            patch("agents.market_scanner.coinbase_client.get_products",
-                  new=AsyncMock(return_value=products)),
-            patch("agents.market_scanner.coinbase_client.get_best_bid_ask",
-                  new=AsyncMock(return_value=self._mock_bba(products))),
-            patch("agents.market_scanner.coinbase_client.get_candles",
-                  new=AsyncMock(return_value=[])),
+            patch(
+                "agents.market_scanner.coinbase_client.get_products",
+                new=AsyncMock(return_value=products),
+            ),
+            patch(
+                "agents.market_scanner.coinbase_client.get_best_bid_ask",
+                new=AsyncMock(return_value=self._mock_bba(products)),
+            ),
+            patch(
+                "agents.market_scanner.coinbase_client.get_candles", new=AsyncMock(return_value=[])
+            ),
             patch("agents.market_scanner.database.upsert_product", new=AsyncMock()),
-            patch("agents.market_scanner.database.save_candles",   new=AsyncMock()),
+            patch("agents.market_scanner.database.save_candles", new=AsyncMock()),
         ):
             result = await scanner._do_scan()
 
@@ -130,12 +150,12 @@ class TestAgentPriceGuard:
     @pytest.mark.asyncio
     async def test_cnn_skips_micro_price(self):
         """CNN generate_signal returns None for price < MIN_PRICE."""
-        from agents.cnn_agent import CoinbaseCNNAgent, MIN_PRICE as CNN_MIN_PRICE
+        from agents.cnn_agent import CoinbaseCNNAgent
 
         agent = CoinbaseCNNAgent()
         product = {
             "product_id": "SHIB-USD",
-            "price": 0.000012,   # below MIN_PRICE
+            "price": 0.000012,  # below MIN_PRICE
         }
         result = await agent.generate_signal(product)
         assert result is None, "CNN must not signal on micro-priced assets"

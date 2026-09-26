@@ -6,7 +6,9 @@
 Per feedback_python_clean_functions: type hints, pure data-in/data-out helpers,
 derived constants, no in-place buffer mutation.
 """
+
 from __future__ import annotations
+
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -15,7 +17,7 @@ import numpy as np
 # Configuration constants
 # ═══════════════════════════════════════════════════════════════════════════
 _OHLCV_FIELDS: Tuple[str, ...] = ("open", "high", "low", "close", "volume")
-_BB_CHANNELS:  Tuple[str, ...] = ("bb_position", "bb_width")
+_BB_CHANNELS: Tuple[str, ...] = ("bb_position", "bb_width")
 _CHANNEL_NAMES: Tuple[str, ...] = _OHLCV_FIELDS + _BB_CHANNELS
 N_CHANNELS_V45: int = len(_CHANNEL_NAMES)  # = 7
 
@@ -27,18 +29,26 @@ BB_PERIOD: int = 20
 BB_MULT: float = 2.0
 
 _STAT_NAMES_V45: Tuple[str, ...] = (
-    "last", "mean", "std", "slope",
-    "min", "max", "pct_rank",
-    "dlt5", "dlt10", "dlt30",
+    "last",
+    "mean",
+    "std",
+    "slope",
+    "min",
+    "max",
+    "pct_rank",
+    "dlt5",
+    "dlt10",
+    "dlt30",
 )
-N_STATS_V45: int = len(_STAT_NAMES_V45)        # = 10
-N_TIERS_V45: int = len(TIER_WINDOWS_V45)       # = 3
+N_STATS_V45: int = len(_STAT_NAMES_V45)  # = 10
+N_TIERS_V45: int = len(TIER_WINDOWS_V45)  # = 3
 N_FEATURES_V45: int = N_CHANNELS_V45 * N_TIERS_V45 * N_STATS_V45  # = 210
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def feature_names_v4_5() -> List[str]:
     """Return 210 feature names in stable column order.
@@ -111,7 +121,7 @@ def extract_v4_5(
             else:  # unreachable; defensive
                 values = np.array([], dtype=np.float64)
             stats = _compute_stats(values)
-            out[0, slot:slot + N_STATS_V45] = stats
+            out[0, slot : slot + N_STATS_V45] = stats
             slot += N_STATS_V45
     return out, names
 
@@ -119,6 +129,7 @@ def extract_v4_5(
 # ═══════════════════════════════════════════════════════════════════════════
 # Internal helpers (pure functions, one responsibility each)
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def _extract_ohlcv_field(
     candles: Sequence[Dict[str, float]],
@@ -150,7 +161,7 @@ def _compute_bb_position(
     if n < period:
         return out
     for i in range(period - 1, n):
-        window = closes[i - period + 1: i + 1]
+        window = closes[i - period + 1 : i + 1]
         mean = window.mean()
         std = window.std()
         if std == 0.0:
@@ -182,7 +193,7 @@ def _compute_bb_width(
     if n < period:
         return out
     for i in range(period - 1, n):
-        window = closes[i - period + 1: i + 1]
+        window = closes[i - period + 1 : i + 1]
         mean = window.mean()
         std = window.std()
         if mean == 0.0:
@@ -200,13 +211,13 @@ def _compute_stats(values: np.ndarray) -> np.ndarray:
     out = np.zeros(N_STATS_V45, dtype=np.float64)
     if values.size == 0:
         return out
-    out[0] = float(values[-1])             # last
-    out[1] = float(values.mean())          # mean
-    out[2] = float(values.std())           # std
-    out[3] = _slope(values)                # slope
-    out[4] = float(values.min())           # min
-    out[5] = float(values.max())           # max
-    out[6] = _pct_rank(values)             # pct_rank
+    out[0] = float(values[-1])  # last
+    out[1] = float(values.mean())  # mean
+    out[2] = float(values.std())  # std
+    out[3] = _slope(values)  # slope
+    out[4] = float(values.min())  # min
+    out[5] = float(values.max())  # max
+    out[6] = _pct_rank(values)  # pct_rank
     out[7] = _delta_at(values, lookback=5)
     out[8] = _delta_at(values, lookback=10)
     out[9] = _delta_at(values, lookback=30)

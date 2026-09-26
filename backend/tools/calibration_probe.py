@@ -10,6 +10,7 @@ This is the check the CNN training path never had — recording val_auc=1.0
 without verifying that confidence buckets actually correlate with realized
 outcomes is the bug that produced the 47.5% live WR (Session 58 audit).
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -18,9 +19,8 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score
 
-from tools.xgb_features import extract_features
 from tools.walk_forward import purged_walk_forward_splits
-
+from tools.xgb_features import extract_features
 
 _DEFAULT_PARAMS = {"max_depth": 4, "min_child_weight": 1, "subsample": 1.0}
 _GATE_AUC = 0.55
@@ -37,9 +37,7 @@ def _xgb_params(base: dict, lr: float, seed: int) -> dict:
     }
 
 
-def _bucket_calibration(
-    preds: np.ndarray, actuals: np.ndarray, n_buckets: int
-) -> list:
+def _bucket_calibration(preds: np.ndarray, actuals: np.ndarray, n_buckets: int) -> list:
     """Quantile-bucket preds, return list of {bucket, n, mean_pred, mean_actual}."""
     if len(preds) == 0:
         return []
@@ -57,16 +55,17 @@ def _bucket_calibration(
             mask = (preds >= lo) & (preds < hi)
         if not mask.any():
             table.append(
-                {"bucket": i, "n": 0, "mean_pred": float("nan"),
-                 "mean_actual": float("nan")}
+                {"bucket": i, "n": 0, "mean_pred": float("nan"), "mean_actual": float("nan")}
             )
             continue
-        table.append({
-            "bucket": i,
-            "n": int(mask.sum()),
-            "mean_pred": float(preds[mask].mean()),
-            "mean_actual": float(actuals[mask].mean()),
-        })
+        table.append(
+            {
+                "bucket": i,
+                "n": int(mask.sum()),
+                "mean_pred": float(preds[mask].mean()),
+                "mean_actual": float(actuals[mask].mean()),
+            }
+        )
     return table
 
 
@@ -76,9 +75,11 @@ def _is_monotonic_increasing(table: list) -> bool:
     Stricter than 'every step rises' — sampling noise can flip one adjacent
     pair. We require the overall trend to point the right way.
     """
-    valid = [r for r in table if r["n"] > 0
-             and not np.isnan(r["mean_pred"])
-             and not np.isnan(r["mean_actual"])]
+    valid = [
+        r
+        for r in table
+        if r["n"] > 0 and not np.isnan(r["mean_pred"]) and not np.isnan(r["mean_actual"])
+    ]
     if len(valid) < 3:
         return False
     preds = np.array([r["mean_pred"] for r in valid])
@@ -116,9 +117,7 @@ def calibration_probe(
     features, feature_names = extract_features(samples, feature_set=feature_set)
     labels = np.asarray(labels, dtype=np.float32)
 
-    splits = list(
-        purged_walk_forward_splits(timestamps, n_folds, embargo_hours)
-    )
+    splits = list(purged_walk_forward_splits(timestamps, n_folds, embargo_hours))
 
     fold_aucs: list = []
     oof_pred: list = []
@@ -158,10 +157,7 @@ def calibration_probe(
 
     gate_passed = (mean_auc >= _GATE_AUC) and is_monotonic
     if gate_passed:
-        gate_reason = (
-            f"PASS: mean_auc={mean_auc:.3f} >= {_GATE_AUC}, "
-            f"calibration is monotonic"
-        )
+        gate_reason = f"PASS: mean_auc={mean_auc:.3f} >= {_GATE_AUC}, calibration is monotonic"
     else:
         reasons = []
         if mean_auc < _GATE_AUC:

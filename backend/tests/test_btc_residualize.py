@@ -19,6 +19,7 @@ r_alt[t] at fit time. A lookahead test pins this invariant.
 Pure-array helpers (no I/O, no dicts) so they can be applied directly inside
 FeatureBuilder.build (#253c) on the 5m grid with W=288 (24h).
 """
+
 import os
 import sys
 
@@ -29,23 +30,25 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 
 # ── compute_rolling_beta ───────────────────────────────────────────────────
+
 
 class TestComputeRollingBeta:
     """β[t] = Cov(alt[t-W:t], btc[t-W:t]) / Var(btc[t-W:t]); strict — excludes t."""
 
     def test_recovers_known_beta(self):
         from tools.btc_residualize import compute_rolling_beta
+
         rng = np.random.RandomState(0)
         n, W = 500, 50
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
-        alt = 2.0 * btc                              # β ≡ 2 exactly
+        alt = 2.0 * btc  # β ≡ 2 exactly
         beta = compute_rolling_beta(alt, btc, window=W)
         assert beta.shape == (n,)
         # Eligible bars (t >= W) should be ~2.0.
@@ -54,6 +57,7 @@ class TestComputeRollingBeta:
 
     def test_warmup_is_nan(self):
         from tools.btc_residualize import compute_rolling_beta
+
         n, W = 100, 30
         rng = np.random.RandomState(1)
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -69,6 +73,7 @@ class TestComputeRollingBeta:
         """β[t] must depend ONLY on alt[t-W:t] and btc[t-W:t]. Mutating
         alt[t] or btc[t] (or any later index) MUST NOT change β[t]."""
         from tools.btc_residualize import compute_rolling_beta
+
         rng = np.random.RandomState(2)
         n, W = 200, 40
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -92,9 +97,10 @@ class TestComputeRollingBeta:
         must emit 0.0 (not NaN, not inf) so downstream consumers don't see
         garbage. (Channel must remain finite under #253c spec.)"""
         from tools.btc_residualize import compute_rolling_beta
+
         n, W = 100, 30
         alt = np.linspace(0.0, 1.0, n).astype(np.float64)
-        btc = np.zeros(n, dtype=np.float64)          # var=0 in every window
+        btc = np.zeros(n, dtype=np.float64)  # var=0 in every window
         beta = compute_rolling_beta(alt, btc, window=W)
         # Warm-up still NaN; eligible bars must be finite (0.0 fallback).
         assert np.all(np.isnan(beta[:W]))
@@ -104,10 +110,11 @@ class TestComputeRollingBeta:
 
     def test_zero_beta_when_uncorrelated(self):
         from tools.btc_residualize import compute_rolling_beta
+
         rng = np.random.RandomState(3)
         n, W = 2000, 200
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
-        alt = rng.normal(0.0, 0.01, n).astype(np.float64)   # independent
+        alt = rng.normal(0.0, 0.01, n).astype(np.float64)  # independent
         beta = compute_rolling_beta(alt, btc, window=W)
         # Mean β over eligible bars should be near zero (large sample).
         eligible = beta[W:]
@@ -115,6 +122,7 @@ class TestComputeRollingBeta:
 
     def test_input_shape_preserved(self):
         from tools.btc_residualize import compute_rolling_beta
+
         n, W = 50, 20
         rng = np.random.RandomState(4)
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -127,6 +135,7 @@ class TestComputeRollingBeta:
         """If the array is shorter than the window, every entry is NaN —
         no eligible bar exists."""
         from tools.btc_residualize import compute_rolling_beta
+
         n, W = 10, 30
         rng = np.random.RandomState(5)
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -137,6 +146,7 @@ class TestComputeRollingBeta:
 
     def test_mismatched_lengths_raises(self):
         from tools.btc_residualize import compute_rolling_beta
+
         with pytest.raises(ValueError):
             compute_rolling_beta(
                 np.zeros(50, dtype=np.float64),
@@ -146,6 +156,7 @@ class TestComputeRollingBeta:
 
     def test_invalid_window_raises(self):
         from tools.btc_residualize import compute_rolling_beta
+
         arr = np.zeros(50, dtype=np.float64)
         with pytest.raises(ValueError):
             compute_rolling_beta(arr, arr, window=0)
@@ -155,12 +166,14 @@ class TestComputeRollingBeta:
 
 # ── residualize_returns ────────────────────────────────────────────────────
 
+
 class TestResidualizeReturns:
     """ε[t] = alt[t] - β[t] · btc[t] where β[t] from [t-W, t-1] strictly."""
 
     def test_zero_residual_when_alt_eq_beta_btc(self):
         """alt = 2·btc exactly → β=2, residual=0 (after warm-up)."""
         from tools.btc_residualize import residualize_returns
+
         rng = np.random.RandomState(0)
         n, W = 500, 50
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -173,6 +186,7 @@ class TestResidualizeReturns:
     def test_residual_recovers_idiosyncratic_component(self):
         """alt = β·btc + idio → residual should correlate strongly with idio."""
         from tools.btc_residualize import residualize_returns
+
         rng = np.random.RandomState(1)
         n, W = 1000, 100
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -185,6 +199,7 @@ class TestResidualizeReturns:
 
     def test_warmup_is_nan(self):
         from tools.btc_residualize import residualize_returns
+
         n, W = 100, 30
         rng = np.random.RandomState(2)
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -198,6 +213,7 @@ class TestResidualizeReturns:
         any value at indices > t. Mutating future values of alt or btc must
         not change any ε[i] for i ≤ t."""
         from tools.btc_residualize import residualize_returns
+
         rng = np.random.RandomState(3)
         n, W = 200, 40
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -221,6 +237,7 @@ class TestResidualizeReturns:
         choose to skip the residual lookup for that pid, but the helper
         itself returns zeros — never NaN, never raises."""
         from tools.btc_residualize import residualize_returns
+
         rng = np.random.RandomState(4)
         n, W = 200, 50
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -235,6 +252,7 @@ class TestResidualizeReturns:
         """When btc has no variance in the window, β=0 (per
         compute_rolling_beta fallback) → residual = alt - 0·btc = alt[t]."""
         from tools.btc_residualize import residualize_returns
+
         n, W = 100, 30
         alt = np.linspace(0.0, 1.0, n).astype(np.float64)
         btc = np.zeros(n, dtype=np.float64)
@@ -245,6 +263,7 @@ class TestResidualizeReturns:
 
     def test_input_shape_preserved(self):
         from tools.btc_residualize import residualize_returns
+
         n, W = 50, 20
         rng = np.random.RandomState(5)
         btc = rng.normal(0.0, 0.01, n).astype(np.float64)
@@ -255,6 +274,7 @@ class TestResidualizeReturns:
 
     def test_mismatched_lengths_raises(self):
         from tools.btc_residualize import residualize_returns
+
         with pytest.raises(ValueError):
             residualize_returns(
                 np.zeros(50, dtype=np.float64),
@@ -264,6 +284,7 @@ class TestResidualizeReturns:
 
     def test_invalid_window_raises(self):
         from tools.btc_residualize import residualize_returns
+
         arr = np.zeros(50, dtype=np.float64)
         with pytest.raises(ValueError):
             residualize_returns(arr, arr, window=0)

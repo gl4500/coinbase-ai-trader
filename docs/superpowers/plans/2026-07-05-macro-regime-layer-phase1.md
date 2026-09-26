@@ -1276,7 +1276,7 @@ git log -1 --stat
 ## Execution record — 2026-09-26
 
 Tasks 1–4 were built 2026-07-05/09. Tasks 5–8 executed 2026-09-26 (Session
-58.80). `tests/regime/` = **40 passed**. All work is on `feat/macro-regime-layer`.
+58.82). `tests/regime/` = **40 passed**. All work is on `feat/macro-regime-layer`.
 
 **Deviations from this plan, and why:**
 

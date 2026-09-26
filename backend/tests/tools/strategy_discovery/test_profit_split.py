@@ -1,4 +1,5 @@
 """Tests for tools.strategy_discovery.profit_split (Phase 3)."""
+
 from __future__ import annotations
 
 from typing import List
@@ -8,7 +9,6 @@ import pytest
 import torch
 
 from tools.strategy_discovery.profit_split import (
-    SplitResult,
     best_split,
     build_next_eligible,
     walk_and_sum,
@@ -21,7 +21,7 @@ def _naive_walk_and_sum_py(
     labels: List[float],
 ) -> float:
     """Reference: walk indices in order, only enter if not already in a trade."""
-    open_until = -1   # exclusive
+    open_until = -1  # exclusive
     total = 0.0
     for i in indices:
         if i < open_until:

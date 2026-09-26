@@ -13,6 +13,7 @@ but absent from per-channel stats — vol regime ratio, vol of vol, full-window
 return, return skew/kurt, RSI threshold/cross binaries, MACD sign-change,
 funding x trend interaction. None source from MASKED_CHANNELS.
 """
+
 from __future__ import annotations
 
 from typing import List, Tuple
@@ -35,8 +36,16 @@ MASKED_CHANNELS: frozenset = frozenset({17, 18, 19})
 XGB_DROP_CHANNELS: frozenset = frozenset({21, 24})
 
 _STAT_NAMES: tuple = (
-    "last", "mean", "std", "slope", "min", "max",
-    "pct_rank", "delta_5", "delta_10", "delta_30",
+    "last",
+    "mean",
+    "std",
+    "slope",
+    "min",
+    "max",
+    "pct_rank",
+    "delta_5",
+    "delta_10",
+    "delta_30",
 )
 
 _V2_NEW_FEATURES: tuple = (
@@ -109,10 +118,10 @@ def _v2_addons(s64: np.ndarray) -> np.ndarray:
     d_mean = diffs.mean(axis=1, keepdims=True)
     d_std = diffs.std(axis=1) + eps
     centered = diffs - d_mean
-    m3 = (centered ** 3).mean(axis=1)
-    m4 = (centered ** 4).mean(axis=1)
-    out[:, 3] = m3 / (d_std ** 3)
-    out[:, 4] = m4 / (d_std ** 4) - 3.0
+    m3 = (centered**3).mean(axis=1)
+    m4 = (centered**4).mean(axis=1)
+    out[:, 3] = m3 / (d_std**3)
+    out[:, 4] = m4 / (d_std**4) - 3.0
 
     out[:, 5] = (ch4[:, -1] < 0.3).astype(np.float64)
     out[:, 6] = (ch4[:, -1] > 0.7).astype(np.float64)
@@ -208,7 +217,7 @@ def _stats_from_candles(candles: list, stat_offset: int, out: np.ndarray) -> Non
     below = (closes < last).sum()
     equal = (closes == last).sum()
     out[stat_offset + 6] = (below + 0.5 * equal) / t
-    out[stat_offset + 7] = closes[-1] - closes[-6]  if t >= 6  else 0.0
+    out[stat_offset + 7] = closes[-1] - closes[-6] if t >= 6 else 0.0
     out[stat_offset + 8] = closes[-1] - closes[-11] if t >= 11 else 0.0
     out[stat_offset + 9] = closes[-1] - closes[-31] if t >= 31 else 0.0
 
@@ -226,7 +235,7 @@ def _extract_v3(candles_by_tier: dict) -> Tuple[np.ndarray, List[str]]:
     out = np.zeros((1, len(names)), dtype=np.float64)
 
     micro = candles_by_tier.get("micro") or []
-    meso  = candles_by_tier.get("meso")  or []
+    meso = candles_by_tier.get("meso") or []
     macro = candles_by_tier.get("macro") or []
 
     offset = 0
@@ -251,9 +260,7 @@ def _extract_v3(candles_by_tier: dict) -> Tuple[np.ndarray, List[str]]:
     return out, names
 
 
-def extract_features(
-    samples, feature_set: str = "v1"
-) -> Tuple[np.ndarray, List[str]]:
+def extract_features(samples, feature_set: str = "v1") -> Tuple[np.ndarray, List[str]]:
     """Convert a batch of samples to tabular features.
 
     feature_set:
@@ -268,9 +275,11 @@ def extract_features(
     """
     if feature_set == "v4_5":
         from tools.xgb_v4_5_features import extract_v4_5
+
         return extract_v4_5(samples)
     if feature_set == "v4":
         from tools.xgb_v4_features import extract_v4
+
         return extract_v4(samples)
     if feature_set == "v3":
         return _extract_v3(samples)
@@ -279,9 +288,7 @@ def extract_features(
             f"unknown feature_set={feature_set!r}; expected 'v1', 'v2', 'v3', 'v4', or 'v4_5'"
         )
     if samples.ndim != 3 or samples.shape[1] != N_CHANNELS or samples.shape[2] != SEQ_LEN:
-        raise ValueError(
-            f"expected shape [N, {N_CHANNELS}, {SEQ_LEN}], got {samples.shape}"
-        )
+        raise ValueError(f"expected shape [N, {N_CHANNELS}, {SEQ_LEN}], got {samples.shape}")
 
     n = samples.shape[0]
     out = np.zeros((n, N_CHANNELS * len(_STAT_NAMES)), dtype=np.float64)
@@ -294,15 +301,15 @@ def extract_features(
             # MASKED_CHANNELS: signal is zeroed at inference -> would cause skew.
             # XGB_DROP_CHANNELS: ablation (#146) showed these are anti-signal.
             continue
-        ch = s64[:, c, :]              # [N, T]
-        out[:, base + 0] = ch[:, -1]   # last
+        ch = s64[:, c, :]  # [N, T]
+        out[:, base + 0] = ch[:, -1]  # last
         out[:, base + 1] = ch.mean(axis=1)
         out[:, base + 2] = ch.std(axis=1)
         out[:, base + 3] = _slope(ch)
         out[:, base + 4] = ch.min(axis=1)
         out[:, base + 5] = ch.max(axis=1)
         out[:, base + 6] = _percentile_rank(ch)
-        out[:, base + 7] = ch[:, -1] - ch[:, -6]   # delta_5
+        out[:, base + 7] = ch[:, -1] - ch[:, -6]  # delta_5
         out[:, base + 8] = ch[:, -1] - ch[:, -11]  # delta_10
         out[:, base + 9] = ch[:, -1] - ch[:, -31]  # delta_30
 

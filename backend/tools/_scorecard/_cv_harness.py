@@ -16,6 +16,7 @@ xgb_model.json was fit on the full dataset, so scoring its own training rows
 would be in-sample. Booster config mirrors train_xgb_v3 (feature_weights_v3
 on the DMatrix per CLAUDE.md invariant #13; subsample=0.7; colsample=0.8).
 """
+
 from __future__ import annotations
 
 import os
@@ -23,20 +24,21 @@ from dataclasses import dataclass
 
 import numpy as np
 
-_MIN_BARS = 336      # macro tier window
-_HORIZON = 4         # v3 label/return horizon, bars
+_MIN_BARS = 336  # macro tier window
+_HORIZON = 4  # v3 label/return horizon, bars
 _MICRO, _MESO, _MACRO = 60, 168, 336
 
 
 @dataclass
 class V3Dataset:
     """Pooled, time-sorted v3 samples with pre-extracted features."""
-    X: np.ndarray            # (N, 350) v3 features
-    y: np.ndarray            # (N,) binary 0/1 = close[t+4] > close[t]
-    entry_ts: np.ndarray     # (N,) int64 epoch seconds at the entry bar
+
+    X: np.ndarray  # (N, 350) v3 features
+    y: np.ndarray  # (N,) binary 0/1 = close[t+4] > close[t]
+    entry_ts: np.ndarray  # (N,) int64 epoch seconds at the entry bar
     entry_close: np.ndarray  # (N,) close[t]
-    exit_close: np.ndarray   # (N,) close[t+4]
-    pid: np.ndarray          # (N,) object, source product id
+    exit_close: np.ndarray  # (N,) close[t+4]
+    pid: np.ndarray  # (N,) object, source product id
 
 
 def top_n_pids_from_cache(cache_path: str, n: int = 20, snapshot_ts=None) -> list[str]:
@@ -44,6 +46,7 @@ def top_n_pids_from_cache(cache_path: str, n: int = 20, snapshot_ts=None) -> lis
     AUC probes. The cache is read only for this ranking — v3 samples are built
     from parquets, not the cache."""
     import torch
+
     from tools.pid_snapshot import survivorship_aware_top_n
 
     blob = torch.load(cache_path, map_location="cpu", weights_only=False)
@@ -62,6 +65,7 @@ def build_v3_samples(
     `close[t+4] > close[t]`. Records entry/exit close for realized returns.
     """
     import pandas as pd
+
     from tools.xgb_features import extract_features
 
     X_list, y_list, ts_list, ec_list, xc_list, pid_list = [], [], [], [], [], []
@@ -77,9 +81,9 @@ def build_v3_samples(
         closes = df["close"].to_numpy()
         for t in range(_MIN_BARS, len(starts) - _HORIZON, sample_step):
             tiers = {
-                "micro": records[t - _MICRO:t],
-                "meso": records[t - _MESO:t],
-                "macro": records[t - _MACRO:t],
+                "micro": records[t - _MICRO : t],
+                "meso": records[t - _MESO : t],
+                "macro": records[t - _MACRO : t],
             }
             feats, _ = extract_features(tiers, feature_set="v3")
             X_list.append(feats[0])
@@ -109,6 +113,7 @@ def train_fold_v3(X_tr: np.ndarray, y_tr: np.ndarray, X_va: np.ndarray) -> np.nd
     feature weights mirror tools.train_xgb.train_xgb_v3.
     """
     import xgboost as xgb
+
     from tools.xgb_features import _v3_feature_names, feature_weights_v3
 
     if len(np.unique(y_tr)) < 2:

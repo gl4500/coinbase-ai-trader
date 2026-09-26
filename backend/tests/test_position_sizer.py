@@ -2,7 +2,9 @@
 Unit tests for the Kelly Criterion position sizer.
 These are pure-math tests — no DB, no network, no mocking needed.
 """
+
 import pytest
+
 from agents.position_sizer import PositionSizer
 
 
@@ -17,6 +19,7 @@ def sizer():
 
 
 # ── Edge filtering ────────────────────────────────────────────────────────────
+
 
 class TestEdgeFilter:
     def test_below_min_edge_returns_zero(self, sizer):
@@ -46,6 +49,7 @@ class TestEdgeFilter:
 
 # ── Kelly formula correctness ─────────────────────────────────────────────────
 
+
 class TestKellyFormula:
     def test_full_kelly_calculation(self, sizer):
         # edge = 0.70 - 0.50 = 0.20; full_kelly = 0.20 / 0.50 = 0.40
@@ -68,6 +72,7 @@ class TestKellyFormula:
 
 # ── Position caps ─────────────────────────────────────────────────────────────
 
+
 class TestPositionCaps:
     def test_max_position_usdc_cap(self, sizer):
         # Very large bankroll should still cap at max_position_usdc=500
@@ -77,18 +82,25 @@ class TestPositionCaps:
     def test_exposure_cap_limits_trade(self, sizer):
         # Already at max exposure → no room left
         result = sizer.kelly_size(
-            model_prob=0.80, market_price=0.50, bankroll=1000,
+            model_prob=0.80,
+            market_price=0.50,
+            bankroll=1000,
             current_exposure=5000.0,
         )
         assert result["recommended_usdc"] == 0.0
 
     def test_partial_exposure_reduces_size(self, sizer):
-        full = sizer.kelly_size(model_prob=0.80, market_price=0.50, bankroll=10000, current_exposure=0)
-        partial = sizer.kelly_size(model_prob=0.80, market_price=0.50, bankroll=10000, current_exposure=4000)
+        full = sizer.kelly_size(
+            model_prob=0.80, market_price=0.50, bankroll=10000, current_exposure=0
+        )
+        partial = sizer.kelly_size(
+            model_prob=0.80, market_price=0.50, bankroll=10000, current_exposure=4000
+        )
         assert partial["recommended_usdc"] <= full["recommended_usdc"]
 
 
 # ── Arb sizer ─────────────────────────────────────────────────────────────────
+
 
 class TestArbSizer:
     def test_arb_size_positive(self, sizer):
@@ -103,8 +115,12 @@ class TestArbSizer:
     def test_arb_legs_sum_to_total(self, sizer):
         result = sizer.arb_size(yes_price=0.45, no_price=0.50, bankroll=10000)
         # yes_leg + no_leg should equal recommended_usdc (within rounding)
-        assert abs(result["yes_leg_usdc"] + result["no_leg_usdc"] - result["recommended_usdc"]) < 0.02
+        assert (
+            abs(result["yes_leg_usdc"] + result["no_leg_usdc"] - result["recommended_usdc"]) < 0.02
+        )
 
     def test_arb_capped_at_exposure_limit(self, sizer):
-        result = sizer.arb_size(yes_price=0.45, no_price=0.50, bankroll=10000, current_exposure=5000.0)
+        result = sizer.arb_size(
+            yes_price=0.45, no_price=0.50, bankroll=10000, current_exposure=5000.0
+        )
         assert result["recommended_usdc"] == 0.0

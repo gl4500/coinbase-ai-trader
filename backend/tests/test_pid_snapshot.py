@@ -4,11 +4,11 @@ Existing probes select top-N pids by total `len(entry["X"])`, which is
 post-hoc: products that grew the most data dominate. The fix exposes
 a `snapshot_ts` parameter so selection is based on samples-existing-at-time.
 """
+
 import os
 import sys
 
 import numpy as np
-import pytest
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
@@ -30,9 +30,9 @@ def _entry(first_ts: int, n: int, indices_step: int = 1) -> dict:
 
 
 class TestSurvivorshipAwareTopN:
-
     def test_no_snapshot_matches_legacy_sort(self):
         from tools.pid_snapshot import survivorship_aware_top_n
+
         prods = {
             "A": _entry(0, 10),
             "B": _entry(0, 30),
@@ -43,6 +43,7 @@ class TestSurvivorshipAwareTopN:
 
     def test_snapshot_excludes_data_after_cutoff(self):
         from tools.pid_snapshot import survivorship_aware_top_n
+
         # A has 10 samples ending at ts=10*3600
         # B starts AFTER cutoff (ts=20*3600), all samples post-cutoff
         # C has 5 samples ending at ts=5*3600 (below cutoff)
@@ -58,6 +59,7 @@ class TestSurvivorshipAwareTopN:
 
     def test_snapshot_partial_truncates_count(self):
         from tools.pid_snapshot import survivorship_aware_top_n
+
         # A: 100 samples, all before cutoff
         # B: 100 samples but only 5 before cutoff
         prods = {
@@ -72,6 +74,7 @@ class TestSurvivorshipAwareTopN:
 
     def test_returns_at_most_n(self):
         from tools.pid_snapshot import survivorship_aware_top_n
+
         prods = {f"P{i}": _entry(0, i + 1) for i in range(5)}
         out = survivorship_aware_top_n(prods, n=3, snapshot_ts=None)
         assert len(out) == 3
@@ -79,15 +82,22 @@ class TestSurvivorshipAwareTopN:
 
     def test_empty_prods_returns_empty(self):
         from tools.pid_snapshot import survivorship_aware_top_n
+
         assert survivorship_aware_top_n({}, n=5, snapshot_ts=None) == []
 
     def test_skips_empty_X_entries(self):
         from tools.pid_snapshot import survivorship_aware_top_n
+
         prods = {
             "A": _entry(0, 5),
-            "B": {"first_ts": 0, "last_ts": 0, "last_n": 0,
-                  "X": [], "y": np.array([], dtype=np.float32),
-                  "indices": np.array([], dtype=np.int64)},
+            "B": {
+                "first_ts": 0,
+                "last_ts": 0,
+                "last_n": 0,
+                "X": [],
+                "y": np.array([], dtype=np.float32),
+                "indices": np.array([], dtype=np.int64),
+            },
             "C": _entry(0, 3),
         }
         out = survivorship_aware_top_n(prods, n=5, snapshot_ts=None)
@@ -98,6 +108,7 @@ class TestSurvivorshipAwareTopN:
         """`recommended_snapshot_ts` returns the median first_ts across products
         — a sensible cutoff that excludes products that joined recently."""
         from tools.pid_snapshot import recommended_snapshot_ts
+
         prods = {
             "A": _entry(first_ts=0, n=5),
             "B": _entry(first_ts=10 * _BAR_SECS, n=5),

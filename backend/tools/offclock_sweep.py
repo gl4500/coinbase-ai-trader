@@ -7,6 +7,7 @@ writes a results table. See 2026-05-21-offclock-xgb-track-design.md.
 Operator-run and offline: it trains 16 x 5 boosters. Requires
 data/history/dollar/ to be populated (SP1's backfill + build steps).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,18 +27,12 @@ _DEFAULT_OUT = os.path.join(
 
 def _config_grid() -> list[tuple[str, str, int]]:
     """All 16 (substrate, label_variant, horizon) configs."""
-    return [
-        (s, lv, k)
-        for s in SUBSTRATES
-        for lv in LABEL_VARIANTS
-        for k in HORIZONS
-    ]
+    return [(s, lv, k) for s in SUBSTRATES for lv in LABEL_VARIANTS for k in HORIZONS]
 
 
 def _gates_passed(row: dict) -> int:
     """Count of the 4 hard gates a config row passes."""
-    return sum((row["precision"], row["expected_return"],
-                row["paper_sharpe"], row["ece"]))
+    return sum((row["precision"], row["expected_return"], row["paper_sharpe"], row["ece"]))
 
 
 def _render_results_doc(rows: list[dict]) -> str:
@@ -95,8 +90,7 @@ def _render_results_doc(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _run_one(substrate: str, label_variant: str, k: int,
-             pids: list[str], sample_step: int) -> dict:
+def _run_one(substrate: str, label_variant: str, k: int, pids: list[str], sample_step: int) -> dict:
     """Run + scorecard one config. Returns a results row."""
     from sklearn.metrics import roc_auc_score
 
@@ -105,8 +99,11 @@ def _run_one(substrate: str, label_variant: str, k: int,
 
     data = run_config(substrate, label_variant, k, pids, sample_step)
     report = compute_scorecard(
-        data["scores"], data["labels"], data["returns"],
-        data["fold_ids"], data["fold_spans_days"],
+        data["scores"],
+        data["labels"],
+        data["returns"],
+        data["fold_ids"],
+        data["fold_spans_days"],
     )
     try:
         auc = float(roc_auc_score(data["labels"], data["scores"]))
@@ -130,20 +127,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Sweep 16 off-the-clock XGB configs through the scorecard"
     )
-    parser.add_argument("--cache", default=_DEFAULT_CACHE,
-                        help="cache for the survivorship-aware top-20 ranking")
-    parser.add_argument("--pids", default=None,
-                        help="comma-separated product ids (overrides --cache)")
-    parser.add_argument("--sample-step", type=int, default=_DEFAULT_SAMPLE_STEP,
-                        help="roll one sample every N bars (default: 24)")
-    parser.add_argument("--out", default=_DEFAULT_OUT,
-                        help="results doc path (default: the SP2 results spec)")
+    parser.add_argument(
+        "--cache", default=_DEFAULT_CACHE, help="cache for the survivorship-aware top-20 ranking"
+    )
+    parser.add_argument(
+        "--pids", default=None, help="comma-separated product ids (overrides --cache)"
+    )
+    parser.add_argument(
+        "--sample-step",
+        type=int,
+        default=_DEFAULT_SAMPLE_STEP,
+        help="roll one sample every N bars (default: 24)",
+    )
+    parser.add_argument(
+        "--out", default=_DEFAULT_OUT, help="results doc path (default: the SP2 results spec)"
+    )
     args = parser.parse_args()
 
     if args.pids:
         pids = [p.strip() for p in args.pids.split(",") if p.strip()]
     else:
         from tools._scorecard._cv_harness import top_n_pids_from_cache
+
         pids = list(top_n_pids_from_cache(args.cache))
 
     grid = _config_grid()

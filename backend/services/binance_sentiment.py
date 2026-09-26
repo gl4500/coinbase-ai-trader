@@ -5,6 +5,7 @@ Contrarian signal: heavy long positioning = crowd is long = bearish lean.
 sentiment_score = long_ratio - short_ratio, normalised to [-1, 1].
 Cached for 5 minutes (Binance updates every 1h anyway).
 """
+
 import logging
 import time
 from typing import Dict, Optional
@@ -13,9 +14,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_URL      = "https://fapi.binance.com/futures/data/topLongShortPositionRatio"
+_URL = "https://fapi.binance.com/futures/data/topLongShortPositionRatio"
 _CACHE_TTL = 300
-_cache: Dict[str, tuple] = {}   # binance_symbol -> (timestamp, score)
+_cache: Dict[str, tuple] = {}  # binance_symbol -> (timestamp, score)
 
 # Map Coinbase product_id → Binance futures symbol
 _PRODUCT_TO_BN = {
@@ -55,7 +56,7 @@ async def get_ls_sentiment(product_id: str) -> Optional[float]:
             if not data:
                 return None
             row = data[0]
-            long_ratio  = float(row["longAccount"])
+            long_ratio = float(row["longAccount"])
             short_ratio = float(row["shortAccount"])
             score = max(-1.0, min(1.0, long_ratio - short_ratio))
             _cache[bn_sym] = (time.time(), score)

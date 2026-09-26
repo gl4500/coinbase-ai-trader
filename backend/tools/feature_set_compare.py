@@ -9,6 +9,7 @@ Cells:
 Output: 4-cell mean_auc grid + gate pass/fail. Drives the decision on
 whether to promote v2 to default and whether to retrain BTC-only or pooled.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,10 +39,9 @@ def _load_cache() -> dict:
 
 def _entry_to_arrays(entry: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-product cache entry -> (samples [N,27,60], labels [N], ts [N])."""
-    X = np.stack([
-        x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-        for x in entry["X"]
-    ]).astype(np.float32)
+    X = np.stack(
+        [x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x) for x in entry["X"]]
+    ).astype(np.float32)
     y = np.asarray(entry["y"], dtype=np.float32)
     first_ts = int(entry["first_ts"])
     idx = np.asarray(entry["indices"], dtype=np.int64)
@@ -77,10 +77,16 @@ def _pooled_top_n(prods: dict, n: int = 20, snapshot_ts: Optional[int] = None):
 def _run_cell(name: str, X, y, ts, feature_set: str):
     print(f"-- {name} | feature_set={feature_set} | n={len(y):,} ", flush=True)
     res = calibration_probe(
-        X, y, ts,
-        n_folds=5, embargo_hours=4, n_buckets=10,
+        X,
+        y,
+        ts,
+        n_folds=5,
+        embargo_hours=4,
+        n_buckets=10,
         params={"max_depth": 4, "min_child_weight": 1, "subsample": 1.0},
-        n_estimators=200, learning_rate=0.05, seed=0,
+        n_estimators=200,
+        learning_rate=0.05,
+        seed=0,
         feature_set=feature_set,
     )
     fold_str = ", ".join(f"{a:.3f}" for a in res["fold_aucs"])
@@ -109,8 +115,8 @@ def main():
         "--snapshot-ts",
         default=None,
         help="Survivorship-aware top-N cutoff (#163). Pass 'auto' for the "
-             "median-first_ts default, or an explicit Unix-seconds int. "
-             "Omit to keep the legacy len(X) ranking.",
+        "median-first_ts default, or an explicit Unix-seconds int. "
+        "Omit to keep the legacy len(X) ranking.",
     )
     args = parser.parse_args()
 

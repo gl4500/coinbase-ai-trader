@@ -12,6 +12,7 @@ dataset cache, with the cache's own forward-4h ±0.3% labels.
 
 These tests cover the new path; the legacy db-shadow path is unchanged.
 """
+
 from __future__ import annotations
 
 import os
@@ -19,7 +20,6 @@ import pickle
 import sys
 
 import numpy as np
-import pytest
 
 _HERE = os.path.dirname(__file__)
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
@@ -43,11 +43,12 @@ class TestCacheSourceCalibratorFit:
 
     def test_cache_source_function_exists(self):
         """The new fit entry-point must exist with a `source` kwarg."""
-        from tools.fit_xgb_calibration import fit_calibration
-
         # Sentinel call signature; actual execution patched in later tests.
         # If the kwarg is missing this raises TypeError → RED.
         import inspect
+
+        from tools.fit_xgb_calibration import fit_calibration
+
         sig = inspect.signature(fit_calibration)
         assert "source" in sig.parameters, (
             "fit_calibration must accept `source` so callers can pick "
@@ -60,7 +61,8 @@ class TestCacheSourceCalibratorFit:
 
         raw, wins = _make_synthetic_pairs()
         monkeypatch.setattr(
-            mod, "_load_cache_pairs",
+            mod,
+            "_load_cache_pairs",
             lambda cache_path, model_path, features_path: (raw, wins),
         )
 
@@ -74,7 +76,8 @@ class TestCacheSourceCalibratorFit:
         )
 
         with open(out_path, "rb") as f:
-            _loaded = pickle.load(f); iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
+            _loaded = pickle.load(f)
+            iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
         grid = np.linspace(0.4, 0.6, 11)
         cal = iso.transform(grid)
         n_unique = len(np.unique(np.round(cal, 4)))
@@ -89,7 +92,8 @@ class TestCacheSourceCalibratorFit:
 
         raw, wins = _make_synthetic_pairs()
         monkeypatch.setattr(
-            mod, "_load_cache_pairs",
+            mod,
+            "_load_cache_pairs",
             lambda cache_path, model_path, features_path: (raw, wins),
         )
 
@@ -103,7 +107,8 @@ class TestCacheSourceCalibratorFit:
         )
 
         with open(out_path, "rb") as f:
-            _loaded = pickle.load(f); iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
+            _loaded = pickle.load(f)
+            iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
         grid = np.linspace(0.4, 0.6, 50)
         cal = iso.transform(grid)
         diffs = np.diff(cal)
@@ -118,7 +123,8 @@ class TestCacheSourceCalibratorFit:
 
         raw, wins = _make_synthetic_pairs()
         monkeypatch.setattr(
-            mod, "_load_cache_pairs",
+            mod,
+            "_load_cache_pairs",
             lambda cache_path, model_path, features_path: (raw, wins),
         )
 
@@ -132,7 +138,8 @@ class TestCacheSourceCalibratorFit:
         )
 
         with open(out_path, "rb") as f:
-            _loaded = pickle.load(f); iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
+            _loaded = pickle.load(f)
+            iso = _loaded["calibrator"] if isinstance(_loaded, dict) else _loaded
         cal = iso.transform(raw)
 
         def _auc(p, y):
@@ -147,21 +154,21 @@ class TestCacheSourceCalibratorFit:
         raw_auc = _auc(raw, wins)
         cal_auc = _auc(cal, wins)
         assert abs(raw_auc - cal_auc) <= 0.02, (
-            f"calibration broke ranking: raw_auc={raw_auc:.4f} "
-            f"cal_auc={cal_auc:.4f}"
+            f"calibration broke ranking: raw_auc={raw_auc:.4f} cal_auc={cal_auc:.4f}"
         )
 
     def test_cache_source_default_when_no_args(self):
         """The legacy positional-arg call still routes through the
         signal_outcomes path so #180 callers don't break."""
-        from tools.fit_xgb_calibration import fit_calibration
         import inspect
+
+        from tools.fit_xgb_calibration import fit_calibration
+
         sig = inspect.signature(fit_calibration)
         # Backward compat: default source must keep the legacy "shadow" path
         default = sig.parameters["source"].default
         assert default in ("shadow", "signal_outcomes"), (
-            f"backward compat: default source kwarg must keep legacy path, "
-            f"got {default!r}"
+            f"backward compat: default source kwarg must keep legacy path, got {default!r}"
         )
 
 
@@ -173,17 +180,45 @@ class TestFeatureSetDetection:
 
     def test_v1_at_28_channels_detected_as_v1(self):
         from tools.fit_xgb_calibration import _detect_feature_set
-        v1_names = [f"ch{c}_{s}" for c in range(28)
-                    for s in ("last", "mean", "std", "slope", "min", "max",
-                              "pct_rank", "delta_5", "delta_10", "delta_30")]
+
+        v1_names = [
+            f"ch{c}_{s}"
+            for c in range(28)
+            for s in (
+                "last",
+                "mean",
+                "std",
+                "slope",
+                "min",
+                "max",
+                "pct_rank",
+                "delta_5",
+                "delta_10",
+                "delta_30",
+            )
+        ]
         assert len(v1_names) == 280
         assert _detect_feature_set(v1_names) == "v1"
 
     def test_v2_at_28_channels_detected_as_v2(self):
         from tools.fit_xgb_calibration import _detect_feature_set
-        v1_names = [f"ch{c}_{s}" for c in range(28)
-                    for s in ("last", "mean", "std", "slope", "min", "max",
-                              "pct_rank", "delta_5", "delta_10", "delta_30")]
+
+        v1_names = [
+            f"ch{c}_{s}"
+            for c in range(28)
+            for s in (
+                "last",
+                "mean",
+                "std",
+                "slope",
+                "min",
+                "max",
+                "pct_rank",
+                "delta_5",
+                "delta_10",
+                "delta_30",
+            )
+        ]
         v2_addons = ["xt_vol_regime_ratio", "xt_vol_of_vol", "xt_ret_full"]
         assert _detect_feature_set(v1_names + v2_addons) == "v2"
 
@@ -194,13 +229,16 @@ class TestFeatureSetDetection:
 class TestV3CalibrationPickle:
     def test_pickle_writes_dict_with_feature_set(self, tmp_path):
         import pickle
-        from sklearn.isotonic import IsotonicRegression
+
         import numpy as np
+        from sklearn.isotonic import IsotonicRegression
+
         from tools.fit_xgb_calibration import _save_calibrator
 
         out = tmp_path / "xgb_calibration.pkl"
         iso = IsotonicRegression(out_of_bounds="clip").fit(
-            np.array([0.2, 0.5, 0.8]), np.array([0.1, 0.5, 0.9]),
+            np.array([0.2, 0.5, 0.8]),
+            np.array([0.1, 0.5, 0.9]),
         )
         _save_calibrator(iso, str(out), feature_set="v3")
         loaded = pickle.load(open(out, "rb"))
@@ -210,6 +248,6 @@ class TestV3CalibrationPickle:
 
     def test_detect_feature_set_recognises_v3(self):
         from tools.fit_xgb_calibration import _detect_feature_set
-        v3_names = ["ch0_last", "ch15_m060_mean", "ch15_m168_slope",
-                    "ch20_m336_pct_rank"]
+
+        v3_names = ["ch0_last", "ch15_m060_mean", "ch15_m168_slope", "ch20_m336_pct_rank"]
         assert _detect_feature_set(v3_names) == "v3"

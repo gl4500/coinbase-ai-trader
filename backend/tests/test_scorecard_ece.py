@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from tools._scorecard._ece import expected_calibration_error
 
 

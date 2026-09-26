@@ -12,10 +12,11 @@ Verifies:
   - SignalCNN.forward accepts (B, 27, 60) and returns (B, 1)
   - apply_mask zeros only the channels listed in mask
 """
+
+import json
 import os
 import sys
-import json
-import pytest
+
 import torch
 
 # tools/ is sibling of backend/
@@ -26,7 +27,9 @@ if _TOOLS not in sys.path:
 
 def _import_module():
     import importlib
+
     import train_cloud  # type: ignore
+
     importlib.reload(train_cloud)
     return train_cloud
 

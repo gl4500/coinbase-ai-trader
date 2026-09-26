@@ -2,6 +2,7 @@
 
 Consumer: the deployment-aligned scorecard (tools/scorecard.py, Task 3+).
 """
+
 from __future__ import annotations
 
 import numpy as np

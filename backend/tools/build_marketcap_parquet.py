@@ -20,6 +20,7 @@ Run:
         --source coinpaprika --pids BTC-USD,ETH-USD,SOL-USD \\
         --start 2025-01-01 --end 2026-05-10
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,14 +45,16 @@ _BAR_SECS = 3600
 _MARKETCAP_DIR = os.path.join(BACKEND, "data", "marketcap")
 
 _SCHEMA_VERSION = 2  # was 1; v2 adds volume_24h (Step A, 2026-05-16)
-_SCHEMA = pa.schema([
-    pa.field("start",          pa.int64()),
-    pa.field("market_cap",     pa.float64()),
-    pa.field("fdv",            pa.float64()),
-    pa.field("volume_24h",     pa.float64()),
-    pa.field("ingest_ts",      pa.int64()),
-    pa.field("schema_version", pa.int32()),
-])
+_SCHEMA = pa.schema(
+    [
+        pa.field("start", pa.int64()),
+        pa.field("market_cap", pa.float64()),
+        pa.field("fdv", pa.float64()),
+        pa.field("volume_24h", pa.float64()),
+        pa.field("ingest_ts", pa.int64()),
+        pa.field("schema_version", pa.int32()),
+    ]
+)
 
 
 def _parquet_path(product_id: str) -> str:
@@ -71,9 +74,9 @@ def _load_marketcap_history(path: str) -> List[Dict]:
     has_sv = "schema_version" in rows
     for i in range(n):
         r = {
-            "start":      int(rows["start"][i]),
+            "start": int(rows["start"][i]),
             "market_cap": float(rows["market_cap"][i]),
-            "fdv":        float(rows["fdv"][i]),
+            "fdv": float(rows["fdv"][i]),
         }
         # volume_24h is v2-only — old v1 parquets lack the column entirely.
         if "volume_24h" in rows and rows["volume_24h"][i] is not None:
@@ -110,9 +113,9 @@ def _save_marketcap_history(
         mc = float(r["market_cap"])
         fdv = float(r.get("fdv", mc))
         merged: Dict = {
-            "start":      start,
+            "start": start,
             "market_cap": mc,
-            "fdv":        fdv,
+            "fdv": fdv,
             "volume_24h": float(r.get("volume_24h", 0.0)),
         }
         if "ingest_ts" in r:
@@ -123,11 +126,11 @@ def _save_marketcap_history(
     ordered = sorted(seen.values(), key=lambda r: r["start"])
     table = pa.table(
         {
-            "start":          [r["start"]      for r in ordered],
-            "market_cap":     [r["market_cap"] for r in ordered],
-            "fdv":            [r["fdv"]        for r in ordered],
-            "volume_24h":     [float(r.get("volume_24h", 0.0)) for r in ordered],
-            "ingest_ts":      [int(r.get("ingest_ts", now_ts)) for r in ordered],
+            "start": [r["start"] for r in ordered],
+            "market_cap": [r["market_cap"] for r in ordered],
+            "fdv": [r["fdv"] for r in ordered],
+            "volume_24h": [float(r.get("volume_24h", 0.0)) for r in ordered],
+            "ingest_ts": [int(r.get("ingest_ts", now_ts)) for r in ordered],
             "schema_version": [int(r.get("schema_version", _SCHEMA_VERSION)) for r in ordered],
         },
         schema=_SCHEMA,
@@ -161,16 +164,19 @@ def rows_from_history(
             vol = 0.0
         start = (int(ts_ms) // 1000 // _BAR_SECS) * _BAR_SECS
         fdv = fdv_lookup.get(int(ts_ms), float(mc))
-        out.append({
-            "start":      start,
-            "market_cap": float(mc),
-            "fdv":        fdv,
-            "volume_24h": float(vol),
-        })
+        out.append(
+            {
+                "start": start,
+                "market_cap": float(mc),
+                "fdv": fdv,
+                "volume_24h": float(vol),
+            }
+        )
     return out
 
 
 # ── CLI runner ──────────────────────────────────────────────────────────────
+
 
 async def _fetch_one(source: str, pid: str, start_ms: int, end_ms: int):
     if source == "coingecko":
@@ -209,7 +215,7 @@ def main() -> int:
         history = asyncio.run(_fetch_one(args.source, pid, start_ms, end_ms))
         if not history:
             skipped.append(pid)
-            print(f"    no rows — skipping", flush=True)
+            print("    no rows — skipping", flush=True)
             continue
         rows = rows_from_history(history)
         path = os.path.join(args.out_dir, f"{pid.replace('/', '_')}.parquet")

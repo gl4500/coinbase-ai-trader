@@ -9,9 +9,10 @@ label_h{horizon} — no exit re-simulation.
 
 Pure pandas + numpy. No I/O, no GPU.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -69,10 +70,14 @@ def _rule_holds_at(conditions: List[Tuple[str, str, float]], row: pd.Series) -> 
         if feature not in row.index:
             return False
         v = float(row[feature])
-        if op == ">"  and not (v >  threshold): return False
-        if op == ">=" and not (v >= threshold): return False
-        if op == "<"  and not (v <  threshold): return False
-        if op == "<=" and not (v <= threshold): return False
+        if op == ">" and not (v > threshold):
+            return False
+        if op == ">=" and not (v >= threshold):
+            return False
+        if op == "<" and not (v < threshold):
+            return False
+        if op == "<=" and not (v <= threshold):
+            return False
     return True
 
 
@@ -93,7 +98,7 @@ def _compute_sortino(trade_pnls: List[float]) -> float:
     downside = arr[arr < 0]
     if downside.size == 0:
         return 0.0
-    dd = float(np.sqrt(np.mean(downside ** 2)))
+    dd = float(np.sqrt(np.mean(downside**2)))
     return mean / dd if dd > 0 else 0.0
 
 
@@ -121,9 +126,11 @@ def simulate_portfolio(
     for pid, f in pid_features.items():
         if f.empty:
             continue
-        pid_ts_to_row[pid] = {int(t): row for t, row in zip(f["ts"], (f.iloc[i] for i in range(len(f))))}
+        pid_ts_to_row[pid] = {
+            int(t): row for t, row in zip(f["ts"], (f.iloc[i] for i in range(len(f))), strict=False)
+        }
 
-    open_positions: List[dict] = []   # {pid, profile_id, entry_ts, exit_ts, expected_pnl}
+    open_positions: List[dict] = []  # {pid, profile_id, entry_ts, exit_ts, expected_pnl}
     trade_log: List[float] = []
     telemetry: List[TelemetryRow] = []
     equity = 0.0
@@ -142,10 +149,15 @@ def simulate_portfolio(
         for c in closed_this_bar:
             equity += c["expected_pnl"]
             trade_log.append(float(c["expected_pnl"]))
-            telemetry.append(TelemetryRow(
-                ts=ts, equity=equity, n_open=len(still_open),
-                closed_profile_id=c["profile_id"], realized_pnl=float(c["expected_pnl"]),
-            ))
+            telemetry.append(
+                TelemetryRow(
+                    ts=ts,
+                    equity=equity,
+                    n_open=len(still_open),
+                    closed_profile_id=c["profile_id"],
+                    realized_pnl=float(c["expected_pnl"]),
+                )
+            )
         open_positions = still_open
 
         # 2. Evaluate firings (per-pid occupied set updated live during entries)
@@ -176,31 +188,39 @@ def simulate_portfolio(
             if label_col not in row.index or pd.isna(row[label_col]):
                 continue
             expected = float(row[label_col])
-            open_positions.append({
-                "pid": profile.pid,
-                "profile_id": profile.profile_id,
-                "entry_ts": int(ts),
-                "exit_ts": int(ts) + horizon_ms[profile.profile_id],
-                "expected_pnl": expected,
-            })
+            open_positions.append(
+                {
+                    "pid": profile.pid,
+                    "profile_id": profile.profile_id,
+                    "entry_ts": int(ts),
+                    "exit_ts": int(ts) + horizon_ms[profile.profile_id],
+                    "expected_pnl": expected,
+                }
+            )
             occupied_pids.add(profile.pid)
-            telemetry.append(TelemetryRow(
-                ts=ts, equity=equity, n_open=len(open_positions),
-                fired_profile_id=profile.profile_id,
-            ))
+            telemetry.append(
+                TelemetryRow(
+                    ts=ts,
+                    equity=equity,
+                    n_open=len(open_positions),
+                    fired_profile_id=profile.profile_id,
+                )
+            )
         # If no firings, emit a baseline telemetry row anyway
         if not firings:
             telemetry.append(TelemetryRow(ts=ts, equity=equity, n_open=len(open_positions)))
         bar_max_n_open.append(len(open_positions))
 
     equity_curve = [t.equity for t in telemetry]
-    n_open_log = [t.n_open for t in telemetry]
+    [t.n_open for t in telemetry]
     metrics = PortfolioMetrics(
         cumulative_profit_raw=equity,
         max_dd=_compute_max_dd(equity_curve),
         sortino=_compute_sortino(trade_log),
         trade_count=len(trade_log),
-        pct_slots_full=float(sum(1 for n in bar_max_n_open if n >= cap) / max(len(bar_max_n_open), 1)),
+        pct_slots_full=float(
+            sum(1 for n in bar_max_n_open if n >= cap) / max(len(bar_max_n_open), 1)
+        ),
         mean_concurrent=float(sum(bar_max_n_open) / max(len(bar_max_n_open), 1)),
     )
     return metrics, telemetry

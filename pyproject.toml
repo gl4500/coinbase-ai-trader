@@ -43,16 +43,18 @@ select = [
     "W",   # pycodestyle warnings
     "F",   # pyflakes
     "B",   # flake8-bugbear
-    "S",   # flake8-bandit (security)
     "I",   # isort
 ]
+# Security linting (flake8-bandit / "S") is intentionally NOT selected: the
+# dedicated Bandit SAST job in .github/workflows/ci.yml is the security gate,
+# so enabling ruff's S-rules here would duplicate it.
 ignore = [
-    "S101",  # assert in tests
-    "S105",  # hardcoded password in tests/config templates
     "B008",  # do not perform function call in argument defaults (FastAPI Depends)
     "E501",  # line length handled by ruff formatter
 ]
-per-file-ignores = { "backend/tests/*" = ["S", "B"] }
+# E402 is ignored where a sys.path bootstrap must run before imports:
+# main.py (launcher .venv shim) and the test modules (BACKEND path insert).
+per-file-ignores = { "backend/tests/*" = ["B", "E402"], "backend/main.py" = ["E402"] }
 
 [tool.ruff.lint.isort]
 known-first-party = ["config", "database", "agents", "clients", "services"]

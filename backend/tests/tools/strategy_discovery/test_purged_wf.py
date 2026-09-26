@@ -1,8 +1,8 @@
 """Tests for tools.strategy_discovery.purged_wf (Phase 3)."""
+
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from tools.strategy_discovery.purged_wf import inner_folds, outer_folds
 
@@ -37,7 +37,7 @@ def test_nested_inner_cv_uses_only_outer_train():
     inner = inner_folds(outer_train, n_folds=3, embargo_bars=0)
     assert len(inner) == 3
     outer_train_set = set(outer_train.tolist())
-    outer_test_set  = set(outer_test.tolist())
+    outer_test_set = set(outer_test.tolist())
     for inner_train, inner_test in inner:
         for idx in inner_train.tolist() + inner_test.tolist():
             assert idx in outer_train_set, f"inner idx {idx} not in outer train"

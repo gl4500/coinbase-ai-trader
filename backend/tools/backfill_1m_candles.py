@@ -5,6 +5,7 @@ history covers the same calendar span. Long-running and network-heavy — run
 offline; it makes only read-only Coinbase candle requests (it does not touch
 the database or the live backend).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -32,6 +33,7 @@ def _resolve_pids(cache_path: str, pids_arg: str | None) -> list[str]:
     if pids_arg:
         return [p.strip() for p in pids_arg.split(",") if p.strip()]
     from tools._scorecard._cv_harness import top_n_pids_from_cache
+
     return list(top_n_pids_from_cache(cache_path))
 
 
@@ -44,18 +46,21 @@ async def _run(pids: list[str]) -> None:
             continue
         print(f"[{i}/{len(pids)}] {pid}: backfilling 1m, {days}d ...", flush=True)
         result = await backfill_product_1m(pid, days=days)
-        print(f"    +{result['new_bars']} new | {result['total_bars']} total",
-              flush=True)
+        print(f"    +{result['new_bars']} new | {result['total_bars']} total", flush=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Backfill 1-minute candles for the top-20 products"
     )
-    parser.add_argument("--cache", default="cnn_dataset_cache.pt",
-                        help="cache for the survivorship-aware top-20 ranking")
-    parser.add_argument("--pids", default=None,
-                        help="comma-separated product ids (overrides --cache)")
+    parser.add_argument(
+        "--cache",
+        default="cnn_dataset_cache.pt",
+        help="cache for the survivorship-aware top-20 ranking",
+    )
+    parser.add_argument(
+        "--pids", default=None, help="comma-separated product ids (overrides --cache)"
+    )
     args = parser.parse_args()
     pids = _resolve_pids(args.cache, args.pids)
     print(f"1m backfill: {len(pids)} products", flush=True)

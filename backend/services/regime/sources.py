@@ -6,6 +6,7 @@ All fetches are injectable (session_get) so tests never hit the network, and
 degrade to the local parquet cache on failure. See memory
 btc_macro_drivers_findings for source quirks.
 """
+
 from __future__ import annotations
 
 import io
@@ -15,16 +16,19 @@ import os
 import urllib.request
 from typing import Callable
 
-import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
 _FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
-_CM = ("https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
-       "?assets=btc&metrics=CapMVRVCur&frequency=1d&page_size=10000&start_time={}")
+_CM = (
+    "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+    "?assets=btc&metrics=CapMVRVCur&frequency=1d&page_size=10000&start_time={}"
+)
 _FRED_IDS = {"btc": "CBBTCUSD", "spx": "SP500", "dxy": "DTWEXBGS", "real_yield": "DFII10"}
 _CACHE_NAME = "regime_sources.parquet"
 
@@ -51,7 +55,9 @@ def fetch_fred(series_id: str, start: str, session_get: Callable = _urlopen) -> 
 
 def fetch_mvrv(start: str, session_get: Callable = _urlopen) -> pd.Series:
     try:
-        raw = session_get(_CM.format(start), headers={"User-Agent": _UA, "Accept": "application/json"})
+        raw = session_get(
+            _CM.format(start), headers={"User-Agent": _UA, "Accept": "application/json"}
+        )
         data = json.loads(raw.decode()).get("data", [])
         idx = pd.to_datetime([d["time"] for d in data]).tz_localize(None).normalize()
         vals = pd.to_numeric([d.get("CapMVRVCur") for d in data], errors="coerce")

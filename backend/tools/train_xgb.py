@@ -5,6 +5,7 @@ tabular feature extraction and tools/walk_forward for time-ordered CV with
 4-hour embargo (the gap the CNN training path was missing — see Phase 0
 findings).
 """
+
 from __future__ import annotations
 
 import json
@@ -16,9 +17,8 @@ import numpy as np
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score
 
-from tools.xgb_features import extract_features
 from tools.walk_forward import purged_walk_forward_splits
-
+from tools.xgb_features import extract_features
 
 _DEFAULT_GRID: list = [
     {"max_depth": d, "min_child_weight": w, "subsample": s}
@@ -65,9 +65,7 @@ def train_xgb(
     features, feature_names = extract_features(samples)
     labels = np.asarray(labels, dtype=np.float32)
 
-    splits = list(
-        purged_walk_forward_splits(timestamps, n_folds, embargo_hours)
-    )
+    splits = list(purged_walk_forward_splits(timestamps, n_folds, embargo_hours))
 
     best_score = -1.0
     best_params: Optional[dict] = None
@@ -153,12 +151,15 @@ def train_xgb_v3(
              "features_path"}.
     """
     import logging as _log
-    import pandas as pd
     import shutil
     import time as _time
 
+    import pandas as pd
+
     from tools.xgb_features import (
-        extract_features, _v3_feature_names, feature_weights_v3,
+        _v3_feature_names,
+        extract_features,
+        feature_weights_v3,
     )
 
     _trainer_log = _log.getLogger("train_xgb_v3")
@@ -190,9 +191,9 @@ def train_xgb_v3(
         n_samples_this_pid = 0
         for t in range(336, len(starts) - 4, sample_step):
             tiers = {
-                "micro": records[t - 60:t],
-                "meso":  records[t - 168:t] if t >= 168 else [],
-                "macro": records[t - 336:t] if t >= 336 else [],
+                "micro": records[t - 60 : t],
+                "meso": records[t - 168 : t] if t >= 168 else [],
+                "macro": records[t - 336 : t] if t >= 336 else [],
             }
             feats, _ = extract_features(tiers, feature_set="v3")
             label = 1 if closes[t + 4] > closes[t] else 0
@@ -201,7 +202,11 @@ def train_xgb_v3(
             n_samples_this_pid += 1
         _trainer_log.info(
             "v3 features built: pid=%s (%d/%d) samples=%d elapsed=%.1fs",
-            pid, pid_idx + 1, len(pids), n_samples_this_pid, _time.time() - _t_start,
+            pid,
+            pid_idx + 1,
+            len(pids),
+            n_samples_this_pid,
+            _time.time() - _t_start,
         )
         # Also print so background nohup logs see progress (logging may be
         # silenced when called as a module under nohup with empty config).
@@ -245,12 +250,15 @@ def train_xgb_v3(
     tmp_feats = out_path / "xgb_features.tmp.json"
     booster.save_model(str(tmp_model))
     with open(tmp_feats, "w") as f:
-        json.dump({
-            "feature_names": names,
-            "feature_set": "v3",
-            "best_params": {"max_depth": 4, "min_child_weight": 1, "subsample": 0.7},
-            "feature_weights": weights.tolist(),
-        }, f)
+        json.dump(
+            {
+                "feature_names": names,
+                "feature_set": "v3",
+                "best_params": {"max_depth": 4, "min_child_weight": 1, "subsample": 0.7},
+                "feature_weights": weights.tolist(),
+            },
+            f,
+        )
     shutil.move(str(tmp_model), str(out_path / "xgb_model.json"))
     shutil.move(str(tmp_feats), str(out_path / "xgb_features.json"))
 

@@ -16,6 +16,7 @@ re-stamp `ingest_ts = int(time.time())`, write parquet, return merged rows
 filtered to the requested [start_ms, end_ms] window as `(ts_ms, market_cap)`
 tuples sorted ascending.
 """
+
 from __future__ import annotations
 
 import os
@@ -24,9 +25,9 @@ from typing import List, Tuple
 
 from services.coingecko_marketcap import fetch_marketcap_history
 from tools.build_marketcap_parquet import (
+    _SCHEMA_VERSION,
     _load_marketcap_history,
     _save_marketcap_history,
-    _SCHEMA_VERSION,
 )
 
 _BAR_SECS = 3600
@@ -109,9 +110,7 @@ async def fetch_marketcap_history_cached(
                 "schema_version": _SCHEMA_VERSION,
             }
         if merged_by_start:
-            _save_marketcap_history(
-                path, list(merged_by_start.values()), now_ts=now_ts
-            )
+            _save_marketcap_history(path, list(merged_by_start.values()), now_ts=now_ts)
             cached = sorted(merged_by_start.values(), key=lambda r: r["start"])
 
     out: List[Tuple[int, float, float]] = []

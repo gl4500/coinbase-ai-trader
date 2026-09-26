@@ -5,16 +5,17 @@ Progress is written atomically to cnn_train_progress.json.
 
 Usage: python train_worker.py --epochs 50
 """
-import sys
-import os
-import json
-import asyncio
+
 import argparse
-import time
+import asyncio
+import json
 import logging
+import os
+import sys
+import time
 
 # ── Path bootstrap (mirrors main.py) ─────────────────────────────────────────
-_root      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _venv_site = os.path.join(_root, ".venv", "Lib", "site-packages")
 if os.path.isdir(_venv_site) and _venv_site not in sys.path:
     sys.path.insert(0, _venv_site)
@@ -29,9 +30,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler(
-            os.path.join(_log_dir, "cnn_training.log"), encoding="utf-8"
-        ),
+        logging.FileHandler(os.path.join(_log_dir, "cnn_training.log"), encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
@@ -59,12 +58,14 @@ async def _run(epochs: int, started_at: float) -> None:
     agent = CoinbaseCNNAgent(ws_subscriber=None)
     result = await agent.train_on_history(epochs=epochs)
 
-    _write({
-        "status":       "failed" if "error" in result else "completed",
-        "elapsed_secs": result.get("duration_secs", int(time.time() - started_at)),
-        "result":       result,
-        "finished_at":  time.time(),
-    })
+    _write(
+        {
+            "status": "failed" if "error" in result else "completed",
+            "elapsed_secs": result.get("duration_secs", int(time.time() - started_at)),
+            "result": result,
+            "finished_at": time.time(),
+        }
+    )
 
 
 if __name__ == "__main__":
@@ -73,12 +74,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     started_at = time.time()
-    _write({
-        "status":     "running",
-        "pid":        os.getpid(),
-        "started_at": started_at,
-        "result":     None,
-    })
+    _write(
+        {
+            "status": "running",
+            "pid": os.getpid(),
+            "started_at": started_at,
+            "result": None,
+        }
+    )
 
     logger.info(f"CNN training worker started — PID={os.getpid()} epochs={args.epochs}")
 
@@ -86,12 +89,14 @@ if __name__ == "__main__":
         asyncio.run(_run(args.epochs, started_at))
     except Exception as exc:
         logger.error(f"CNN training worker failed: {exc}", exc_info=True)
-        _write({
-            "status":       "failed",
-            "elapsed_secs": int(time.time() - started_at),
-            "result":       {"error": str(exc)},
-            "finished_at":  time.time(),
-        })
+        _write(
+            {
+                "status": "failed",
+                "elapsed_secs": int(time.time() - started_at),
+                "result": {"error": str(exc)},
+                "finished_at": time.time(),
+            }
+        )
         sys.exit(1)
 
     logger.info("CNN training worker finished successfully")

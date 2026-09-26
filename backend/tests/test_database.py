@@ -2,10 +2,12 @@
 Integration tests for the async SQLite database layer — Coinbase schema.
 Uses a real (temporary) SQLite file — no mocking of DB calls.
 """
-import os
-import sys
+
 import asyncio
 import importlib
+import os
+import sys
+
 import pytest
 
 # Make backend importable
@@ -14,16 +16,17 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 # Patch env before any imports touch config
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("APP_API_KEY",              "test-key")
-os.environ.setdefault("DRY_RUN",                  "true")
+os.environ.setdefault("APP_API_KEY", "test-key")
+os.environ.setdefault("DRY_RUN", "true")
 
 
 @pytest.fixture
 def db_module(tmp_path):
     """Reload the database module pointing at a fresh tmp SQLite file."""
     import database
+
     importlib.reload(database)
     database.DB_PATH = str(tmp_path / "test.db")
     return database
@@ -40,6 +43,7 @@ def event_loop():
 def run(event_loop):
     def _run(coro):
         return event_loop.run_until_complete(coro)
+
     return _run
 
 
@@ -51,6 +55,7 @@ def db(db_module, run):
 
 # ── Timestamps ────────────────────────────────────────────────────────────────
 
+
 class TestTimestamps:
     def test_now_returns_utc_offset(self, db_module):
         ts = db_module._now()
@@ -58,7 +63,7 @@ class TestTimestamps:
 
     def test_product_timestamp_is_utc(self, db, run):
         product = {
-            "product_id":    "BTC-USD",
+            "product_id": "BTC-USD",
             "base_currency": "BTC",
             "quote_currency": "USD",
         }
@@ -68,15 +73,17 @@ class TestTimestamps:
 
     def test_signal_timestamp_is_utc(self, db, run):
         # Need a product first (FK)
-        run(db.upsert_product({
-            "product_id": "ETH-USD", "base_currency": "ETH", "quote_currency": "USD"
-        }))
+        run(
+            db.upsert_product(
+                {"product_id": "ETH-USD", "base_currency": "ETH", "quote_currency": "USD"}
+            )
+        )
         signal = {
-            "product_id":  "ETH-USD",
+            "product_id": "ETH-USD",
             "signal_type": "RSI_OVERSOLD",
-            "side":        "BUY",
-            "price":       3000.0,
-            "strength":    0.75,
+            "side": "BUY",
+            "price": 3000.0,
+            "strength": 0.75,
         }
         run(db.save_signal(signal))
         signals = run(db.get_signals())
@@ -84,13 +91,13 @@ class TestTimestamps:
 
     def test_order_timestamp_is_utc(self, db, run):
         order = {
-            "order_id":   "ord001",
+            "order_id": "ord001",
             "product_id": "BTC-USD",
-            "side":       "BUY",
+            "side": "BUY",
             "order_type": "LIMIT",
-            "price":      95000.0,
-            "base_size":  0.001,
-            "status":     "open",
+            "price": 95000.0,
+            "base_size": 0.001,
+            "status": "open",
         }
         run(db.save_order(order))
         orders = run(db.get_orders())
@@ -99,15 +106,16 @@ class TestTimestamps:
 
 # ── Products CRUD ─────────────────────────────────────────────────────────────
 
+
 class TestProducts:
     def _product(self, pid="BTC-USD", tracked=False):
         return {
-            "product_id":    pid,
+            "product_id": pid,
             "base_currency": pid.split("-")[0],
             "quote_currency": "USD",
-            "price":         95_000.0,
-            "volume_24h":    500_000_000,
-            "is_tracked":    tracked,
+            "price": 95_000.0,
+            "volume_24h": 500_000_000,
+            "is_tracked": tracked,
         }
 
     def test_upsert_and_fetch(self, db, run):
@@ -154,12 +162,12 @@ class TestMajorsAlwaysIncluded:
 
     def _prod(self, pid, volume):
         return {
-            "product_id":    pid,
+            "product_id": pid,
             "base_currency": pid.split("-")[0],
             "quote_currency": "USD",
-            "price":         1.0,
-            "volume_24h":    volume,
-            "is_tracked":    True,
+            "price": 1.0,
+            "volume_24h": volume,
+            "is_tracked": True,
         }
 
     def test_btc_eth_sol_returned_even_with_low_native_volume(self, db, run):
@@ -180,34 +188,47 @@ class TestMajorsAlwaysIncluded:
 
 # ── Candles CRUD ──────────────────────────────────────────────────────────────
 
+
 class TestCandles:
     def _candles(self, n=5, pid="BTC-USD"):
         return [
-            {"start": 1_700_000_000 + i * 3600, "open": 95_000.0, "high": 96_000.0,
-             "low": 94_000.0, "close": 95_500.0, "volume": 1000.0}
+            {
+                "start": 1_700_000_000 + i * 3600,
+                "open": 95_000.0,
+                "high": 96_000.0,
+                "low": 94_000.0,
+                "close": 95_500.0,
+                "volume": 1000.0,
+            }
             for i in range(n)
         ]
 
     def test_save_and_fetch(self, db, run):
-        run(db.upsert_product({
-            "product_id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD"
-        }))
+        run(
+            db.upsert_product(
+                {"product_id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD"}
+            )
+        )
         run(db.save_candles("BTC-USD", self._candles(5)))
         candles = run(db.get_candles("BTC-USD"))
         assert len(candles) == 5
 
     def test_candles_oldest_first(self, db, run):
-        run(db.upsert_product({
-            "product_id": "ETH-USD", "base_currency": "ETH", "quote_currency": "USD"
-        }))
+        run(
+            db.upsert_product(
+                {"product_id": "ETH-USD", "base_currency": "ETH", "quote_currency": "USD"}
+            )
+        )
         run(db.save_candles("ETH-USD", self._candles(3, "ETH-USD")))
         candles = run(db.get_candles("ETH-USD"))
         assert candles[0]["start_time"] <= candles[-1]["start_time"]
 
     def test_duplicate_candles_ignored(self, db, run):
-        run(db.upsert_product({
-            "product_id": "SOL-USD", "base_currency": "SOL", "quote_currency": "USD"
-        }))
+        run(
+            db.upsert_product(
+                {"product_id": "SOL-USD", "base_currency": "SOL", "quote_currency": "USD"}
+            )
+        )
         run(db.save_candles("SOL-USD", self._candles(3, "SOL-USD")))
         run(db.save_candles("SOL-USD", self._candles(3, "SOL-USD")))  # same timestamps
         candles = run(db.get_candles("SOL-USD"))
@@ -216,18 +237,19 @@ class TestCandles:
 
 # ── Signals CRUD ──────────────────────────────────────────────────────────────
 
+
 class TestSignals:
     def _signal(self, pid="BTC-USD"):
         return {
-            "product_id":  pid,
+            "product_id": pid,
             "signal_type": "CNN_LONG",
-            "side":        "BUY",
-            "price":       95_000.0,
-            "strength":    0.80,
-            "rsi":         28.5,
-            "macd":        0.0012,
+            "side": "BUY",
+            "price": 95_000.0,
+            "strength": 0.80,
+            "rsi": 28.5,
+            "macd": 0.0012,
             "bb_position": 0.1,
-            "reasoning":   "Oversold on RSI",
+            "reasoning": "Oversold on RSI",
         }
 
     def test_save_and_retrieve(self, db, run):
@@ -254,17 +276,18 @@ class TestSignals:
 
 # ── Orders CRUD ───────────────────────────────────────────────────────────────
 
+
 class TestOrders:
     def _order(self, oid="ord001"):
         return {
-            "order_id":   oid,
+            "order_id": oid,
             "product_id": "BTC-USD",
-            "side":       "BUY",
+            "side": "BUY",
             "order_type": "LIMIT",
-            "price":      94_000.0,
-            "base_size":  0.001,
-            "status":     "open",
-            "strategy":   "CNN_LONG",
+            "price": 94_000.0,
+            "base_size": 0.001,
+            "status": "open",
+            "strategy": "CNN_LONG",
         }
 
     def test_save_and_retrieve(self, db, run):
@@ -289,19 +312,20 @@ class TestOrders:
 
 # ── Positions & Portfolio ─────────────────────────────────────────────────────
 
+
 class TestPortfolio:
     def _position(self, pid="BTC-USD"):
         return {
-            "product_id":    pid,
+            "product_id": pid,
             "base_currency": pid.split("-")[0],
-            "side":          "BUY",
-            "size":          0.1,
-            "avg_price":     90_000.0,
+            "side": "BUY",
+            "size": 0.1,
+            "avg_price": 90_000.0,
             "current_price": 95_000.0,
             "initial_value": 9_000.0,
             "current_value": 9_500.0,
-            "cash_pnl":      500.0,
-            "pct_pnl":       5.56,
+            "cash_pnl": 500.0,
+            "pct_pnl": 5.56,
         }
 
     def test_empty_portfolio(self, db, run):
@@ -314,7 +338,7 @@ class TestPortfolio:
         summary = run(db.get_portfolio_summary())
         assert summary["open_positions"] == 1
         assert summary["total_value"] == 9_500.0
-        assert summary["total_pnl"]   == 500.0
+        assert summary["total_pnl"] == 500.0
 
     def test_upsert_updates_existing(self, db, run):
         run(db.upsert_position(self._position("ETH-USD")))
@@ -333,6 +357,7 @@ class TestPortfolio:
 
 # ── CNN Training Sessions ────────────────────────────────────────────────────
 
+
 class TestCNNTrainingSessions:
     """save_training_session must persist all training metrics, including the
     instrumentation added to compare gate choices (val_auc, precision/recall
@@ -342,21 +367,21 @@ class TestCNNTrainingSessions:
 
     def _base_result(self) -> dict:
         return {
-            "epochs":             50,
-            "stopped_epoch":      17,
-            "train_samples":      100_000,
-            "val_samples":        25_000,
-            "channels":           27,
-            "arch":               "glu2",
-            "initial_loss":       0.693,
-            "final_train_loss":   0.42,
-            "final_val_loss":     0.81,
-            "best_val_loss":      0.66,
-            "overfit_gap_pct":    92.0,
-            "fit_status":         "OVERFIT",
-            "fit_advice":         "train/val divergence",
-            "duration_secs":      380,
-            "saved":              False,
+            "epochs": 50,
+            "stopped_epoch": 17,
+            "train_samples": 100_000,
+            "val_samples": 25_000,
+            "channels": 27,
+            "arch": "glu2",
+            "initial_loss": 0.693,
+            "final_train_loss": 0.42,
+            "final_val_loss": 0.81,
+            "best_val_loss": 0.66,
+            "overfit_gap_pct": 92.0,
+            "fit_status": "OVERFIT",
+            "fit_advice": "train/val divergence",
+            "duration_secs": 380,
+            "saved": False,
         }
 
     def test_persists_val_auc(self, db, run):
@@ -364,6 +389,7 @@ class TestCNNTrainingSessions:
         r["val_auc"] = 0.6527
         run(db.save_training_session(r))
         import sqlite3
+
         cur = sqlite3.connect(db.DB_PATH).execute(
             "SELECT val_auc FROM cnn_training_sessions ORDER BY id DESC LIMIT 1"
         )
@@ -374,10 +400,11 @@ class TestCNNTrainingSessions:
     def test_persists_precision_recall_and_threshold(self, db, run):
         r = self._base_result()
         r["val_precision_at_thresh"] = 0.58
-        r["val_recall_at_thresh"]    = 0.31
-        r["val_threshold"]           = 0.60
+        r["val_recall_at_thresh"] = 0.31
+        r["val_threshold"] = 0.60
         run(db.save_training_session(r))
         import sqlite3
+
         cur = sqlite3.connect(db.DB_PATH).execute(
             "SELECT val_precision_at_thresh, val_recall_at_thresh, val_threshold "
             "FROM cnn_training_sessions ORDER BY id DESC LIMIT 1"
@@ -393,6 +420,7 @@ class TestCNNTrainingSessions:
         r = self._base_result()
         run(db.save_training_session(r))
         import sqlite3
+
         cur = sqlite3.connect(db.DB_PATH).execute(
             "SELECT val_auc, val_precision_at_thresh, val_recall_at_thresh, val_threshold "
             "FROM cnn_training_sessions ORDER BY id DESC LIMIT 1"
@@ -402,6 +430,7 @@ class TestCNNTrainingSessions:
 
 
 # ── Product status persistence (#120c — task #124) ───────────────────────────
+
 
 class TestProductStatusPersistence:
     """Per-product blacklist tier (#120c). The evaluator in
@@ -415,6 +444,7 @@ class TestProductStatusPersistence:
 
     def test_table_created_by_init_db(self, db):
         import sqlite3
+
         cur = sqlite3.connect(db.DB_PATH).execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='product_status'"
         )
@@ -442,16 +472,14 @@ class TestProductStatusPersistence:
         )
 
     def test_set_persists_reason(self, db, run):
-        run(db.set_product_status("ETH-USD", "probation",
-                                  reason="demote: per-trade sharpe=-0.612"))
+        run(db.set_product_status("ETH-USD", "probation", reason="demote: per-trade sharpe=-0.612"))
         row = run(db.get_product_status("ETH-USD"))
         assert row["status"] == "probation"
         assert row["reason"] == "demote: per-trade sharpe=-0.612"
 
     def test_set_is_upsert(self, db, run):
         run(db.set_product_status("SOL-USD", "active"))
-        run(db.set_product_status("SOL-USD", "probation",
-                                  reason="demote: sharpe=-0.7"))
+        run(db.set_product_status("SOL-USD", "probation", reason="demote: sharpe=-0.7"))
         row = run(db.get_product_status("SOL-USD"))
         assert row["status"] == "probation"
         assert row["reason"] == "demote: sharpe=-0.7"
@@ -459,8 +487,7 @@ class TestProductStatusPersistence:
     def test_set_to_suspended_records_demoted_at(self, db, run):
         """First entry into 'suspended' must stamp demoted_at — used by the
         UI to show how long a pair has been blacklisted."""
-        run(db.set_product_status("XRP-USD", "suspended",
-                                  reason="demote: sharpe=-1.2"))
+        run(db.set_product_status("XRP-USD", "suspended", reason="demote: sharpe=-1.2"))
         row = run(db.get_product_status("XRP-USD"))
         assert row["status"] == "suspended"
         assert row["demoted_at"] is not None
@@ -469,10 +496,8 @@ class TestProductStatusPersistence:
     def test_promotion_clears_demoted_at(self, db, run):
         """Recovery (suspended -> probation) clears demoted_at so the next
         demotion stamps a fresh timestamp rather than reusing the stale one."""
-        run(db.set_product_status("ADA-USD", "suspended",
-                                  reason="demote: sharpe=-1.0"))
-        run(db.set_product_status("ADA-USD", "probation",
-                                  reason="promote: sharpe=+0.3"))
+        run(db.set_product_status("ADA-USD", "suspended", reason="demote: sharpe=-1.0"))
+        run(db.set_product_status("ADA-USD", "probation", reason="promote: sharpe=+0.3"))
         row = run(db.get_product_status("ADA-USD"))
         assert row["status"] == "probation"
         assert row["demoted_at"] is None
@@ -483,10 +508,10 @@ class TestProductStatusPersistence:
         assert row["demoted_at"] is None
 
     def test_list_products_by_status(self, db, run):
-        run(db.set_product_status("BTC-USD",  "active"))
-        run(db.set_product_status("ETH-USD",  "probation"))
+        run(db.set_product_status("BTC-USD", "active"))
+        run(db.set_product_status("ETH-USD", "probation"))
         run(db.set_product_status("DOGE-USD", "suspended"))
-        run(db.set_product_status("XRP-USD",  "suspended"))
+        run(db.set_product_status("XRP-USD", "suspended"))
 
         suspended = run(db.list_products_by_status("suspended"))
         assert sorted(suspended) == ["DOGE-USD", "XRP-USD"]
@@ -500,6 +525,7 @@ class TestProductStatusPersistence:
 
 # ── XGB-Step3 (#181): xgb_prob column on cnn_scans ────────────────────────────
 
+
 class TestCnnScansXgbProb:
     """Parallel xgb_prob logging in cnn_scans — XGB-Step3 (#181).
 
@@ -511,26 +537,26 @@ class TestCnnScansXgbProb:
     def _scan_payload(self, **overrides) -> dict:
         base = {
             "product_id": "BTC-USD",
-            "price":      50_000.0,
-            "cnn_prob":   0.55,
-            "llm_prob":   0.40,
+            "price": 50_000.0,
+            "cnn_prob": 0.55,
+            "llm_prob": 0.40,
             "model_prob": 0.50,
             "cnn_weight": 0.6,
             "llm_weight": 0.4,
-            "side":       "HOLD",
-            "strength":   0.0,
+            "side": "HOLD",
+            "strength": 0.0,
             "signal_gen": False,
-            "regime":     "RANGING",
-            "adx":        18.0,
-            "rsi":        55.0,
-            "macd":       0.001,
-            "mfi":        50.0,
-            "stoch_k":    60.0,
-            "atr":        100.0,
-            "vwap_dist":  0.001,
-            "fast_rsi":   0.50,
-            "velocity":   0.0,
-            "vol_z":      0.0,
+            "regime": "RANGING",
+            "adx": 18.0,
+            "rsi": 55.0,
+            "macd": 0.001,
+            "mfi": 50.0,
+            "stoch_k": 60.0,
+            "atr": 100.0,
+            "vwap_dist": 0.001,
+            "fast_rsi": 0.50,
+            "velocity": 0.0,
+            "vol_z": 0.0,
         }
         base.update(overrides)
         return base
@@ -552,9 +578,7 @@ class TestCnnScansXgbProb:
 
     def test_xgb_prob_distinct_from_cnn_prob(self, db, run):
         """Stores cnn_prob and xgb_prob independently in a single row."""
-        run(db.save_cnn_scan(
-            self._scan_payload(cnn_prob=0.71, xgb_prob=0.33)
-        ))
+        run(db.save_cnn_scan(self._scan_payload(cnn_prob=0.71, xgb_prob=0.33)))
         rows = run(db.get_cnn_scans(product_id="BTC-USD", limit=1))
         assert rows[0]["cnn_prob"] == pytest.approx(0.71)
         assert rows[0]["xgb_prob"] == pytest.approx(0.33)
@@ -566,19 +590,34 @@ class TestCnnScansXgbProb:
 class TestSaveCnnScanMCColumns:
     def test_save_cnn_scan_persists_xgb_prob_stdev_when_present(self, db, run):
         from migrations.mc_telemetry_20260516 import run as mig_run
+
         mig_run(db.DB_PATH)
-        run(db.upsert_product({
-            "product_id": "BTC-USD", "base_currency": "BTC",
-            "quote_currency": "USD",
-        }))
-        run(db.save_cnn_scan({
-            "product_id": "BTC-USD", "price": 100.0,
-            "cnn_prob": 0.60, "model_prob": 0.60, "side": "BUY",
-            "strength": 0.2, "signal_gen": True,
-            "xgb_prob_stdev": 0.0124,
-            "mc_telemetry": '{"ci":{"decision":"keep"}}',
-        }))
+        run(
+            db.upsert_product(
+                {
+                    "product_id": "BTC-USD",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                }
+            )
+        )
+        run(
+            db.save_cnn_scan(
+                {
+                    "product_id": "BTC-USD",
+                    "price": 100.0,
+                    "cnn_prob": 0.60,
+                    "model_prob": 0.60,
+                    "side": "BUY",
+                    "strength": 0.2,
+                    "signal_gen": True,
+                    "xgb_prob_stdev": 0.0124,
+                    "mc_telemetry": '{"ci":{"decision":"keep"}}',
+                }
+            )
+        )
         import sqlite3
+
         c = sqlite3.connect(db.DB_PATH)
         row = c.execute(
             "SELECT xgb_prob_stdev, mc_telemetry FROM cnn_scans WHERE product_id='BTC-USD'"
@@ -589,17 +628,32 @@ class TestSaveCnnScanMCColumns:
 
     def test_save_cnn_scan_handles_missing_mc_keys_as_null(self, db, run):
         from migrations.mc_telemetry_20260516 import run as mig_run
+
         mig_run(db.DB_PATH)
-        run(db.upsert_product({
-            "product_id": "ETH-USD", "base_currency": "ETH",
-            "quote_currency": "USD",
-        }))
-        run(db.save_cnn_scan({
-            "product_id": "ETH-USD", "price": 200.0,
-            "cnn_prob": 0.50, "model_prob": 0.50, "side": "HOLD",
-            "strength": 0.0, "signal_gen": False,
-        }))
+        run(
+            db.upsert_product(
+                {
+                    "product_id": "ETH-USD",
+                    "base_currency": "ETH",
+                    "quote_currency": "USD",
+                }
+            )
+        )
+        run(
+            db.save_cnn_scan(
+                {
+                    "product_id": "ETH-USD",
+                    "price": 200.0,
+                    "cnn_prob": 0.50,
+                    "model_prob": 0.50,
+                    "side": "HOLD",
+                    "strength": 0.0,
+                    "signal_gen": False,
+                }
+            )
+        )
         import sqlite3
+
         c = sqlite3.connect(db.DB_PATH)
         row = c.execute(
             "SELECT xgb_prob_stdev, mc_telemetry FROM cnn_scans WHERE product_id='ETH-USD'"
@@ -615,22 +669,37 @@ class TestSaveCnnScanMCColumns:
 class TestSaveCnnScanXgbProbV4:
     def test_save_cnn_scan_persists_xgb_prob_v4_when_present(self, db, run):
         from migrations.xgb_v4_shadow_20260517 import run as mig_run
+
         mig_run(db.DB_PATH)
-        run(db.upsert_product({
-            "product_id": "BTC-USD", "base_currency": "BTC",
-            "quote_currency": "USD",
-        }))
-        run(db.save_cnn_scan({
-            "product_id": "BTC-USD", "price": 100.0,
-            "cnn_prob": 0.60, "model_prob": 0.60, "side": "BUY",
-            "strength": 0.2, "signal_gen": True,
-            "xgb_prob": 0.55, "xgb_prob_v4": 0.42,
-        }))
+        run(
+            db.upsert_product(
+                {
+                    "product_id": "BTC-USD",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                }
+            )
+        )
+        run(
+            db.save_cnn_scan(
+                {
+                    "product_id": "BTC-USD",
+                    "price": 100.0,
+                    "cnn_prob": 0.60,
+                    "model_prob": 0.60,
+                    "side": "BUY",
+                    "strength": 0.2,
+                    "signal_gen": True,
+                    "xgb_prob": 0.55,
+                    "xgb_prob_v4": 0.42,
+                }
+            )
+        )
         import sqlite3
+
         c = sqlite3.connect(db.DB_PATH)
         row = c.execute(
-            "SELECT xgb_prob, xgb_prob_v4 FROM cnn_scans WHERE product_id=?"
-            , ("BTC-USD",)
+            "SELECT xgb_prob, xgb_prob_v4 FROM cnn_scans WHERE product_id=?", ("BTC-USD",)
         ).fetchone()
         c.close()
         assert row is not None
@@ -639,21 +708,35 @@ class TestSaveCnnScanXgbProbV4:
 
     def test_save_cnn_scan_xgb_prob_v4_defaults_to_null(self, db, run):
         from migrations.xgb_v4_shadow_20260517 import run as mig_run
+
         mig_run(db.DB_PATH)
-        run(db.upsert_product({
-            "product_id": "ETH-USD", "base_currency": "ETH",
-            "quote_currency": "USD",
-        }))
-        run(db.save_cnn_scan({
-            "product_id": "ETH-USD", "price": 200.0,
-            "cnn_prob": 0.50, "model_prob": 0.50, "side": "HOLD",
-            "strength": 0.0, "signal_gen": False,
-        }))
+        run(
+            db.upsert_product(
+                {
+                    "product_id": "ETH-USD",
+                    "base_currency": "ETH",
+                    "quote_currency": "USD",
+                }
+            )
+        )
+        run(
+            db.save_cnn_scan(
+                {
+                    "product_id": "ETH-USD",
+                    "price": 200.0,
+                    "cnn_prob": 0.50,
+                    "model_prob": 0.50,
+                    "side": "HOLD",
+                    "strength": 0.0,
+                    "signal_gen": False,
+                }
+            )
+        )
         import sqlite3
+
         c = sqlite3.connect(db.DB_PATH)
         row = c.execute(
-            "SELECT xgb_prob_v4 FROM cnn_scans WHERE product_id=?"
-            , ("ETH-USD",)
+            "SELECT xgb_prob_v4 FROM cnn_scans WHERE product_id=?", ("ETH-USD",)
         ).fetchone()
         c.close()
         assert row[0] is None
@@ -665,24 +748,40 @@ class TestSaveCnnScanXgbProbV4:
 class TestSaveCnnScanV4_5Cols:
     @pytest.mark.asyncio
     async def test_save_cnn_scan_persists_three_v45_probs(self, db, run):
-        from migrations.xgb_v4_5_shadow_20260517 import run as mig_run
         import sqlite3
 
+        from migrations.xgb_v4_5_shadow_20260517 import run as mig_run
+
         mig_run(db.DB_PATH)
-        await db.save_cnn_scan({
-            "product_id": "BTC-USD",
-            "price": 100.0,
-            "model_prob": 0.6, "cnn_prob": 0.6, "llm_prob": None,
-            "regime": "TRENDING", "side": "BUY",
-            "cnn_weight": 1.0, "llm_weight": 0.0,
-            "rsi": 50.0, "macd": 0.0, "mfi": 50.0, "adx": 20.0, "atr": 1.0,
-            "stoch_k": 50.0,
-            "vwap_dist": 0.0, "fast_rsi": 0.5, "velocity": 0.5, "vol_z": 0.5,
-            "xgb_prob": 0.55, "strength": 0.5, "signal_gen": True,
-            "xgb_prob_v4_5_down":    0.21,
-            "xgb_prob_v4_5_neutral": 0.34,
-            "xgb_prob_v4_5_up":      0.45,
-        })
+        await db.save_cnn_scan(
+            {
+                "product_id": "BTC-USD",
+                "price": 100.0,
+                "model_prob": 0.6,
+                "cnn_prob": 0.6,
+                "llm_prob": None,
+                "regime": "TRENDING",
+                "side": "BUY",
+                "cnn_weight": 1.0,
+                "llm_weight": 0.0,
+                "rsi": 50.0,
+                "macd": 0.0,
+                "mfi": 50.0,
+                "adx": 20.0,
+                "atr": 1.0,
+                "stoch_k": 50.0,
+                "vwap_dist": 0.0,
+                "fast_rsi": 0.5,
+                "velocity": 0.5,
+                "vol_z": 0.5,
+                "xgb_prob": 0.55,
+                "strength": 0.5,
+                "signal_gen": True,
+                "xgb_prob_v4_5_down": 0.21,
+                "xgb_prob_v4_5_neutral": 0.34,
+                "xgb_prob_v4_5_up": 0.45,
+            }
+        )
         # Note: connect via the same path
         c = sqlite3.connect(db.DB_PATH)
         row = c.execute(
@@ -698,21 +797,37 @@ class TestSaveCnnScanV4_5Cols:
 
     @pytest.mark.asyncio
     async def test_save_cnn_scan_v45_default_null(self, db, run):
-        from migrations.xgb_v4_5_shadow_20260517 import run as mig_run
         import sqlite3
 
+        from migrations.xgb_v4_5_shadow_20260517 import run as mig_run
+
         mig_run(db.DB_PATH)
-        await db.save_cnn_scan({
-            "product_id": "BTC-USD",
-            "price": 100.0,
-            "model_prob": 0.6, "cnn_prob": 0.6, "llm_prob": None,
-            "regime": "TRENDING", "side": "BUY",
-            "cnn_weight": 1.0, "llm_weight": 0.0,
-            "rsi": 50.0, "macd": 0.0, "mfi": 50.0, "adx": 20.0, "atr": 1.0,
-            "stoch_k": 50.0,
-            "vwap_dist": 0.0, "fast_rsi": 0.5, "velocity": 0.5, "vol_z": 0.5,
-            "xgb_prob": 0.55, "strength": 0.5, "signal_gen": True,
-        })
+        await db.save_cnn_scan(
+            {
+                "product_id": "BTC-USD",
+                "price": 100.0,
+                "model_prob": 0.6,
+                "cnn_prob": 0.6,
+                "llm_prob": None,
+                "regime": "TRENDING",
+                "side": "BUY",
+                "cnn_weight": 1.0,
+                "llm_weight": 0.0,
+                "rsi": 50.0,
+                "macd": 0.0,
+                "mfi": 50.0,
+                "adx": 20.0,
+                "atr": 1.0,
+                "stoch_k": 50.0,
+                "vwap_dist": 0.0,
+                "fast_rsi": 0.5,
+                "velocity": 0.5,
+                "vol_z": 0.5,
+                "xgb_prob": 0.55,
+                "strength": 0.5,
+                "signal_gen": True,
+            }
+        )
         c = sqlite3.connect(db.DB_PATH)
         row = c.execute(
             "SELECT xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up "

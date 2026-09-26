@@ -11,6 +11,7 @@ on two signals:
   2. backend/logs/cnn_training.log has not been written to for at least
      the log-staleness window.
 """
+
 import os
 import sys
 
@@ -21,6 +22,7 @@ if BACKEND not in sys.path:
 
 def _fn():
     import main
+
     return main._is_training_stale
 
 
@@ -67,6 +69,7 @@ class TestTrainingStaleness:
         # and the watchdog false-killed healthy training. Bump to 3600s (1hr)
         # so even a 50-min-per-epoch worst case has headroom.
         import main
+
         assert main._TRAIN_STALE_LOG_SECS == 3600
 
     def test_running_log_idle_20m_is_not_stale(self):

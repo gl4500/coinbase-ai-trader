@@ -24,6 +24,7 @@ representation feature-complete for the +0.01 gate.
 Run:
     cd backend && python tools/marketcap_probe.py --snapshot-ts auto
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,13 +44,14 @@ if BACKEND not in sys.path:
 _CACHE_PATH = os.path.join(BACKEND, "cnn_dataset_cache.pt")
 _BAR_SECS = 3600
 _SEQ_LEN = 60
-_TARGET_CHANNEL = 13       # obv_slope — lowest-importance per #146 ablation
-_LAG_SECS = 86400          # 1-day strict-causal lag (CoinGecko EOD-UTC)
+_TARGET_CHANNEL = 13  # obv_slope — lowest-importance per #146 ablation
+_LAG_SECS = 86400  # 1-day strict-causal lag (CoinGecko EOD-UTC)
 
 
 # ---------------------------------------------------------------------------
 # Pure helpers (tested in tests/test_marketcap_probe.py)
 # ---------------------------------------------------------------------------
+
 
 def marketcap_rows_to_log_grid(
     rows: Iterable[Tuple[int, float]],
@@ -72,19 +74,13 @@ def marketcap_rows_to_log_grid(
 
     # Step A (2026-05-16): fetchers now return 3-tuples (ts, mc, volume_24h).
     # Accept both shapes for back-compat with legacy callers/tests.
-    valid_rows = [
-        (int(r[0]), float(r[1])) for r in rows
-        if r[1] is not None and float(r[1]) > 0.0
-    ]
+    valid_rows = [(int(r[0]), float(r[1])) for r in rows if r[1] is not None and float(r[1]) > 0.0]
     if not valid_rows:
         return {}
 
     aligned_ms = align_to_hourly(valid_rows, hour_grid_ms, lag_secs=lag_secs)
 
-    return {
-        int(ts_ms) // 1000: float(math.log(v))
-        for ts_ms, v in aligned_ms.items()
-    }
+    return {int(ts_ms) // 1000: float(math.log(v)) for ts_ms, v in aligned_ms.items()}
 
 
 def build_marketcap_signal(
@@ -173,7 +169,10 @@ async def _fetch_marketcap_for_pids(
 
         async def _fetch(pid: str):
             return await mhc.fetch_marketcap_history_cached(
-                pid, start_ms, end_ms, parquet_dir=parquet_dir,
+                pid,
+                start_ms,
+                end_ms,
+                parquet_dir=parquet_dir,
             )
     elif source == "coinpaprika":
         from services import coinpaprika_marketcap as cpm
@@ -181,15 +180,15 @@ async def _fetch_marketcap_for_pids(
         async def _fetch(pid: str):
             return await cpm.fetch_marketcap_history(pid, start_ms, end_ms)
     else:
-        raise ValueError(
-            f"unknown source: {source!r}; choose from {_VALID_SOURCES}"
-        )
+        raise ValueError(f"unknown source: {source!r}; choose from {_VALID_SOURCES}")
 
     out: Dict[str, Dict[int, float]] = {}
     for pid in pids:
         rows = await _fetch(pid)
         out[pid] = marketcap_rows_to_log_grid(
-            rows, hour_grid_ms=hour_grid_ms, lag_secs=_LAG_SECS,
+            rows,
+            hour_grid_ms=hour_grid_ms,
+            lag_secs=_LAG_SECS,
         )
     return out
 
@@ -201,6 +200,7 @@ def _load_pooled_with_marketcap(
     parquet_dir: str = _DEFAULT_MARKETCAP_DIR,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     import torch
+
     from tools.feature_set_compare import _entry_to_arrays
     from tools.pid_snapshot import survivorship_aware_top_n
 
@@ -213,31 +213,30 @@ def _load_pooled_with_marketcap(
     mode = "legacy" if snapshot_ts is None else f"snapshot_ts={snapshot_ts}"
     print(f"  pooled top-{n} ({mode}): {top_pids}", flush=True)
 
-    all_ts = np.concatenate([
-        _entry_to_arrays(prods[pid])[2] for pid, _ in sized
-    ])
+    all_ts = np.concatenate([_entry_to_arrays(prods[pid])[2] for pid, _ in sized])
     start_ms = int(all_ts.min() - _SEQ_LEN * _BAR_SECS - _LAG_SECS) * 1000
     end_ms = int(all_ts.max() + _BAR_SECS) * 1000
     print(f"  fetch window: {start_ms} ms .. {end_ms} ms", flush=True)
 
-    grid_secs = sorted({
-        ((int(t) // _BAR_SECS) * _BAR_SECS) for t in all_ts
-    })
+    grid_secs = sorted({((int(t) // _BAR_SECS) * _BAR_SECS) for t in all_ts})
     grid_ms = [t * 1000 for t in grid_secs]
 
     print(f"Fetching {source} marketcap history per pid...", flush=True)
     t0 = time.time()
     mc_by_pid = asyncio.run(
         _fetch_marketcap_for_pids(
-            top_pids, start_ms, end_ms, grid_ms,
-            source=source, parquet_dir=parquet_dir,
+            top_pids,
+            start_ms,
+            end_ms,
+            grid_ms,
+            source=source,
+            parquet_dir=parquet_dir,
         )
     )
     elapsed = time.time() - t0
     cov_pids = sum(1 for h in mc_by_pid.values() if h)
     print(
-        f"  marketcap coverage: {cov_pids}/{len(top_pids)} pids in "
-        f"{elapsed:.1f}s",
+        f"  marketcap coverage: {cov_pids}/{len(top_pids)} pids in {elapsed:.1f}s",
         flush=True,
     )
     for pid in top_pids:
@@ -245,8 +244,7 @@ def _load_pooled_with_marketcap(
         if h:
             vals = np.array(list(h.values()))
             print(
-                f"    {pid}: {len(h):,} hours, log_mc mean={vals.mean():.2f} "
-                f"std={vals.std():.3f}",
+                f"    {pid}: {len(h):,} hours, log_mc mean={vals.mean():.2f} std={vals.std():.3f}",
                 flush=True,
             )
         else:
@@ -257,7 +255,9 @@ def _load_pooled_with_marketcap(
     for pid, _ in sized:
         X, y, ts = _entry_to_arrays(prods[pid])
         sig = build_marketcap_signal(
-            ts, mc_by_pid.get(pid, {}), seq_len=_SEQ_LEN,
+            ts,
+            mc_by_pid.get(pid, {}),
+            seq_len=_SEQ_LEN,
         )
         Xs.append(X)
         ys.append(y)
@@ -284,23 +284,28 @@ def _load_pooled_with_marketcap(
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--snapshot-ts", type=str, default=None,
+        "--snapshot-ts",
+        type=str,
+        default=None,
         help="Survivorship-aware top-N selection cutoff: 'auto' (median "
-             "first_ts), an integer epoch seconds, or omit for legacy "
-             "behavior (#163).",
+        "first_ts), an integer epoch seconds, or omit for legacy "
+        "behavior (#163).",
     )
     parser.add_argument(
-        "--source", choices=list(_VALID_SOURCES), default="coingecko",
+        "--source",
+        choices=list(_VALID_SOURCES),
+        default="coingecko",
         help="Marketcap provider: 'coingecko' (default, parquet-cached via "
-             "services.marketcap_history_cache), 'coinpaprika' (no-key "
-             "fallback, free 12-month rolling window), or 'both' for A/B "
-             "comparison (runs the probe once per provider, reports each).",
+        "services.marketcap_history_cache), 'coinpaprika' (no-key "
+        "fallback, free 12-month rolling window), or 'both' for A/B "
+        "comparison (runs the probe once per provider, reports each).",
     )
     return parser
 
 
 def main():
     import torch
+
     from tools.channel_replace import run_replace
     from tools.pid_snapshot import recommended_snapshot_ts
 
@@ -326,7 +331,9 @@ def main():
     for src in sources:
         print(f"\n=== source={src} ===", flush=True)
         X, y, ts, sig, used = _load_pooled_with_marketcap(
-            n=20, snapshot_ts=snapshot_ts, source=src,
+            n=20,
+            snapshot_ts=snapshot_ts,
+            source=src,
         )
         print(f"pooled samples: n={len(y):,}", flush=True)
         print(f"products & marketcap coverage: {used}", flush=True)
@@ -341,14 +348,16 @@ def main():
             flush=True,
         )
         result = run_replace(
-            X, y, ts,
+            X,
+            y,
+            ts,
             channel_idx=_TARGET_CHANNEL,
             replacement=sig,
-            n_folds=5, embargo_hours=4, n_estimators=200,
+            n_folds=5,
+            embargo_hours=4,
+            n_estimators=200,
         )
-        print(
-            f"\n--- single-add probe: log_marketcap -> ch{_TARGET_CHANNEL} (source={src}) ---"
-        )
+        print(f"\n--- single-add probe: log_marketcap -> ch{_TARGET_CHANNEL} (source={src}) ---")
         print(f"  baseline mean_auc = {result['baseline_auc']:.4f}")
         print(f"  replaced mean_auc = {result['replaced_auc']:.4f}")
         print(f"  delta             = {result['delta']:+.4f}")

@@ -4,6 +4,7 @@ Must be an async function backed by aiosqlite — not sync sqlite3 — so the
 FastAPI /api/equity_curve endpoint doesn't block the event loop while
 reading two DBs sequentially.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -24,11 +25,10 @@ def _seed_trades_db(db_path: str, rows: list[tuple[str, float]]) -> None:
     """Create a trades table with (closed_at, pnl) rows. Uses sync sqlite3 —
     fixture-only; runtime code uses aiosqlite."""
     con = sqlite3.connect(db_path)
-    con.execute(
-        "CREATE TABLE trades (id INTEGER PRIMARY KEY, closed_at TEXT, pnl REAL)"
-    )
+    con.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, closed_at TEXT, pnl REAL)")
     con.executemany(
-        "INSERT INTO trades (closed_at, pnl) VALUES (?, ?)", rows,
+        "INSERT INTO trades (closed_at, pnl) VALUES (?, ?)",
+        rows,
     )
     con.commit()
     con.close()
@@ -44,7 +44,8 @@ class TestEquityCurveSeries:
 
     @pytest.mark.asyncio
     async def test_returns_cumulative_series_in_order(self, tmp_path):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         db = str(tmp_path / "trades.db")
         now = datetime.now(timezone.utc)
         rows = [
@@ -72,12 +73,13 @@ class TestEquityCurveSeries:
 
     @pytest.mark.asyncio
     async def test_excludes_rows_outside_days_window(self, tmp_path):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         db = str(tmp_path / "trades.db")
         now = datetime.now(timezone.utc)
         rows = [
             ((now - timedelta(days=10)).isoformat(), 100.0),  # outside 7d
-            ((now - timedelta(days=2)).isoformat(),   5.0),
+            ((now - timedelta(days=2)).isoformat(), 5.0),
         ]
         _seed_trades_db(db, rows)
 

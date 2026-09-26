@@ -24,6 +24,7 @@ OKX details:
 Kill switch: set env OKX_OI_DISABLED=1 to short-circuit and return []
 without an HTTP call.
 """
+
 import logging
 import os
 from typing import List, Optional, Tuple
@@ -41,67 +42,70 @@ _MAX_PAGES = 60
 def _is_disabled() -> bool:
     """True when OKX_OI_DISABLED env is set to a truthy value."""
     return os.environ.get("OKX_OI_DISABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
 # Coinbase product → OKX SWAP instId. Mirrors okx_funding_history exactly so
 # both fetchers honour the same supported-symbol set.
 _PRODUCT_TO_OKX = {
-    "BTC-USD":   "BTC-USDT-SWAP",
-    "ETH-USD":   "ETH-USDT-SWAP",
-    "SOL-USD":   "SOL-USDT-SWAP",
-    "XRP-USD":   "XRP-USDT-SWAP",
-    "BNB-USD":   "BNB-USDT-SWAP",
-    "ADA-USD":   "ADA-USDT-SWAP",
-    "AVAX-USD":  "AVAX-USDT-SWAP",
-    "LINK-USD":  "LINK-USDT-SWAP",
-    "DOT-USD":   "DOT-USDT-SWAP",
-    "DOGE-USD":  "DOGE-USDT-SWAP",
-    "LTC-USD":   "LTC-USDT-SWAP",
-    "ATOM-USD":  "ATOM-USDT-SWAP",
-    "FIL-USD":   "FIL-USDT-SWAP",
-    "NEAR-USD":  "NEAR-USDT-SWAP",
-    "APT-USD":   "APT-USDT-SWAP",
-    "INJ-USD":   "INJ-USDT-SWAP",
-    "ARB-USD":   "ARB-USDT-SWAP",
-    "OP-USD":    "OP-USDT-SWAP",
-    "TIA-USD":   "TIA-USDT-SWAP",
-    "SEI-USD":   "SEI-USDT-SWAP",
-    "SUI-USD":   "SUI-USDT-SWAP",
-    "AAVE-USD":  "AAVE-USDT-SWAP",
-    "UNI-USD":   "UNI-USDT-SWAP",
-    "HYPE-USD":  "HYPE-USDT-SWAP",
-    "ICP-USD":   "ICP-USDT-SWAP",
-    "TAO-USD":   "TAO-USDT-SWAP",
-    "BCH-USD":   "BCH-USDT-SWAP",
-    "ZEC-USD":   "ZEC-USDT-SWAP",
-    "SHIB-USD":  "SHIB-USDT-SWAP",
-    "TRX-USD":   "TRX-USDT-SWAP",
+    "BTC-USD": "BTC-USDT-SWAP",
+    "ETH-USD": "ETH-USDT-SWAP",
+    "SOL-USD": "SOL-USDT-SWAP",
+    "XRP-USD": "XRP-USDT-SWAP",
+    "BNB-USD": "BNB-USDT-SWAP",
+    "ADA-USD": "ADA-USDT-SWAP",
+    "AVAX-USD": "AVAX-USDT-SWAP",
+    "LINK-USD": "LINK-USDT-SWAP",
+    "DOT-USD": "DOT-USDT-SWAP",
+    "DOGE-USD": "DOGE-USDT-SWAP",
+    "LTC-USD": "LTC-USDT-SWAP",
+    "ATOM-USD": "ATOM-USDT-SWAP",
+    "FIL-USD": "FIL-USDT-SWAP",
+    "NEAR-USD": "NEAR-USDT-SWAP",
+    "APT-USD": "APT-USDT-SWAP",
+    "INJ-USD": "INJ-USDT-SWAP",
+    "ARB-USD": "ARB-USDT-SWAP",
+    "OP-USD": "OP-USDT-SWAP",
+    "TIA-USD": "TIA-USDT-SWAP",
+    "SEI-USD": "SEI-USDT-SWAP",
+    "SUI-USD": "SUI-USDT-SWAP",
+    "AAVE-USD": "AAVE-USDT-SWAP",
+    "UNI-USD": "UNI-USDT-SWAP",
+    "HYPE-USD": "HYPE-USDT-SWAP",
+    "ICP-USD": "ICP-USDT-SWAP",
+    "TAO-USD": "TAO-USDT-SWAP",
+    "BCH-USD": "BCH-USDT-SWAP",
+    "ZEC-USD": "ZEC-USDT-SWAP",
+    "SHIB-USD": "SHIB-USDT-SWAP",
+    "TRX-USD": "TRX-USDT-SWAP",
     # #211: alts/memes that #210 audit found all-zero in the cache. Live OKX
     # SWAP probe (probe_okx_swap_listings.py, 2026-05-08) confirmed each one
     # has a `<TICKER>-USDT-SWAP` instrument. Pids in the #210 zero set that
     # are NOT listed on OKX (NKN, AIOZ, JASMY, TRU, SKL, FET, XCN, LRDS) are
     # intentionally omitted so they keep returning [] without an HTTP call.
-    "PENGU-USD":   "PENGU-USDT-SWAP",
-    "JTO-USD":     "JTO-USDT-SWAP",
-    "POPCAT-USD":  "POPCAT-USDT-SWAP",
-    "BONK-USD":    "BONK-USDT-SWAP",
-    "ZK-USD":      "ZK-USDT-SWAP",
-    "PEPE-USD":    "PEPE-USDT-SWAP",
+    "PENGU-USD": "PENGU-USDT-SWAP",
+    "JTO-USD": "JTO-USDT-SWAP",
+    "POPCAT-USD": "POPCAT-USDT-SWAP",
+    "BONK-USD": "BONK-USDT-SWAP",
+    "ZK-USD": "ZK-USDT-SWAP",
+    "PEPE-USD": "PEPE-USDT-SWAP",
     "MOODENG-USD": "MOODENG-USDT-SWAP",
-    "ONDO-USD":    "ONDO-USDT-SWAP",
-    "ALGO-USD":    "ALGO-USDT-SWAP",
-    "ZORA-USD":    "ZORA-USDT-SWAP",
-    "WIF-USD":     "WIF-USDT-SWAP",
-    "RENDER-USD":  "RENDER-USDT-SWAP",
-    "FLOKI-USD":   "FLOKI-USDT-SWAP",
-    "WLD-USD":     "WLD-USDT-SWAP",
-    "BERA-USD":    "BERA-USDT-SWAP",
-    "ENA-USD":     "ENA-USDT-SWAP",
-    "STRK-USD":    "STRK-USDT-SWAP",
-    "TON-USD":     "TON-USDT-SWAP",
-    "JUP-USD":     "JUP-USDT-SWAP",
+    "ONDO-USD": "ONDO-USDT-SWAP",
+    "ALGO-USD": "ALGO-USDT-SWAP",
+    "ZORA-USD": "ZORA-USDT-SWAP",
+    "WIF-USD": "WIF-USDT-SWAP",
+    "RENDER-USD": "RENDER-USDT-SWAP",
+    "FLOKI-USD": "FLOKI-USDT-SWAP",
+    "WLD-USD": "WLD-USDT-SWAP",
+    "BERA-USD": "BERA-USDT-SWAP",
+    "ENA-USD": "ENA-USDT-SWAP",
+    "STRK-USD": "STRK-USDT-SWAP",
+    "TON-USD": "TON-USDT-SWAP",
+    "JUP-USD": "JUP-USDT-SWAP",
 }
 
 
@@ -146,7 +150,7 @@ async def fetch_oi_history(
         return []
 
     collected: List[Tuple[int, float]] = []
-    cursor = int(end_ms)   # OKX `after=` returns records OLDER than this ts
+    cursor = int(end_ms)  # OKX `after=` returns records OLDER than this ts
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -156,8 +160,8 @@ async def fetch_oi_history(
                     params={
                         "instId": inst_id,
                         "period": bar,
-                        "after":  cursor,
-                        "limit":  _PAGE_SIZE,
+                        "after": cursor,
+                        "limit": _PAGE_SIZE,
                     },
                 )
                 if resp.status_code != 200:

@@ -3,6 +3,7 @@ Coinbase Advanced Trade WebSocket subscriber.
 Subscribes to the public ticker channel for live price + bid/ask updates.
 No auth required for public ticker data.
 """
+
 import asyncio
 import json
 import logging
@@ -17,11 +18,11 @@ logger = logging.getLogger(__name__)
 
 class CoinbaseWSSubscriber:
     def __init__(self, broadcast_fn: Callable):
-        self.broadcast_fn  = broadcast_fn
-        self.state: Dict[str, Dict] = {}    # product_id → latest ticker
-        self._task: Optional[asyncio.Task]  = None
-        self._products: List[str]           = []
-        self._price_handlers: List[Callable] = []   # async fn(pid, price) callbacks
+        self.broadcast_fn = broadcast_fn
+        self.state: Dict[str, Dict] = {}  # product_id → latest ticker
+        self._task: Optional[asyncio.Task] = None
+        self._products: List[str] = []
+        self._price_handlers: List[Callable] = []  # async fn(pid, price) callbacks
 
     def get_price(self, product_id: str) -> Optional[float]:
         return self.state.get(product_id, {}).get("price")
@@ -79,11 +80,15 @@ class CoinbaseWSSubscriber:
             ping_interval=20,
             ping_timeout=20,
         ) as ws:
-            await ws.send(json.dumps({
-                "type":        "subscribe",
-                "product_ids": products,
-                "channel":     "ticker",
-            }))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "subscribe",
+                        "product_ids": products,
+                        "channel": "ticker",
+                    }
+                )
+            )
             logger.info(f"Coinbase WS subscribed to: {products}")
 
             async for raw in ws:
@@ -98,23 +103,25 @@ class CoinbaseWSSubscriber:
             return
         for event in msg.get("events", []):
             for ticker in event.get("tickers", []):
-                pid   = ticker.get("product_id")
+                pid = ticker.get("product_id")
                 price = ticker.get("price") or ticker.get("close")
                 if not pid or not price:
                     continue
                 self.state[pid] = {
                     "product_id": pid,
-                    "price":      float(price),
-                    "bid":        float(ticker["best_bid"])  if ticker.get("best_bid")  else None,
-                    "ask":        float(ticker["best_ask"])  if ticker.get("best_ask")  else None,
+                    "price": float(price),
+                    "bid": float(ticker["best_bid"]) if ticker.get("best_bid") else None,
+                    "ask": float(ticker["best_ask"]) if ticker.get("best_ask") else None,
                     "volume_24h": float(ticker.get("volume_24_h", 0)),
                     "pct_change": float(ticker.get("price_percent_chg_24_h", 0)),
                 }
-                await self.broadcast_fn({
-                    "type":       "price_update",
-                    "product_id": pid,
-                    **self.state[pid],
-                })
+                await self.broadcast_fn(
+                    {
+                        "type": "price_update",
+                        "product_id": pid,
+                        **self.state[pid],
+                    }
+                )
                 # Fire real-time trade handlers without blocking the WS receive loop
                 for handler in self._price_handlers:
                     asyncio.create_task(handler(pid, float(price)))

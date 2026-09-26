@@ -3,7 +3,9 @@
 5 OHLCV channels + 2 BB channels (bb_position, bb_width) × 3 tiers
 × 10 stats = 210 features. Pure functions, no module state.
 """
+
 from __future__ import annotations
+
 import os
 import sys
 from typing import Dict, List
@@ -17,16 +19,21 @@ if BACKEND not in sys.path:
 
 from tools import xgb_v4_5_features as v45  # noqa: E402
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Constants
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestConstants:
     def test_channel_names_order(self):
         assert v45._CHANNEL_NAMES == (
-            "open", "high", "low", "close", "volume",
-            "bb_position", "bb_width",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "bb_position",
+            "bb_width",
         )
 
     def test_n_channels_derived(self):
@@ -48,6 +55,7 @@ class TestConstants:
 # ═══════════════════════════════════════════════════════════════════════════
 # BB helpers
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestBollingerHelpers:
     def test_bb_position_empty(self):
@@ -96,6 +104,7 @@ class TestBollingerHelpers:
 # _compute_stats / _slope / _pct_rank / _delta_at
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestStatHelpers:
     def test_compute_stats_known_series(self):
         v = np.arange(1, 11, dtype=np.float64)
@@ -122,6 +131,7 @@ class TestStatHelpers:
 # ═══════════════════════════════════════════════════════════════════════════
 # feature_names_v4_5 + feature_weights_v4_5
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestFeatureNames:
     def test_returns_210_names(self):
@@ -164,13 +174,14 @@ class TestFeatureWeights:
 # extract_v4_5 (the main public extractor)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestExtractV4_5:
     def _make_candle(self, c: int) -> Dict[str, float]:
         return {
-            "open":   c * 1.0,
-            "high":   c * 1.0 + 0.5,
-            "low":    c * 1.0 - 0.5,
-            "close":  c * 1.0 + 0.25,
+            "open": c * 1.0,
+            "high": c * 1.0 + 0.5,
+            "low": c * 1.0 - 0.5,
+            "close": c * 1.0 + 0.25,
             "volume": c * 10.0,
         }
 
@@ -180,7 +191,7 @@ class TestExtractV4_5:
     def test_shape_and_names(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v45.extract_v4_5(candles_by_tier)
@@ -191,7 +202,7 @@ class TestExtractV4_5:
     def test_channel_3_reads_close(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v45.extract_v4_5(candles_by_tier)
@@ -203,7 +214,7 @@ class TestExtractV4_5:
         # Rising linear closes ⇒ bb_position monotonic toward upper band
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v45.extract_v4_5(candles_by_tier)
@@ -214,7 +225,7 @@ class TestExtractV4_5:
     def test_channel_6_is_bb_width(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v45.extract_v4_5(candles_by_tier)
@@ -225,7 +236,7 @@ class TestExtractV4_5:
     def test_empty_tier_zeros_its_slots(self):
         candles_by_tier = {
             "micro": [],
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v45.extract_v4_5(candles_by_tier)
@@ -242,7 +253,7 @@ class TestExtractV4_5:
     def test_determinism(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         f1, _ = v45.extract_v4_5(candles_by_tier)
@@ -256,11 +267,11 @@ class TestExtractV4_5:
 class TestDispatcherV4_5Branch:
     def test_extract_features_v4_5_routes(self):
         from tools.xgb_features import extract_features
-        candles = [{"open": 1.0, "high": 2.0, "low": 0.5,
-                    "close": 1.5, "volume": 10.0}]
+
+        candles = [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}]
         cbt = {
             "micro": candles * 60,
-            "meso":  candles * 168,
+            "meso": candles * 168,
             "macro": candles * 336,
         }
         features, names = extract_features(cbt, feature_set="v4_5")
@@ -270,5 +281,6 @@ class TestDispatcherV4_5Branch:
 
     def test_extract_features_unknown_feature_set_raises(self):
         from tools.xgb_features import extract_features
+
         with pytest.raises(ValueError, match="unknown feature_set"):
             extract_features({}, feature_set="v99")

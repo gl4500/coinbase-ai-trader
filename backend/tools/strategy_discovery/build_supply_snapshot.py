@@ -15,6 +15,7 @@ Schema:
 On `pid`-collision dedup, the LAST row in input wins (mirrors
 build_marketcap_parquet semantics).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,14 +35,16 @@ if BACKEND not in sys.path:
 from services.coinpaprika_marketcap import fetch_supply_snapshot  # noqa: E402
 
 _SCHEMA_VERSION = 1
-_SCHEMA = pa.schema([
-    pa.field("pid",            pa.string()),
-    pa.field("circulating",    pa.float64()),
-    pa.field("total",          pa.float64()),
-    pa.field("max_supply",     pa.float64()),
-    pa.field("ingest_ts",      pa.int64()),
-    pa.field("schema_version", pa.int32()),
-])
+_SCHEMA = pa.schema(
+    [
+        pa.field("pid", pa.string()),
+        pa.field("circulating", pa.float64()),
+        pa.field("total", pa.float64()),
+        pa.field("max_supply", pa.float64()),
+        pa.field("ingest_ts", pa.int64()),
+        pa.field("schema_version", pa.int32()),
+    ]
+)
 
 _DEFAULT_PATH = os.path.join(BACKEND, "data", "supply", "snapshot.parquet")
 
@@ -61,21 +64,21 @@ def save_snapshot(path: str, rows: List[Dict]) -> None:
     for r in rows:
         pid = str(r["pid"])
         seen[pid] = {
-            "pid":            pid,
-            "circulating":    float(r["circulating"]),
-            "total":          float(r["total"]),
-            "max_supply":     None if r.get("max_supply") is None else float(r["max_supply"]),
-            "ingest_ts":      int(r.get("ingest_ts", _now_ts())),
+            "pid": pid,
+            "circulating": float(r["circulating"]),
+            "total": float(r["total"]),
+            "max_supply": None if r.get("max_supply") is None else float(r["max_supply"]),
+            "ingest_ts": int(r.get("ingest_ts", _now_ts())),
             "schema_version": int(r.get("schema_version", _SCHEMA_VERSION)),
         }
     ordered = sorted(seen.values(), key=lambda r: r["pid"])
     table = pa.table(
         {
-            "pid":            [r["pid"]            for r in ordered],
-            "circulating":    [r["circulating"]    for r in ordered],
-            "total":          [r["total"]          for r in ordered],
-            "max_supply":     [r["max_supply"]     for r in ordered],
-            "ingest_ts":      [r["ingest_ts"]      for r in ordered],
+            "pid": [r["pid"] for r in ordered],
+            "circulating": [r["circulating"] for r in ordered],
+            "total": [r["total"] for r in ordered],
+            "max_supply": [r["max_supply"] for r in ordered],
+            "ingest_ts": [r["ingest_ts"] for r in ordered],
             "schema_version": [r["schema_version"] for r in ordered],
         },
         schema=_SCHEMA,
@@ -92,14 +95,18 @@ def load_snapshot(path: str) -> List[Dict]:
     n = len(cols["pid"])
     out: List[Dict] = []
     for i in range(n):
-        out.append({
-            "pid":            str(cols["pid"][i]),
-            "circulating":    float(cols["circulating"][i]),
-            "total":          float(cols["total"][i]),
-            "max_supply":     None if cols["max_supply"][i] is None else float(cols["max_supply"][i]),
-            "ingest_ts":      int(cols["ingest_ts"][i]),
-            "schema_version": int(cols["schema_version"][i]),
-        })
+        out.append(
+            {
+                "pid": str(cols["pid"][i]),
+                "circulating": float(cols["circulating"][i]),
+                "total": float(cols["total"][i]),
+                "max_supply": None
+                if cols["max_supply"][i] is None
+                else float(cols["max_supply"][i]),
+                "ingest_ts": int(cols["ingest_ts"][i]),
+                "schema_version": int(cols["schema_version"][i]),
+            }
+        )
     return out
 
 
@@ -129,11 +136,11 @@ async def fetch_and_persist(
             continue
         circ, total, max_supply = snap
         merged[pid] = {
-            "pid":            pid,
-            "circulating":    circ,
-            "total":          total,
-            "max_supply":     max_supply,
-            "ingest_ts":      now,
+            "pid": pid,
+            "circulating": circ,
+            "total": total,
+            "max_supply": max_supply,
+            "ingest_ts": now,
             "schema_version": _SCHEMA_VERSION,
         }
         if sleep_secs > 0.0:
@@ -151,6 +158,7 @@ def main() -> int:
             --pids BTC-USD,ETH-USD,SOL-USD
     """
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--pids", required=True, help="comma-separated, e.g. BTC-USD,ETH-USD")
     parser.add_argument("--out", default=_DEFAULT_PATH)
@@ -162,7 +170,7 @@ def main() -> int:
 
     results = asyncio.run(fetch_and_persist(pids, parquet_path=args.out, sleep_secs=args.sleep))
 
-    ok    = [p for p, v in results.items() if v is not None]
+    ok = [p for p, v in results.items() if v is not None]
     failed = [p for p, v in results.items() if v is None]
     print(f"  ok:     {len(ok)}", flush=True)
     print(f"  failed: {len(failed)}  -> {failed}", flush=True)

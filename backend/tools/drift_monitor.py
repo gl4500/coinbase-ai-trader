@@ -12,6 +12,7 @@ escape #164 but show up here.
 Run:
     python tools/drift_monitor.py [--snapshot-ts auto|<int>] [--n-bins 10]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -111,7 +112,9 @@ def _parse_snapshot_ts(arg: Optional[str], prods: dict) -> Optional[int]:
 
 
 def _audit_channels_drift(
-    prods: dict, n_pids: int = 20, snapshot_ts: Optional[int] = None,
+    prods: dict,
+    n_pids: int = 20,
+    snapshot_ts: Optional[int] = None,
     n_bins: int = _DEFAULT_BINS,
 ) -> list:
     """Run per-channel PSI on terminal value of each sample's window,
@@ -141,7 +144,8 @@ def _audit_channels_drift(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--snapshot-ts", default=None,
+        "--snapshot-ts",
+        default=None,
         help="Survivorship-aware top-N cutoff (#163). 'auto' or Unix-seconds int.",
     )
     parser.add_argument("--n-pids", type=int, default=20)
@@ -156,7 +160,10 @@ def main():
         print(f"  snapshot_ts: {snapshot_ts}", flush=True)
 
     rows = _audit_channels_drift(
-        prods, n_pids=args.n_pids, snapshot_ts=snapshot_ts, n_bins=args.n_bins,
+        prods,
+        n_pids=args.n_pids,
+        snapshot_ts=snapshot_ts,
+        n_bins=args.n_bins,
     )
 
     print(

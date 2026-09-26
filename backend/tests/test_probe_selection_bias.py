@@ -1,7 +1,10 @@
 import pytest
-from tools.probe_selection_bias import iid_auc_se, fold_level_se
+
 from tools.probe_selection_bias import (
-    expected_max_under_null, deflated_probability,
+    deflated_probability,
+    expected_max_under_null,
+    fold_level_se,
+    iid_auc_se,
 )
 
 
@@ -62,11 +65,11 @@ def test_deflated_probability_low_when_below_floor():
     assert p < 0.5
 
 
-from tools.probe_selection_bias import TRIALS, N_TIERS, analyze
+from tools.probe_selection_bias import TRIALS, analyze
 
 
 def test_trials_table_shape():
-    assert len(TRIALS) == 17                       # channel-candidate trials
+    assert len(TRIALS) == 17  # channel-candidate trials
     for t in TRIALS:
         assert set(t) == {"name", "delta", "passed"}
     # exactly the two RSI-rank runs are marked passed
@@ -79,20 +82,35 @@ def test_analyze_row_structure():
     # + Track B: 1 x 3 x 2 = 6  -> 18 rows
     assert len(rows) == 18
     for r in rows:
-        assert {"track", "observed_label", "observed", "n_trials", "noise",
-                "se", "center", "expected_max", "deflated_prob"} <= set(r)
+        assert {
+            "track",
+            "observed_label",
+            "observed",
+            "n_trials",
+            "noise",
+            "se",
+            "center",
+            "expected_max",
+            "deflated_prob",
+        } <= set(r)
         assert 0.0 <= r["deflated_prob"] <= 1.0
 
 
 def test_analyze_iid_inflates_confidence_vs_fold():
     rows = analyze()
+
     # for Track A best AUC at N=100, the iid noise scale gives a much higher
     # deflated probability than the honest fold-level scale
     def cell(noise):
-        return next(r for r in rows
-                    if r["track"].startswith("A") and r["n_trials"] == 100
-                    and r["noise"] == noise
-                    and "best" in r["observed_label"])
+        return next(
+            r
+            for r in rows
+            if r["track"].startswith("A")
+            and r["n_trials"] == 100
+            and r["noise"] == noise
+            and "best" in r["observed_label"]
+        )
+
     assert cell("iid")["deflated_prob"] > cell("fold")["deflated_prob"]
 
 
@@ -102,8 +120,8 @@ from tools.probe_selection_bias import render_report, verdict_line
 def test_verdict_line_reflects_headline_probability():
     # headline = Track A, best documented AUC, fold noise, N=100
     assert "marginal" in verdict_line(0.73).lower()
-    assert "noise" in verdict_line(0.20).lower()       # below floor
-    assert "real" in verdict_line(0.99).lower()        # clears the bar
+    assert "noise" in verdict_line(0.20).lower()  # below floor
+    assert "real" in verdict_line(0.99).lower()  # clears the bar
 
 
 def test_render_report_structure():

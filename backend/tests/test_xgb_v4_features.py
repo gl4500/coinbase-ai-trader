@@ -3,7 +3,9 @@
 5 channels (open/high/low/close/volume) x 3 tiers (micro/meso/macro)
 x 10 stats = 150 features. Pure functions, no module state.
 """
+
 from __future__ import annotations
+
 import os
 import sys
 from typing import Dict, List
@@ -17,8 +19,8 @@ if BACKEND not in sys.path:
 
 from tools import xgb_v4_features as v4  # noqa: E402
 
-
 # ── Constants ─────────────────────────────────────────────────────────────
+
 
 class TestConstants:
     def test_channel_fields_order(self):
@@ -36,9 +38,16 @@ class TestConstants:
 
     def test_stat_names_order(self):
         assert v4._STAT_NAMES_V4 == (
-            "last", "mean", "std", "slope",
-            "min", "max", "pct_rank",
-            "dlt5", "dlt10", "dlt30",
+            "last",
+            "mean",
+            "std",
+            "slope",
+            "min",
+            "max",
+            "pct_rank",
+            "dlt5",
+            "dlt10",
+            "dlt30",
         )
 
     def test_n_features_derived(self):
@@ -47,6 +56,7 @@ class TestConstants:
 
 
 # ── _slope ────────────────────────────────────────────────────────────────
+
 
 class TestSlope:
     def test_empty_returns_zero(self):
@@ -67,6 +77,7 @@ class TestSlope:
 
 
 # ── _pct_rank ─────────────────────────────────────────────────────────────
+
 
 class TestPctRank:
     def test_empty_returns_zero(self):
@@ -89,6 +100,7 @@ class TestPctRank:
 
 # ── _delta_at ─────────────────────────────────────────────────────────────
 
+
 class TestDeltaAt:
     def test_too_short_returns_zero(self):
         assert v4._delta_at(np.array([1.0, 2.0]), lookback=5) == 0.0
@@ -106,6 +118,7 @@ class TestDeltaAt:
 
 
 # ── _extract_field ────────────────────────────────────────────────────────
+
 
 class TestExtractField:
     def test_empty_candles_returns_empty(self):
@@ -125,6 +138,7 @@ class TestExtractField:
 
 # ── _compute_stats ────────────────────────────────────────────────────────
 
+
 class TestComputeStats:
     def test_empty_returns_ten_zeros(self):
         out = v4._compute_stats(np.array([], dtype=np.float64))
@@ -137,19 +151,20 @@ class TestComputeStats:
         out = v4._compute_stats(v)
         assert out.shape == (10,)
         # _STAT_NAMES_V4 order: last, mean, std, slope, min, max, pct_rank, dlt5, dlt10, dlt30
-        assert out[0] == 10.0                            # last
-        assert out[1] == pytest.approx(5.5)              # mean
-        assert out[2] == pytest.approx(v.std())          # std
-        assert out[3] == pytest.approx(1.0)              # slope
-        assert out[4] == 1.0                             # min
-        assert out[5] == 10.0                            # max
-        assert out[6] == pytest.approx((9 + 0.5) / 10)   # pct_rank
-        assert out[7] == 10.0 - 5.0                      # dlt5 = v[-1]-v[-6]
-        assert out[8] == 0.0                             # dlt10 needs len>=11
-        assert out[9] == 0.0                             # dlt30 needs len>=31
+        assert out[0] == 10.0  # last
+        assert out[1] == pytest.approx(5.5)  # mean
+        assert out[2] == pytest.approx(v.std())  # std
+        assert out[3] == pytest.approx(1.0)  # slope
+        assert out[4] == 1.0  # min
+        assert out[5] == 10.0  # max
+        assert out[6] == pytest.approx((9 + 0.5) / 10)  # pct_rank
+        assert out[7] == 10.0 - 5.0  # dlt5 = v[-1]-v[-6]
+        assert out[8] == 0.0  # dlt10 needs len>=11
+        assert out[9] == 0.0  # dlt30 needs len>=31
 
 
 # ── feature_names_v4 ──────────────────────────────────────────────────────
+
 
 class TestFeatureNames:
     def test_returns_150_names(self):
@@ -175,6 +190,7 @@ class TestFeatureNames:
 
 # ── feature_weights_v4 ────────────────────────────────────────────────────
 
+
 class TestFeatureWeights:
     def test_length_matches_names(self):
         assert len(v4.feature_weights_v4()) == len(v4.feature_names_v4())
@@ -196,14 +212,15 @@ class TestFeatureWeights:
 
 # ── extract_v4 ────────────────────────────────────────────────────────────
 
+
 class TestExtractV4:
     def _make_candle(self, c: int) -> Dict[str, float]:
         # Distinct values per field so we can detect mis-routing
         return {
-            "open":   c * 1.0,
-            "high":   c * 1.0 + 0.5,
-            "low":    c * 1.0 - 0.5,
-            "close":  c * 1.0 + 0.25,
+            "open": c * 1.0,
+            "high": c * 1.0 + 0.5,
+            "low": c * 1.0 - 0.5,
+            "close": c * 1.0 + 0.25,
             "volume": c * 10.0,
         }
 
@@ -213,7 +230,7 @@ class TestExtractV4:
     def test_shape_and_names(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v4.extract_v4(candles_by_tier)
@@ -224,7 +241,7 @@ class TestExtractV4:
     def test_channel_3_reads_close(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v4.extract_v4(candles_by_tier)
@@ -236,7 +253,7 @@ class TestExtractV4:
     def test_channel_4_reads_volume_not_close(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v4.extract_v4(candles_by_tier)
@@ -250,8 +267,8 @@ class TestExtractV4:
 
     def test_empty_tier_zeros_its_slots(self):
         candles_by_tier = {
-            "micro": [],                       # empty
-            "meso":  self._make_tier(168),
+            "micro": [],  # empty
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         features, names = v4.extract_v4(candles_by_tier)
@@ -262,7 +279,7 @@ class TestExtractV4:
 
     def test_missing_tier_key_zeros_slots(self):
         candles_by_tier = {
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }  # no "micro" key
         features, names = v4.extract_v4(candles_by_tier)
@@ -278,7 +295,7 @@ class TestExtractV4:
     def test_determinism(self):
         candles_by_tier = {
             "micro": self._make_tier(60),
-            "meso":  self._make_tier(168),
+            "meso": self._make_tier(168),
             "macro": self._make_tier(336),
         }
         f1, _ = v4.extract_v4(candles_by_tier)
@@ -292,13 +309,11 @@ class TestExtractV4:
 class TestDispatcherV4Branch:
     def test_extract_features_v4_routes_to_v4(self):
         from tools.xgb_features import extract_features
+
         candles_by_tier = {
-            "micro": [{"open": 1.0, "high": 2.0, "low": 0.5,
-                       "close": 1.5, "volume": 10.0}] * 60,
-            "meso":  [{"open": 1.0, "high": 2.0, "low": 0.5,
-                       "close": 1.5, "volume": 10.0}] * 168,
-            "macro": [{"open": 1.0, "high": 2.0, "low": 0.5,
-                       "close": 1.5, "volume": 10.0}] * 336,
+            "micro": [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}] * 60,
+            "meso": [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}] * 168,
+            "macro": [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}] * 336,
         }
         features, names = extract_features(candles_by_tier, feature_set="v4")
         assert features.shape == (1, 150)
@@ -307,5 +322,6 @@ class TestDispatcherV4Branch:
 
     def test_extract_features_unknown_feature_set_raises(self):
         from tools.xgb_features import extract_features
+
         with pytest.raises(ValueError, match="unknown feature_set"):
             extract_features({}, feature_set="v99")

@@ -4,13 +4,12 @@ pre-baked y for the same samples?
 If the labels match, the +0.12 AUC gap is in the pipeline.
 If they differ, the gap is in the labeling — possibly leakage or stale parquet.
 """
+
 from __future__ import annotations
 
 import os
 import sys
 from typing import List, Optional
-
-import numpy as np
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND not in sys.path:
@@ -41,8 +40,11 @@ def main():
 
     total_n = total_match = total_both_valid = 0
     print(f"Comparing fresh relabel vs cache y at horizon={HORIZON}h", flush=True)
-    print(f"{'pid':<14} {'n':>8} {'fresh_valid':>12} {'cache_y_pos':>12} "
-          f"{'fresh_y_pos':>12} {'agree':>8} {'agree%':>8}", flush=True)
+    print(
+        f"{'pid':<14} {'n':>8} {'fresh_valid':>12} {'cache_y_pos':>12} "
+        f"{'fresh_y_pos':>12} {'agree':>8} {'agree%':>8}",
+        flush=True,
+    )
     for pid in pids:
         entry = prods[pid]
         X, y_cache, ts = _entry_to_arrays(entry)
@@ -59,16 +61,22 @@ def main():
         total_match += agree
         total_both_valid += valid
 
-        print(f"{pid:<14} {n:>8,} {valid:>12,} "
-              f"{y_cache.mean():>12.3f} "
-              f"{(y_fresh[mask].mean() if valid else 0):>12.3f} "
-              f"{agree:>8,} "
-              f"{(100.0*agree/valid if valid else 0):>7.2f}%", flush=True)
+        print(
+            f"{pid:<14} {n:>8,} {valid:>12,} "
+            f"{y_cache.mean():>12.3f} "
+            f"{(y_fresh[mask].mean() if valid else 0):>12.3f} "
+            f"{agree:>8,} "
+            f"{(100.0 * agree / valid if valid else 0):>7.2f}%",
+            flush=True,
+        )
 
-    print(f"\nTOTAL: cached samples={total_n:,}  "
-          f"fresh-valid={total_both_valid:,}  "
-          f"matches={total_match:,}  "
-          f"agree={100.0*total_match/total_both_valid:.2f}%", flush=True)
+    print(
+        f"\nTOTAL: cached samples={total_n:,}  "
+        f"fresh-valid={total_both_valid:,}  "
+        f"matches={total_match:,}  "
+        f"agree={100.0 * total_match / total_both_valid:.2f}%",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

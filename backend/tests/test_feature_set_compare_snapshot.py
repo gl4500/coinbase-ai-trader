@@ -4,13 +4,13 @@ Covers the new `snapshot_ts` plumbing through `_pooled_top_n` and the
 `_parse_snapshot_ts` CLI helper. The behaviour of the underlying
 `survivorship_aware_top_n` is covered separately in test_pid_snapshot.py.
 """
+
 from __future__ import annotations
 
 import os
 import sys
 
 import numpy as np
-import pytest
 import torch
 
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
@@ -32,17 +32,19 @@ def _entry(first_ts: int, n: int) -> dict:
 
 
 class TestParseSnapshotTs:
-
     def test_none_returns_none(self):
         from tools.feature_set_compare import _parse_snapshot_ts
+
         assert _parse_snapshot_ts(None, {}) is None
 
     def test_explicit_int_string_parsed(self):
         from tools.feature_set_compare import _parse_snapshot_ts
+
         assert _parse_snapshot_ts("1700000000", {}) == 1700000000
 
     def test_auto_resolves_to_recommended(self):
         from tools.feature_set_compare import _parse_snapshot_ts
+
         prods = {
             "A": _entry(first_ts=1000 * _BAR_SECS, n=5),
             "B": _entry(first_ts=2000 * _BAR_SECS, n=5),
@@ -52,17 +54,18 @@ class TestParseSnapshotTs:
 
     def test_auto_falls_back_to_none_on_empty(self):
         from tools.feature_set_compare import _parse_snapshot_ts
+
         # No products with non-empty X → recommended_snapshot_ts returns 0
         assert _parse_snapshot_ts("auto", {}) is None
 
 
 class TestPooledTopNSnapshotPlumbing:
-
     def test_legacy_passthrough_when_snapshot_none(self):
         from tools.feature_set_compare import _pooled_top_n
+
         prods = {
-            "OLD":      _entry(first_ts=0, n=5),
-            "OLDER":    _entry(first_ts=0, n=10),
+            "OLD": _entry(first_ts=0, n=5),
+            "OLDER": _entry(first_ts=0, n=10),
             "NEWCOMER": _entry(first_ts=20 * _BAR_SECS, n=100),
         }
         # Legacy: NEWCOMER (100) wins, then OLDER (10), then OLD (5)
@@ -72,9 +75,10 @@ class TestPooledTopNSnapshotPlumbing:
 
     def test_snapshot_excludes_newcomers(self):
         from tools.feature_set_compare import _pooled_top_n
+
         prods = {
-            "OLD":      _entry(first_ts=0, n=5),
-            "OLDER":    _entry(first_ts=0, n=10),
+            "OLD": _entry(first_ts=0, n=5),
+            "OLDER": _entry(first_ts=0, n=10),
             "NEWCOMER": _entry(first_ts=20 * _BAR_SECS, n=100),
         }
         # Cutoff at 15h → NEWCOMER's first sample (20h) is post-cutoff,

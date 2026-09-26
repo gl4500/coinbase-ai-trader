@@ -1,5 +1,5 @@
-import os
 import pytest
+
 from tools._scorecard import _offclock_harness as och
 
 
@@ -13,8 +13,7 @@ def test_load_dollar_bars_missing_file_returns_empty():
 
 
 def test_load_bars_time_delegates_to_history(monkeypatch):
-    sentinel = [{"start": 1, "open": 1.0, "high": 1.0, "low": 1.0,
-                 "close": 1.0, "volume": 1.0}]
+    sentinel = [{"start": 1, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0}]
     monkeypatch.setattr(och, "load_history", lambda pid: sentinel)
     assert och.load_bars("time", "BTC-USD") is sentinel
 
@@ -22,17 +21,26 @@ def test_load_bars_time_delegates_to_history(monkeypatch):
 def test_load_dollar_bars_roundtrip(tmp_path, monkeypatch):
     import pyarrow as pa
     import pyarrow.parquet as pq
-    table = pa.table({
-        "start": [60, 0], "open": [2.0, 1.0], "high": [2.0, 1.0],
-        "low": [2.0, 1.0], "close": [2.0, 1.0], "volume": [2.0, 1.0],
-        "end": [119, 59], "dollar_value": [2.0, 1.0], "n_candles": [1, 1],
-    })
+
+    table = pa.table(
+        {
+            "start": [60, 0],
+            "open": [2.0, 1.0],
+            "high": [2.0, 1.0],
+            "low": [2.0, 1.0],
+            "close": [2.0, 1.0],
+            "volume": [2.0, 1.0],
+            "end": [119, 59],
+            "dollar_value": [2.0, 1.0],
+            "n_candles": [1, 1],
+        }
+    )
     d = tmp_path / "dollar"
     d.mkdir()
     pq.write_table(table, str(d / "BTC-USD.parquet"))
     monkeypatch.setattr(och, "_HISTORY_DIR", str(tmp_path))
     bars = och.load_dollar_bars("BTC-USD")
-    assert [b["start"] for b in bars] == [0, 60]   # sorted ascending
+    assert [b["start"] for b in bars] == [0, 60]  # sorted ascending
     assert bars[0]["close"] == 1.0
 
 
@@ -56,16 +64,15 @@ def test_direction_label_down():
 def test_direction_label_flat_is_zero():
     closes = [100.0, 100.0, 100.0]
     label, exit_close = direction_label(closes, t=0, k=2)
-    assert label == 0          # not strictly greater
+    assert label == 0  # not strictly greater
     assert exit_close == 100.0
 
 
 from tools._scorecard._offclock_harness import triple_barrier_label
 
 
-def _ohlc(start, o, h, l, c):
-    return {"start": start, "open": o, "high": h, "low": l, "close": c,
-            "volume": 1.0}
+def _ohlc(start, o, h, lo, c):
+    return {"start": start, "open": o, "high": h, "low": lo, "close": c, "volume": 1.0}
 
 
 def test_triple_barrier_upper_hit():
@@ -79,20 +86,20 @@ def test_triple_barrier_upper_hit():
     ]
     label, exit_close = triple_barrier_label(bars, t=0, k=4)
     assert label == 1
-    assert exit_close == pytest.approx(101.0)   # entry * 1.01
+    assert exit_close == pytest.approx(101.0)  # entry * 1.01
 
 
 def test_triple_barrier_lower_hit():
     bars = [
         _ohlc(0, 100.0, 100.0, 100.0, 100.0),
-        _ohlc(1, 100.0, 100.1, 98.5, 99.0),     # low 98.5 <= 99.0 barrier
+        _ohlc(1, 100.0, 100.1, 98.5, 99.0),  # low 98.5 <= 99.0 barrier
         _ohlc(2, 99.0, 99.2, 98.8, 99.0),
         _ohlc(3, 99.0, 99.1, 98.9, 99.0),
         _ohlc(4, 99.0, 99.1, 98.9, 99.0),
     ]
     label, exit_close = triple_barrier_label(bars, t=0, k=4)
     assert label == 0
-    assert exit_close == pytest.approx(99.0)    # entry * 0.99
+    assert exit_close == pytest.approx(99.0)  # entry * 0.99
 
 
 def test_triple_barrier_timeout_uses_close_direction():
@@ -123,8 +130,14 @@ from tools._scorecard._offclock_harness import build_product_samples
 def _rising_bars(n):
     """n bars with strictly rising close so direction labels are all 1."""
     return [
-        {"start": i * 60, "open": 100.0 + 0.01 * i, "high": 100.0 + 0.01 * i,
-         "low": 100.0 + 0.01 * i, "close": 100.0 + 0.01 * i, "volume": 1.0}
+        {
+            "start": i * 60,
+            "open": 100.0 + 0.01 * i,
+            "high": 100.0 + 0.01 * i,
+            "low": 100.0 + 0.01 * i,
+            "close": 100.0 + 0.01 * i,
+            "volume": 1.0,
+        }
         for i in range(n)
     ]
 
@@ -135,12 +148,12 @@ def test_build_product_samples_shape_and_count():
     # samples roll at t in range(336, 396, 24) -> 336, 360, 384 => 3 samples
     assert s["X"].shape == (3, 150)
     assert len(s["y"]) == 3
-    assert list(s["y"]) == [1, 1, 1]            # rising closes
+    assert list(s["y"]) == [1, 1, 1]  # rising closes
     assert s["entry_ts"][0] == 336 * 60
 
 
 def test_build_product_samples_too_short_returns_empty():
-    bars = _rising_bars(338)                    # < 336 + k + 1 for k=4
+    bars = _rising_bars(338)  # < 336 + k + 1 for k=4
     s = build_product_samples(bars, "direction", k=4, sample_step=24)
     assert s["X"].shape == (0, 150)
     assert len(s["y"]) == 0
@@ -157,37 +170,51 @@ from tools._scorecard._offclock_harness import pool_samples
 
 def test_pool_samples_concatenates_and_sorts(monkeypatch):
     import numpy as np
+
     from tools._scorecard import _offclock_harness as h
 
     # two products: pid B's samples are chronologically before pid A's
     samples = {
-        "A": {"X": np.ones((2, 150)), "y": np.array([1, 0]),
-              "entry_close": np.array([10.0, 11.0]),
-              "exit_close": np.array([10.5, 11.5]),
-              "entry_ts": np.array([300, 400], dtype=np.int64)},
-        "B": {"X": np.zeros((1, 150)), "y": np.array([1]),
-              "entry_close": np.array([20.0]), "exit_close": np.array([21.0]),
-              "entry_ts": np.array([100], dtype=np.int64)},
+        "A": {
+            "X": np.ones((2, 150)),
+            "y": np.array([1, 0]),
+            "entry_close": np.array([10.0, 11.0]),
+            "exit_close": np.array([10.5, 11.5]),
+            "entry_ts": np.array([300, 400], dtype=np.int64),
+        },
+        "B": {
+            "X": np.zeros((1, 150)),
+            "y": np.array([1]),
+            "entry_close": np.array([20.0]),
+            "exit_close": np.array([21.0]),
+            "entry_ts": np.array([100], dtype=np.int64),
+        },
     }
     monkeypatch.setattr(h, "load_bars", lambda substrate, pid: ["bars-of", pid])
-    monkeypatch.setattr(h, "build_product_samples",
-                        lambda bars, lv, k, step: samples[bars[1]])
-    pooled = pool_samples("dollar", "direction", k=4,
-                          pids=["A", "B"], sample_step=24)
+    monkeypatch.setattr(h, "build_product_samples", lambda bars, lv, k, step: samples[bars[1]])
+    pooled = pool_samples("dollar", "direction", k=4, pids=["A", "B"], sample_step=24)
     # sorted by entry_ts ascending: 100 (B), 300 (A), 400 (A)
     assert list(pooled["entry_ts"]) == [100, 300, 400]
     assert pooled["X"].shape == (3, 150)
 
 
 def test_pool_samples_raises_when_no_samples(monkeypatch):
-    from tools._scorecard import _offclock_harness as h
     import numpy as np
+
+    from tools._scorecard import _offclock_harness as h
+
     monkeypatch.setattr(h, "load_bars", lambda substrate, pid: [])
-    monkeypatch.setattr(h, "build_product_samples",
-                        lambda bars, lv, k, step: {
-                            "X": np.zeros((0, 150)), "y": np.zeros(0),
-                            "entry_close": np.zeros(0), "exit_close": np.zeros(0),
-                            "entry_ts": np.zeros(0, dtype=np.int64)})
+    monkeypatch.setattr(
+        h,
+        "build_product_samples",
+        lambda bars, lv, k, step: {
+            "X": np.zeros((0, 150)),
+            "y": np.zeros(0),
+            "entry_close": np.zeros(0),
+            "exit_close": np.zeros(0),
+            "entry_ts": np.zeros(0, dtype=np.int64),
+        },
+    )
     with pytest.raises(RuntimeError, match="no samples"):
         pool_samples("dollar", "direction", k=4, pids=["A"], sample_step=24)
 
@@ -197,6 +224,7 @@ from tools._scorecard._offclock_harness import oof_predict_offclock, run_config
 
 def test_oof_predict_offclock_shapes():
     import numpy as np
+
     rng = np.random.default_rng(0)
     n = 500
     X = rng.normal(size=(n, 150))
@@ -204,27 +232,33 @@ def test_oof_predict_offclock_shapes():
     entry_ts = np.arange(n, dtype=np.int64) * 3600
     scores, fold_ids, spans = oof_predict_offclock(X, y, entry_ts)
     assert scores.shape == (n,)
-    assert not np.isnan(scores).any()           # every sample gets an OOF score
+    assert not np.isnan(scores).any()  # every sample gets an OOF score
     assert set(fold_ids.tolist()) == {0, 1, 2, 3, 4}
     assert set(spans.keys()) == {0, 1, 2, 3, 4}
 
 
 def test_run_config_composes_pool_oof_returns(monkeypatch):
     import numpy as np
+
     from tools._scorecard import _offclock_harness as h
 
     pooled = {
-        "X": np.ones((4, 150)), "y": np.array([1, 0, 1, 0]),
+        "X": np.ones((4, 150)),
+        "y": np.array([1, 0, 1, 0]),
         "entry_close": np.array([10.0, 10.0, 10.0, 10.0]),
         "exit_close": np.array([11.0, 9.0, 11.0, 9.0]),
         "entry_ts": np.array([1, 2, 3, 4], dtype=np.int64),
     }
-    monkeypatch.setattr(h, "pool_samples",
-                        lambda sub, lv, k, pids, step: pooled)
-    monkeypatch.setattr(h, "oof_predict_offclock",
-                        lambda X, y, ts: (np.array([0.6, 0.4, 0.7, 0.3]),
-                                          np.array([0, 0, 1, 1]),
-                                          {0: 30.0, 1: 30.0}))
+    monkeypatch.setattr(h, "pool_samples", lambda sub, lv, k, pids, step: pooled)
+    monkeypatch.setattr(
+        h,
+        "oof_predict_offclock",
+        lambda X, y, ts: (
+            np.array([0.6, 0.4, 0.7, 0.3]),
+            np.array([0, 0, 1, 1]),
+            {0: 30.0, 1: 30.0},
+        ),
+    )
     out = run_config("dollar", "direction", k=4, pids=["A"], sample_step=24)
     assert out["scores"].shape == (4,)
     assert list(out["labels"]) == [1, 0, 1, 0]

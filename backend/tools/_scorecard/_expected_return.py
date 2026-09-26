@@ -1,4 +1,5 @@
 """Expected log-return per fired signal, net of round-trip fee."""
+
 from __future__ import annotations
 
 import numpy as np

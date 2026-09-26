@@ -5,6 +5,7 @@ cumulative dollar volume (volume x typical price) of consecutive 1-minute
 candles crosses a per-product threshold. The threshold is calibrated so each
 product yields about the same number of bars as its existing 1h history.
 """
+
 from __future__ import annotations
 
 import os
@@ -68,17 +69,19 @@ def dollar_bars_from_candles(candles: list[dict], threshold: float) -> list[dict
         n += 1
 
         if acc_dollar >= threshold:
-            bars.append({
-                "start": bar_start,
-                "end": c["start"],
-                "open": bar_open,
-                "high": bar_high,
-                "low": bar_low,
-                "close": c["close"],
-                "volume": acc_volume,
-                "dollar_value": acc_dollar,
-                "n_candles": n,
-            })
+            bars.append(
+                {
+                    "start": bar_start,
+                    "end": c["start"],
+                    "open": bar_open,
+                    "high": bar_high,
+                    "low": bar_low,
+                    "close": c["close"],
+                    "volume": acc_volume,
+                    "dollar_value": acc_dollar,
+                    "n_candles": n,
+                }
+            )
             acc_dollar = 0.0
             acc_volume = 0.0
             bar_start = None
@@ -104,25 +107,26 @@ def build_dollar_bars_for_candles(
         return []
     first_ts = int(one_h_candles[0]["start"])
     last_ts = int(one_h_candles[-1]["start"])
-    clipped = [c for c in one_min_candles
-               if first_ts <= int(c["start"]) <= last_ts]
+    clipped = [c for c in one_min_candles if first_ts <= int(c["start"]) <= last_ts]
     if not clipped:
         return []
     threshold = calibrate_threshold(clipped, len(one_h_candles))
     return dollar_bars_from_candles(clipped, threshold)
 
 
-_DOLLAR_SCHEMA = pa.schema([
-    pa.field("start",        pa.int64()),
-    pa.field("end",          pa.int64()),
-    pa.field("open",         pa.float64()),
-    pa.field("high",         pa.float64()),
-    pa.field("low",          pa.float64()),
-    pa.field("close",        pa.float64()),
-    pa.field("volume",       pa.float64()),
-    pa.field("dollar_value", pa.float64()),
-    pa.field("n_candles",    pa.int64()),
-])
+_DOLLAR_SCHEMA = pa.schema(
+    [
+        pa.field("start", pa.int64()),
+        pa.field("end", pa.int64()),
+        pa.field("open", pa.float64()),
+        pa.field("high", pa.float64()),
+        pa.field("low", pa.float64()),
+        pa.field("close", pa.float64()),
+        pa.field("volume", pa.float64()),
+        pa.field("dollar_value", pa.float64()),
+        pa.field("n_candles", pa.int64()),
+    ]
+)
 
 
 def _dollar_parquet_path(product_id: str) -> str:
@@ -136,15 +140,15 @@ def _save_dollar_bars(path: str, bars: list[dict]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     table = pa.table(
         {
-            "start":        [b["start"]        for b in bars],
-            "end":          [b["end"]          for b in bars],
-            "open":         [b["open"]         for b in bars],
-            "high":         [b["high"]         for b in bars],
-            "low":          [b["low"]          for b in bars],
-            "close":        [b["close"]        for b in bars],
-            "volume":       [b["volume"]       for b in bars],
+            "start": [b["start"] for b in bars],
+            "end": [b["end"] for b in bars],
+            "open": [b["open"] for b in bars],
+            "high": [b["high"] for b in bars],
+            "low": [b["low"] for b in bars],
+            "close": [b["close"] for b in bars],
+            "volume": [b["volume"] for b in bars],
             "dollar_value": [b["dollar_value"] for b in bars],
-            "n_candles":    [b["n_candles"]    for b in bars],
+            "n_candles": [b["n_candles"] for b in bars],
         },
         schema=_DOLLAR_SCHEMA,
     )
@@ -167,23 +171,27 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build dollar bars for the top-20 products from 1m candles"
     )
-    parser.add_argument("--cache", default="cnn_dataset_cache.pt",
-                        help="cache for the survivorship-aware top-20 ranking")
-    parser.add_argument("--pids", default=None,
-                        help="comma-separated product ids (overrides --cache)")
+    parser.add_argument(
+        "--cache",
+        default="cnn_dataset_cache.pt",
+        help="cache for the survivorship-aware top-20 ranking",
+    )
+    parser.add_argument(
+        "--pids", default=None, help="comma-separated product ids (overrides --cache)"
+    )
     args = parser.parse_args()
 
     if args.pids:
         pids = [p.strip() for p in args.pids.split(",") if p.strip()]
     else:
         from tools._scorecard._cv_harness import top_n_pids_from_cache
+
         pids = list(top_n_pids_from_cache(args.cache))
 
     print(f"build_dollar_bars: {len(pids)} products", flush=True)
     for i, pid in enumerate(pids, 1):
         result = build_for_pid(pid)
-        print(f"[{i}/{len(pids)}] {pid}: {result['n_bars']} dollar bars",
-              flush=True)
+        print(f"[{i}/{len(pids)}] {pid}: {result['n_bars']} dollar bars", flush=True)
     return 0
 
 

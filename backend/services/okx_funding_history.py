@@ -22,6 +22,7 @@ OKX details:
 Kill switch: set env OKX_FUNDING_DISABLED=1 to short-circuit and return []
 without an HTTP call.
 """
+
 import logging
 import os
 from typing import List, Optional, Tuple
@@ -44,7 +45,10 @@ _MAX_PAGES = 60
 def _is_disabled() -> bool:
     """True when OKX_FUNDING_DISABLED env is set to a truthy value."""
     return os.environ.get("OKX_FUNDING_DISABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -53,59 +57,59 @@ def _is_disabled() -> bool:
 # Binance fetcher behaviour and avoiding wasted calls for products OKX
 # doesn't list (e.g. VVV-USD as of 2026-04-27).
 _PRODUCT_TO_OKX = {
-    "BTC-USD":   "BTC-USDT-SWAP",
-    "ETH-USD":   "ETH-USDT-SWAP",
-    "SOL-USD":   "SOL-USDT-SWAP",
-    "XRP-USD":   "XRP-USDT-SWAP",
-    "BNB-USD":   "BNB-USDT-SWAP",
-    "ADA-USD":   "ADA-USDT-SWAP",
-    "AVAX-USD":  "AVAX-USDT-SWAP",
-    "LINK-USD":  "LINK-USDT-SWAP",
-    "DOT-USD":   "DOT-USDT-SWAP",
-    "DOGE-USD":  "DOGE-USDT-SWAP",
-    "LTC-USD":   "LTC-USDT-SWAP",
-    "ATOM-USD":  "ATOM-USDT-SWAP",
-    "FIL-USD":   "FIL-USDT-SWAP",
-    "NEAR-USD":  "NEAR-USDT-SWAP",
-    "APT-USD":   "APT-USDT-SWAP",
-    "INJ-USD":   "INJ-USDT-SWAP",
-    "ARB-USD":   "ARB-USDT-SWAP",
-    "OP-USD":    "OP-USDT-SWAP",
-    "TIA-USD":   "TIA-USDT-SWAP",
-    "SEI-USD":   "SEI-USDT-SWAP",
-    "SUI-USD":   "SUI-USDT-SWAP",
-    "AAVE-USD":  "AAVE-USDT-SWAP",
-    "UNI-USD":   "UNI-USDT-SWAP",
-    "HYPE-USD":  "HYPE-USDT-SWAP",
-    "ICP-USD":   "ICP-USDT-SWAP",
-    "TAO-USD":   "TAO-USDT-SWAP",
-    "BCH-USD":   "BCH-USDT-SWAP",
-    "ZEC-USD":   "ZEC-USDT-SWAP",
-    "SHIB-USD":  "SHIB-USDT-SWAP",
-    "TRX-USD":   "TRX-USDT-SWAP",
+    "BTC-USD": "BTC-USDT-SWAP",
+    "ETH-USD": "ETH-USDT-SWAP",
+    "SOL-USD": "SOL-USDT-SWAP",
+    "XRP-USD": "XRP-USDT-SWAP",
+    "BNB-USD": "BNB-USDT-SWAP",
+    "ADA-USD": "ADA-USDT-SWAP",
+    "AVAX-USD": "AVAX-USDT-SWAP",
+    "LINK-USD": "LINK-USDT-SWAP",
+    "DOT-USD": "DOT-USDT-SWAP",
+    "DOGE-USD": "DOGE-USDT-SWAP",
+    "LTC-USD": "LTC-USDT-SWAP",
+    "ATOM-USD": "ATOM-USDT-SWAP",
+    "FIL-USD": "FIL-USDT-SWAP",
+    "NEAR-USD": "NEAR-USDT-SWAP",
+    "APT-USD": "APT-USDT-SWAP",
+    "INJ-USD": "INJ-USDT-SWAP",
+    "ARB-USD": "ARB-USDT-SWAP",
+    "OP-USD": "OP-USDT-SWAP",
+    "TIA-USD": "TIA-USDT-SWAP",
+    "SEI-USD": "SEI-USDT-SWAP",
+    "SUI-USD": "SUI-USDT-SWAP",
+    "AAVE-USD": "AAVE-USDT-SWAP",
+    "UNI-USD": "UNI-USDT-SWAP",
+    "HYPE-USD": "HYPE-USDT-SWAP",
+    "ICP-USD": "ICP-USDT-SWAP",
+    "TAO-USD": "TAO-USDT-SWAP",
+    "BCH-USD": "BCH-USDT-SWAP",
+    "ZEC-USD": "ZEC-USDT-SWAP",
+    "SHIB-USD": "SHIB-USDT-SWAP",
+    "TRX-USD": "TRX-USDT-SWAP",
     # #211: alts/memes that #210 audit found all-zero in the OI cache. Same
     # set is added here so both fetchers share one supported-symbol set.
     # Pids in the zero set that aren't listed on OKX (NKN, AIOZ, JASMY,
     # TRU, SKL, FET, XCN, LRDS) are intentionally omitted.
-    "PENGU-USD":   "PENGU-USDT-SWAP",
-    "JTO-USD":     "JTO-USDT-SWAP",
-    "POPCAT-USD":  "POPCAT-USDT-SWAP",
-    "BONK-USD":    "BONK-USDT-SWAP",
-    "ZK-USD":      "ZK-USDT-SWAP",
-    "PEPE-USD":    "PEPE-USDT-SWAP",
+    "PENGU-USD": "PENGU-USDT-SWAP",
+    "JTO-USD": "JTO-USDT-SWAP",
+    "POPCAT-USD": "POPCAT-USDT-SWAP",
+    "BONK-USD": "BONK-USDT-SWAP",
+    "ZK-USD": "ZK-USDT-SWAP",
+    "PEPE-USD": "PEPE-USDT-SWAP",
     "MOODENG-USD": "MOODENG-USDT-SWAP",
-    "ONDO-USD":    "ONDO-USDT-SWAP",
-    "ALGO-USD":    "ALGO-USDT-SWAP",
-    "ZORA-USD":    "ZORA-USDT-SWAP",
-    "WIF-USD":     "WIF-USDT-SWAP",
-    "RENDER-USD":  "RENDER-USDT-SWAP",
-    "FLOKI-USD":   "FLOKI-USDT-SWAP",
-    "WLD-USD":     "WLD-USDT-SWAP",
-    "BERA-USD":    "BERA-USDT-SWAP",
-    "ENA-USD":     "ENA-USDT-SWAP",
-    "STRK-USD":    "STRK-USDT-SWAP",
-    "TON-USD":     "TON-USDT-SWAP",
-    "JUP-USD":     "JUP-USDT-SWAP",
+    "ONDO-USD": "ONDO-USDT-SWAP",
+    "ALGO-USD": "ALGO-USDT-SWAP",
+    "ZORA-USD": "ZORA-USDT-SWAP",
+    "WIF-USD": "WIF-USDT-SWAP",
+    "RENDER-USD": "RENDER-USDT-SWAP",
+    "FLOKI-USD": "FLOKI-USDT-SWAP",
+    "WLD-USD": "WLD-USDT-SWAP",
+    "BERA-USD": "BERA-USDT-SWAP",
+    "ENA-USD": "ENA-USDT-SWAP",
+    "STRK-USD": "STRK-USDT-SWAP",
+    "TON-USD": "TON-USDT-SWAP",
+    "JUP-USD": "JUP-USDT-SWAP",
 }
 
 
@@ -140,7 +144,7 @@ async def fetch_funding_history(
         return []
 
     collected: List[Tuple[int, float]] = []
-    cursor = int(end_ms)   # OKX `after=` returns records OLDER than this ts
+    cursor = int(end_ms)  # OKX `after=` returns records OLDER than this ts
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -149,8 +153,8 @@ async def fetch_funding_history(
                     _URL,
                     params={
                         "instId": inst_id,
-                        "after":  cursor,
-                        "limit":  _PAGE_SIZE,
+                        "after": cursor,
+                        "limit": _PAGE_SIZE,
                     },
                 )
                 if resp.status_code != 200:

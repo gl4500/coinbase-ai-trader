@@ -1,10 +1,11 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 BACKEND = Path(__file__).resolve().parent.parent
-PYTHON = BACKEND.parent / ".venv" / "Scripts" / "python.exe"
+PYTHON = sys.executable
 
 
 def test_scorecard_cli_help():

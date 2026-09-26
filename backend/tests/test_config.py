@@ -5,6 +5,7 @@ The four CNN_*_CNN_W / CNN_*_LLM_W env vars were dead-on-arrival (never
 read anywhere in backend/) and were deleted. If anyone re-adds them
 without a live consumer, this test fails.
 """
+
 import os
 import sys
 
@@ -41,6 +42,7 @@ class TestNoCnnArchEnvVar:
 class TestDeadBlendFieldsStayDeleted:
     def test_no_dead_llm_blend_fields(self):
         from config import config
+
         dead = (
             "cnn_trending_cnn_w",
             "cnn_trending_llm_w",
@@ -147,26 +149,30 @@ class TestModelBackendValidation:
     def test_model_backend_cnn_raises_value_error(self, monkeypatch):
         monkeypatch.setenv("MODEL_BACKEND", "cnn")
         from config import Config
+
         with pytest.raises(ValueError, match="deprecated"):
             Config()
 
     def test_model_backend_xgb_v45_accepted(self, monkeypatch):
         monkeypatch.setenv("MODEL_BACKEND", "xgb_v45")
         from config import Config
+
         cfg = Config()
         assert cfg.model_backend == "xgb_v45"
 
     def test_model_backend_unknown_raises(self, monkeypatch):
         monkeypatch.setenv("MODEL_BACKEND", "lstm")
         from config import Config
+
         with pytest.raises(ValueError, match="invalid"):
             Config()
 
     def test_xgb_v45_threshold_defaults(self, monkeypatch):
-        monkeypatch.delenv("XGB_V45_THRESH_UP",   raising=False)
+        monkeypatch.delenv("XGB_V45_THRESH_UP", raising=False)
         monkeypatch.delenv("XGB_V45_THRESH_DOWN", raising=False)
         monkeypatch.setenv("MODEL_BACKEND", "xgb")
         from config import Config
+
         cfg = Config()
-        assert cfg.xgb_v45_thresh_up   == 0.50
+        assert cfg.xgb_v45_thresh_up == 0.50
         assert cfg.xgb_v45_thresh_down == 0.50

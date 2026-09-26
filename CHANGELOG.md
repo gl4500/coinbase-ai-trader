@@ -7,7 +7,7 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
-### Session 58.80 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
+### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
 
 Completed Tasks 5–8 of the Phase-1 plan (Tasks 1–4 landed 2026-07-05/09). The
 layer stays **entirely offline** — nothing here touches `cnn_agent`, `main.py`,
@@ -64,6 +64,287 @@ high-correlation drawdown) or a longer proxy return series to replace the
 4-month live record.
 
 
+### Session 58.81 — 2026-08-09 — Promote Snyk to a blocking security gate
+
+Now that the Snyk job runs and passes clean end-to-end (58.79/58.80), wire it
+into the merge-blocking gate.
+
+- `.github/workflows/ci.yml`: added `snyk` to `security-gate.needs` and to the
+  gate's pass/fail check, so a high-severity Snyk finding fails the security
+  gate. The skip-on-empty-token path is safe: a job whose steps all skip
+  concludes `success`, so token-less runs (e.g. forks) stay green — the gate
+  only blocks when Snyk actually ran and found a high-severity issue.
+
+### Session 58.80 — 2026-08-09 — Fix Snyk frontend step (npm ci → npm install)
+
+After the operator set a real `SNYK_TOKEN`, the Snyk CI job ran its real steps
+for the first time (previously skipped on the empty token). The **backend**
+step passed (deps clean); the **frontend** step failed — not on a vuln, but
+because it used `npm ci`, which aborts on the repo's known cross-platform
+`package-lock.json` esbuild drift (same issue fixed for the typecheck/build
+jobs in 58.74).
+
+- `.github/workflows/ci.yml`: Snyk frontend step `npm ci --ignore-scripts` →
+  `npm install --ignore-scripts --no-audit --no-fund`, matching the other
+  frontend jobs. Verified locally: `snyk test --severity-threshold=high` on
+  frontend = **0 vulnerable paths** (5 deps). The Snyk backend step already
+  passes clean, so the full Snyk job now genuinely runs and gates.
+
+### Session 58.79 — 2026-08-09 — Remediate backend dependency CVEs + fix Snyk CI false-green
+
+Follows 58.78: the new Snyk scan surfaced **15 High / 14 Medium / 1 Low**
+backend dependency CVEs that the CI Snyk step was *not* catching (it scanned
+`requirements.txt` from the repo root without an installed/resolvable graph →
+false green).
+
+- `backend/requirements.txt`: bumped vulnerable pins — `cryptography>=48.0.1`
+  (→50.0.0), `python-multipart>=0.0.18` (→0.0.32), `PyJWT>=2.13.0`,
+  `python-dotenv>=1.2.2`, plus transitive security pins `click>=8.3.3`,
+  `idna>=3.15`, and `starlette>=1.3.1`. The starlette fix floor had moved to
+  **1.3.1** (ReDoS/SSRF/resource-throttling/name-resolution), which forced
+  **fastapi 0.115.0 → 0.141.1** (fastapi<0.141 caps starlette below 1.x).
+  pydantic stayed pinned at 2.9.2 — no cascade.
+- Validated: full CI-equivalent suite **1323 passed / 0 failed** against
+  fastapi 0.141.1 + starlette 1.6.0; `snyk test --severity-threshold=medium`
+  → **0 vulnerable paths** (was 30 findings).
+- `.github/workflows/ci.yml`: fixed the Snyk backend step — install deps into
+  the job interpreter, then run `snyk test` from `backend/` so the pip plugin
+  resolves against the installed graph (removes the false green; step now
+  genuinely gates on high-severity findings).
+
+### Session 58.78 — 2026-08-09 — Dependency (SCA) security scanning
+
+Closes the SCA gap: CI already had Bandit (Python SAST) + Gitleaks (secrets),
+but nothing scanned dependencies for known CVEs (no Snyk, Dependabot off).
+
+- Enabled repo-level Dependabot **vulnerability alerts** + **automated security
+  fixes** (via API / Settings → Code security).
+- `.github/dependabot.yml` (new): weekly version-update PRs for `pip` (backend/),
+  `npm` (frontend/), and `github-actions`.
+- `.github/workflows/ci.yml`: new **dep-audit** job (`pip-audit` + `npm audit`,
+  advisory `|| true` so pre-existing findings don't block) and a **snyk** job
+  (Python+Node SCA, a no-op until a `SNYK_TOKEN` repo secret is added, then runs
+  and blocks on high-severity findings). Neither is wired into the security-gate
+  `needs` yet — advisory until the dependency backlog is triaged.
+
+### Session 58.77 — 2026-08-08 — Diagnostics dashboard (v3 signal/exit/regime/funnel)
+
+New read-only **Diagnostics** tab explaining *why* v3 loses (complements the
+PnL-only PerformanceDashboard). Built subagent-driven from the 2026-08-08
+spec/plan.
+
+- `backend/services/diagnostics.py` (new, read-only, own `mode=ro` connection,
+  60s TTL cache): `window_cutoff` + `signal_edge` (precision + confidence-decile
+  calibration) + `exit_attribution` (per-trigger PnL + SCAN-SELL share) +
+  `regime_and_asset` (per-asset + nearest-scan regime join) + `signal_funnel`
+  (scans→BUY→executed→matured) + `compute_diagnostics` orchestrator.
+- `backend/main.py`: `GET /api/diagnostics?window=30d|90d|all` (400 on bad
+  window; 500 isolated from trading; reads `database.DB_PATH`).
+- `backend/migrations/diagnostics_indexes_20260808.py` (new, operator-applied):
+  additive indexes `idx_cnn_scans_pid_scanned` + `idx_trades_agent_closed` for
+  the regime/exit queries.
+- `frontend/src/components/DiagnosticsDashboard.tsx` (new) + `App.tsx`
+  'Diagnostics' tab: 4 sections, hand-rolled SVG (no new deps), window selector
+  + refresh.
+- Tests: `test_diagnostics.py`, `test_diagnostics_migration.py`,
+  `test_diagnostics_api.py`; frontend `tsc` + `build` pass.
+
+Read-only + additive — zero effect on the trading loop. Operator preflight:
+apply the index migration once (see the plan's deployment note). Grounded
+finding the tab surfaces: v3's top-confidence slice (conf~0.9) has real edge
+(~53% WR) despite ~22% blended precision.
+
+### Session 58.76 — 2026-08-08 — Scan-loop resilience (Aug-1 stall hardening)
+
+The 2026-08-01 Coinbase DNS/network outage hung a scan-loop network call; the
+loop's `try/except` catches exceptions but not *hangs*, so trading froze for days
+while the HTTP server stayed up — and the launcher watchdog only probed
+`/api/status` (still 200), so nothing auto-restarted it. Fixes:
+
+- `agents/cnn_agent.py` — new `_scan_cycle()` wraps `scan_all` + `_check_risk_exits`
+  in `asyncio.wait_for(_SCAN_CYCLE_TIMEOUT_SECS=600)`; a hung cycle raises
+  `TimeoutError`, is logged, and the loop continues to the next cycle instead of
+  freezing indefinitely.
+- `main.py` — new `GET /api/health` returns **503 when the scan loop is stale**
+  (`last_scan_at` older than 3× scan interval; `None` = startup grace). Pure
+  helper `scan_loop_stale()`. `/api/status` is unchanged for the UI.
+- `launcher.py` — watchdog now probes `/api/health` via `_is_backend_healthy()`,
+  so a stalled-but-serving backend trips the existing 3-strike auto-restart
+  (self-recovery). The latent `_is_url_up` arg-ignoring bug is left as-is;
+  startup readiness checks still use `/api/status`.
+- `tests/test_scan_resilience.py` — 7 tests (staleness boundaries + scan-cycle
+  timeout/normal paths).
+
+Not changed (already adequate): httpx has 15s timeouts, the WS auto-reconnects
+(ping_timeout 20). The earlier "log rotation stalled" was a transient —
+logging is healthy. Root cause stays environmental (network); this makes the
+system self-recover rather than needing a manual restart.
+
+### Session 58.71z — 2026-06-08 — Fix misleading "balance too low" WARN for tier-suspended (task #73)
+
+`_CNNBook.buy` returns `(0.0, 0.0)` for two distinct cases:
+
+1. **Tier-suspended** (`status == "suspended"`) — already INFO-logged inside
+   `buy()` at the suspension site.
+2. **Legitimate low-balance** (`spend < 1.0`) — no log at the `buy()` level;
+   caller emits the WARN.
+
+Pre-fix, the caller at `cnn_agent.py:2186-2190` couldn't distinguish the cases
+and emitted the same `"BOOK BUY skipped ... balance too low for kelly_frac=…"`
+WARN for both. Live logs showed e.g. `WARNING ... balance=$1000.00 too low`
+for products that were actually tier-suspended on Coinbase — wildly misleading.
+
+Post-fix, the caller queries `database.get_product_status(pid)` in the
+failure branch:
+- **Suspended** → `signal["execution"]["reason"] = "Tier suspended"`, no WARN
+  (the INFO log inside `buy()` already records it; the caller's WARN was
+  duplicate + mislabeled).
+- **Low-balance** → unchanged behavior, WARN still fires (correct for the
+  real case).
+
+**Files:**
+- `backend/agents/cnn_agent.py` — 11-line fix in the `generate_signal` BUY
+  fail-branch.
+- `backend/tests/test_cnn_agent.py` — 2 new TDD tests in
+  `TestKellySizingBug`:
+  - `test_buy_skipped_warns_for_legit_low_balance` (balance=$0.50, status=active → WARN fires)
+  - `test_buy_skipped_no_warn_for_tier_suspended` (balance=$1000, status=suspended → no WARN, reason="Tier suspended")
+
+No behavior change for live trading or paper-execution — the only effect is
+the log/execution-payload labeling.
+
+### Session 58.74 — 2026-08-02 — CI: grant tag-release `contents: write`
+
+After tracks 1+2 merged, main's CI was 6/7 green — only `tag-release` (main-push
+only; hadn't run since before the pipeline broke) failed with 403 "Resource not
+accessible by integration". Creating the release tag needs `contents: write`, but
+the repo's default `GITHUB_TOKEN` is read-only. Added a job-level
+`permissions: { contents: write }` to the `tag-release` job only (least-privilege —
+repo-wide default stays read-only).
+
+### Session 58.74 — 2026-08-01 — CI pipeline repair (track 2 of 2): ruff lint + format
+
+Clears the Ruff-lint + Security-gate jobs left red by track 1. Branch
+`chore/ruff-lint-format`, stacked on `fix/ci-pipeline-green`.
+
+**Mechanical (ruff 0.9.0, CI-pinned):** `ruff check backend/ --fix` (373 safe
+auto-fixes — I001 import sort, F401 unused imports, …) + `--unsafe-fixes` for 35
+more (F841 dead vars, E712, B006/B007, E731); `ruff format backend/` (211 files).
+
+**Manual code fixes:**
+- E741 ambiguous `l` → `lo` / `labels` / `lesson` in `cnn_agent.py`,
+  `signal_generator.py`, `outcome_tracker.py`, `anomaly_flagger.py` + 5 test
+  modules (incl. `_candle`/`_ohlc`/`_bar` helper params and keyword callers).
+- B904 exception chaining: `clients/coinbase_client.py` (`from err`), `main.py`
+  (`from exc`).
+
+**Config (`pyproject.toml [tool.ruff.lint]`):**
+- Dropped `S` (flake8-bandit) from `select` — the dedicated Bandit SAST CI job is
+  the security gate, so ruff-S duplicated it. Removed now-dead `S101`/`S105`
+  ignores.
+- `per-file-ignores` E402 for `backend/main.py` (launcher `.venv` sys.path shim)
+  and `backend/tests/*` (BACKEND path insert) — legitimate bootstrap-before-import;
+  imports cannot move above it.
+- `.gitleaks.toml` (new): extends the default Gitleaks ruleset (`useDefault =
+  true`) and allowlists `backend/tests/conftest.py`, whose all-zero dummy EC key
+  is a pytest fixture, not a real credential. Track-2 reformatting pulled that
+  line into the last-commit diff that the Secret-scan job scans (`--log-opts=-1`).
+
+**Verified:** `ruff check backend/` + `ruff format --check backend/` both exit 0
+(228 files); targeted rename tests + full suite via pre-commit hook green.
+
+### Session 58.74 — 2026-08-01 — CI pipeline repair (track 1 of 2)
+
+Main's CI ("CI — DevSecOps Pipeline") had been failing since 2026-06-08 (every
+PR since merged red). Diagnosis: three independent, pre-existing pipeline
+failures — no product-code regressions. This is track 1 of a two-track fix: the
+infra/dependency/bug fixes that unblock the Backend-tests, Frontend-typecheck,
+and Frontend-build jobs. The bulk ruff cleanup (~585 lint + 210-file format) is
+deferred to a separate dedicated PR (track 2); the Ruff-lint and Security-gate
+jobs stay red until then.
+
+**Files:**
+- `backend/requirements.txt` — added `pandas>=2.0.0`. pandas is a real runtime
+  dependency (imported by `services/tiered_history.py` on the live v3 path) but
+  was undeclared; its absence broke CI pytest collection (ModuleNotFoundError).
+- `.github/workflows/ci.yml` — (1) test-backend job installs CPU torch
+  (`--index-url https://download.pytorch.org/whl/cpu`) so collection of the 17
+  torch/pandas-importing test modules succeeds; (2) both frontend jobs switched
+  from `npm ci` to `npm install --ignore-scripts --no-audit --no-fund` to
+  tolerate lockfile drift (committed lock was missing the esbuild@0.28.0 subtree
+  from the vitest 4.x bump; regenerating the lock cross-platform on Windows
+  produced broken optional-platform flags, so per-runner `npm install` is the
+  robust fix).
+- `backend/agents/cnn_agent.py` — `self.model` annotation `Optional["SignalCNN"]`
+  → `Optional[Any]` (SignalCNN deleted #311-refactor-e; dead forward-ref, F821).
+- `backend/tests/test_cnn_agent.py` — `seen_oi: List` → `seen_oi: list` (×2);
+  `List` was undefined (F821).
+- `backend/tests/test_scorecard_cli.py` — `PYTHON` hardcoded the Windows
+  `.venv/Scripts/python.exe` path (3 FileNotFoundError failures on linux CI,
+  newly exposed once collection succeeded); now `sys.executable`.
+
+**Verified locally:** ruff 0.9.0 F821-clean on both touched files; `npx tsc
+--noEmit` passes; `npm install` installs cleanly with no cpu-notsup error.
+Backend-tests collection fix confirmed via CI on push (full local pytest gated —
+8001 backend actively trading).
+
+### Session 58.73 — 2026-06-21 — Maker-execution routing (exit leg, shadow-gated)
+
+Opt-in maker (post-only LIMIT) routing for live profit-target EXITS, completing
+the piece deferred by the entry leg (58.72). Reuses the same `USE_MAKER_EXECUTION`
+flag (default false → byte-for-byte paper-only). Trail + model-down exits post as
+maker (can wait for a fill; 30s market fallback in `execute_maker_signal`); hard
+stop-loss + forced time exits cross as taker (capital protection). Both exit paths
+(scan loop + WS) covered. Asymmetric with the entry leg by design: exits place NO
+live order today, so the WHOLE exit live-order path is gated behind the flag.
+
+Zero effect on tracked 8001 paper PnL (paper book models no fees); purely a
+live-execution-path change for the 8002 shadow. Promote to 8001 only after the
+shadow confirms real maker fill rates.
+
+**Files:**
+- `backend/agents/exit_execution.py` (new) — single source of truth for exit
+  routing: `is_maker_exit(trigger)` classification + `execute_live_exit(order_executor,
+  *, pid, price, size, trigger)`. Owns the flag/dry-run gate, the bid/ask fetch
+  (maker only), and the `order_executor` call. SELL signal carries no `atr` key →
+  sizes from `quote_size = size*ask` (maker) / `size*price` (taker). No-ops (returns
+  None) when gated off or quotes missing.
+- `backend/agents/cnn_agent.py` — `_check_risk_exits(self, order_executor=None)`;
+  after the paper `book.sell`, calls `exit_execution.execute_live_exit` in a
+  try/except (never re-raises into the scan loop); `run_loop` forwards `order_executor`.
+- `backend/agents/exit_watcher.py` — `on_price_tick(..., order_executor=None)` +
+  `attach(..., order_executor=None)`; live-exit call sits inside the existing
+  handler try/except (invariant #18).
+- `backend/main.py` — `attach_exit_watcher` now passes `app_state.order_executor`.
+- `backend/tests/test_exit_execution.py` (new, 8 tests) — classification, gate
+  (none/flag-off/dry-run), maker routing + sizing + missing-quote no-op, taker routing.
+- `backend/tests/test_cnn_risk_exits.py` — `TestCheckRiskExitsLiveRouting` (5 tests):
+  trail→maker, stop→taker, flag-off paper-only, no-executor paper-only, exception swallowed.
+- `backend/tests/test_exit_watcher.py` — `TestOnPriceTickLiveRouting` (5 tests):
+  WS trail→maker, WS stop→taker, WS model-down→maker, flag-off paper-only, attach forwards executor.
+- `CLAUDE.md` — invariant #21 amended with the exit-leg contract.
+
+### Session 58.72 — 2026-06-15 — Maker-execution routing (entry leg, shadow-gated)
+
+Opt-in maker (post-only LIMIT) routing for live BUY entries, gated behind a
+new `USE_MAKER_EXECUTION` env flag (default false → byte-for-byte unchanged
+taker behavior). Intended for the 8002 shadow per port discipline; promote to
+8001 only after the shadow confirms real maker fill rates. Backtest
+expectation (read-only sims, `docs/win-factors-strategy/`): maker execution
+flips full-history paper PnL from −$414 (taker) to +$169.
+
+**Files:**
+- `backend/config.py` — new `use_maker_execution` field (env `USE_MAKER_EXECUTION`, default false).
+- `backend/agents/cnn_agent.py` — extracted `_execute_live_order(order_executor, signal)`;
+  flag on → sources best bid/ask via `coinbase_client.get_best_bid_ask`, attaches them to the
+  signal, routes to `order_executor.execute_maker_signal` (which owns the 30s poll + market
+  fallback). Flag off → existing `execute_signal` taker path, no bid/ask fetch.
+- `backend/tests/test_cnn_agent.py` — `TestMakerExecutionRouting` (2 tests): taker path when
+  flag off (byte-for-byte, no quote fetch); maker path populates bid/ask + routes to maker.
+
+**Why:** `execute_maker_signal` existed and was tested but unwired — the live path called the
+taker `execute_signal`, and the signal dict lacked the bid/ask the maker path requires. Sourcing
+those quotes is the actual entry-leg work. Profit-target maker exits are the next (separate) piece.
 ### Session 58.71w — 2026-06-07 — Tier A: skip masked-channel builders (ch17/18/19)
 
 Pure compute optimization in `FeatureBuilder.build` — emit zero arrays

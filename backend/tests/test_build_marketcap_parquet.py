@@ -11,6 +11,7 @@ Schema (mirrors history_backfill but with marketcap columns):
 
 Per-pid path: backend/data/marketcap/<pid>.parquet
 """
+
 import os
 import sys
 import tempfile
@@ -22,23 +23,20 @@ BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 from tools import build_marketcap_parquet as bmp  # noqa: E402
 
-
 # ── Schema match ────────────────────────────────────────────────────────────
 
-class TestParquetSchema:
 
+class TestParquetSchema:
     def test_schema_columns_match_bronze_convention(self):
         names = [f.name for f in bmp._SCHEMA]
-        assert names == [
-            "start", "market_cap", "fdv", "volume_24h", "ingest_ts", "schema_version"
-        ]
+        assert names == ["start", "market_cap", "fdv", "volume_24h", "ingest_ts", "schema_version"]
 
     def test_schema_dtypes_match_bronze_convention(self):
         types = {f.name: str(f.type) for f in bmp._SCHEMA}
@@ -56,8 +54,8 @@ class TestParquetSchema:
 
 # ── Round-trip + ordering ───────────────────────────────────────────────────
 
-class TestRoundTrip:
 
+class TestRoundTrip:
     def test_save_then_load_returns_same_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "BTC-USD.parquet")
@@ -108,8 +106,8 @@ class TestRoundTrip:
 
 # ── PIT semantics (#168) ────────────────────────────────────────────────────
 
-class TestPITSemantics:
 
+class TestPITSemantics:
     def test_save_stamps_ingest_ts_when_not_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "BTC-USD.parquet")
@@ -122,10 +120,15 @@ class TestPITSemantics:
     def test_save_preserves_existing_ingest_ts(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "BTC-USD.parquet")
-            rows = [{
-                "start": 100, "market_cap": 1.0e12, "fdv": 1.0e12,
-                "ingest_ts": 1700000000, "schema_version": 1,
-            }]
+            rows = [
+                {
+                    "start": 100,
+                    "market_cap": 1.0e12,
+                    "fdv": 1.0e12,
+                    "ingest_ts": 1700000000,
+                    "schema_version": 1,
+                }
+            ]
             bmp._save_marketcap_history(path, rows, now_ts=1778500000)
             loaded = bmp._load_marketcap_history(path)
             assert loaded[0]["ingest_ts"] == 1700000000
@@ -149,8 +152,8 @@ class TestPITSemantics:
 
 # ── Integration: written file is readable by pyarrow with declared schema ───
 
-class TestParquetFileShape:
 
+class TestParquetFileShape:
     def test_written_file_has_declared_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "BTC-USD.parquet")
@@ -169,8 +172,8 @@ class TestParquetFileShape:
 
 # ── Convert (ts_ms, mc) rows to bar-aligned save rows ───────────────────────
 
-class TestRowsFromHistory:
 
+class TestRowsFromHistory:
     def test_converts_ms_to_bar_aligned_secs(self):
         # 2025-01-01 00:00:00 UTC = 1735689600 sec = 1735689600000 ms
         history = [(1735689600000, 1.0e12), (1735776000000, 1.01e12)]

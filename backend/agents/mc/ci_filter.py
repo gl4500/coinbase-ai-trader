@@ -8,6 +8,7 @@ exceed cnn_buy_threshold before allowing BUY.
 K is configurable via MC_CI_K (default 1.0). Skips gracefully for non-v3
 boosters, missing pid, or any predict failure — decision stays the caller's.
 """
+
 from __future__ import annotations
 
 import logging
@@ -50,17 +51,17 @@ class CIFilter(BuyFilter):
 
         try:
             import xgboost as xgb
+
+            import config as cfg
             from services.tiered_history import fetch_tiered
             from tools.xgb_features import extract_features
-            import config as cfg
 
             tiers = fetch_tiered(pid, source="live")
             features, _ = extract_features(tiers, feature_set="v3")
             dmat = xgb.DMatrix(features, feature_names=xs._feature_names)
             n = xs._booster.num_boosted_rounds()
             trajectory = [
-                float(xs._booster.predict(dmat, iteration_range=(0, k + 1))[0])
-                for k in range(n)
+                float(xs._booster.predict(dmat, iteration_range=(0, k + 1))[0]) for k in range(n)
             ]
             point = trajectory[-1]
             stdev = float(np.std(trajectory))
@@ -85,6 +86,7 @@ class CIFilter(BuyFilter):
 # Self-register with the registry on import.
 try:
     from agents.mc.registry import _FILTER_CLASSES
+
     _FILTER_CLASSES["ci"] = CIFilter
 except Exception:
     pass

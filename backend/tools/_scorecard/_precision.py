@@ -1,4 +1,5 @@
 """Precision at a score threshold: of signals that fire, what fraction win?"""
+
 from __future__ import annotations
 
 import numpy as np

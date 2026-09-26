@@ -1,0 +1,24 @@
+version: 2
+# Dependabot dependency-update PRs. Vulnerability alerts + automated security
+# fixes are enabled at the repo level (Settings -> Code security). This file
+# adds scheduled version-update PRs for each ecosystem.
+updates:
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "backend"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "frontend"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "ci"]

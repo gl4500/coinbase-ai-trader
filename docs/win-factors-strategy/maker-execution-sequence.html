@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>execute_maker_signal() — Execution Trace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;400;500;700&family=Archivo:wght@400;500;600;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0b0e; --panel:#101319; --panel-2:#0d1015;
+    --ink:#e9e7e0; --muted:#7f858f; --faint:#4a4f59;
+    --maker:#2fe39a; --maker-dim:#163428;
+    --taker:#ff5a4d; --taker-dim:#341c19;
+    --warn:#f5b13c; --warn-dim:#332710;
+    --call:#5aa9ff; --call-dim:#152538;
+    --line:#1d222b; --grid:#161a22;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+    --serif:'Instrument Serif',Georgia,serif;
+    --ui:'Archivo',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:var(--ui);line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:999;opacity:.035;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+  .wrap{max-width:980px;margin:0 auto;padding:0 28px}
+
+  /* header */
+  header{padding:64px 0 40px;border-bottom:1px solid var(--line);position:relative}
+  header::before{content:"";position:absolute;inset:0;z-index:-1;background:radial-gradient(800px 320px at 80% -10%,rgba(90,169,255,.10),transparent 60%)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.3em;text-transform:uppercase;color:var(--call);margin-bottom:20px}
+  h1{font-family:var(--mono);font-weight:700;font-size:clamp(26px,4.4vw,42px);letter-spacing:-.01em;margin-bottom:8px}
+  h1 .paren{color:var(--muted)}
+  h1 .arg{color:var(--warn);font-weight:400}
+  .loc{font-family:var(--mono);font-size:13px;color:var(--faint);margin-bottom:22px}
+  .sub{max-width:660px;color:var(--muted);font-size:16px}
+  .sub b{color:var(--ink);font-weight:600}
+
+  /* legend */
+  .legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:26px}
+  .chip{font-family:var(--mono);font-size:11px;letter-spacing:.06em;padding:6px 11px;border-radius:20px;border:1px solid var(--line);color:var(--muted);display:flex;align-items:center;gap:7px}
+  .chip .sw{width:9px;height:9px;border-radius:50%}
+  .sw.call{background:var(--call)} .sw.gate{background:var(--warn)} .sw.io{background:var(--ink)}
+  .sw.maker{background:var(--maker)} .sw.taker{background:var(--taker)}
+
+  /* trace */
+  .trace{padding:46px 0 20px;position:relative}
+  .spine{position:absolute;left:calc(28px + 30px);top:46px;bottom:60px;width:2px;background:linear-gradient(var(--call),var(--warn) 60%,var(--maker));opacity:.35}
+  @media(max-width:760px){.spine{left:42px}}
+
+  .step{display:grid;grid-template-columns:62px 1fr;gap:18px;margin-bottom:18px;position:relative}
+  .node-num{width:62px;display:flex;flex-direction:column;align-items:center;z-index:2}
+  .dot{width:30px;height:30px;border-radius:50%;background:var(--panel);border:2px solid var(--call);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--call)}
+  .step.gate .dot{border-color:var(--warn);color:var(--warn)}
+  .step.io .dot{border-color:var(--faint);color:var(--ink)}
+  .step.loop .dot{border-color:var(--maker);color:var(--maker)}
+  .ln{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:6px;text-align:center}
+
+  .body{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;border-left:3px solid var(--call)}
+  .step.gate .body{border-left-color:var(--warn)}
+  .step.io .body{border-left-color:var(--faint)}
+  .step.loop .body{border-left-color:var(--maker)}
+  .kind{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:5px}
+  .step.gate .kind{color:var(--warn)} .step.loop .kind{color:var(--maker)}
+  .body h3{font-family:var(--mono);font-size:15px;font-weight:500;margin-bottom:5px}
+  .body code{font-family:var(--mono);font-size:13px;color:var(--call);background:var(--panel-2);padding:1px 5px;border-radius:4px;word-break:break-word}
+  .body p{font-size:13.5px;color:var(--muted);line-height:1.55;margin-top:6px}
+  .body p b{color:var(--ink);font-weight:600}
+
+  /* abort exit */
+  .abort{margin-top:11px;display:flex;align-items:flex-start;gap:9px;background:var(--taker-dim);border:1px solid var(--taker);border-radius:8px;padding:9px 12px}
+  .abort .x{color:var(--taker);font-family:var(--mono);font-weight:700;font-size:13px;flex-shrink:0}
+  .abort .txt{font-family:var(--mono);font-size:12px;color:var(--ink);line-height:1.5}
+  .abort .txt b{color:var(--taker)}
+
+  /* fork (dry vs live) */
+  .fork{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:11px}
+  .branch{border:1px dashed var(--line);border-radius:8px;padding:12px 14px}
+  .branch .h{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px}
+  .branch.dry .h{color:var(--warn)} .branch.live .h{color:var(--maker)}
+  .branch p{font-size:12.5px;color:var(--muted);margin:0;line-height:1.5}
+  .branch code{font-size:11.5px}
+
+  /* loop visual */
+  .poll{margin-top:11px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .poll .lh{color:var(--maker);font-weight:500;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .poll .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--maker-dim);border-top-color:var(--maker);border-radius:50%;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .poll .seq{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+  .poll .t{padding:3px 7px;border:1px solid var(--line);border-radius:5px;font-size:11px;color:var(--faint)}
+  .poll .t.hit{color:var(--maker);border-color:var(--maker-dim);background:var(--maker-dim)}
+
+  /* terminal outcomes */
+  .terminals{margin-top:40px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .term{border-radius:14px;padding:22px;border:1px solid var(--line);position:relative;overflow:hidden}
+  .term .mode{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+  .term .ico{font-size:30px;line-height:1;margin-bottom:10px}
+  .term h4{font-family:var(--mono);font-size:16px;font-weight:700;margin-bottom:6px}
+  .term p{font-size:12.5px;color:var(--muted);line-height:1.5}
+  .term .fee{position:absolute;top:18px;right:18px;font-family:var(--mono);font-size:13px;font-weight:700}
+  .term.ok{border-color:var(--maker-dim);background:linear-gradient(180deg,var(--maker-dim),transparent)} .term.ok h4,.term.ok .ico,.term.ok .fee{color:var(--maker)}
+  .term.fb{border-color:var(--taker-dim);background:linear-gradient(180deg,var(--taker-dim),transparent)} .term.fb h4,.term.fb .ico,.term.fb .fee{color:var(--taker)}
+  .term.ab{border-color:var(--line);background:var(--panel-2)} .term.ab h4,.term.ab .ico{color:var(--faint)}
+
+  /* return shape note */
+  .retnote{margin-top:30px;font-family:var(--mono);font-size:12px;color:var(--faint);border:1px dashed var(--line);border-radius:10px;padding:16px 18px;line-height:1.8}
+  .retnote b{color:var(--muted)} .retnote .g{color:var(--maker)} .retnote .r{color:var(--taker)} .retnote .w{color:var(--warn)}
+
+  footer{padding:40px 0 70px;border-top:1px solid var(--line);margin-top:40px}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--faint);line-height:1.9}
+  .meta b{color:var(--muted)}
+
+  .reveal{opacity:0;transform:translateY(16px);transition:opacity .55s ease,transform .55s ease}
+  .reveal.in{opacity:1;transform:none}
+
+  @media(max-width:760px){
+    .step{grid-template-columns:46px 1fr;gap:12px}.node-num{width:46px}
+    .fork,.terminals{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <div class="kicker">Execution Trace · order_executor.py</div>
+  <h1>execute_maker_signal<span class="paren">(</span><span class="arg">signal</span>, <span class="arg">timeout_secs=30.0</span><span class="paren">)</span></h1>
+  <div class="loc">async def · agents/order_executor.py:285 → 424</div>
+  <p class="sub">The exact ordered sequence the function runs — <b>five short-circuit gates</b>, a dry-run/live fork, a <b>post-only LIMIT placement</b>, a <b>30-second fill poll</b>, and a <b>market fallback</b> if the resting order never fills. Three ways it can end.</p>
+  <div class="legend">
+    <span class="chip"><span class="sw call"></span>call / compute</span>
+    <span class="chip"><span class="sw gate"></span>gate — can short-circuit</span>
+    <span class="chip"><span class="sw io"></span>I/O — order + DB</span>
+    <span class="chip"><span class="sw maker"></span>poll loop</span>
+    <span class="chip"><span class="sw taker"></span>fallback</span>
+  </div>
+</div></header>
+
+<div class="wrap"><div class="trace">
+  <div class="spine"></div>
+
+  <!-- 1 -->
+  <div class="step call reveal">
+    <div class="node-num"><div class="dot">1</div><div class="ln">L285</div></div>
+    <div class="body">
+      <div class="kind">Entry</div>
+      <h3>Receive <code>signal</code> + 30s timeout</h3>
+      <p>Signal must carry <code>product_id</code>, <code>side</code>, <code>bid</code>, <code>ask</code>. Optional: <code>atr</code>, <code>quote_size</code>, <code>signal_type</code>, <code>id</code>.</p>
+    </div>
+  </div>
+
+  <!-- 2 -->
+  <div class="step gate reveal">
+    <div class="node-num"><div class="dot">2</div><div class="ln">L302</div></div>
+    <div class="body">
+      <div class="kind">Gate · drawdown circuit breaker</div>
+      <h3>await <code>_check_drawdown()</code></h3>
+      <p>Reads balance, seeds daily/weekly baselines, resets windows when due (24h / 7d), computes drawdown. Trips if <code>day_dd ≥ daily_drawdown_limit</code> or <code>week_dd ≥ weekly_drawdown_limit</code> — and latches <code>_halted=True</code>.</p>
+      <div class="abort"><span class="x">↳ return</span><span class="txt"><b>{success: False, reason}</b> — halted until the window resets. No order placed.</span></div>
+    </div>
+  </div>
+
+  <!-- 3 -->
+  <div class="step gate reveal">
+    <div class="node-num"><div class="dot">3</div><div class="ln">L308</div></div>
+    <div class="body">
+      <div class="kind">Gate · quotes present</div>
+      <h3>require <code>bid &gt; 0</code> and <code>ask &gt; 0</code></h3>
+      <p>The maker price comes from the live touch — no quotes, no maker order.</p>
+      <div class="abort"><span class="x">↳ return</span><span class="txt"><b>"Maker path requires bid + ask quotes"</b></span></div>
+    </div>
+  </div>
+
+  <!-- 4 -->
+  <div class="step call reveal">
+    <div class="node-num"><div class="dot">4</div><div class="ln">L313</div></div>
+    <div class="body">
+      <div class="kind">Compute · maker price</div>
+      <h3><code>_maker_price(side, bid, ask)</code> → bid (BUY) / ask (SELL)</h3>
+      <p>Posts <b>at the touch</b>, not across it. Crossing the spread (BUY at ask) would auto-cancel a <code>post_only</code> order on Coinbase — so it rests at the bid and waits to be hit.</p>
+    </div>
+  </div>
+
+  <!-- 5 -->
+  <div class="step gate reveal">
+    <div class="node-num"><div class="dot">5</div><div class="ln">L316</div></div>
+    <div class="body">
+      <div class="kind">Compute + gate · position size</div>
+      <h3>ATR sizing or default</h3>
+      <p>If <code>atr &gt; 0</code> → <code>_size_from_atr</code>: <code>min((balance × atr_risk_pct)/(atr × atr_multiplier), max_position_usd)</code>. Else <code>signal.quote_size</code> or <code>config.max_position_usd</code>.</p>
+      <div class="abort"><span class="x">↳ return</span><span class="txt"><b>"Position below $1 minimum"</b> if <code>quote_size &lt; 1.0</code></span></div>
+    </div>
+  </div>
+
+  <!-- 6 -->
+  <div class="step gate reveal">
+    <div class="node-num"><div class="dot">6</div><div class="ln">L326</div></div>
+    <div class="body">
+      <div class="kind">Gate · pre-flight</div>
+      <h3>await <code>_preflight(quote_size)</code></h3>
+      <p>Live: credentials present? USD balance ≥ size? <code>exposure + size ≤ max_total_exposure</code>? (Dry-run checks sim balance + exposure.)</p>
+      <div class="abort"><span class="x">↳ return</span><span class="txt"><b>{success: False, reason}</b> — insufficient balance / exposure cap / no credentials</span></div>
+    </div>
+  </div>
+
+  <!-- 7 -->
+  <div class="step call reveal">
+    <div class="node-num"><div class="dot">7</div><div class="ln">L330</div></div>
+    <div class="body">
+      <div class="kind">Compute</div>
+      <h3><code>base_size = round(quote_size / maker_price, 8)</code></h3>
+      <p>USD size → base-currency size at the maker price.</p>
+    </div>
+  </div>
+
+  <!-- 8 fork -->
+  <div class="step io reveal">
+    <div class="node-num"><div class="dot">8</div><div class="ln">L333</div></div>
+    <div class="body">
+      <div class="kind">Fork · dry-run?</div>
+      <h3>if <code>self.dry_run</code> → simulate &amp; return</h3>
+      <div class="fork">
+        <div class="branch dry"><div class="h">▸ dry-run</div><p>Make <code>DRY_MAKER_…</code> id, deduct sim balance on BUY, <code>save_order(LIMIT_MAKER, "dry_run")</code>, <code>mark_signal_acted</code> → return <b style="color:var(--maker)">fill_mode: "MAKER"</b>, dry_run: true. <b>Stops here.</b></p></div>
+        <div class="branch live"><div class="h">▸ live</div><p>Fall through to real placement (steps 9–12). This is the path the 8002 shadow would exercise.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 9 -->
+  <div class="step io reveal">
+    <div class="node-num"><div class="dot">9</div><div class="ln">L364</div></div>
+    <div class="body">
+      <div class="kind">I/O · place order</div>
+      <h3>await <code>place_limit_order(…, post_only=True)</code></h3>
+      <p>Posts the resting maker LIMIT at the bid/ask. <b>This is the only line that reaches the exchange to open the position.</b></p>
+      <div class="abort"><span class="x">↳ return</span><span class="txt"><b>"Limit placement failed: {e}"</b> on any exception — nothing rests, nothing filled.</span></div>
+    </div>
+  </div>
+
+  <!-- 10 -->
+  <div class="step io reveal">
+    <div class="node-num"><div class="dot">10</div><div class="ln">L373</div></div>
+    <div class="body">
+      <div class="kind">I/O · persist</div>
+      <h3><code>save_order(status="live", LIMIT_MAKER)</code> + <code>mark_signal_acted</code></h3>
+      <p>Record the resting order, link it to the originating signal, log <code>MAKER ORDER …</code>.</p>
+    </div>
+  </div>
+
+  <!-- 11 loop -->
+  <div class="step loop reveal">
+    <div class="node-num"><div class="dot">11</div><div class="ln">L391</div></div>
+    <div class="body">
+      <div class="kind">Loop · poll for fill</div>
+      <h3>await <code>_wait_for_fill(pid, order_id, 30s)</code></h3>
+      <p>Deadline = now + 30s. Loops: <code>get_orders(pid)</code> → is this order <code>status == "FILLED"</code>? Sleep <code>min(0.5, remaining/4)</code> and repeat until filled or the deadline passes.</p>
+      <div class="poll">
+        <div class="lh"><span class="spin"></span>polling every ≤ 0.5s…</div>
+        <div class="seq">
+          <span class="t">0.0s open</span><span class="t">0.5s —</span><span class="t">1.0s —</span><span class="t">… —</span><span class="t hit">FILLED ✓</span><span class="t">↯ or 30s deadline</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 12 branch -->
+  <div class="step io reveal">
+    <div class="node-num"><div class="dot">12</div><div class="ln">L392</div></div>
+    <div class="body">
+      <div class="kind">Branch · filled?</div>
+      <h3>fill within 30s — or timeout</h3>
+      <div class="fork">
+        <div class="branch live"><div class="h">▸ filled (True)</div><p>return <b style="color:var(--maker)">{success, fill_mode: "MAKER"}</b> — captured the cheap fill. <b>Done.</b></p></div>
+        <div class="branch dry" style="border-color:var(--taker-dim)"><div class="h" style="color:var(--taker)">▸ timeout (False)</div><p><code>cancel_orders([id])</code> → <code>update_order_status("canceled")</code> → <code>place_market_order(quote_size)</code> → <code>save_order(MARKET, "…_TAKER_FALLBACK")</code> → return <b style="color:var(--taker)">fill_mode: "TAKER_FALLBACK"</b>.</p></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- terminals -->
+<div class="terminals reveal">
+  <div class="term ok"><div class="fee">0.2%</div><div class="mode">terminal · best case</div><div class="ico">✓</div><h4>MAKER</h4><p>Resting limit was hit within 30s. The cheap fill the whole thesis depends on.</p></div>
+  <div class="term fb"><div class="fee">0.6%</div><div class="mode">terminal · safety net</div><div class="ico">◤</div><h4>TAKER_FALLBACK</h4><p>No fill in 30s → cancel + market order. Costs the taker fee, but <b>the entry is never lost.</b></p></div>
+  <div class="term ab"><div class="fee" style="color:var(--faint)">—</div><div class="mode">terminal · short-circuit</div><div class="ico">✗</div><h4>ABORT</h4><p><code>{success: False}</code> from any gate (2,3,5,6) or a placement exception (9). No position opened.</p></div>
+</div>
+
+<div class="retnote">
+  <b>Return shape:</b> always a dict with <code>success</code>.<br>
+  <span class="g">success + fill_mode "MAKER"</span> · resting limit filled cheap<br>
+  <span class="r">success + fill_mode "TAKER_FALLBACK"</span> · timed out, market-filled (entry preserved)<br>
+  <span class="w">success: False + reason</span> · a gate blocked it or placement threw — nothing opened<br>
+  <b style="color:var(--muted)">Key safety property:</b> the function never silently drops a signal — every path returns an explicit, logged outcome.
+</div>
+
+<footer><div class="wrap" style="padding:0">
+  <div class="meta">
+    <b>Source:</b> agents/order_executor.py:285–424 (+ helpers _check_drawdown L82, _size_from_atr L124, _preflight L144, _maker_price L34, _wait_for_fill L261)<br>
+    <b>Status:</b> built &amp; tested (test_order_executor_maker.py) · <b>not wired</b> — live path still calls execute_signal (taker) at cnn_agent.py:2206 &amp; main.py:1032<br>
+    <b>Note:</b> this is the <b>entry</b> leg only. Maker-routed profit exits are separate, net-new work.
+  </div>
+</div></footer>
+</div>
+
+<script>
+  const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.15});
+  document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=(Math.min(i,8)*40)+'ms';io.observe(el)});
+</script>
+</body>
+</html>

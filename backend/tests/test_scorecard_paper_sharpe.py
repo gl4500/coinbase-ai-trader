@@ -1,11 +1,12 @@
 import numpy as np
 import pytest
+
 from tools._scorecard._paper_sharpe import paper_sharpe_per_fold
 
 
 def test_paper_sharpe_constant_per_signal_return():
     """If every fold has identical net returns, std across folds = 0."""
-    rng = np.random.default_rng(0)
+    np.random.default_rng(0)
     n = 200
     scores = np.full(n, 0.9)
     returns = np.full(n, 0.01)  # constant => std=0 per fold => Sharpe inf

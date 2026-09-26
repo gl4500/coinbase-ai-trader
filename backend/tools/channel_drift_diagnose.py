@@ -13,12 +13,13 @@ against the chronologically-sorted terminal-value series for the channel
 selected via `--channel N` (defaults to 5 = macd_hist, the original
 investigation that motivated this tool).
 """
+
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 
@@ -57,7 +58,9 @@ def _flag(psi: float) -> str:
 
 
 def decompose_psi(
-    a: np.ndarray, b: np.ndarray, n_bins: int = _DEFAULT_BINS,
+    a: np.ndarray,
+    b: np.ndarray,
+    n_bins: int = _DEFAULT_BINS,
 ) -> dict:
     """Per-bin PSI contribution breakdown.
 
@@ -75,14 +78,16 @@ def decompose_psi(
     contributions = (q_safe - p_safe) * np.log(q_safe / p_safe)
     per_bin: List[dict] = []
     for i in range(n_bins):
-        per_bin.append({
-            "bin_idx": i,
-            "lo": float(edges[i]),
-            "hi": float(edges[i + 1]),
-            "p": float(p[i]),
-            "q": float(q[i]),
-            "contribution": float(contributions[i]),
-        })
+        per_bin.append(
+            {
+                "bin_idx": i,
+                "lo": float(edges[i]),
+                "hi": float(edges[i + 1]),
+                "p": float(p[i]),
+                "q": float(q[i]),
+                "contribution": float(contributions[i]),
+            }
+        )
     return {
         "total_psi": float(contributions.sum()),
         "flag": _flag(float(contributions.sum())),
@@ -97,17 +102,27 @@ def summary_stats(values: np.ndarray) -> dict:
     arr = np.asarray(values, dtype=np.float64).ravel()
     n = int(arr.size)
     if n == 0:
-        return {"n": 0, "mean": float("nan"), "var": float("nan"),
-                "skew": float("nan"), "min": float("nan"), "max": float("nan")}
+        return {
+            "n": 0,
+            "mean": float("nan"),
+            "var": float("nan"),
+            "skew": float("nan"),
+            "min": float("nan"),
+            "max": float("nan"),
+        }
     mean = float(arr.mean())
     var = float(arr.var())  # population
     if var > 0:
-        skew = float(((arr - mean) ** 3).mean() / (var ** 1.5))
+        skew = float(((arr - mean) ** 3).mean() / (var**1.5))
     else:
         skew = 0.0
     return {
-        "n": n, "mean": mean, "var": var, "skew": skew,
-        "min": float(arr.min()), "max": float(arr.max()),
+        "n": n,
+        "mean": mean,
+        "var": var,
+        "skew": skew,
+        "min": float(arr.min()),
+        "max": float(arr.max()),
     }
 
 
@@ -121,7 +136,8 @@ def _channel_psi(series: np.ndarray, n_bins: int = _DEFAULT_BINS) -> float:
 
 
 def per_product_drift(
-    prods: Dict[str, dict], n_bins: int = _DEFAULT_BINS,
+    prods: Dict[str, dict],
+    n_bins: int = _DEFAULT_BINS,
 ) -> List[dict]:
     """One PSI per product. Each product entry must carry `channel`
     (1-D values, chronological) and `ts` (used only to verify length)."""
@@ -130,31 +146,50 @@ def per_product_drift(
         ch = np.asarray(entry["channel"], dtype=np.float64).ravel()
         n = ch.size
         psi = _channel_psi(ch, n_bins=n_bins)
-        out.append({"pid": pid, "n": int(n), "psi": float(psi),
-                    "flag": _flag(float(psi))})
+        out.append({"pid": pid, "n": int(n), "psi": float(psi), "flag": _flag(float(psi))})
     out.sort(key=lambda r: r["psi"], reverse=True)
     return out
 
 
 def bin_count_sensitivity(
-    a: np.ndarray, b: np.ndarray,
+    a: np.ndarray,
+    b: np.ndarray,
     n_bins_list: Iterable[int] = (5, 10, 20, 40),
 ) -> Dict[int, float]:
     """PSI for each n_bins in the input list. A drift that shrinks
     sharply with finer/coarser binning is normalization-fragile."""
-    return {
-        int(n): float(decompose_psi(a, b, n_bins=int(n))["total_psi"])
-        for n in n_bins_list
-    }
+    return {int(n): float(decompose_psi(a, b, n_bins=int(n))["total_psi"]) for n in n_bins_list}
 
 
 _CHANNEL_NAMES = (
-    "norm_close", "log_volume", "hl_range", "body", "rsi14",
-    "macd_hist", "ema9_dist", "ema21_dist", "bb_pos", "ret_1",
-    "bid", "ask", "mfi14", "obv_slope", "stoch_rsi_k",
-    "adx14", "vwap_dist", "fast_rsi_1h", "velocity_1h", "vol_zscore",
-    "funding_rate", "btc_corr_20", "hour_sin", "hour_cos", "ivrv_20",
-    "ivrv_60", "vol_sentiment", "okx_oi",
+    "norm_close",
+    "log_volume",
+    "hl_range",
+    "body",
+    "rsi14",
+    "macd_hist",
+    "ema9_dist",
+    "ema21_dist",
+    "bb_pos",
+    "ret_1",
+    "bid",
+    "ask",
+    "mfi14",
+    "obv_slope",
+    "stoch_rsi_k",
+    "adx14",
+    "vwap_dist",
+    "fast_rsi_1h",
+    "velocity_1h",
+    "vol_zscore",
+    "funding_rate",
+    "btc_corr_20",
+    "hour_sin",
+    "hour_cos",
+    "ivrv_20",
+    "ivrv_60",
+    "vol_sentiment",
+    "okx_oi",
 )
 
 
@@ -174,6 +209,7 @@ def _load_cache_and_extract_channel(
       - per_pid_dict: {pid: {"channel": np.ndarray, "ts": np.ndarray}}
     """
     import torch  # local import — CLI-only path
+
     from tools.feature_set_compare import _entry_to_arrays
     from tools.pid_snapshot import recommended_snapshot_ts, survivorship_aware_top_n
 
@@ -203,7 +239,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-bins", type=int, default=_DEFAULT_BINS)
     parser.add_argument(
-        "--channel", type=int, default=5,
+        "--channel",
+        type=int,
+        default=5,
         help="Channel index to diagnose (default: 5 = macd_hist).",
     )
     args = parser.parse_args()
@@ -219,38 +257,34 @@ def main():
 
     print("\n[1] Per-bin PSI decomposition", flush=True)
     decomp = decompose_psi(a, b, n_bins=args.n_bins)
-    print(f"  total_psi={decomp['total_psi']:.4f}  flag={decomp['flag']}",
-          flush=True)
-    print(f"  {'bin':>3} {'lo':>10} {'hi':>10} "
-          f"{'p':>7} {'q':>7} {'contrib':>9}", flush=True)
+    print(f"  total_psi={decomp['total_psi']:.4f}  flag={decomp['flag']}", flush=True)
+    print(f"  {'bin':>3} {'lo':>10} {'hi':>10} {'p':>7} {'q':>7} {'contrib':>9}", flush=True)
     for r in decomp["per_bin"]:
         lo = "-inf" if r["lo"] == -np.inf else f"{r['lo']:.4f}"
         hi = "+inf" if r["hi"] == np.inf else f"{r['hi']:.4f}"
-        print(f"  {r['bin_idx']:>3} {lo:>10} {hi:>10} "
-              f"{r['p']:>7.4f} {r['q']:>7.4f} {r['contribution']:>9.4f}",
-              flush=True)
+        print(
+            f"  {r['bin_idx']:>3} {lo:>10} {hi:>10} "
+            f"{r['p']:>7.4f} {r['q']:>7.4f} {r['contribution']:>9.4f}",
+            flush=True,
+        )
 
     print("\n[2] Half-vs-half summary stats", flush=True)
     sa, sb = summary_stats(a), summary_stats(b)
-    print(f"  {'metric':<8} {'first':>14} {'second':>14} {'delta':>14}",
-          flush=True)
+    print(f"  {'metric':<8} {'first':>14} {'second':>14} {'delta':>14}", flush=True)
     for k in ("n", "mean", "var", "skew", "min", "max"):
         delta = sb[k] - sa[k] if k != "n" else sb[k] - sa[k]
-        print(f"  {k:<8} {sa[k]:>14.4f} {sb[k]:>14.4f} {delta:>14.4f}",
-              flush=True)
+        print(f"  {k:<8} {sa[k]:>14.4f} {sb[k]:>14.4f} {delta:>14.4f}", flush=True)
 
     print("\n[3] Per-product PSI (sorted)", flush=True)
     rows = per_product_drift(pid_data, n_bins=args.n_bins)
     print(f"  {'pid':<14} {'n':>8} {'psi':>8} flag", flush=True)
     for r in rows:
-        print(f"  {r['pid']:<14} {r['n']:>8,} {r['psi']:>8.4f} {r['flag']}",
-              flush=True)
+        print(f"  {r['pid']:<14} {r['n']:>8,} {r['psi']:>8.4f} {r['flag']}", flush=True)
 
     print("\n[4] Bin-count sensitivity", flush=True)
     sens = bin_count_sensitivity(a, b, n_bins_list=(5, 10, 20, 40))
     for n_bins, psi in sens.items():
-        print(f"  n_bins={n_bins:>3}: PSI={psi:.4f}  flag={_flag(psi)}",
-              flush=True)
+        print(f"  n_bins={n_bins:>3}: PSI={psi:.4f}  flag={_flag(psi)}", flush=True)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ Value ranges:
   56–74  Greed         → allow
   75–100 Extreme Greed → allow (but consider tighter take-profits)
 """
+
 import logging
 import time
 from typing import Dict
@@ -25,9 +26,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_API_URL              = "https://api.alternative.me/fng/"
-_EXTREME_FEAR_THRESHOLD = 20          # BUY suppressed when value < this
-_DEFAULT_CACHE_TTL    = 600           # 10 minutes
+_API_URL = "https://api.alternative.me/fng/"
+_EXTREME_FEAR_THRESHOLD = 20  # BUY suppressed when value < this
+_DEFAULT_CACHE_TTL = 600  # 10 minutes
 
 
 class FearGreedIndex:
@@ -58,7 +59,7 @@ class FearGreedIndex:
             logger.warning(f"FearGreed fetch failed: {e} — returning neutral 50")
             result = {"value": 50, "label": "Unknown"}
 
-        self._cache    = result
+        self._cache = result
         self._cache_ts = now
         return result
 

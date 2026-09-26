@@ -1,13 +1,9 @@
 """Unit tests for tools/strategy_discovery/inventory.py."""
-from __future__ import annotations
 
-import json
-import os
-import tempfile
+from __future__ import annotations
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pytest
 
 from tools.strategy_discovery import inventory
 
@@ -15,14 +11,16 @@ from tools.strategy_discovery import inventory
 def _write_ohlcv_parquet(path: str, starts: list[int]) -> None:
     """Helper: write an OHLCV parquet matching the history schema."""
     n = len(starts)
-    table = pa.table({
-        "start":  starts,
-        "open":   [100.0] * n,
-        "high":   [101.0] * n,
-        "low":    [99.0] * n,
-        "close":  [100.5] * n,
-        "volume": [10.0] * n,
-    })
+    table = pa.table(
+        {
+            "start": starts,
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.5] * n,
+            "volume": [10.0] * n,
+        }
+    )
     pq.write_table(table, path, compression="snappy")
 
 
@@ -30,7 +28,9 @@ def test_scan_history_parquets_returns_per_pid_coverage(tmp_path):
     """scan_history_parquets returns {pid: (first_ts, last_ts, n_rows)} for *.parquet files."""
     hdir = tmp_path / "history"
     hdir.mkdir()
-    _write_ohlcv_parquet(str(hdir / "BTC-USD.parquet"), starts=[1_700_000_000, 1_700_003_600, 1_700_007_200])
+    _write_ohlcv_parquet(
+        str(hdir / "BTC-USD.parquet"), starts=[1_700_000_000, 1_700_003_600, 1_700_007_200]
+    )
     _write_ohlcv_parquet(str(hdir / "ETH-USD.parquet"), starts=[1_700_000_000, 1_700_003_600])
 
     out = inventory.scan_history_parquets(str(hdir))
@@ -66,14 +66,16 @@ def test_scan_history_parquets_handles_missing_dir(tmp_path):
 def _write_marketcap_parquet(path: str, starts: list[int]) -> None:
     """Helper: write a marketcap parquet matching the bronze schema."""
     n = len(starts)
-    table = pa.table({
-        "start":          starts,
-        "market_cap":     [1e9] * n,
-        "fdv":            [1.5e9] * n,
-        "volume_24h":     [1e7] * n,
-        "ingest_ts":      [1_700_000_000] * n,
-        "schema_version": [2] * n,
-    })
+    table = pa.table(
+        {
+            "start": starts,
+            "market_cap": [1e9] * n,
+            "fdv": [1.5e9] * n,
+            "volume_24h": [1e7] * n,
+            "ingest_ts": [1_700_000_000] * n,
+            "schema_version": [2] * n,
+        }
+    )
     pq.write_table(table, path, compression="snappy")
 
 
@@ -114,10 +116,12 @@ def test_scan_1m_dir_missing_returns_empty(tmp_path):
 
 def test_inventory_report_contains_section_headers_and_pid_counts():
     """inventory_report renders Markdown with required sections and the totals."""
-    history    = {"BTC-USD": {"first_ts": 1_700_000_000, "last_ts": 1_715_000_000, "n_rows": 4200},
-                  "ETH-USD": {"first_ts": 1_700_000_000, "last_ts": 1_715_000_000, "n_rows": 4200}}
-    marketcap  = {"BTC-USD": {"first_ts": 1_700_000_000, "last_ts": 1_715_000_000, "n_rows": 175}}
-    minute1    = {"BTC-USD": 12, "ETH-USD": 0}
+    history = {
+        "BTC-USD": {"first_ts": 1_700_000_000, "last_ts": 1_715_000_000, "n_rows": 4200},
+        "ETH-USD": {"first_ts": 1_700_000_000, "last_ts": 1_715_000_000, "n_rows": 4200},
+    }
+    marketcap = {"BTC-USD": {"first_ts": 1_700_000_000, "last_ts": 1_715_000_000, "n_rows": 175}}
+    minute1 = {"BTC-USD": 12, "ETH-USD": 0}
 
     md = inventory.inventory_report(history=history, marketcap=marketcap, minute1=minute1)
 

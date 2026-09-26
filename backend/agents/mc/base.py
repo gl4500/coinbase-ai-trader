@@ -4,6 +4,7 @@ Each filter wraps one decision point in cnn_agent. Filters live under
 agents/mc/<name>_filter.py, expose a class with .name and .evaluate(...),
 and are listed by name in the MC_FILTERS env var (comma-separated).
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

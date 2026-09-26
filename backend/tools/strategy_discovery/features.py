@@ -7,6 +7,7 @@ Adds 7 trend columns to a 1h OHLCV DataFrame:
 
 Pure functions on pandas DataFrames. No I/O. No tokenomics. No labels.
 """
+
 from __future__ import annotations
 
 from typing import Tuple
@@ -36,11 +37,14 @@ def _wilder_atr14(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Serie
     Wilder smoothing is equivalent to ewm(alpha=1/14, adjust=False).
     """
     prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low).abs(),
-        (high - prev_close).abs(),
-        (low  - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     return tr.ewm(alpha=1.0 / 14.0, adjust=False).mean()
 
 
@@ -53,12 +57,12 @@ def add_trend_features(df_ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
     out = df_ohlcv.copy()
     close = out["close"]
-    out["price_over_ema20"]  = close / _ema(close, 20)
-    out["price_over_ema50"]  = close / _ema(close, 50)
+    out["price_over_ema20"] = close / _ema(close, 20)
+    out["price_over_ema50"] = close / _ema(close, 50)
     out["price_over_ema200"] = close / _ema(close, 200)
-    out["ret_1h_sign"]  = np.sign(close - close.shift(1)).astype("float64")
+    out["ret_1h_sign"] = np.sign(close - close.shift(1)).astype("float64")
     out["ret_24h_sign"] = np.sign(close - close.shift(24)).astype("float64")
-    out["ret_7d_sign"]  = np.sign(close - close.shift(168)).astype("float64")
+    out["ret_7d_sign"] = np.sign(close - close.shift(168)).astype("float64")
     out["atr14_pct"] = _wilder_atr14(out["high"], out["low"], close) / close
     return out
 

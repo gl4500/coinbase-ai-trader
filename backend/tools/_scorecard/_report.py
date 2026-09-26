@@ -1,4 +1,5 @@
 """ScorecardReport: dataclass aggregating all per-tau x per-tier rows + scalars."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ class ScorecardReport:
         n_fired >= floor AND positive E[r] at gate_tier. NaN if no row qualifies.
     gates_passed: dict[str, bool] for {precision, expected_return, paper_sharpe, ece}.
     """
+
     per_tau_rows: list[dict[str, Any]]
     ece: float
     recommended_operating_tau: float

@@ -4,6 +4,7 @@ Locks in the TechAgent retirement. If anyone re-adds the import or the
 AppState.tech_agent field without a proper revert, this test fails at
 the pre-commit hook.
 """
+
 import os
 import sys
 
@@ -31,6 +32,5 @@ class TestNoTechAgentInMain:
         # like comments. Both `tech_agent:` and `tech_agent =` would be flags.
         for needle in ("tech_agent:", "tech_agent =", "TechAgentCB"):
             assert needle not in src, (
-                f"main.py contains '{needle}' — TechAgent was retired in "
-                f"#311-refactor-c."
+                f"main.py contains '{needle}' — TechAgent was retired in #311-refactor-c."
             )

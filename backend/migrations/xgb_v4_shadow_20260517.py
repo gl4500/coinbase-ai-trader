@@ -6,7 +6,9 @@ prediction alongside v3's during the 1-week shadow validation period.
 Idempotent — safe to re-run. Matches the pattern of
 mc_telemetry_20260516.py.
 """
+
 from __future__ import annotations
+
 import sqlite3
 from typing import Dict, List
 

@@ -24,6 +24,7 @@ Timeframe-agnostic:
     same code runs on 1m, 5m, hourly. Probe (#253c) calls with 5m returns
     and W=288 (24h).
 """
+
 from __future__ import annotations
 
 import numpy as np

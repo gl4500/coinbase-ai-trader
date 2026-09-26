@@ -11,18 +11,19 @@ probabilities, enabling finer CNN/LLM blend ratios and Kelly scaling.
 
 Minimum 60 candles required; falls back to ADX-based heuristic if not fitted.
 """
+
 import logging
 import math
-import pickle
 import os
-from typing import List, Optional, Tuple, Dict
+import pickle
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_N_STATES   = 3
-_MIN_BARS   = 60
+_N_STATES = 3
+_MIN_BARS = 60
 _MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "hmm_model.pkl")
 
 # Regime label names indexed by state id (assigned after fitting by vol ranking)
@@ -36,16 +37,18 @@ def _build_obs(closes: List[float], window: int = 10) -> Optional[np.ndarray]:
     """
     if len(closes) < window + 2:
         return None
-    log_ret = [math.log(closes[i] / closes[i - 1])
-               for i in range(1, len(closes))
-               if closes[i - 1] > 0 and closes[i] > 0]
+    log_ret = [
+        math.log(closes[i] / closes[i - 1])
+        for i in range(1, len(closes))
+        if closes[i - 1] > 0 and closes[i] > 0
+    ]
     if len(log_ret) < window + 1:
         return None
     rows = []
     for i in range(window, len(log_ret)):
-        win = log_ret[i - window: i]
+        win = log_ret[i - window : i]
         mean = sum(win) / window
-        vol  = math.sqrt(sum((r - mean) ** 2 for r in win) / window)
+        vol = math.sqrt(sum((r - mean) ** 2 for r in win) / window)
         rows.append([log_ret[i], vol])
     return np.array(rows, dtype=np.float64)
 
@@ -55,8 +58,8 @@ def _label_states(model) -> Dict[int, str]:
     Assign semantic labels by ranking state means on the volatility dimension.
     Lowest vol → RANGING, highest vol → CHAOTIC, middle → TRENDING.
     """
-    vols = model.means_[:, 1]   # volatility is column 1
-    order = np.argsort(vols)    # ascending
+    vols = model.means_[:, 1]  # volatility is column 1
+    order = np.argsort(vols)  # ascending
     return {
         int(order[0]): "RANGING",
         int(order[1]): "TRENDING",
@@ -76,7 +79,7 @@ class HMMRegimeDetector:
         try:
             with open(_MODEL_PATH, "rb") as f:
                 data = pickle.load(f)
-            self._model       = data["model"]
+            self._model = data["model"]
             self._state_labels = data["labels"]
             logger.info("HMMRegime loaded from %s", _MODEL_PATH)
         except Exception as e:
@@ -122,7 +125,8 @@ class HMMRegimeDetector:
                 if max(vols) - min(vols) < 1e-6:
                     logger.warning(
                         "HMM fit produced degenerate states (all similar vol, window=%d) "
-                        "— trying smaller window", window
+                        "— trying smaller window",
+                        window,
                     )
                     continue
 
@@ -133,15 +137,18 @@ class HMMRegimeDetector:
                     logger.warning(
                         "HMM state label mapping changed after refit: %s → %s "
                         "(CNN/LLM blend weights updated accordingly)",
-                        self._state_labels, new_labels,
+                        self._state_labels,
+                        new_labels,
                     )
 
-                self._model        = candidate
+                self._model = candidate
                 self._state_labels = new_labels
                 self._save()
                 logger.info(
                     "HMMRegime fitted on %d bars (window=%d) | labels=%s",
-                    len(obs), window, self._state_labels,
+                    len(obs),
+                    window,
+                    self._state_labels,
                 )
                 return True
 
@@ -174,7 +181,7 @@ class HMMRegimeDetector:
             # Get posterior probability for the current bar
             posteriors = self._model.predict_proba(obs)
             confidence = float(posteriors[-1, current_state])
-            regime     = self._state_labels.get(current_state, "UNKNOWN")
+            regime = self._state_labels.get(current_state, "UNKNOWN")
             return regime, confidence, current_state
         except Exception as e:
             logger.debug("HMM predict failed: %s", e)
@@ -210,9 +217,9 @@ def regime_blend(regime: str, confidence: float) -> Tuple[float, float]:
     """
     base = {
         "TRENDING": (0.75, 0.25),
-        "RANGING":  (0.55, 0.45),
-        "CHAOTIC":  (0.40, 0.60),
-        "UNKNOWN":  (0.60, 0.40),
+        "RANGING": (0.55, 0.45),
+        "CHAOTIC": (0.40, 0.60),
+        "UNKNOWN": (0.60, 0.40),
     }.get(regime, (0.60, 0.40))
 
     # Pull toward 0.5/0.5 proportionally when confidence is low

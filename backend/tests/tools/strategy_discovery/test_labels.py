@@ -1,4 +1,5 @@
 """Tests for tools.strategy_discovery.labels (Phase 2)."""
+
 from __future__ import annotations
 
 import math
@@ -8,9 +9,7 @@ import pandas as pd
 import pytest
 
 from tools.strategy_discovery.labels import (
-    _DEFAULT_ATR_TRAIL_FLOOR,
     _DEFAULT_ROUND_TRIP_FEE,
-    _DEFAULT_STOP_LOSS_PCT,
     simulate_dynamic_exit_labels,
 )
 
@@ -23,14 +22,16 @@ def _frame(closes, highs=None, lows=None, atrs=None):
         lows = list(closes)
     if atrs is None:
         atrs = [0.02] * n
-    return pd.DataFrame({
-        "ts":         np.arange(n, dtype="int64") * 3_600_000,
-        "open":       np.array(closes, dtype="float64"),
-        "high":       np.array(highs,  dtype="float64"),
-        "low":        np.array(lows,   dtype="float64"),
-        "close":      np.array(closes, dtype="float64"),
-        "atr14_pct":  np.array(atrs,   dtype="float64"),
-    })
+    return pd.DataFrame(
+        {
+            "ts": np.arange(n, dtype="int64") * 3_600_000,
+            "open": np.array(closes, dtype="float64"),
+            "high": np.array(highs, dtype="float64"),
+            "low": np.array(lows, dtype="float64"),
+            "close": np.array(closes, dtype="float64"),
+            "atr14_pct": np.array(atrs, dtype="float64"),
+        }
+    )
 
 
 def test_stop_loss_fires_at_8pct_drawdown():
@@ -70,14 +71,14 @@ def test_max_hold_cap_at_168_for_h168():
     closes = list(np.linspace(100.0, 200.0, n))
     df = _frame(
         closes=closes,
-        highs=[c + 0.01 for c in closes],          # tiny range → trail never fires
-        lows= [c - 0.01 for c in closes],
-        atrs=[0.0001] * n,                          # ATR floor (6%) governs; never fires
+        highs=[c + 0.01 for c in closes],  # tiny range → trail never fires
+        lows=[c - 0.01 for c in closes],
+        atrs=[0.0001] * n,  # ATR floor (6%) governs; never fires
     )
     out = simulate_dynamic_exit_labels(df, horizons=[168])
     # Entry at index 0, horizon_cap = min(168, 168) = 168, exit at index 168.
     entry_close = closes[0]
-    exit_close  = closes[168]
+    exit_close = closes[168]
     expected = (exit_close / entry_close - 1.0) - _DEFAULT_ROUND_TRIP_FEE
     assert out.loc[0, "label_h168"] == pytest.approx(expected, abs=1e-9)
 
@@ -88,9 +89,9 @@ def test_horizon_reached_without_trigger_uses_close():
     # Net label = (100/100 - 1) - 0.012 = -0.012.
     df = _frame(
         closes=[100.0] * 6,
-        highs=[100.0]  * 6,
-        lows= [100.0]  * 6,
-        atrs= [0.02]   * 6,
+        highs=[100.0] * 6,
+        lows=[100.0] * 6,
+        atrs=[0.02] * 6,
     )
     out = simulate_dynamic_exit_labels(df, horizons=[4])
     assert out.loc[0, "label_h4"] == pytest.approx(-0.012, abs=1e-9)
@@ -116,9 +117,9 @@ def test_fee_subtracted_from_label():
     # Entry at 100, flat 5 bars → exit at close[5] = 100. Default fee = 0.012.
     df = _frame(
         closes=[100.0] * 6,
-        highs=[100.0]  * 6,
-        lows= [100.0]  * 6,
-        atrs= [0.02]   * 6,
+        highs=[100.0] * 6,
+        lows=[100.0] * 6,
+        atrs=[0.02] * 6,
     )
     # With default fee
     out_default = simulate_dynamic_exit_labels(df, horizons=[5])
@@ -134,8 +135,8 @@ def test_insufficient_forward_bars_returns_nan():
     df = _frame(
         closes=[100.0, 100.0, 100.0],
         highs=[100.0, 100.0, 100.0],
-        lows= [100.0, 100.0, 100.0],
-        atrs= [0.02, 0.02, 0.02],
+        lows=[100.0, 100.0, 100.0],
+        atrs=[0.02, 0.02, 0.02],
     )
     out = simulate_dynamic_exit_labels(df, horizons=[2, 5])
     # h=2 fits at index 0 (entry+2 = 2 is in-bounds)

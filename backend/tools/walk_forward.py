@@ -8,6 +8,7 @@ Critical for both CNN and XGBoost training paths: any train sample whose
 forward window overlaps the val region peeks at the same future. The
 embargo drops those samples so AUC reports reflect honest generalization.
 """
+
 from __future__ import annotations
 
 from typing import Iterator, Tuple
@@ -36,9 +37,7 @@ def purged_walk_forward_splits(
     timestamps = np.asarray(timestamps, dtype=np.int64)
     n = len(timestamps)
     if n < n_folds * 2:
-        raise ValueError(
-            f"need at least {n_folds * 2} samples for {n_folds} folds, got {n}"
-        )
+        raise ValueError(f"need at least {n_folds * 2} samples for {n_folds} folds, got {n}")
 
     order = np.argsort(timestamps, kind="stable")
     ts_sorted = timestamps[order]
@@ -55,9 +54,7 @@ def purged_walk_forward_splits(
         val_min = int(ts_sorted[v_lo])
         val_max = int(ts_sorted[v_hi - 1])
 
-        keep = (timestamps < val_min - embargo_secs) | (
-            timestamps > val_max + embargo_secs
-        )
+        keep = (timestamps < val_min - embargo_secs) | (timestamps > val_max + embargo_secs)
         train_idx = np.where(keep)[0]
 
         yield train_idx, val_idx

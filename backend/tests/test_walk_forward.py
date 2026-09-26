@@ -9,6 +9,7 @@ both:
   - 4-hour embargo: drop train samples whose forward window enters val region
   - K time-ordered folds with per-fold visibility (AUC reported per fold)
 """
+
 import os
 import sys
 
@@ -27,14 +28,16 @@ def _hourly_ts(n: int, start: int = 1_700_000_000) -> np.ndarray:
 
 # ── Signature & basic shape ─────────────────────────────────────────────
 
-class TestSignature:
 
+class TestSignature:
     def test_function_exists(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         assert callable(purged_walk_forward_splits)
 
     def test_yields_iterator_of_tuples(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(200)
         splits = list(purged_walk_forward_splits(ts, n_folds=4, embargo_hours=4))
         assert len(splits) == 4
@@ -47,18 +50,18 @@ class TestSignature:
 
 # ── Disjoint train/val ──────────────────────────────────────────────────
 
-class TestDisjoint:
 
+class TestDisjoint:
     def test_train_and_val_indices_dont_overlap(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(500)
-        for train_idx, val_idx in purged_walk_forward_splits(
-            ts, n_folds=5, embargo_hours=4
-        ):
+        for train_idx, val_idx in purged_walk_forward_splits(ts, n_folds=5, embargo_hours=4):
             assert len(np.intersect1d(train_idx, val_idx)) == 0
 
     def test_val_regions_dont_overlap_across_folds(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(500)
         all_val = []
         for _, val_idx in purged_walk_forward_splits(ts, n_folds=5, embargo_hours=4):
@@ -71,18 +74,17 @@ class TestDisjoint:
 
 # ── Embargo enforcement ─────────────────────────────────────────────────
 
-class TestEmbargo:
 
+class TestEmbargo:
     def test_no_train_sample_within_embargo_of_val_start(self):
         """A train sample at time t with forward_hours=4 looks at t+4h.
         If val starts at t_val, no train sample at t_val - 4h or later
         should appear in train (its forward window enters val)."""
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(500)
         embargo = 4
-        for train_idx, val_idx in purged_walk_forward_splits(
-            ts, n_folds=5, embargo_hours=embargo
-        ):
+        for train_idx, val_idx in purged_walk_forward_splits(ts, n_folds=5, embargo_hours=embargo):
             if len(val_idx) == 0 or len(train_idx) == 0:
                 continue
             val_ts = ts[val_idx]
@@ -107,31 +109,31 @@ class TestEmbargo:
 
 # ── Time-ordered folds ──────────────────────────────────────────────────
 
-class TestTimeOrder:
 
+class TestTimeOrder:
     def test_val_regions_appear_in_chronological_order(self):
         """Fold k's val region should start later than fold k-1's val region."""
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(500)
         prev_max = -1
         for _, val_idx in purged_walk_forward_splits(ts, n_folds=5, embargo_hours=4):
             v_min = ts[val_idx].min()
-            assert v_min > prev_max, (
-                "Val regions must advance in time across folds"
-            )
+            assert v_min > prev_max, "Val regions must advance in time across folds"
             prev_max = ts[val_idx].max()
 
 
 # ── Coverage ────────────────────────────────────────────────────────────
 
-class TestCoverage:
 
+class TestCoverage:
     def test_each_sample_appears_in_exactly_one_val_fold(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(500)
-        all_val = np.concatenate([
-            v for _, v in purged_walk_forward_splits(ts, n_folds=5, embargo_hours=4)
-        ])
+        all_val = np.concatenate(
+            [v for _, v in purged_walk_forward_splits(ts, n_folds=5, embargo_hours=4)]
+        )
         assert sorted(all_val.tolist()) == list(range(len(ts))), (
             "Val folds must partition the dataset exactly"
         )
@@ -139,12 +141,13 @@ class TestCoverage:
 
 # ── Unsorted-input safety ───────────────────────────────────────────────
 
-class TestUnsortedInput:
 
+class TestUnsortedInput:
     def test_unsorted_timestamps_are_handled(self):
         """Real X_list is concatenated by product, so timestamps arrive
         unsorted. The splitter must internally sort by time before slicing."""
         from tools.walk_forward import purged_walk_forward_splits
+
         ts_sorted = _hourly_ts(200)
         rng = np.random.default_rng(0)
         perm = rng.permutation(len(ts_sorted))
@@ -160,7 +163,7 @@ class TestUnsortedInput:
                 # allow no train ts inside [val_min - embargo, val_max + embargo)
                 window_lo = val_ts.min() - 4 * 3600
                 window_hi = val_ts.max() + 4 * 3600
-                in_window = ((train_ts >= window_lo) & (train_ts < window_hi))
+                in_window = (train_ts >= window_lo) & (train_ts < window_hi)
                 assert not in_window.any(), (
                     "Unsorted input: embargo not enforced after internal sort"
                 )
@@ -168,16 +171,18 @@ class TestUnsortedInput:
 
 # ── Edge cases ──────────────────────────────────────────────────────────
 
-class TestEdgeCases:
 
+class TestEdgeCases:
     def test_too_few_samples_raises(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(3)
         with pytest.raises(ValueError):
             list(purged_walk_forward_splits(ts, n_folds=5, embargo_hours=4))
 
     def test_n_folds_minimum_is_two(self):
         from tools.walk_forward import purged_walk_forward_splits
+
         ts = _hourly_ts(100)
         with pytest.raises(ValueError):
             list(purged_walk_forward_splits(ts, n_folds=1, embargo_hours=4))

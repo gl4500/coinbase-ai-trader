@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from tools._scorecard._expected_return import expected_return_at_tau
 
 

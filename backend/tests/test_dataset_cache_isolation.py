@@ -12,6 +12,7 @@ This test asserts that during any pytest session, `_DATASET_CACHE_PATH`
 does NOT resolve to the real production path. Enforced via an autouse
 fixture in conftest.py.
 """
+
 import os
 import sys
 
@@ -26,7 +27,6 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("OLLAMA_MODEL", "llama3.1:8b")
 
 import agents.cnn_agent as ca  # noqa: E402
-
 
 _PROD_CACHE = os.path.abspath(os.path.join(BACKEND, "cnn_dataset_cache.pt"))
 
