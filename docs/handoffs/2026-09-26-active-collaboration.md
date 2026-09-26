@@ -18,7 +18,7 @@ TaskCreate is unavailable; this register records the required find-list-fix sequ
 
 8. Completed, round-trip tests pass: parquet schema assertion exposed newly added validation metadata. Version new profile rows as schema 2 and round-trip both causal and legacy-unverified defaults. Existing rows are not relabeled.
 
-9. Deferred (Claude review): profile_loader still accepts missing/legacy validation metadata. Enforce chronological_v1 and five evaluated folds with counted exclusions before treating archived profiles as current research inputs. Phase 4 remains deployment-blocked regardless.
+9. Implemented, targeted 18 tests passed (full suite pending): profile_loader accepted missing/legacy validation metadata. Enforce schema 2, chronological_v1 and five evaluated folds with counted exclusions before treating archived profiles as current research inputs. Reject malformed or impossible pass counts without integer truncation. Phase 4 remains deployment-blocked regardless.
 
 ## Coordination decisions
 
@@ -58,3 +58,35 @@ Claude reviewed PR #60 with no blockers: https://github.com/gl4500/coinbase-ai-t
 PR #61 contains Claude's independently based executor patch. Its full-suite result is Claude-reported (1315 passed); Codex independently verified the 29 lifecycle/exit tests. No integration merge was performed.
 
 The dollar-bar worktree uses bar-count horizons and requires its own integration review; hourly timestamp spacing validation must not be copied into it blindly. The agreed position/order lifecycle spec and pure validator are Claude's next local deliverables, not completed components of this patch.
+
+
+## Resumed dialogue after operator status check
+
+Claude delivered validator PR #63 at 3bb8aa1. Independent pure-function probes reproduced six evidence defects: cancellation accepted OPEN/negative fills; numeric order IDs accepted; partial settlement without terminal proof; failed entry erased known exposure; infinite increment made held exposure flat; string false cleared reconciliation. Sent as blockers for Claude to fix before the false-success manual order/cancel repairs. No production calls involved.
+
+Root is integrating upstream 3afccfc into #60/#62 and enforcing validation metadata at profile loading. Claude owns validator and executor fixes; root does not edit those files. Full test runs are coordinated to avoid contention. Promotion remains blocked.
+
+PR #60 integration is now 634bf8f, pushed after 1464 full-suite tests passed
+(65 skipped, one deselected, one xfailed, two xpassed). PR #62 cleanly merged
+that parent locally; its loader change remains pending final full-suite commit.
+
+## Regular session checks
+
+At the operator's request, both sessions now run 30-second mailbox watchers.
+Codex uses the installed native `codex queue` command against this existing
+thread, one outstanding challenge maximum, next cycle 120 seconds after the
+assistant receipt. A missing receipt after 180 seconds is stale/busy, not proof
+of process failure. Runtime status is `.coordination/ping-status.json`; separate
+receipt records prevent process liveness from masquerading as agent response.
+The initial queued follow-up actually resumed Codex; Claude independently
+replied to PING-ROUNDTRIP-1 after its background watcher notification. Claude's
+reported acknowledgement took about 116 seconds, response creation about 129
+seconds. No strict response latency is guaranteed during long tool calls.
+Both clients must remain available and the computer awake. Stop instructions
+are in `tools/session_bridge/README.md` in the main workspace.
+
+Second validator review found four remaining evidence contradictions and sent
+them to Claude: unidentified/nonzero-fill rejection from UNKNOWN, zero-fill
+cancellation after a known partial, zero-fill partial settlement, and FILLED
+despite explicit live remainder. These are unresolved review blockers until
+Claude's follow-up is independently checked. No live execution was exercised.

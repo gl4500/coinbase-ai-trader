@@ -1107,6 +1107,9 @@ operator decision.
   each and minimum training history; report insufficient evidence explicitly.
   Schema-2 profiles record evaluated fold count and chronological validation
   version; legacy defaults remain unverified.
+- Phase 4 loading now excludes missing/legacy/unknown validation provenance,
+  reports excluded row counts, and rejects missing, fractional or impossible
+  fold-pass counts before conversion. Existing archives remain unchanged.
 - Phase 4 JSON and Markdown now explicitly block deployment. Passing numeric
   gates rank research candidates only; historical results require regeneration.
 - Add regression tests, an evaluation contract and the active Claude/Codex issue
