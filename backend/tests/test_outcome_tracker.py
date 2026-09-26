@@ -225,9 +225,8 @@ async def test_lesson_text_states_the_real_horizon_not_a_false_4h_claim(db):
 # ── Legacy pending rows ───────────────────────────────────────────────────────
 
 
-async def test_legacy_pending_row_without_target_time_is_still_resolvable(db):
-    """v1 rows that never resolved have no target_time; derive it from
-    check_after rather than stranding them."""
+async def test_legacy_pending_row_is_never_relabelled(db):
+    """The v2 resolver must leave every legacy row unchanged, even pending ones."""
     import aiosqlite
 
     async with aiosqlite.connect(db.DB_PATH) as conn:
@@ -241,12 +240,10 @@ async def test_legacy_pending_row_without_target_time_is_still_resolvable(db):
         await conn.commit()
 
     await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
+    before = await _all_rows(db)
     resolved = await ot.get_tracker().check_pending(now=_TARGET + HOUR)
-    assert resolved == 1
-
-    rows = [r for r in await _all_rows(db) if r["lesson_text"]]
-    assert rows[0]["outcome"] == "WIN"
-    assert rows[0]["label_version"] == ol.LABEL_VERSION
+    assert resolved == 0
+    assert await _all_rows(db) == before
 
 
 async def _all_rows(db):
@@ -256,3 +253,20 @@ async def _all_rows(db):
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute("SELECT * FROM signal_outcomes")
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def test_small_asset_prices_preserve_the_measured_return(db):
+    row = await _pending_row(db)
+    await db.save_candles(
+        "BTC-USD",
+        [
+            _bar(_ENTRY, 0.00000012, 0.00000012),
+            _bar(_EXIT, 0.00000012, 0.000000123456789),
+        ],
+    )
+    assert await ot.get_tracker().check_pending(now=_TARGET) == 1
+    stored = await db.get_signal_outcome(row["id"])
+    assert stored["entry_price_v2"] == 0.00000012
+    assert stored["target_price"] == 0.000000123456789
+    reconstructed = stored["target_price"] / stored["entry_price_v2"] - 1
+    assert stored["signed_return"] == pytest.approx(reconstructed, abs=1e-12)

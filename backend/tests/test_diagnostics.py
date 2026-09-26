@@ -203,7 +203,7 @@ class TestSignalFunnel:
             _outcome_row("CNN", "BUY", 0.6, 0.01, "WIN", "2026-08-08T00:00:00+00:00"),
         )
         con.commit()
-        out = d.signal_funnel(con, cutoff=None)
+        out = d.signal_funnel(con, cutoff=None, now=_NOW)
         assert out == {
             "scans": 2,
             "buy_signals": 1,

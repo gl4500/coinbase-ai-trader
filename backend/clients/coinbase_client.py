@@ -341,21 +341,32 @@ async def place_limit_order(
 async def place_market_order(
     product_id: str,
     side: str,
-    quote_size: float,
+    quote_size: Optional[float] = None,
+    *,
+    base_size: Optional[float] = None,
 ) -> Dict:
+    if (quote_size is None) == (base_size is None):
+        raise ValueError("Specify exactly one of quote_size or base_size")
+    size = (
+        {"base_size": str(base_size)}
+        if base_size is not None
+        else {"quote_size": str(round(quote_size, 2))}
+    )
     return await _post(
         "/orders",
         {
             "client_order_id": str(uuid.uuid4()),
             "product_id": product_id,
             "side": side.upper(),
-            "order_configuration": {
-                "market_market_ioc": {
-                    "quote_size": str(round(quote_size, 2)),
-                }
-            },
+            "order_configuration": {"market_market_ioc": size},
         },
     )
+
+
+async def get_order(order_id: str) -> Dict:
+    """Read the exact order; propagate errors so unknown state is never an empty fill."""
+    data = await _get(f"/orders/historical/{order_id}")
+    return data["order"]
 
 
 async def cancel_orders(order_ids: List[str]) -> Dict:

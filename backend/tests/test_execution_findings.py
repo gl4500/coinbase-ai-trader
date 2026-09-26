@@ -11,6 +11,9 @@ to update an explicit assertion. Task 5 was scoped to investigate without
 altering live-execution semantics, and findings 2 and 3 are documented as
 intentional in CLAUDE.md invariant #21.
 
+Finding 4 now asserts the repaired cancellation/fill contract; findings 1-3
+remain characterisations of known issues.
+
 No test here places an order: every exchange call is a stub.
 """
 
@@ -214,7 +217,7 @@ def maker_env(monkeypatch):
     monkeypatch.setattr(oe.OrderExecutor, "_wait_for_fill", _never_fills)
 
     async def _place_limit(*a, **k):
-        return {"success_response": {"order_id": "limit-1"}}
+        return {"success": True, "success_response": {"order_id": "limit-1"}}
 
     async def _save_order(*a, **k):
         return None
@@ -228,13 +231,8 @@ def maker_env(monkeypatch):
     return executor
 
 
-async def test_f4_market_order_is_placed_even_when_cancel_raises(maker_env, monkeypatch):
-    """CONFIRMED. The cancel exception is logged and execution falls through.
-
-    Consequence: if the resting limit is still live (or filled in the race
-    between the poll timing out and the cancel landing), the account can end up
-    with roughly double the intended exposure.
-    """
+async def test_f4_no_market_order_when_cancel_raises(maker_env, monkeypatch):
+    """Regression: cancellation uncertainty must never cause duplicate exposure."""
     market_calls = []
 
     async def _cancel_raises(order_ids):
@@ -252,13 +250,13 @@ async def test_f4_market_order_is_placed_even_when_cancel_raises(maker_env, monk
         timeout_secs=0.01,
     )
 
-    assert market_calls == [("BTC-USD", "BUY", 50.0)]
-    assert result["fill_mode"] == "TAKER_FALLBACK"
-    assert result["success"] is True
+    assert market_calls == []
+    assert result["reconciliation_required"] is True
+    assert result["success"] is False
 
 
-async def test_f4_cancel_response_body_is_never_inspected(maker_env, monkeypatch):
-    """A cancel that reports failure *without raising* also falls through."""
+async def test_f4_cancel_response_failure_prevents_replacement(maker_env, monkeypatch):
+    """Regression: a failed cancel response blocks the replacement."""
     market_calls = []
 
     async def _cancel_reports_failure(order_ids):
@@ -276,21 +274,30 @@ async def test_f4_cancel_response_body_is_never_inspected(maker_env, monkeypatch
         timeout_secs=0.01,
     )
 
-    assert market_calls == [25.0], "fallback ran despite a failed cancel"
+    assert market_calls == [], "a failed cancel must block fallback"
 
 
-async def test_f4_partial_fill_is_treated_as_no_fill(maker_env, monkeypatch):
-    """`_wait_for_fill` only accepts status == FILLED, so a partially filled
-    maker order still triggers a full-size market order on top of it."""
+async def test_f4_partial_fill_blocks_full_size_replacement(maker_env, monkeypatch):
+    """A real partial fill in the reconciled order must block a full replacement."""
     market_calls = []
 
     async def _cancel_ok(order_ids):
-        return {"results": [{"success": True}]}
+        return {"results": [{"order_id": "limit-1", "success": True}]}
 
     async def _place_market(pid, side, quote_size):
         market_calls.append(quote_size)
         return {"success_response": {"order_id": "market-3"}}
 
+    async def _partial_order(order_id):
+        return {
+            "order_id": order_id,
+            "status": "CANCELLED",
+            "pending_cancel": False,
+            "filled_size": "0.5",
+            "filled_value": "10",
+        }
+
+    monkeypatch.setattr(oe.coinbase_client, "get_order", _partial_order)
     monkeypatch.setattr(oe.coinbase_client, "cancel_orders", _cancel_ok)
     monkeypatch.setattr(oe.coinbase_client, "place_market_order", _place_market)
 
@@ -299,5 +306,4 @@ async def test_f4_partial_fill_is_treated_as_no_fill(maker_env, monkeypatch):
         timeout_secs=0.01,
     )
 
-    # Full quote_size, not the unfilled remainder.
-    assert market_calls == [40.0]
+    assert market_calls == []
