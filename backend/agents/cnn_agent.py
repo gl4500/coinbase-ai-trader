@@ -1643,6 +1643,24 @@ class FeatureBuilder:
 # ── CNN-LSTM Agent ─────────────────────────────────────────────────────────────
 
 
+def _resolve_executor(order_executor, executor_fn):
+    """Return the executor to use for this one operation.
+
+    `executor_fn` wins when supplied: main.py passes a resolver so that POST
+    /api/trading/enable, which rebinds app_state.order_executor, is visible here
+    — mirroring the existing is_trading_fn treatment. `order_executor` remains
+    the by-value path for callers that hold a single instance.
+
+    Two explicit parameters rather than one overloaded one, because callable()
+    cannot tell a resolver from an executor: MagicMock and any __call__-defining
+    object are callable too.
+
+    Resolve ONCE per operation and reuse the result, so a single tick or cycle
+    can never mix two executor objects across an await.
+    """
+    return executor_fn() if executor_fn is not None else order_executor
+
+
 class CoinbaseCNNAgent:
     def __init__(self, ws_subscriber=None):
         self.ws = ws_subscriber
@@ -2438,12 +2456,18 @@ class CoinbaseCNNAgent:
         is_trading_fn=None,
         broadcast_fn=None,
         auto_train_fn=None,
+        executor_fn=None,
     ) -> None:
         """
         Scan every `interval` seconds (default 15 min).
         Auto-train every `train_every_n_scans` scans (default 4 = ~1 hour).
         Pass order_executor + is_trading_fn to enable live trade execution
         on each auto-scan (mirrors the /api/cnn/scan?execute=true endpoint).
+
+        Pass `executor_fn` (a zero-argument resolver) instead of
+        `order_executor` to have the executor resolved once per cycle, so one
+        swapped in by /api/trading/enable is picked up on the next scan rather
+        than this task holding the startup instance for its whole lifetime.
 
         Why 1 hour: candles are hourly so no new training data arrives faster
         than that. Training more often just re-learns the same data → overfitting.
@@ -2461,6 +2485,9 @@ class CoinbaseCNNAgent:
                 self.next_scan_at = time.time() + interval
 
                 should_execute = is_trading_fn() if is_trading_fn else False
+                # Resolve once per cycle and reuse: both legs of _scan_cycle
+                # must see the same object, never two across an await.
+                cycle_executor = _resolve_executor(order_executor, executor_fn)
 
                 # SCAN-SELL (model's own exit) runs first inside _scan_cycle so
                 # it can close positions before the risk fallbacks (TRAIL_STOP →
@@ -2469,7 +2496,7 @@ class CoinbaseCNNAgent:
                 # (2026-08-01 stall). Risk exits still run every loop.
                 await self._scan_cycle(
                     execute=should_execute,
-                    order_executor=order_executor,
+                    order_executor=cycle_executor,
                     timeout=_SCAN_CYCLE_TIMEOUT_SECS,
                 )
                 self.scan_count += 1
