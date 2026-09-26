@@ -109,7 +109,7 @@ def simulate_portfolio(
 ) -> Tuple[PortfolioMetrics, List[TelemetryRow]]:
     """Walk historical bars in the subset's union; enforce cap; return metrics + telemetry."""
     # Pre-parse rule paths for speed
-    parsed_rules = {(p.pid, p.leaf_id): parse_rule_path(p.rule_path) for p in subset}
+    parsed_rules = {p.profile_id: parse_rule_path(p.rule_path) for p in subset}
     label_cols = {p.profile_id: f"label_h{int(p.horizon)}" for p in subset}
     horizon_ms = {p.profile_id: int(p.horizon) * 3_600_000 for p in subset}
 
@@ -169,7 +169,7 @@ def simulate_portfolio(
             row = pid_ts_to_row.get(profile.pid, {}).get(int(ts))
             if row is None:
                 continue
-            if _rule_holds_at(parsed_rules[(profile.pid, profile.leaf_id)], row):
+            if _rule_holds_at(parsed_rules[profile.profile_id], row):
                 firings.append(profile)
 
         # 3. Enforce cap; tiebreaker = highest deflated profit

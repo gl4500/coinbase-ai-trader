@@ -7,6 +7,16 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Horizon-qualified research profile identities - 2026-09-26
+
+- Qualify loaded profile IDs by product, horizon and leaf; use that identity
+  for simulator rule lookup as well as return-label and holding-period lookup.
+- Preserve existing per-horizon rule sidecars. Telemetry IDs now contain the
+  horizon; old telemetry must not be joined by the old ambiguous ID.
+- Regressions exercise both input orders, both horizons and conflicting rules.
+  Research-only deployment blockers remain in force.
+
+
 ### Session 58.85 - 2026-09-26 - Causal strategy validation and research-only verdicts
 
 - Replace future-inclusive CV with expanding chronological inner/outer folds,
