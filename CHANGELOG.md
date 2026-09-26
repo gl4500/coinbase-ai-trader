@@ -7,6 +7,53 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.83 — 2026-09-26 — Position/order lifecycle contract + pure validator
+
+A written contract for order and position lifecycle state, plus a pure
+`(state, event, evidence) -> state` validator implementing it. Motivated by one
+systemic pattern found across four execution sites: **"accepted" treated as
+"confirmed"**.
+
+- `docs/specs/2026-09-26-position-lifecycle-contract.md`: two separate state
+  machines (order vs position), the evidence required per transition, invariants
+  I1–I10, the §8b trusted-caller boundary, and §9a recording the review history.
+- `backend/services/position_lifecycle.py`: the validator. No database, clock or
+  network, so the rules are provable before anything persists or acts on them.
+- `backend/tests/test_position_lifecycle.py` + `test_position_lifecycle_adversarial.py`:
+  208 tests. The adversarial file is kept separate because **every case in it was
+  reproduced against this implementation and accepted by it** before being fixed.
+
+**Four review rounds, four different root causes** — found by the parallel Codex
+session driving the module with hostile inputs, and the later rounds were caused
+by the fixes for the earlier ones:
+
+1. Presence checked instead of validity (`order_id="unknown"`, `NaN` quantities,
+   truthy non-booleans all passed).
+2. Evidence validated in isolation from the state — a cancel from
+   `WORKING_PARTIAL` claiming zero cumulative fill was accepted, erasing a fill.
+3. Branch-by-branch fixes diverged: a hand-written `is True` bypassed the
+   strict-bool validator, one branch omitted the overfill check, and two events
+   classified identical evidence differently.
+4. Only quantities were centralised, not terminality: `REJECTED` could prove a
+   fill, and a terminal outcome could leave a **live remainder** — including
+   zero-fill cancellations, where a cancel is recorded as confirmed while the
+   order still works at the exchange.
+
+Resolved structurally rather than case by case: `_validated_fill` owns quantity
+evidence, `_validated_terminal` + `_require_no_live_remainder` own terminality,
+`_classify_terminal_fill` states the one classification policy (quantity decides
+the state; the status need only be a non-reject terminal status), and
+`_reject_terminal_claim` fails the mirror contradiction closed. New tests are
+**parameterised across events** so the class is closed rather than one more
+instance, including an equivalence test that drives identical evidence through
+all four events and asserts a single verdict.
+
+**Scope limits.** No production behaviour changes; nothing is wired into live
+execution. Per §8b this rests on a trusted-caller boundary — the module cannot
+confirm a supplied identifier corresponds to anything the exchange issued. A
+green suite here is not evidence that execution is safe.
+
+
 ### Session 58.81 — 2026-08-09 — Promote Snyk to a blocking security gate
 
 Now that the Snyk job runs and passes clean end-to-end (58.79/58.80), wire it

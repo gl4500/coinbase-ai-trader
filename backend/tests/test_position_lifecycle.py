@@ -147,6 +147,10 @@ def test_rejected_is_distinct_from_cancelled():
         "terminal_status": "REJECTED",
         "reason": "INSUFFICIENT_FUNDS",
         "observed_at": 1_800_000_003,
+        # A rejection must now prove it carried no fills (review round 2):
+        # a "rejection" reporting a fill is a reconciliation case.
+        "filled_size": Decimal("0"),
+        "filled_value": Decimal("0"),
     }
     assert next_order_state(OrderState.SUBMITTING, "rejected", ev) is OrderState.REJECTED
     assert OrderState.REJECTED is not OrderState.CANCELLED

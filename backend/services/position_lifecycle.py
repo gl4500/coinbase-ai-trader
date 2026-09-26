@@ -28,6 +28,61 @@ non-empty non-placeholder strings, quantities must be finite Decimals with the
 right sign, booleans must be actual booleans rather than truthy values, terminal
 statuses must be drawn from an allowed set, and quantities must be mutually
 consistent. Absence of proof is never proof.
+
+## Consistency with the state, not only with itself
+
+A second review round found a DIFFERENT root cause: each transition validated its
+evidence in isolation while ignoring what the CURRENT STATE already proves.
+WORKING_PARTIAL witnesses a positive fill, so a cancellation claiming zero
+cumulative fill is not merely unproven — it is contradicted, and accepting it
+erased a known fill. Likewise a full fill cannot coexist with a live remainder,
+and a rejection cannot carry fills.
+
+So: contradictory evidence fails closed, whichever branch would otherwise win,
+and a transition out of a state must remain consistent with what that state
+already established.
+
+## One validator, one policy
+
+A third review round found that fixing the above branch by branch had created
+three NEW holes: a hand-written `is True` check bypassed the strict-bool validator
+(an int `1` and the string `"true"` both slipped through), the partial-cancel
+branch omitted the overfill comparison, and `remainder_terminal` disagreed with
+`fill_observed` about whether a complete fill reported CANCELLED is FILLED — so
+identical evidence classified differently depending on which event carried it.
+
+Duplicated validation diverges. Every event that reasons about fills therefore
+goes through `_validated_fill`, and every terminal classification through
+`_classify_terminal_fill`, whose policy is stated once: **quantity decides the
+state, the status need only be terminal.** Optional fields are validated whenever
+supplied rather than only when a branch needs them, because an unvalidated
+optional field is precisely how a truthy non-boolean gets in.
+
+## Terminality is evidence too
+
+Centralising the quantity rules turned out to be half the job, because the other
+half of the evidence stayed per-branch. Widening the allowed status set to
+`_ALL_TERMINALS` while unifying classification admitted the REJECT family into
+the fill path, so a REJECTED status carrying a complete fill returned FILLED --
+contradicting the rejection zero-fill contract two branches away. And no branch
+asked the question terminality actually raises: is anything still working? A
+confirmed cancellation was accepted with `remainder_live=True` and a positive
+`remaining_size`, the zero-fill cancellation paths included, which is the shape
+that leaves real exposure at the exchange with nothing in the record saying so.
+
+So terminality gets what quantities got: `_validated_terminal` at every terminal
+exit, with the reject family admissible only where the zero-fill rejection
+contract applies.
+
+## Trusted caller boundary
+
+Position transitions require a linked `order_id` and a non-empty `fill_ids` list,
+and the reconciler path requires a real boolean. That is a TRUSTED CALLER
+BOUNDARY, not verification: this module cannot confirm those identifiers
+correspond to anything the exchange actually issued, because no persisted
+correlation exists yet. Until intents, orders and fills are stored and
+cross-checked, "linked" means "the caller supplied an identifier", nothing
+stronger. Do not read these rules as proof of real exchange state.
 """
 
 from __future__ import annotations
@@ -45,6 +100,11 @@ _CANCEL_TERMINALS = frozenset({"CANCELLED", "CANCELED", "EXPIRED"})
 _FILL_TERMINALS = frozenset({"FILLED", "DONE", "CLOSED"})
 _REJECT_TERMINALS = frozenset({"REJECTED", "FAILED"})
 _ALL_TERMINALS = _CANCEL_TERMINALS | _FILL_TERMINALS | _REJECT_TERMINALS
+# Statuses that may serve as evidence of an OUTCOME THAT CARRIED FILLS. The
+# reject family is excluded on purpose: a rejection has its own contract (zero
+# fills, see _reject_evidence), so admitting it here would let a REJECTED status
+# prove a fill two branches away from the rule that forbids exactly that.
+_NONREJECT_TERMINALS = _CANCEL_TERMINALS | _FILL_TERMINALS
 
 # Failure reasons that mean "we do not know", not "nothing happened". A timeout
 # is the canonical case: the order may well exist.
@@ -209,6 +269,79 @@ def _require_terminal_status(evidence: Mapping[str, Any], allowed: Iterable[str]
     return status
 
 
+def _require_no_live_remainder(evidence: Mapping[str, Any], context: str) -> None:
+    """A terminal outcome cannot coexist with something still working.
+
+    Checked wherever terminality is claimed, because the dangerous shape is the
+    one with no fill at all: a cancellation recorded as confirmed while the order
+    is still live at the exchange leaves real exposure with nothing in the record
+    saying anything is outstanding.
+    """
+    if evidence.get("remainder_live") is not None:
+        if _require_strict_bool(evidence, "remainder_live"):
+            raise IllegalTransition(
+                f"{context} cannot coexist with remainder_live=True; "
+                f"a live remainder means the order is not terminal"
+            )
+    if evidence.get("remaining_size") is not None:
+        remaining = _require_nonneg(evidence, "remaining_size")
+        if remaining > 0:
+            raise IllegalTransition(
+                f"{context} cannot coexist with remaining_size {remaining}; "
+                f"a positive working remainder means the order is not terminal"
+            )
+
+
+def _reject_terminal_claim(evidence: Mapping[str, Any], context: str) -> None:
+    """The mirror of _require_no_live_remainder, for branches that are NOT terminal.
+
+    A caller reporting a live remainder has said the order is still working. If it
+    ALSO supplies a terminal status, the two claims contradict each other and the
+    honest answer is neither WORKING_PARTIAL nor a terminal state. This branch
+    previously returned WORKING_PARTIAL without reading terminal_status at all --
+    the same unread-optional-field mistake, from the other side.
+    """
+    status = evidence.get("terminal_status")
+    if isinstance(status, str) and status.strip().upper() in _ALL_TERMINALS:
+        raise IllegalTransition(
+            f"{context} cannot coexist with terminal_status "
+            f"{status.strip().upper()}; the evidence claims the order is both "
+            f"still working and finished"
+        )
+
+
+def _validated_terminal(evidence: Mapping[str, Any], *, allowed: Iterable[str]) -> str:
+    """Single source of truth for "this order reached a terminal state".
+
+    Round 4 centralised the QUANTITY rules and left terminality per-branch, which
+    was only half the job: substituting `_ALL_TERMINALS` for `_FILL_TERMINALS`
+    while unifying classification admitted the reject family into the fill path,
+    and no branch asked whether a terminal outcome still had a live remainder.
+    Terminality therefore gets the same treatment quantities got.
+    """
+    status = _require_terminal_status(evidence, allowed)
+    _require_no_live_remainder(evidence, f"terminal_status {status}")
+    return status
+
+
+def _require_any_identity(evidence: Mapping[str, Any]) -> str:
+    """At least one usable identifier: the exchange's, or ours.
+
+    A rejection may legitimately have no exchange order_id — the exchange refused
+    before issuing one — but it must still be correlatable to the intent we sent,
+    or the record is unattributable.
+    """
+    for field in ("order_id", "client_order_id"):
+        if field in evidence and evidence[field] is not None:
+            try:
+                return _require_str_id(evidence, field)
+            except InsufficientEvidence:
+                continue
+    raise InsufficientEvidence(
+        "a usable order_id or client_order_id is required to attribute this outcome"
+    )
+
+
 def _require_linked_order(evidence: Mapping[str, Any]) -> None:
     """A position transition must cite the order and fills that caused it.
 
@@ -221,42 +354,105 @@ def _require_linked_order(evidence: Mapping[str, Any]) -> None:
 # ── Order machine ─────────────────────────────────────────────────────────────
 
 
-def _classify_fill(current: OrderState, evidence: Mapping[str, Any]) -> OrderState:
-    """Shared by fill_observed and the UNKNOWN resolution path."""
+def _reject_evidence(evidence: Mapping[str, Any]) -> None:
+    """A rejection must be attributable and must carry no fills.
+
+    A "rejection" reporting a fill is a reconciliation case: something executed
+    and the record disagrees with itself.
+    """
+    _require_any_identity(evidence)
+    _require_exact_zero(evidence, "filled_size")
+    _require_exact_zero(evidence, "filled_value")
+    _require_no_live_remainder(evidence, "a rejection")
+
+
+def _validated_fill(
+    evidence: Mapping[str, Any],
+    *,
+    require_positive_fill: bool,
+) -> tuple:
+    """Single source of truth for fill evidence. Returns
+    (filled, intended, remaining_or_None, remainder_live_or_None).
+
+    Every event that reasons about fills goes through here — fill_observed,
+    remainder_terminal, the partial branch of cancel_confirmed, and the UNKNOWN
+    resolution path. Round 3 duplicated these checks per branch and the copies
+    immediately diverged: one used `is True` (which an int 1 or the string "true"
+    slips past), another omitted the overfill comparison. Centralising is the fix;
+    a fourth hand-written copy would only postpone the next divergence.
+
+    Optional fields are validated WHENEVER SUPPLIED, not only when the branch
+    happens to need them. An unvalidated optional field is exactly how a truthy
+    non-boolean gets through.
+    """
     _require(evidence, "observed_at")
-    _require_str_id(evidence, "order_id")
+    _require_any_identity(evidence)
     _require_id_list(evidence, "fill_ids")
     _require_positive(evidence, "avg_fill_price")
-    filled = _require_positive(evidence, "filled_size")  # a zero fill is not a fill
+
     intended = _require_positive(evidence, "intended_size")
+    if require_positive_fill:
+        filled = _require_positive(evidence, "filled_size")
+    else:
+        filled = _require_nonneg(evidence, "filled_size")
 
     if filled > intended:
         raise IllegalTransition(
             f"filled_size {filled} exceeds intended_size {intended}; "
-            f"an overfill is a reconciliation case, not a clean fill"
+            f"an overfill is a reconciliation case, never a clean outcome"
         )
+
+    remainder_live = None
+    if evidence.get("remainder_live") is not None:
+        remainder_live = _require_strict_bool(evidence, "remainder_live")
+
+    remaining = None
+    if evidence.get("remaining_size") is not None:
+        remaining = _require_nonneg(evidence, "remaining_size")
+        if filled + remaining > intended:
+            raise IllegalTransition(
+                f"filled_size {filled} plus remaining_size {remaining} exceeds "
+                f"intended_size {intended}"
+            )
 
     if filled == intended:
-        _require_terminal_status(evidence, _FILL_TERMINALS)
-        return OrderState.FILLED
+        # A complete fill cannot coexist with anything still working.
+        if remainder_live is True:
+            raise IllegalTransition(
+                "filled_size equals intended_size but remainder_live is True; "
+                "contradictory evidence fails closed"
+            )
+        if remaining is not None and remaining > 0:
+            raise IllegalTransition(
+                "filled_size equals intended_size but remaining_size is positive; "
+                "contradictory evidence fails closed"
+            )
 
-    # Partial.
-    remainder_live = _require_strict_bool(evidence, "remainder_live")
-    remaining = _require_nonneg(evidence, "remaining_size")
-    if filled + remaining > intended:
-        raise IllegalTransition(
-            f"filled_size {filled} plus remaining_size {remaining} exceeds intended_size {intended}"
-        )
+    return filled, intended, remaining, remainder_live
 
-    if remainder_live:
-        if remaining <= 0:
-            raise InsufficientEvidence("a live remainder must have a positive remaining_size")
-        return OrderState.WORKING_PARTIAL
 
-    # Not live: that claim needs terminal proof, and nothing may still be working.
-    _require_terminal_status(evidence, _CANCEL_TERMINALS | _FILL_TERMINALS)
-    _require_exact_zero(evidence, "remaining_size")
-    return OrderState.SETTLED_PARTIAL
+def _classify_terminal_fill(filled: Decimal, intended: Decimal) -> OrderState:
+    """THE terminal-classification policy, stated once.
+
+    **Quantity decides the state. The status need only be a NON-REJECT terminal
+    status.**
+
+    A complete fill reported alongside a CANCELLED status is the cancel losing the
+    race: the fill happened, so the order is FILLED regardless of which cancel- or
+    fill-family label the exchange attached. A partial fill with any such status is
+    SETTLED_PARTIAL.
+
+    Two things are never acceptable as evidence here, and the callers enforce both
+    via _validated_terminal before reaching this function: a NON-terminal status,
+    and a REJECT-family status — a rejection carries its own zero-fill contract, so
+    it cannot be the terminal status of an outcome that carried fills.
+
+    Round 3 had fill_observed demanding a fill-family status for a complete fill
+    while remainder_terminal accepted a cancel-family one, so identical evidence
+    classified differently depending on which event carried it. One policy, one
+    function.
+    """
+    return OrderState.FILLED if filled == intended else OrderState.SETTLED_PARTIAL
 
 
 def next_order_state(
@@ -287,17 +483,24 @@ def next_order_state(
         status = _require_terminal_status(evidence, _ALL_TERMINALS)
         if status in _REJECT_TERMINALS:
             _require(evidence, "reason", "observed_at")
+            _reject_evidence(evidence)
             return OrderState.REJECTED
         if status in _FILL_TERMINALS:
-            return _classify_fill(current, evidence)
+            _validated_terminal(evidence, allowed=_FILL_TERMINALS)
+            filled, intended, _r, _rl = _validated_fill(evidence, require_positive_fill=True)
+            return _classify_terminal_fill(filled, intended)
         # Cancel family: zero fills means CANCELLED, otherwise it settled partial.
+        # The terminality check comes FIRST so it also covers the zero-fill exit
+        # below, which reasons about no quantities at all.
+        _validated_terminal(evidence, allowed=_CANCEL_TERMINALS)
         _require(evidence, "observed_at")
-        _require_str_id(evidence, "order_id")
+        _require_any_identity(evidence)
         filled = _require_nonneg(evidence, "filled_size")
         if filled == 0:
             _require_exact_zero(evidence, "filled_value")
             return OrderState.CANCELLED
-        return _classify_fill(current, evidence)
+        filled, intended, _r, _rl = _validated_fill(evidence, require_positive_fill=True)
+        return _classify_terminal_fill(filled, intended)
 
     if event == "intent_created":
         if current is not None:
@@ -335,6 +538,7 @@ def next_order_state(
             raise IllegalTransition(f"rejected is not valid from {current}")
         _require(evidence, "reason", "observed_at")
         _require_terminal_status(evidence, _REJECT_TERMINALS)
+        _reject_evidence(evidence)
         return OrderState.REJECTED
 
     if event == "cancel_confirmed":
@@ -342,9 +546,25 @@ def next_order_state(
             raise IllegalTransition(f"cancel_confirmed is not valid from {current}")
         _require(evidence, "observed_at")
         _require_str_id(evidence, "order_id")
-        _require_terminal_status(evidence, _CANCEL_TERMINALS)
-        # Exactly zero, not merely "not positive": negative is not evidence of
-        # no fills, it is evidence of a corrupt record.
+        _validated_terminal(evidence, allowed=_CANCEL_TERMINALS)
+
+        if current is OrderState.WORKING_PARTIAL:
+            # The state already witnesses a positive fill. A claim of zero
+            # cumulative fill contradicts it rather than merely lacking proof,
+            # and accepting it would erase that fill. Same centralised validation
+            # as every other fill-reasoning event, so the overfill and
+            # strict-bool rules cannot be missed on this branch.
+            filled, intended, _remaining, remainder_live = _validated_fill(
+                evidence, require_positive_fill=True
+            )
+            _require_exact_zero(evidence, "remaining_size")
+            if remainder_live:
+                raise IllegalTransition("a confirmed cancel cannot leave a live remainder")
+            return _classify_terminal_fill(filled, intended)
+
+        # From ACCEPTED nothing has been witnessed, so zero is coherent. Exactly
+        # zero, not merely "not positive": negative is not evidence of no fills,
+        # it is evidence of a corrupt record.
         _require_exact_zero(evidence, "filled_size")
         _require_exact_zero(evidence, "filled_value")
         return OrderState.CANCELLED
@@ -352,20 +572,40 @@ def next_order_state(
     if event == "fill_observed":
         if current not in (OrderState.ACCEPTED, OrderState.WORKING_PARTIAL):
             raise IllegalTransition(f"fill_observed is not valid from {current}")
-        return _classify_fill(current, evidence)
+        filled, intended, remaining, remainder_live = _validated_fill(
+            evidence, require_positive_fill=True
+        )
+        if filled == intended:
+            _validated_terminal(evidence, allowed=_NONREJECT_TERMINALS)
+            return _classify_terminal_fill(filled, intended)
+        # Partial: the caller must say whether the remainder is still working.
+        if remainder_live is None:
+            raise InsufficientEvidence(
+                "a partial fill must state remainder_live so the order's "
+                "terminality is not left to inference"
+            )
+        if remainder_live:
+            if remaining is None or remaining <= 0:
+                raise InsufficientEvidence("a live remainder must have a positive remaining_size")
+            _reject_terminal_claim(evidence, "a live remainder")
+            return OrderState.WORKING_PARTIAL
+        _validated_terminal(evidence, allowed=_NONREJECT_TERMINALS)
+        _require_exact_zero(evidence, "remaining_size")
+        return _classify_terminal_fill(filled, intended)
 
     if event == "remainder_terminal":
         if current is not OrderState.WORKING_PARTIAL:
             raise IllegalTransition("remainder_terminal is only valid from WORKING_PARTIAL")
-        _require(evidence, "observed_at")
-        _require_str_id(evidence, "order_id")
-        _require_id_list(evidence, "fill_ids")
-        _require_terminal_status(evidence, _CANCEL_TERMINALS | _FILL_TERMINALS)
-        _require_nonneg(evidence, "filled_size")
+        _validated_terminal(evidence, allowed=_NONREJECT_TERMINALS)
+        filled, intended, _remaining, remainder_live = _validated_fill(
+            evidence, require_positive_fill=True
+        )
         _require_exact_zero(evidence, "remaining_size")
-        if _require_strict_bool(evidence, "remainder_live"):
+        if remainder_live is None:
+            raise InsufficientEvidence("remainder_terminal must state remainder_live")
+        if remainder_live:
             raise InsufficientEvidence("remainder_terminal requires the remainder to be gone")
-        return OrderState.SETTLED_PARTIAL
+        return _classify_terminal_fill(filled, intended)
 
     raise IllegalTransition(f"unknown order event {event!r}")
 
