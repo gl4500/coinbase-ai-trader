@@ -7,6 +7,63 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
+
+Completed Tasks 5–8 of the Phase-1 plan (Tasks 1–4 landed 2026-07-05/09). The
+layer stays **entirely offline** — nothing here touches `cnn_agent`, `main.py`,
+the scan loop, or sizing, and no env flag was added. Phase 2 (live wiring) was
+NOT opened; see the verdict below.
+
+**Files:**
+- `backend/database.py` — new `regime_state` table (date PK) in the `init_db`
+  block, plus `upsert_regime_state` / `get_latest_regime_state` /
+  `get_regime_series`. Helpers use the module's `_db()` context manager rather
+  than a bare `aiosqlite.connect`, so they inherit `PRAGMA busy_timeout` — the
+  live DB takes concurrent writes from the scan loop.
+- `backend/tools/regime/build_regime_series.py` — offline daily builder
+  (`build_series` + `persist` + CLI). `persist` calls `init_db` first so the
+  tool works against a DB the backend has never initialised.
+- `backend/tools/regime/backtest_regime.py` — offline overlay backtest
+  (`apply_scaling` / `metrics` / `scalar_stats` / `compare` + CLI).
+- Tests: `test_regime_store.py`, `test_build_regime_series.py`,
+  `test_backtest_regime.py`. Full `tests/regime/` suite: **40 passed**.
+
+**Two corrections to the plan as written** (both found by running it):
+1. The builder CLI assumed `regime_state` already existed and crashed on any
+   uninitialised DB — `persist` now ensures the schema (regression test added).
+2. The plan's verdict was binary HELPS/NO, which can report a confident NO for
+   arithmetic reasons on a window that cannot test the overlay. `compare` now
+   emits **INCONCLUSIVE** plus a `reason`, guarded on two conditions: the
+   applied scalar barely varying (`MIN_SCALAR_DISPERSION`), or it never dropping
+   below 1.0 — which leaves the layer's protective half unexercised.
+
+**Phase-1 gate run** (offline, against a scratch snapshot of `coinbase.db`; the
+live DB was never written to):
+- Series built: **3,831 days, 2016-03-31 → 2026-09-25** from FRED + CoinMetrics.
+- Trades overlaid: **2,085 closed paper trades, 2026-04-12 → 2026-08-16**, 100%
+  regime coverage.
+- Baseline total −$165.38 / sharpe −0.0314 / maxDD −$305.49.
+  Scaled total −$170.62 / sharpe −0.0280 / maxDD −$337.63.
+- **VERDICT: INCONCLUSIVE.** Over the trade window the scalar ran
+  **1.047 → 1.243 — always above 1.0**, so the overlay only ever levered up and
+  the protective half was never exercised. The layer is not broken: across the
+  full 3,831-day series **24.3% of days scale below 1.0**, bottoming at **0.795
+  in 2021** (the cycle top), which is the intended behaviour. It simply never
+  engaged during the only period we have trades for — MVRV 1.10–1.52 (cheap
+  side) and BTC-SPX corr 0.24–0.52.
+- Sub-finding that *is* supported: regime **leverage** over this window was
+  mildly harmful — it amplified a losing stretch (−$5.25 total, drawdown $32
+  worse). Sharpe's +0.0035 is reweighting noise, not an edge.
+- The overlay is in-sample with no purged walk-forward and no DSR/PBO
+  deflation, so even a HELPS would have been a kill-filter pass, not a deploy
+  signal.
+
+**Phase-2 status: NOT opened.** The honest read is "untested", not "rejected" —
+the gate needs either a trade record spanning a risk-off regime (MVRV > 3 or a
+high-correlation drawdown) or a longer proxy return series to replace the
+4-month live record.
+
+
 ### Session 58.81 — 2026-08-09 — Promote Snyk to a blocking security gate
 
 Now that the Snyk job runs and passes clean end-to-end (58.79/58.80), wire it
