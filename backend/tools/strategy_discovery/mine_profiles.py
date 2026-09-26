@@ -382,6 +382,7 @@ def mine_profiles_for_pid_horizon(
         leaf_test_rows_outer: List[List[int]] = [[] for _ in range(n_leaves)]
         for pos, leaf_id in enumerate(assignments):
             leaf_test_rows_outer[leaf_id].append(int(outer_test_idx[pos]))
+        passed_directions = set()
         for leaf_id in range(n_leaves):
             global_test_rows = leaf_test_rows_outer[leaf_id]
             if not global_test_rows:
@@ -396,7 +397,7 @@ def mine_profiles_for_pid_horizon(
                 n_combos=9,
             )
             if leaf_qualifies(metrics):
-                fold_pass_count[direction_key] += 1
+                passed_directions.add(direction_key)
                 fold_trade_lists[direction_key].extend(trades)
                 fold_summaries[direction_key] = {
                     **metrics,
@@ -406,6 +407,10 @@ def mine_profiles_for_pid_horizon(
                     "raw_max": raw_max,
                     "rule_summary": _serialize_rule_summary(tree, leaf_id, _FEATURE_COLUMNS),
                 }
+        # Several leaves can share one root-direction identity. Their evidence
+        # comes from the same held-out period, so count that period only once.
+        for direction_key in passed_directions:
+            fold_pass_count[direction_key] += 1
 
     rng = np.random.default_rng(seed)
     profiles: List[LeafProfile] = []
@@ -449,7 +454,7 @@ def mine_profiles_for_pid_horizon(
                 chosen_depth=fold_summaries[direction_key]["chosen_depth"],
                 chosen_min_leaf=fold_summaries[direction_key]["chosen_min_leaf"],
                 n_folds_evaluated=len(outer),
-                validation_version="chronological_v1",
+                validation_version="chronological_distinct_folds_v2",
             )
         )
     return profiles

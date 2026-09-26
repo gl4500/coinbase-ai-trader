@@ -149,7 +149,7 @@ def test_mine_profiles_for_pid_horizon_returns_qualifying_leaves_only(tmp_path):
     )
     assert len(profiles) >= 1
     assert all(p.n_folds_evaluated == 5 for p in profiles)
-    assert all(p.validation_version == "chronological_v1" for p in profiles)
+    assert all(p.validation_version == "chronological_distinct_folds_v2" for p in profiles)
     winners = [p for p in profiles if p.avg_win >= 0.05 and p.cumulative_profit_deflated > 0]
     assert len(winners) >= 1, (
         f"no winners; got profiles: {[(p.avg_win, p.cumulative_profit_deflated) for p in profiles]}"
@@ -243,3 +243,48 @@ def test_miner_requires_complete_comparable_fold_history(monkeypatch, caplog, n)
     assert miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu") == []
     assert "insufficient history" in caplog.text.lower()
     assert "5 outer" in caplog.text
+
+
+@pytest.mark.parametrize("passing_periods", [1, 3, 4, 5])
+def test_multiple_leaves_in_one_period_count_as_one_fold(monkeypatch, passing_periods):
+    import torch
+
+    from tools.strategy_discovery.profit_tree import TreeNode
+
+    miner = _stub_mining_frame(monkeypatch, np.arange(12000, dtype="int64") * 3_600_000)
+
+    # Four distinct leaves share the actual root-direction identity. Their
+    # success in one period must never stand in for four independent periods.
+    def split(feature, left, right):
+        return TreeNode(feature=feature, threshold=0.5, left=left, right=right)
+
+    tree = split(
+        0,
+        split(1, split(2, TreeNode(), TreeNode()), split(2, TreeNode(), TreeNode())),
+        TreeNode(),
+    )
+    monkeypatch.setattr(miner, "fit_tree", lambda **kwargs: tree)
+    monkeypatch.setattr(miner, "_DEPTH_GRID", (3,))
+    monkeypatch.setattr(miner, "_MIN_LEAF_GRID", (20,))
+    monkeypatch.setattr(miner, "pick_best_hyperparams", lambda _: (3, 20, 0.1, 0.0))
+    monkeypatch.setattr(
+        miner, "_assign_leaves", lambda root, rows: [i % 4 for i in range(len(rows))]
+    )
+    monkeypatch.setattr(miner, "walk_and_sum", lambda *args: torch.tensor([0.1]))
+    replay_calls = 0
+
+    def replay(*args):
+        nonlocal replay_calls
+        period = replay_calls // 4
+        replay_calls += 1
+        return [0.1] if period < passing_periods else [-0.2]
+
+    monkeypatch.setattr(miner, "_replay_trades", replay)
+    profiles = miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")
+    assert replay_calls == 20
+    if passing_periods < 4:
+        assert profiles == [], "several leaves from one period cannot satisfy the four-fold gate"
+    else:
+        assert len(profiles) == 1
+        assert profiles[0].n_folds_passed_q0 == passing_periods
+        assert profiles[0].n_folds_passed_q0 <= profiles[0].n_folds_evaluated

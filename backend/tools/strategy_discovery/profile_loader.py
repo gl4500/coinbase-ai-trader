@@ -55,7 +55,7 @@ def load_all_profiles(
 ) -> List[LoadedProfile]:
     """Load all per-horizon profile parquets + rule-path sidecars.
 
-    Require schema 2, chronological_v1 and five evaluated folds. Re-enforce
+    Require schema 2, chronological_distinct_folds_v2 and five evaluated folds. Re-enforce
     the four-pass minimum (or a stricter caller threshold) at the Phase 4 input
     boundary; missing, fractional and impossible pass counts are rejected.
     """
@@ -78,7 +78,7 @@ def load_all_profiles(
             continue
         verified = (
             df["schema_version"].eq(2)
-            & df["validation_version"].eq("chronological_v1")
+            & df["validation_version"].eq("chronological_distinct_folds_v2")
             & df["n_folds_evaluated"].eq(5)
         ).fillna(False)
         excluded = int((~verified).sum())
