@@ -65,8 +65,9 @@ Every requirement below follows from that sentence.
 ## 2. A concrete counterexample
 
 One product, horizon 24 h, five chronological outer folds `P1…P5`. The tree is refitted per fold and
-the root split is on `price_over_ema20` in the same direction each time — **its threshold varies by
-fold**, which does not prevent grouping — so every left-side leaf falls in one direction group. In each
+the root split is on `price_over_ema20` in the same direction each time. Its threshold **may vary by
+fold without preventing grouping**; it is held constant at `1.02` in the table below purely for
+legibility. Either way every left-side leaf falls in one direction group. In each
 of the first four folds a *different* sub-split qualifies:
 
 | Fold | Qualifying leaf | Its exact rule | Return in that fold |
@@ -84,12 +85,15 @@ What is emitted today, all of it correctly computed:
 - `cumulative_profit_raw = +16.0 %` — the pooled trades of A, B, C and D.
 - the machine rule of **D**, the last leaf written into the fold summary.
 
-Now ask what **D alone** would have done across all five folds. **This is a hindsight
-counterfactual, not out-of-sample evidence, and the distinction matters:** D was selected *in* P4, so
-its P1–P3 results are retrospective and could not have been earned by anyone. The counterfactual is
-still decisive for the point at hand — it shows the advertised figure is **not attributable to the
-rule the artifact names** — but it is not itself evidence for or against D. Genuine out-of-sample
-evidence for D would require a freeze timestamp preceding the evaluated period (R3, R7):
+Now ask what **D alone** would have done across all five folds. **This is not out-of-sample
+evidence for D, and the reason is specific:** D was *selected using* P4, so the selection procedure had
+already seen the outcomes it is now being scored against. The disqualifying fact is the **access**, not
+the calendar — see R3 on why a sealed historical holdout can be genuine out-of-sample evidence even
+though its bars predate the freeze.
+
+The figures below are therefore a **contaminated retrospective evaluation**. They remain decisive for
+the point at hand — they show the advertised aggregate is **not attributable to the rule the artifact
+names** — but they are evidence neither for nor against D:
 
 | Fold | P1 | P2 | P3 | P4 | P5 | Total |
 |---|---|---|---|---|---|---|
@@ -159,9 +163,29 @@ touched that window, so a result can be read against the number of attempts that
 scoring after the first, by any identity, is a **selection** use and the report must say so. A new
 identity does not buy a fresh holdout; a new **data window** does.
 
-**Freeze precedes evaluation.** A policy identity carries the timestamp at which it was frozen, and
-evaluation is valid only over data after it. A retrospective evaluation is labelled a counterfactual
-(see §2) and may never be reported as out-of-sample.
+**Three distinct clocks, and the rule is about information access — not about the calendar.**
+
+| Clock | What it is |
+|---|---|
+| **wall-clock freeze time** | when the policy was fixed and its identity recorded |
+| **simulated information cutoff** | the latest data the policy may consult when making each decision |
+| **holdout access time** | when the researcher first saw the holdout's *outcomes* |
+
+Out-of-sample status is determined by the third, not the first. **A sealed historical holdout may be
+evaluated after the policy is frozen and still yield genuine out-of-sample evidence, even though its
+bars predate the freeze** — what matters is that nobody consulted its outcomes while selecting. An
+earlier draft of this document got this wrong, declaring all retrospective evaluation a counterfactual;
+that rule would have forbidden the one honest use of archived data.
+
+So the prohibition is stated as access: a policy's evidence is void over any period whose outcomes
+informed its selection. D in §2 fails on exactly that ground — it was selected using P4 — and not
+because P1–P3 precede its freeze.
+
+**A deterministic rerun is not a new attempt.** Re-evaluating an unchanged policy on unchanged data to
+reproduce a result consumes no additional selection budget. Log reruns separately from candidate
+evaluations, so the campaign counter measures attempts to *find* something rather than attempts to
+*verify* it. A rerun that produces a different number is a reproducibility failure, which is its own
+finding.
 
 ### R4 — Capital is a ledger, and concurrent exposure is explicit
 `blocker: additive_returns_not_funded`
@@ -194,8 +218,11 @@ each were taken on the full account. Neither error is safe to carry.
 ### R7 — The policy is identified by content
 `blocker: policy_identity_unbound`
 
-A policy identity is a digest over its exact machine rule, its exit and holding rule, its sizing rule,
-and its cost model. An ordinal, a name, or a position in a sorted list is not an identity: it is not
+A policy identity is a digest over the frozen decision procedure and everything needed to act on it:
+for a static policy, its exact machine rule; for a **predeclared adaptive procedure** (§1), the fitting
+and selection configuration — trailing-window definition, refit cadence, hyperparameters, and
+leaf-selection rule — since for such a policy *that configuration is the rule*. In both cases the
+digest also covers the exit and holding rule, the sizing rule, and the cost model. An ordinal, a name, or a position in a sorted list is not an identity: it is not
 stable across runs. **Rule alone is not a policy** — the same rule with different sizing is a
 different policy and must not inherit the rule's evidence.
 
@@ -210,7 +237,7 @@ The evidence must therefore also carry a **manifest**, and the report is not com
 | executable implementation + config identity | the description is not the executor; a config change is a different policy |
 | feature schema, ordered | a rule naming a column means nothing without the schema that defines it |
 | evaluation data identity and time boundaries | fixes *what* was evaluated and *over which span*, so a later re-run is comparable |
-| freeze timestamp | makes R3's freeze-precedes-evaluation rule checkable rather than asserted |
+| freeze time, information cutoff, holdout access log | makes R3's three clocks checkable rather than asserted — in particular that no evaluated period's outcomes informed selection |
 
 The manifest is integrity evidence too, not attestation: it records what was claimed to run, and an
 independent execution record remains a separate requirement this specification does not satisfy.
