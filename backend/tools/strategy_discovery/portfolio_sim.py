@@ -43,47 +43,6 @@ class TelemetryRow:
     realized_pnl: Optional[float] = None
 
 
-def parse_rule_path(rule_path: str) -> List[Tuple[str, str, float]]:
-    """Parse 'feat_a > 1.02 AND feat_b <= 0.08' into [(feature, op, threshold), ...].
-
-    Operators supported: >, <, >=, <=. Only explicit '(root)' is unconditional.
-    """
-    if not isinstance(rule_path, str) or not rule_path.strip():
-        raise ValueError("unresolved rule cannot be simulated")
-    if rule_path.strip() == "(root)":
-        return []
-    conditions: List[Tuple[str, str, float]] = []
-    for clause in rule_path.split(" AND "):
-        clause = clause.strip()
-        for op in (">=", "<=", ">", "<"):
-            if f" {op} " in clause:
-                feature, threshold_str = clause.split(f" {op} ", 1)
-                conditions.append((feature.strip(), op, float(threshold_str.strip())))
-                break
-        else:
-            raise ValueError(f"unparseable rule clause: {clause!r}")
-    return conditions
-
-
-def _rule_holds_at(conditions: List[Tuple[str, str, float]], row: pd.Series) -> bool:
-    """Evaluate parsed conditions against a Phase 2 feature row."""
-    if not conditions:
-        return True
-    for feature, op, threshold in conditions:
-        if feature not in row.index:
-            return False
-        v = float(row[feature])
-        if op == ">" and not (v > threshold):
-            return False
-        if op == ">=" and not (v >= threshold):
-            return False
-        if op == "<" and not (v < threshold):
-            return False
-        if op == "<=" and not (v <= threshold):
-            return False
-    return True
-
-
 def _compute_max_dd(equity_series: List[float]) -> float:
     if not equity_series:
         return 0.0

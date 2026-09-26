@@ -195,3 +195,50 @@ def test_empty_scorecard_still_discloses_missing_validation():
     assert "Deployment blocked" in md
     assert "untouched holdout" in md.lower()
     assert "research" in md.lower()
+
+
+def _card_with_exact_rule():
+    from tests.tools.strategy_discovery.rule_fixtures import machine_rule_fixture
+    from tests.tools.strategy_discovery.test_portfolio_sim import _make_profile
+
+    profile = _make_profile("BTC-USD", 0, 24, "price_over_ema20 > 1.02")
+    profile.machine_rule = machine_rule_fixture("price_over_ema20 > 1.0249")
+    profile.rule_digest = "a" * 64
+    return CapScorecard(3, _passing_metrics(), 10, 0.05, {}, True, [profile])
+
+
+def test_markdown_identifies_exact_rule_separately_from_rounded_display():
+    import json
+
+    card = _card_with_exact_rule()
+    profile = card.selected_profiles[0]
+    md = render_scorecard([card])
+    assert "Rounded display summary (not executable):" in md
+    assert "Exact machine rule (NaN routes right):" in md
+    assert json.dumps(profile.machine_rule, sort_keys=True) in md
+    assert profile.rule_digest in md
+    assert "Group search metrics (not representative-policy performance)" in md
+    assert "Deployment blocked" in md
+
+
+def test_json_preserves_exact_rule_and_scopes_group_metrics(tmp_path):
+    import json
+
+    from tools.strategy_discovery.build_phase4 import _write_deployment_json
+
+    card = _card_with_exact_rule()
+    profile = card.selected_profiles[0]
+    path = tmp_path / "research.json"
+    _write_deployment_json(card, path)
+    payload = json.loads(path.read_text())
+    row = payload["profiles"][0]
+    assert payload["schema_version"] == 2
+    assert payload["deployment_eligible"] is False
+    assert row["profile_id"] == profile.profile_id
+    assert row["machine_rule"] == profile.machine_rule
+    assert row["rule_digest"] == profile.rule_digest
+    assert row["rounded_display_summary"] == "price_over_ema20 > 1.02"
+    assert "rule_path" not in row
+    assert not any(key.startswith("expected_") for key in row)
+    assert row["group_search_metrics"]["scope"] == "qualifying_leaves_not_representative_policy"
+    assert row["group_search_metrics"]["avg_win"] == profile.avg_win

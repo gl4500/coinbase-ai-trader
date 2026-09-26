@@ -5,6 +5,7 @@ Pure functions on PortfolioMetrics. No I/O (build_phase4 owns writing).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -111,8 +112,16 @@ def render_scorecard(per_cap: List[CapScorecard]) -> str:
         if c.selected_profiles:
             lines.append("Selected profiles:")
             for p in c.selected_profiles:
+                lines.append(f"- {p.profile_id} (h={p.horizon})")
+                lines.append(f"  - Rounded display summary (not executable): `{p.rule_path}`")
+                lines.append(f"  - Rule binding digest: `{p.rule_digest}`")
                 lines.append(
-                    f"  - {p.profile_id}  (h={p.horizon})  `{p.rule_path}`  → deflated {p.cumulative_profit_deflated:+.4f}"
+                    "  - Exact machine rule (NaN routes right): "
+                    f"`{json.dumps(p.machine_rule, sort_keys=True)}`"
+                )
+                lines.append(
+                    "  - Group search metrics (not representative-policy performance): "
+                    f"deflated {p.cumulative_profit_deflated:+.4f}"
                 )
             lines.append("")
     return "\n".join(lines)
