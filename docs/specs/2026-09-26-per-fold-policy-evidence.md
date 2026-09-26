@@ -181,6 +181,21 @@ So the prohibition is stated as access: a policy's evidence is void over any per
 informed its selection. D in §2 fails on exactly that ground — it was selected using P4 — and not
 because P1–P3 precede its freeze.
 
+**Access discipline is necessary and NOT sufficient, and the two conditions must be enforced
+jointly.** The access rule governs what the *researcher* saw. It says nothing about what the *features*
+contain. A feature computed with a forward-looking window carries future information into every
+decision the policy makes, and no amount of access hygiene repairs that — the leakage is inside the
+data, not in anyone's behaviour. Both must hold:
+
+1. **Causal simulated information cutoff** — every feature value available at a decision is computable
+   from data at or before that decision's timestamp, per the second clock above.
+2. **No holdout-assisted selection** — no evaluated period's outcomes informed the choice of the
+   policy, per the third clock.
+
+Satisfying (2) while violating (1) produces evidence that is clean in its provenance and worthless in
+its content. A report claiming out-of-sample status asserts **both**, and the manifest (R7) must record
+what establishes each.
+
 **A deterministic rerun is not a new attempt.** Re-evaluating an unchanged policy on unchanged data to
 reproduce a result consumes no additional selection budget. Log reruns separately from candidate
 evaluations, so the campaign counter measures attempts to *find* something rather than attempts to
