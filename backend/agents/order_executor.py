@@ -578,11 +578,20 @@ class OrderExecutor:
         }
         try:
             cancel = await coinbase_client.cancel_orders([order_id])
-            matches = [r for r in cancel.get("results", []) if r.get("order_id") == order_id]
-            if len(matches) != 1 or matches[0].get("success") is not True:
+            if not _acknowledged_cancel(cancel, order_id):
                 return {**unresolved, "reason": "Maker cancellation was not acknowledged"}
             final = await coinbase_client.get_order(order_id)
-            if final.get("order_id") == order_id and final.get("status") == "FILLED":
+            # Identity BEFORE evidence, as in cancel_order: a snapshot naming a
+            # different order says nothing about this one, and attaching its
+            # fills here would cite another order's quantities as this order's
+            # reconciliation evidence.
+            if not isinstance(final, dict) or _usable_order_id(final.get("order_id")) != order_id:
+                logger.error(
+                    "Maker cancellation status for %s named a different order; evidence discarded",
+                    order_id,
+                )
+                return {**unresolved, "reason": "Maker cancellation status named a different order"}
+            if final.get("status") == "FILLED":
                 await database.update_order_status(order_id, "filled")
                 return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
             if not _confirmed_unfilled_cancel(final, order_id):

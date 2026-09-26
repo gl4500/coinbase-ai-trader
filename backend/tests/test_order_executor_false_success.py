@@ -668,3 +668,53 @@ async def test_cancel_snapshot_for_a_different_order_contributes_no_evidence():
     assert result.get("filled_value") is None
     assert result.get("status") is None
     assert "100" not in str(result.get("reason", ""))
+
+
+@pytest.mark.asyncio
+async def test_maker_cancel_snapshot_for_a_different_order_contributes_no_evidence():
+    """The sibling of the cancel_order defect, found by Codex and pre-existing in
+    #60: the identity check sat inside the FILLED branch, so a snapshot naming
+    another order fell through to `_confirmed_unfilled_cancel` — correctly
+    rejected on identity — and the reconciliation return then attached that other
+    order's fills to `maker_order_id`.
+    """
+    ex = _live_executor()
+    signal = {
+        "product_id": "BTC-USD",
+        "side": "BUY",
+        "price": 100.0,
+        "bid": 99.5,
+        "ask": 100.5,
+        "quote_size": 50.0,
+        "signal_type": "TEST",
+    }
+    other = {
+        "order_id": "different-2",
+        "status": "FILLED",
+        "pending_cancel": False,
+        "filled_size": "100",
+        "filled_value": "9000",
+    }
+    with (
+        patch("agents.order_executor.coinbase_client") as cb,
+        patch("agents.order_executor.database") as db,
+    ):
+        cb.place_limit_order = AsyncMock(return_value=_ACCEPTED)
+        cb.get_orders = AsyncMock(return_value=[])  # never fills, so the cancel path runs
+        cb.cancel_orders = AsyncMock(return_value=_CANCEL_ACK)
+        cb.get_order = AsyncMock(return_value=other)
+        cb.place_market_order = AsyncMock(return_value=_ACCEPTED)
+        db.save_order = AsyncMock()
+        db.mark_signal_acted = AsyncMock()
+        db.update_order_status = AsyncMock()
+        result = await ex.execute_maker_signal(signal, timeout_secs=0.01)
+
+    assert result["success"] is False
+    assert result.get("reconciliation_required") is True
+    assert result.get("maker_order_id") == "ex-1"
+    # None of the other order's evidence may be attributed to this one.
+    assert result.get("filled_size") is None
+    assert result.get("filled_value") is None
+    # And no replacement may be placed against an unreconciled order.
+    assert cb.place_market_order.await_count == 0
+    assert db.update_order_status.await_count == 0
