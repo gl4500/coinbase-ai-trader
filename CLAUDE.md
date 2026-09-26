@@ -242,6 +242,7 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 - **AI agents:** CoinbaseCNNAgent only (XGBoost driver via `MODEL_BACKEND=xgb`; CNN model path still exists but xgb has been the live backend for months — see `agents/xgb_signal.py`). Historical: TechAgent retired #311-refactor-c (2026-05-16); Ollama LLM blend deleted #311-refactor-f; rows remain in DB.
 - **Config:** `.env` → environment variables read directly in modules
 - **Training:** `train_worker.py` spawned as subprocess to avoid blocking scan loop
+- **Macro-regime layer:** `backend/services/regime/` + `backend/tools/regime/` — **offline only** (daily cadence). Evaluates an `exposure_scalar` from MVRV cycle position x correlation-gated macro risk into the `regime_state` table. It is NOT wired to the scan loop or sizing: Phase 2 stays closed while the Phase-1 gate reads INCONCLUSIVE (the 2026-04..08 trade window never exercised the protective branch — see CHANGELOG 58.82).
 
 ### Key invariants (never break these)
 1. `_CNNBook.positions[pid]` must always contain `entry_time` and `peak_price` on new entries
