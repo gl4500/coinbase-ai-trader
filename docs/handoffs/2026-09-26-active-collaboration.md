@@ -14,6 +14,10 @@ TaskCreate is unavailable; this register records the required find-list-fix sequ
 5. Deferred: profile identities omit horizon; mixed-horizon simulation may collide. Require horizon-qualified identities before multi-horizon evaluation.
 6. Deferred: additive return drawdown is not funded portfolio drawdown. Replace with a capital/position ledger before treating the 30% gate as risk evidence.
 
+7. Completed, targeted tests pass (Claude review): a variable count of usable folds makes the four-pass gate ambiguous and permits tiny training sets. Require five evaluable outer folds, three inner folds each, and minimum training rows max(horizon, twice the smallest min_leaf). Record evaluated fold count/version on profiles; report insufficient history explicitly.
+
+8. Completed, round-trip tests pass: parquet schema assertion exposed newly added validation metadata. Version new profile rows as schema 2 and round-trip both causal and legacy-unverified defaults. Existing rows are not relabeled.
+
 ## Coordination decisions
 
 - Claude acknowledged c7249dc supersedes maker PR #59, including confirmed empty-cancel, missing-fill, SELL sizing and pending-cancel defects. PR #59 must not be merged in its present form. Claude subsequently reported PR #59 closed by operator authorization; preserved branch for provenance. No PR closed by Codex.
@@ -24,7 +28,7 @@ TaskCreate is unavailable; this register records the required find-list-fix sequ
 
 ## Validation evidence
 
-TDD: split regressions first failed 16/17, then passed 17/17. Miner regressions reproduced ordering and empty-inner failures; all 14 miner tests passed after repair. Scorecard regressions first failed 3 tests; all 11 scorecard/driver tests passed after repair. The complete strategy-discovery suite passed 103 tests. Full-suite pre-commit validation pending.
+TDD: split regressions first failed 16/17, then passed 17/17. Miner regressions reproduced ordering and empty-inner failures; all 14 miner tests passed after repair. Scorecard regressions first failed 3 tests; all 11 scorecard/driver tests passed after repair. The complete strategy-discovery suite passed 103 tests. Initial full-suite pre-commit passed: 1437 passed, 65 skipped, 1 deselected, 1 xfailed, 2 xpassed (380.82s).
 
 Archived Phase 3/4 verdicts produced with future training rows are invalid validation evidence, including ABORT. Preserve originals; do not interpret as proof for or against a strategy.
 
@@ -32,3 +36,14 @@ Archived Phase 3/4 verdicts produced with future training rows are invalid valid
 ## Claude lifecycle design review
 
 Claude reports both scan and WS resolver paths implemented; commit/tests pending independent review. His proposed next contract was reviewed: add persisted intent before submit, separate order status from position exposure, never erase a held position on exit rejection, distinguish active partial orders from terminal partial fills, reserve CLOSED for flat exposure, use idempotent fill IDs and product-precision quantities, and prohibit unknown-order retries. Asked Claude to document and test the pure validator without live integration.
+
+
+## Review evidence and delivery
+
+- Maker/label draft PR: https://github.com/gl4500/coinbase-ai-trader/pull/60 (c7249dc), stacked on prerequisite PR #58. No merge or deployment.
+- Claude executor patch: 7d9913f on fix/executor-lifecycle-late-binding. Codex source review found no blocker for the narrow stale-reference repair; independent lifecycle + exit-watcher tests passed 29/29. Tests simulate replacement, not actual enable/disable endpoints. Risk-state reset and exit accounting remain open.
+- Claude caught variable-fold comparability and tiny-history issues in the first causal patch. The follow-up requires complete 5x3 evaluation and minimum training rows. Three new regressions failed before the change. The synthetic positive-cohort fixture was lengthened from 1000 to 2000 rows to meet the new warmup precondition; profit criteria were unchanged.
+- Additional source defect registered with Claude: manual execute_market_order accepts a missing exchange success/order ID, and cancel_order marks canceled without verifying per-order success. These are separate from the repaired maker path and remain pending a shared execution adapter.
+
+
+Follow-up validation: all 17 miner tests passed, including the unchanged positive-cohort profitability assertions on adequate history. The parquet metadata test then exposed its obsolete schema expectation; new rows now use schema 2 and round-trip tests verify causal metadata versus legacy-unverified defaults. Final targeted check: 19 passed, one already-passed expensive cohort test deselected. Final full pre-commit run pending; results will be recorded in the PR/session-link handoff.

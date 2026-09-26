@@ -105,7 +105,7 @@ def test_mine_profiles_for_pid_horizon_returns_qualifying_leaves_only(tmp_path):
     from tools.strategy_discovery.mine_profiles import mine_profiles_for_pid_horizon
 
     rng = np.random.default_rng(101)
-    n = 1000
+    n = 2000
     ts_ms = np.arange(n, dtype="int64") * 3_600_000
     feat_0 = rng.uniform(0.0, 1.0, size=n)
     feat_1 = rng.uniform(0.0, 1.0, size=n)
@@ -148,6 +148,8 @@ def test_mine_profiles_for_pid_horizon_returns_qualifying_leaves_only(tmp_path):
         seed=42,
     )
     assert len(profiles) >= 1
+    assert all(p.n_folds_evaluated == 5 for p in profiles)
+    assert all(p.validation_version == "chronological_v1" for p in profiles)
     winners = [p for p in profiles if p.avg_win >= 0.05 and p.cumulative_profit_deflated > 0]
     assert len(winners) >= 1, (
         f"no winners; got profiles: {[(p.avg_win, p.cumulative_profit_deflated) for p in profiles]}"
@@ -211,7 +213,7 @@ def test_miner_skips_outer_folds_without_usable_inner_history(monkeypatch):
 
 
 def test_miner_training_prefix_preserves_feature_label_alignment(monkeypatch):
-    timestamps = np.arange(2000, dtype="int64")[::-1] * 3_600_000
+    timestamps = np.arange(12000, dtype="int64")[::-1] * 3_600_000
     miner = _stub_mining_frame(monkeypatch, timestamps)
 
     class Captured(Exception):
@@ -222,9 +224,22 @@ def test_miner_training_prefix_preserves_feature_label_alignment(monkeypatch):
         np.testing.assert_array_equal(
             features[:, 0].cpu().numpy(), labels[: len(features)].cpu().numpy()
         )
-        assert features[0, 0].item() == 1999
+        assert features[0, 0].item() == 11999
         raise Captured
 
     monkeypatch.setattr(miner, "fit_tree", capture)
     with pytest.raises(Captured):
         miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")
+
+
+@pytest.mark.parametrize("n", [900, 1000, 6000])
+def test_miner_requires_complete_comparable_fold_history(monkeypatch, caplog, n):
+    miner = _stub_mining_frame(monkeypatch, np.arange(n, dtype="int64") * 3_600_000)
+
+    def forbidden(**kwargs):
+        pytest.fail("must reject insufficient fold history before fitting")
+
+    monkeypatch.setattr(miner, "fit_tree", forbidden)
+    assert miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu") == []
+    assert "insufficient history" in caplog.text.lower()
+    assert "5 outer" in caplog.text
