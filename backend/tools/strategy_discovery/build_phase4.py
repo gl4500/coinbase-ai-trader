@@ -31,6 +31,7 @@ from tools.strategy_discovery.profile_loader import (  # noqa: E402
     load_pid_features,
 )
 from tools.strategy_discovery.scorecard import (  # noqa: E402
+    DEPLOYMENT_BLOCKERS,
     CapScorecard,
     evaluate_cap_gates,
     render_scorecard,
@@ -47,6 +48,9 @@ def _write_deployment_json(
     output_path: Path,
 ) -> None:
     payload = {
+        "evaluation_scope": "research_selection",
+        "deployment_eligible": False,
+        "deployment_blockers": list(DEPLOYMENT_BLOCKERS),
         "cap": int(card.cap),
         "selected_at_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "k_subsets_evaluated": int(card.k_evaluated),
@@ -60,7 +64,11 @@ def _write_deployment_json(
             "pct_slots_full": float(card.metrics.pct_slots_full),
             "mean_concurrent": float(card.metrics.mean_concurrent),
         },
-        "gates": {**card.gates, "overall": "pass" if card.overall_pass else "fail"},
+        "gates": {
+            **card.gates,
+            "overall": "pass" if card.overall_pass else "fail",
+            "scope": "research_only",
+        },
         "profiles": [
             {
                 "pid": p.pid,
@@ -165,7 +173,9 @@ def build_phase4(
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Phase 4 -- scorecard + deployment selection.")
+    parser = argparse.ArgumentParser(
+        description="Phase 4 -- research scorecard; deployment blocked."
+    )
     parser.add_argument("--phase3-dir", default=str(_DEFAULT_PHASE3_DIR))
     parser.add_argument("--phase2-dir", default=str(_DEFAULT_PHASE2_DIR))
     parser.add_argument("--output-dir", default=str(_DEFAULT_OUTPUT_DIR))

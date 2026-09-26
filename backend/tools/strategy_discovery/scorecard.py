@@ -14,6 +14,15 @@ from tools.strategy_discovery.profile_loader import LoadedProfile
 _PORTFOLIO_MAX_DD = 0.30
 _PORTFOLIO_MIN_TRADES = 50
 
+# Phase 4 selects on research history; it does not implement these validations.
+DEPLOYMENT_BLOCKERS = (
+    "No untouched holdout evaluated after freezing the complete selection policy.",
+    "Historical fold outputs must be regenerated with chronological training.",
+    "All-fold reporting, horizon-qualified identities and funded-equity metrics remain unverified.",
+    "Account fees, slippage, missed fills and partial fills are not validated together.",
+    "Execution reconciliation and prospective shadow acceptance remain unverified.",
+)
+
 
 @dataclass
 class CapScorecard:
@@ -39,22 +48,27 @@ def evaluate_cap_gates(metrics: PortfolioMetrics) -> Tuple[Dict[str, bool], bool
 
 
 def pick_verdict(per_cap: List[CapScorecard]) -> Tuple[Optional[int], str]:
-    """Pick the highest-deflated-profit passing cap, or abort if none pass."""
+    """Rank research candidates only; this function cannot authorize deployment."""
     passing = [c for c in per_cap if c.overall_pass]
     if not passing:
         return None, "abort — no qualifying portfolio at any cap"
     best = max(passing, key=lambda c: c.metrics.cumulative_profit_deflated)
     return (
         best.cap,
-        f"deploy at N={best.cap} (deflated profit = {best.metrics.cumulative_profit_deflated:.4f})",
+        f"research candidate N={best.cap}; deployment blocked "
+        f"(deflated profit = {best.metrics.cumulative_profit_deflated:.4f})",
     )
 
 
 def render_scorecard(per_cap: List[CapScorecard]) -> str:
     """Render a Markdown scorecard with per-cap sections + comparison + verdict."""
-    lines: List[str] = ["# Phase 4 Scorecard — strategy-discovery deployment selection", ""]
+    lines: List[str] = ["# Phase 4 Scorecard — strategy-discovery research selection", ""]
     chosen_cap, verdict = pick_verdict(per_cap)
     lines.append(f"**Verdict:** {verdict}")
+    lines.append("")
+    lines.append("**Deployment blocked.** Passing gates rank research candidates only.")
+    lines.append("")
+    lines.extend(f"- {reason}" for reason in DEPLOYMENT_BLOCKERS)
     lines.append("")
     lines.append("## Comparison table")
     lines.append("")
