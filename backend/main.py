@@ -456,7 +456,13 @@ async def lifespan(app: FastAPI):
     # WS-driven exit checker: fires WS_TRAIL_STOP / WS_STOP_LOSS on every
     # held position without waiting for the 60s scan cycle.
     # Spec: docs/superpowers/specs/2026-05-23-ws-exit-checker-design.md
-    attach_exit_watcher(app_state.ws_subscriber, app_state.cnn_agent.book, app_state.order_executor)
+    # Resolver, not instance: /api/trading/enable rebinds
+    # app_state.order_executor and this closure must follow it.
+    attach_exit_watcher(
+        app_state.ws_subscriber,
+        app_state.cnn_agent.book,
+        executor_fn=lambda: app_state.order_executor,
+    )
     logger.info("WS exit watcher attached")
 
     # Background scan — refreshes product list without blocking startup
@@ -499,7 +505,7 @@ async def lifespan(app: FastAPI):
     app_state.cnn_task = asyncio.create_task(
         app_state.cnn_agent.run_loop(
             interval=config.scan_interval_secs,
-            order_executor=app_state.order_executor,
+            executor_fn=lambda: app_state.order_executor,
             is_trading_fn=lambda: app_state.is_trading,
             train_every_n_scans=config.cnn_train_every_n_scans,
             broadcast_fn=broadcast_state,

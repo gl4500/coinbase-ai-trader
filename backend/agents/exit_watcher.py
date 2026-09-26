@@ -38,6 +38,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_executor(order_executor, executor_fn):
+    """Return the executor to use for this one operation.
+
+    `executor_fn` wins when supplied: main.py passes a resolver so that POST
+    /api/trading/enable, which rebinds app_state.order_executor, is visible here
+    — mirroring the existing is_trading_fn treatment. `order_executor` remains
+    the by-value path for callers that hold a single instance.
+
+    Two explicit parameters rather than one overloaded one, because callable()
+    cannot tell a resolver from an executor: MagicMock and any __call__-defining
+    object are callable too.
+
+    Resolve ONCE per operation and reuse the result, so a single tick or cycle
+    can never mix two executor objects across an await.
+    """
+    return executor_fn() if executor_fn is not None else order_executor
+
+
 async def on_price_tick(pid: str, price: float, book: "_CNNBook", order_executor=None) -> None:
     """Per-tick exit checker. Idempotent. Exceptions are caught + logged
     (invariant #18 in CLAUDE.md) so a handler failure cannot crash the
@@ -117,13 +135,29 @@ async def on_price_tick(pid: str, price: float, book: "_CNNBook", order_executor
         )
 
 
-def attach(ws_subscriber: "CoinbaseWSSubscriber", book: "_CNNBook", order_executor=None) -> None:
+def attach(
+    ws_subscriber: "CoinbaseWSSubscriber",
+    book: "_CNNBook",
+    order_executor=None,
+    executor_fn=None,
+) -> None:
     """Register the per-tick exit handler. Call once per backend lifespan
     (in main.py after ws_subscriber.start() and after cnn_agent is built).
+
+    Pass `executor_fn` (a zero-argument resolver) rather than `order_executor`
+    so a later executor swap is picked up: this closure outlives any single
+    instance, and binding one by value is exactly how the pre-2026-09-26 code
+    kept using the startup executor after /api/trading/enable replaced it.
     """
 
     async def _handler(pid: str, price: float) -> None:
-        await on_price_tick(pid, price, book, order_executor)
+        try:
+            executor = _resolve_executor(order_executor, executor_fn)
+        except Exception:
+            # Never raise into the WS receive loop (invariant #18).
+            logger.exception("exit_watcher could not resolve the order executor")
+            return
+        await on_price_tick(pid, price, book, executor)
 
     ws_subscriber.register_price_handler(_handler)
     logger.info("exit_watcher attached to ws_subscriber")
