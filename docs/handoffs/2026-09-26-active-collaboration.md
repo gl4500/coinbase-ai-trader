@@ -18,7 +18,7 @@ TaskCreate is unavailable; this register records the required find-list-fix sequ
 
 8. Completed, round-trip tests pass: parquet schema assertion exposed newly added validation metadata. Version new profile rows as schema 2 and round-trip both causal and legacy-unverified defaults. Existing rows are not relabeled.
 
-9. Implemented, targeted 18 tests passed (full suite pending): profile_loader accepted missing/legacy validation metadata. Enforce schema 2, chronological_v1 and five evaluated folds with counted exclusions before treating archived profiles as current research inputs. Reject malformed or impossible pass counts without integer truncation. Phase 4 remains deployment-blocked regardless.
+9. Completed, 18 targeted and 1501 full-suite tests passed: profile_loader accepted missing/legacy validation metadata. Enforce schema 2, chronological_v1 and five evaluated folds with counted exclusions before treating archived profiles as current research inputs. Reject malformed or impossible pass counts without integer truncation. Phase 4 remains deployment-blocked regardless.
 
 ## Coordination decisions
 
@@ -68,7 +68,10 @@ Root is integrating upstream 3afccfc into #60/#62 and enforcing validation metad
 
 PR #60 integration is now 634bf8f, pushed after 1464 full-suite tests passed
 (65 skipped, one deselected, one xfailed, two xpassed). PR #62 cleanly merged
-that parent locally; its loader change remains pending final full-suite commit.
+that parent with its loader fix as e472c2e, pushed after 1501 tests passed
+(65 skipped, one deselected, one xfailed, two xpassed; 14 existing warnings,
+371.54 seconds). Scoped Ruff and whitespace checks passed. Draft PR #62
+reflects the implementation; CI on the new head is pending.
 
 ## Regular session checks
 
@@ -90,3 +93,9 @@ them to Claude: unidentified/nonzero-fill rejection from UNKNOWN, zero-fill
 cancellation after a known partial, zero-fill partial settlement, and FILLED
 despite explicit live remainder. These are unresolved review blockers until
 Claude's follow-up is independently checked. No live execution was exercised.
+
+Latest validator review: independently ran 101 targeted tests successfully,
+then reproduced two remaining branch-specific bypasses (non-boolean remainder
+flags and overfill in partial cancellation) plus inconsistent cancelled/full-fill
+classification. Sent these to Claude with a request for one shared classifier
+and cross-event regression coverage. PR #63 remains blocked on that review.
