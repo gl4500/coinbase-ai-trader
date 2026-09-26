@@ -68,20 +68,26 @@ def load_all_profiles(
         if not parquet_path.exists():
             continue
         df = pq.read_table(parquet_path).to_pandas()
-        required = {'schema_version', 'validation_version', 'n_folds_evaluated'}
+        required = {"schema_version", "validation_version", "n_folds_evaluated"}
         if not required.issubset(df.columns):
-            logger.warning('%s: excluded %d profiles with missing provenance', parquet_path.name, len(df))
+            logger.warning(
+                "%s: excluded %d profiles with missing provenance", parquet_path.name, len(df)
+            )
             continue
-        verified = (df['schema_version'].eq(2)
-                    & df['validation_version'].eq('chronological_v1')
-                    & df['n_folds_evaluated'].eq(5)).fillna(False)
+        verified = (
+            df["schema_version"].eq(2)
+            & df["validation_version"].eq("chronological_v1")
+            & df["n_folds_evaluated"].eq(5)
+        ).fillna(False)
         excluded = int((~verified).sum())
         if excluded:
-            logger.warning('%s: excluded %d profiles with invalid provenance', parquet_path.name, excluded)
+            logger.warning(
+                "%s: excluded %d profiles with invalid provenance", parquet_path.name, excluded
+            )
         df = df.loc[verified]
         # Membership rejects missing, fractional, string and impossible counts
         # before integer conversion; passing folds cannot exceed evaluated folds.
-        accepted = df['n_folds_passed_q0'].isin(
+        accepted = df["n_folds_passed_q0"].isin(
             [count for count in range(4, 6) if count >= min_folds_passed_q0]
         )
         df = df.loc[accepted]
