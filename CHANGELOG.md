@@ -7,6 +7,19 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Exact executable research rules - 2026-09-26
+
+- Store exact binary64 tree paths separately from display summaries. Pin left
+  routing to <= and right routing to its complement, including present NaN.
+- Bind rules to product, horizon, group, source leaf/fold/tree and ordered feature
+  schema; verify sidecar content against independent profile-row digests.
+- Schema 3 loaders exclude legacy rounded artifacts. Simulator executes machine
+  rules only, diagnoses missing columns, and uses digest-qualified profile IDs.
+- Require actual float64 feature tensors before fitting. Digests preserve fitted
+  bits, including signed zero; they are integrity checks, not performance evidence.
+- Group-aggregate metrics still do not measure the representative leaf policy;
+  research deployment remains blocked. No archived artifacts are rewritten.
+
 ### Distinct outer-fold evidence - 2026-09-26
 
 - Count each held-out period once per root-direction group, even when several

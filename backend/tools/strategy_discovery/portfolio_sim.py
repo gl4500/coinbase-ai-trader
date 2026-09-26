@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from tools.strategy_discovery.profile_loader import LoadedProfile
+from tools.strategy_discovery.rule_contract import rule_matches, validate_rule
 
 
 @dataclass
@@ -110,11 +111,22 @@ def simulate_portfolio(
     pid_features: Dict[str, pd.DataFrame],
 ) -> Tuple[PortfolioMetrics, List[TelemetryRow]]:
     """Walk historical bars in the subset's union; enforce cap; return metrics + telemetry."""
-    identities = [profile.profile_id for profile in subset]
+    identities = [(profile.pid, profile.horizon, profile.leaf_id) for profile in subset]
     if len(set(identities)) != len(identities):
         raise ValueError("duplicate research profile identity in simulation subset")
-    # Pre-parse rule paths for speed
-    parsed_rules = {p.profile_id: parse_rule_path(p.rule_path) for p in subset}
+    # Display summaries are never interpreted as executable rules.
+    machine_rules = {}
+    for profile in subset:
+        validate_rule(profile.machine_rule)
+        machine_rules[profile.profile_id] = profile.machine_rule
+        frame = pid_features.get(profile.pid)
+        if frame is not None:
+            required = {clause["feature"] for clause in profile.machine_rule["conditions"]}
+            missing = required.difference(frame.columns)
+            if missing:
+                raise ValueError(
+                    f"missing feature columns for {profile.profile_id}: {sorted(missing)}"
+                )
     label_cols = {p.profile_id: f"label_h{int(p.horizon)}" for p in subset}
     horizon_ms = {p.profile_id: int(p.horizon) * 3_600_000 for p in subset}
 
@@ -174,7 +186,7 @@ def simulate_portfolio(
             row = pid_ts_to_row.get(profile.pid, {}).get(int(ts))
             if row is None:
                 continue
-            if _rule_holds_at(parsed_rules[profile.profile_id], row):
+            if rule_matches(machine_rules[profile.profile_id], row):
                 firings.append(profile)
 
         # 3. Enforce cap; tiebreaker = highest deflated profit
