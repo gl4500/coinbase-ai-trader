@@ -274,6 +274,19 @@ async def init_db() -> None:
                 val_recall_at_thresh     REAL,
                 val_threshold            REAL
             );
+
+            CREATE TABLE IF NOT EXISTS regime_state (
+                date            TEXT PRIMARY KEY,
+                mvrv            REAL,
+                mvrv_prior      REAL NOT NULL,
+                corr_spx_90d    REAL,
+                macro_risk_raw  REAL,
+                macro_mult      REAL NOT NULL,
+                exposure_scalar REAL NOT NULL,
+                confidence      REAL,
+                components      TEXT,
+                computed_at     TEXT DEFAULT (datetime('now'))
+            );
         """)
         await db.commit()
 
@@ -1281,3 +1294,57 @@ async def list_products_by_status(status: str) -> List[str]:
         )
         rows = await cursor.fetchall()
         return [r[0] for r in rows]
+
+
+# ── Macro-regime state (offline Phase-1 layer; not wired to the scan loop) ────
+async def upsert_regime_state(row: Dict) -> None:
+    """Insert or replace one daily regime row, keyed on its date."""
+    async with _db() as db:
+        await db.execute(
+            """INSERT INTO regime_state
+                 (date, mvrv, mvrv_prior, corr_spx_90d, macro_risk_raw,
+                  macro_mult, exposure_scalar, confidence, components)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(date) DO UPDATE SET
+                 mvrv            = excluded.mvrv,
+                 mvrv_prior      = excluded.mvrv_prior,
+                 corr_spx_90d    = excluded.corr_spx_90d,
+                 macro_risk_raw  = excluded.macro_risk_raw,
+                 macro_mult      = excluded.macro_mult,
+                 exposure_scalar = excluded.exposure_scalar,
+                 confidence      = excluded.confidence,
+                 components      = excluded.components,
+                 computed_at     = datetime('now')""",
+            (
+                row["date"],
+                row.get("mvrv"),
+                row["mvrv_prior"],
+                row.get("corr_spx_90d"),
+                row.get("macro_risk_raw"),
+                row["macro_mult"],
+                row["exposure_scalar"],
+                row.get("confidence"),
+                row.get("components"),
+            ),
+        )
+        await db.commit()
+
+
+async def get_latest_regime_state() -> Optional[Dict]:
+    """Most recent regime row, or None when the table is empty."""
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM regime_state ORDER BY date DESC LIMIT 1")
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_regime_series(start: str, end: str) -> List[Dict]:
+    """Regime rows with `start <= date <= end`, oldest first."""
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM regime_state WHERE date >= ? AND date <= ? ORDER BY date ASC",
+            (start, end),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
