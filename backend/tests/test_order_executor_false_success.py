@@ -540,3 +540,131 @@ def test_non_dict_responses_are_never_accepted():
     for junk in (None, [], "ok", 0, MagicMock()):
         assert _accepted_placement(junk) is None
         assert _explicit_rejection(junk) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review round 1 on this branch (Codex): a persistence failure must not discard
+# an accepted order id.
+#
+# Once `_accepted_placement` returns an id, a REAL ORDER EXISTS at the exchange.
+# The persistence that follows — `save_order`, then `mark_signal_acted` — was
+# left unguarded, so an exception there propagated out of the method and the
+# accepted identifier went with it: no row names the order, and the caller
+# receives an exception rather than a result carrying the id.
+#
+# The old code was worse in a different way (persistence sat inside the retry
+# loop, so a failed write triggered another placement), but "no longer retries"
+# is not the same as "does not lose the order". An accepted placement whose id
+# is discarded is unreconcilable exposure, which is the defect class this branch
+# exists to remove.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["save_order", "mark_signal_acted"])
+async def test_signal_persistence_failure_preserves_the_accepted_order_id(failing, signal_buy):
+    signal_buy["id"] = 77  # so mark_signal_acted is reached
+    ex = _live_executor()
+    with (
+        patch("agents.order_executor.coinbase_client") as cb,
+        patch("agents.order_executor.database") as db,
+    ):
+        cb.place_limit_order = AsyncMock(return_value=_ACCEPTED)
+        db.save_order = AsyncMock()
+        db.mark_signal_acted = AsyncMock()
+        getattr(db, failing).side_effect = RuntimeError("db is down")
+        result = await ex.execute_signal(signal_buy)
+
+    assert result["success"] is False
+    assert result["order_id"] == "ex-1", "the accepted id must survive a persistence failure"
+    assert result.get("reconciliation_required") is True
+    # The order exists; nothing may be placed again.
+    assert cb.place_limit_order.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_order_persistence_failure_preserves_the_accepted_order_id():
+    ex = _live_executor()
+    with (
+        patch("agents.order_executor.coinbase_client") as cb,
+        patch("agents.order_executor.database") as db,
+    ):
+        cb.place_market_order = AsyncMock(return_value=_ACCEPTED)
+        db.save_order = AsyncMock(side_effect=RuntimeError("db is down"))
+        result = await ex.execute_market_order("BTC-USD", "BUY", 50.0)
+
+    assert result["success"] is False
+    assert result["order_id"] == "ex-1"
+    assert result.get("reconciliation_required") is True
+    assert cb.place_market_order.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_maker_persistence_failure_preserves_the_accepted_order_id():
+    ex = _live_executor()
+    signal = {
+        "product_id": "BTC-USD",
+        "side": "BUY",
+        "price": 100.0,
+        "bid": 99.5,
+        "ask": 100.5,
+        "quote_size": 50.0,
+        "signal_type": "TEST",
+    }
+    with (
+        patch("agents.order_executor.coinbase_client") as cb,
+        patch("agents.order_executor.database") as db,
+    ):
+        cb.place_limit_order = AsyncMock(return_value=_ACCEPTED)
+        # Set explicitly: on a bare MagicMock, `await_count` is itself a mock, so
+        # comparing it to 0 asserts nothing at all.
+        cb.place_market_order = AsyncMock(return_value=_ACCEPTED)
+        cb.cancel_orders = AsyncMock(return_value=_CANCEL_ACK)
+        db.save_order = AsyncMock(side_effect=RuntimeError("db is down"))
+        result = await ex.execute_maker_signal(signal, timeout_secs=0.01)
+
+    assert result["success"] is False
+    assert result["order_id"] == "ex-1"
+    assert result.get("reconciliation_required") is True
+    # Critically: no market fallback may be attempted for an order we cannot
+    # record, and no cancellation either — that is how one signal becomes two.
+    assert cb.place_market_order.await_count == 0
+    assert cb.cancel_orders.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_snapshot_for_a_different_order_contributes_no_evidence():
+    """Found by Codex probing the ordering assumption in this method.
+
+    The identity check lived inside the FILLED branch, so a snapshot naming a
+    DIFFERENT order fell through to `_confirmed_unfilled_cancel` — which rejects
+    it on identity, correctly refusing the DB write — and then the result was
+    built with that other order's status and fills attached to the order we asked
+    about. Refusing to persist is not enough: a reconciliation record citing
+    another order's 100 units is worse than one citing none, because it looks
+    like evidence. Identity must be established before any field is trusted.
+    """
+    ex = _live_executor()
+    other = {
+        "order_id": "different-2",
+        "status": "FILLED",
+        "pending_cancel": False,
+        "filled_size": "100",
+        "filled_value": "9000",
+    }
+    with (
+        patch("agents.order_executor.coinbase_client") as cb,
+        patch("agents.order_executor.database") as db,
+    ):
+        _cancel_mocks(cb, db, cancel_resp=_CANCEL_ACK, snapshot=other)
+        result = await ex.cancel_order("ex-1")
+
+    assert result["success"] is False
+    assert result.get("reconciliation_required") is True
+    assert result.get("order_id") == "ex-1"
+    assert _persisted_cancel(db) is False
+    # None of the other order's evidence may be attributed to this one.
+    assert result.get("filled_size") is None
+    assert result.get("filled_value") is None
+    assert result.get("status") is None
+    assert "100" not in str(result.get("reason", ""))
