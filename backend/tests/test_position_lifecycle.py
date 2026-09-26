@@ -134,7 +134,9 @@ def test_cancellation_with_fills_is_not_cancelled():
         "filled_value": Decimal("40"),
         "observed_at": 1_800_000_050,
     }
-    with pytest.raises(IllegalTransition):
+    # Either exception is correct: the point is that it is REFUSED. The
+    # exact-zero evidence check now fires before the transition check.
+    with pytest.raises((IllegalTransition, InsufficientEvidence)):
         next_order_state(OrderState.ACCEPTED, "cancel_confirmed", partial)
 
 
@@ -239,9 +241,14 @@ def test_partial_entry_is_open_with_residual():
     assert s is PositionState.OPEN_WITH_RESIDUAL
 
 
-def test_rejected_entry_returns_to_flat():
+def test_rejected_entry_without_zero_proof_is_reconciliation_not_flat():
+    """Stale assertion corrected. A bare reason string is not proof that nothing
+    was filled, so it may not erase exposure. Reaching FLAT now requires
+    affirmative zero-fill and zero-position evidence — see
+    test_entry_failed_reaches_flat_only_with_affirmative_zero_proof in the
+    adversarial suite."""
     s = next_position_state(PositionState.OPENING, "entry_failed", {"reason": "REJECTED"})
-    assert s is PositionState.FLAT
+    assert s is PositionState.RECONCILIATION_REQUIRED
 
 
 def test_rejected_exit_returns_the_position_to_open_never_closed():
