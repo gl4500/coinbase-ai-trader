@@ -256,3 +256,96 @@ Never place the fallback while the limit's state is unknown. Sizing must come fr
 
 Findings 2 and 3 require an invariant #21 amendment and an explicit operator decision; they are
 presented for review rather than proposed for immediate implementation.
+
+---
+
+## Findings 5–8 — false-success placement and cancellation (registered during the fix)
+
+Findings 1–4 were the four sites that conflate **accepted** with **confirmed**. Repairing the two
+assigned ones (`execute_market_order`, `cancel_order`) surfaced two more instances of the same
+pattern in the same module. Both are registered here rather than fixed silently; the parallel Codex
+session reviewed the scope and agreed to include them on this branch, because a shared validator
+makes them one coherent change and leaving a known false-success path beside two repaired ones is the
+worse outcome.
+
+### Finding 5 — `execute_market_order` reports success for a rejected order *(assigned, fixed)*
+
+`resp.get("success_response", resp)` falls back to the **whole response**, so a failure body yields
+`order_id="unknown"`, persists `status="live"`, and returns `{"success": True}`. `resp.get("success")`
+is never read. The literal string `"unknown"` reaches the orders table as though it named something.
+
+### Finding 6 — `cancel_order` persists `"canceled"` on the absence of an exception *(assigned, fixed)*
+
+Coinbase's batch-cancel returns per-order `results`, each with its own `success` and
+`failure_reason`. The old code inspected none of them: any non-throwing call recorded the order as
+cancelled. A refused cancel was recorded as a completed one, and a **partially filled** order had its
+fill erased by a row claiming it was cancelled.
+
+### Finding 7 — `execute_signal` returns success even when it records failure *(registered, then fixed with approval)*
+
+Same fallback and same `"unknown"` default. It *does* compute `status = "live" if resp.get("success")
+else "failed"`, so the database row is right — and then it returns `{"success": True}` regardless. The
+row and the caller disagree about whether an order exists. Every automated entry goes through this
+path, which makes it the highest-traffic instance of the four.
+
+### Finding 8 — the retry loop can double real exposure *(registered, then fixed with approval)*
+
+`execute_signal` retried placement up to three times on exception, with backoff. An exception can be
+raised **after** the request reached the exchange — a timeout, a dropped connection, a malformed
+response to a request that was accepted — so "no response" does not mean "no order". Retrying blind
+can place a second order for one signal. This is the same rule as invariant I4 in the lifecycle
+contract: no automatic retry while state is `UNKNOWN`.
+
+### What the fix establishes
+
+Three outcomes, never two, enforced by one shared validator (`_accepted_placement`,
+`_explicit_rejection`) used by **all three** placement paths:
+
+| Response | Meaning | Result |
+|---|---|---|
+| `success is True` (a real bool) **and** a usable non-placeholder string id | accepted | success |
+| `success is False` | rejected — nothing was placed | clean failure, no reconciliation |
+| anything else, including `success is True` with no usable id | **ambiguous — an order may exist** | `reconciliation_required`, never retried |
+
+`cancel_order` now requires an affirmative per-order acknowledgement **and** a follow-up terminal
+snapshot, reusing the existing `_confirmed_unfilled_cancel` helper rather than a second copy of the
+rule. A partial fill or an unknown state stays `reconciliation_required` and never persists
+`"canceled"`; the known fill evidence and order id survive in the returned result, because a settled
+partial is not a zero-fill cancellation.
+
+**Scope limits.** This repairs how responses are *interpreted* and *recorded*. It does not add ledger
+closure, reconciliation workers, or live integration, and it does not change routing, sizing or
+thresholds. `USE_MAKER_EXECUTION` semantics (invariant #21) are untouched, and the maker regression
+suite passes unchanged.
+
+### Review round on the fix itself — two ways evidence was still lost
+
+The parallel Codex session probed the first version of this repair and found two defects. Both were
+reproduced before being fixed, and both are the same underlying error: **an accepted placement, or a
+cancellation snapshot, was treated as less valuable than the exception or the status that accompanied
+it.**
+
+**Persistence discarded an accepted order id.** Once `_accepted_placement` returns an id, a real order
+exists at the exchange. The `save_order` and `mark_signal_acted` calls that follow were unguarded, so a
+database failure propagated the exception *and took the identifier with it* — leaving an order that
+nothing in the system names. `/api/orders` has no handler for it either, so the caller got an HTTP 500
+and lost the id entirely. Note the first version was still an improvement on the original, where those
+writes sat *inside* the retry loop and a failed write triggered another placement; but "no longer
+retries" is not the same as "does not lose the order". All three placement paths now share
+`_persist_accepted_order`, which reports `reconciliation_required` **with the accepted id** rather than
+raising. The maker path returns before its fill poll and market fallback, because replacing an order
+that could not be recorded is how one signal becomes two positions.
+
+**A cancellation snapshot for a different order contributed its evidence.** The identity check lived
+*inside* the `FILLED` branch, so a snapshot naming another order fell through to
+`_confirmed_unfilled_cancel` — which correctly refused the database write on identity — and the result
+was then built with that other order's `status`, `filled_size` and `filled_value` attached to the order
+we had asked about. Refusing to persist is not sufficient: a reconciliation record citing another
+order's 100 units is *worse* than one citing none, because it looks like evidence. Identity is now
+established before any field is trusted, and a mismatch returns a distinct reason with no status or
+fills at all.
+
+This is worth recording for the same reason §9a of the lifecycle contract exists: the first fix was
+correct about the thing it was aimed at and still lost evidence two different ways, so the rule is not
+"validate the response" but **"an identifier or a fill is the most valuable thing in the record, and
+nothing — not an exception, not a status field — may be allowed to discard or misattribute it."**
