@@ -16,9 +16,10 @@ honestly rather than pass ambiguously.
 ## 0. Why this exists
 
 The strategy-discovery pipeline reports numbers that are individually correct and collectively answer
-a different question than their readers ask. Three repairs landed on 2026-09-26 — chronological
-folds, distinct-fold counting, and exact executable rules — and none of them changed that, because
-none of them was about it.
+a different question than their readers ask. Three repairs were implemented on 2026-09-26 —
+chronological folds, distinct-fold counting, and exact executable rules — and none of them changed
+that, because none of them was about it. All three are **unmerged draft PRs** (#62, #67, #69) at the
+time of writing, so nothing described here is in `main`.
 
 After those repairs, an emitted profile still says:
 
@@ -36,14 +37,23 @@ problem this specification addresses, and it is not fixed by making any one of t
 
 ## 1. The distinction that everything else rests on
 
-**A direction group** is the set of leaves sharing a root split, accumulated across outer folds. It
-has no executable form: its members are different rules, fitted on different training windows, and no
+**A direction group** is the set of leaves sharing the root split's **feature and direction**,
+accumulated across outer folds. The root *threshold* may differ from fold to fold and the leaves still
+group together, so the group is even looser than "same split" suggests. It has no executable form: its members are different rules, fitted on different training windows, and no
 single predicate reproduces its trade set. A direction group can have a *measurement*. It cannot have
 a *policy*.
 
-**A frozen executable policy** is one exact machine rule together with everything needed to act on
-it — entry condition, exit rule, holding period, sizing, and cost model — fixed and identified
-**before** the period over which it is evaluated.
+**A frozen executable policy** is a fully specified decision process together with everything needed
+to act on it — entry condition, exit rule, holding period, sizing, and cost model — fixed and
+identified **before** the period over which it is evaluated.
+
+The frozen object does **not** have to be a static predicate. A *predeclared algorithm* — "refit this
+tree on a trailing window at this cadence, with these hyperparameters and this leaf-selection rule,
+and trade the resulting leaf" — is equally a frozen policy, provided every input, parameter and
+decision rule is fixed in advance and nothing is chosen with knowledge of the evaluation period. What
+must be frozen is the **decision procedure**, not necessarily a single fixed rule. A static rule is
+merely the simplest case, and requiring only static rules would rule out the retraining designs most
+likely to be worth evaluating.
 
 > **Only a frozen executable policy can produce out-of-sample evidence.** A direction-group aggregate
 > is a summary of a search, and the search saw the data it is being scored on.
@@ -55,8 +65,9 @@ Every requirement below follows from that sentence.
 ## 2. A concrete counterexample
 
 One product, horizon 24 h, five chronological outer folds `P1…P5`. The tree is refitted per fold and
-the root split is `price_over_ema20 <= 1.02` in all five, so every left-side leaf shares one direction
-group. In each of the first four folds a *different* sub-split qualifies:
+the root split is on `price_over_ema20` in the same direction each time — **its threshold varies by
+fold**, which does not prevent grouping — so every left-side leaf falls in one direction group. In each
+of the first four folds a *different* sub-split qualifies:
 
 | Fold | Qualifying leaf | Its exact rule | Return in that fold |
 |---|---|---|---|
@@ -73,8 +84,12 @@ What is emitted today, all of it correctly computed:
 - `cumulative_profit_raw = +16.0 %` — the pooled trades of A, B, C and D.
 - the machine rule of **D**, the last leaf written into the fold summary.
 
-Now evaluate **D alone**, as a frozen policy, across all five folds — the question a reader believes
-has been answered:
+Now ask what **D alone** would have done across all five folds. **This is a hindsight
+counterfactual, not out-of-sample evidence, and the distinction matters:** D was selected *in* P4, so
+its P1–P3 results are retrospective and could not have been earned by anyone. The counterfactual is
+still decisive for the point at hand — it shows the advertised figure is **not attributable to the
+rule the artifact names** — but it is not itself evidence for or against D. Genuine out-of-sample
+evidence for D would require a freeze timestamp preceding the evaluated period (R3, R7):
 
 | Fold | P1 | P2 | P3 | P4 | P5 | Total |
 |---|---|---|---|---|---|---|
@@ -84,10 +99,25 @@ The artifact advertises **+16.0 %, passed 4 of 5 folds** for a policy whose only
 returns **−5.0 %** over the same span. No number in it is wrong. The aggregation simply answers
 "did anything on this side of the split ever work?" while the reader hears "does this rule work?"
 
-**Overlap makes it worse, and separately.** If A's and B's trades occupy the *same* bars on the same
-product, the additive sum says +11 % while a one-unit capital account could hold only one position, or
-half of each for +5.5 %. An additive per-trade sum can therefore exceed what any funded account could
-have earned, with no error in any single trade's arithmetic.
+**Overlap is a separate defect, and it needs a separate illustration.** It cannot be shown with A and
+B above: those are `vol_over_mc <= 0.05` and `vol_over_mc > 0.05`, mutually exclusive predicates drawn
+from different folds, so they can never occupy the same bar. Overlap requires two rules that can be
+*concurrently active*.
+
+Take two hypothetical profiles on one product, from different folds and therefore different trees,
+whose predicates are not mutually exclusive:
+
+- **X** — `price_over_ema20 <= 1.02 AND vol_over_mc <= 0.05`
+- **Y** — `rsi_14 <= 30 AND ret_24h > 0.00`
+
+Assume **unlevered unit capital**: one account, one unit, no borrowing. On a stretch of bars where
+both predicates hold, each profile records its own trade — say **+6 %** and **+5 %**. Summed additively
+that reads **+11 %**. But one unit of capital cannot fund both positions: it funds one, or half of
+each for **+5.5 %**.
+
+So an additive per-trade sum can report more than any unlevered account could have earned, with no
+error in any single trade's arithmetic. The overstatement is a property of the *summation*, not of the
+trades — which is why R4 requires a ledger rather than better per-trade accounting.
 
 ---
 
@@ -114,9 +144,24 @@ appear as the policy's performance.
 `blocker: selection_contaminates_evaluation`
 
 Three levels, explicitly separated: inner CV chooses hyperparameters; outer folds provide selection
-evidence; an **untouched holdout** provides the evidence of record. The holdout is scored once per
-policy identity. A second scoring of the same holdout after any change makes it a selection set, and
-the report must say so rather than silently reusing it.
+evidence; an **untouched holdout** provides the evidence of record.
+
+**Holdout access is accounted at the campaign level, not per policy identity.** An earlier draft of
+this requirement said "scored once per policy identity", which is self-defeating: since R7 makes
+identity a content digest, any change of sizing or cost model mints a *fresh* identity for free, so an
+unlimited number of candidates could each claim a first look at the same holdout. That is the
+multiple-testing leak this requirement exists to prevent, reintroduced by the granularity of the rule
+itself.
+
+Instead: a holdout window is **reserved** for a research campaign, and every candidate evaluated
+against it is logged — including the ones discarded. The report states how many candidates have
+touched that window, so a result can be read against the number of attempts that produced it. Any
+scoring after the first, by any identity, is a **selection** use and the report must say so. A new
+identity does not buy a fresh holdout; a new **data window** does.
+
+**Freeze precedes evaluation.** A policy identity carries the timestamp at which it was frozen, and
+evaluation is valid only over data after it. A retrospective evaluation is labelled a counterfactual
+(see §2) and may never be reported as out-of-sample.
 
 ### R4 — Capital is a ledger, and concurrent exposure is explicit
 `blocker: additive_returns_not_funded`
@@ -137,19 +182,38 @@ comparison, and "beat zero" is not a finding.
 ### R6 — Drawdown comes from the funded equity curve
 `blocker: drawdown_not_equity_based`
 
-Maximum drawdown is the worst peak-to-trough of the ledger's equity curve. Drawdown computed on an
-additive return series describes a curve that was never funded and understates the capital at risk
-whenever positions overlap.
+Maximum drawdown is the worst peak-to-trough of the ledger's equity curve, and that curve must
+**mark open positions to market** — a drawdown computed from closed trades alone cannot see an
+unrealised loss on a position still held, which is exactly when capital is most at risk.
+
+Drawdown computed on an additive return series describes a curve that was never funded, and it can
+distort risk in **either direction**: it understates when overlapping positions demand more capital
+than the series assumes, and it can overstate when sequentially-scaled returns are summed as though
+each were taken on the full account. Neither error is safe to carry.
 
 ### R7 — The policy is identified by content
 `blocker: policy_identity_unbound`
 
 A policy identity is a digest over its exact machine rule, its exit and holding rule, its sizing rule,
-and its cost model. The identity is recorded with the evidence, so the object evaluated is provably
-the object later run. An ordinal, a name, or a position in a sorted list is not an identity: it is not
-stable across runs. (This mirrors the exact-rule binding already being built; the addition here is
-that **rule alone is not a policy** — the same rule with different sizing is a different policy and
-must not inherit the rule's evidence.)
+and its cost model. An ordinal, a name, or a position in a sorted list is not an identity: it is not
+stable across runs. **Rule alone is not a policy** — the same rule with different sizing is a
+different policy and must not inherit the rule's evidence.
+
+**A digest proves content integrity, not execution.** It establishes that the description has not
+changed since it was recorded; it says nothing about whether the code that ran implements that
+description. Claiming otherwise would repeat the accepted-versus-confirmed error in a new place.
+
+The evidence must therefore also carry a **manifest**, and the report is not complete without it:
+
+| Manifest field | Why |
+|---|---|
+| executable implementation + config identity | the description is not the executor; a config change is a different policy |
+| feature schema, ordered | a rule naming a column means nothing without the schema that defines it |
+| evaluation data identity and time boundaries | fixes *what* was evaluated and *over which span*, so a later re-run is comparable |
+| freeze timestamp | makes R3's freeze-precedes-evaluation rule checkable rather than asserted |
+
+The manifest is integrity evidence too, not attestation: it records what was claimed to run, and an
+independent execution record remains a separate requirement this specification does not satisfy.
 
 ### R8 — Reporting fails closed
 `blocker: report_incomplete_fail_closed`
@@ -197,7 +261,7 @@ prospective execution evidence, which by definition cannot come from a backtest.
 
 ## 5. Relationship to the 2026-09-26 repairs
 
-These repairs are prerequisites, not substitutes:
+These repairs are prerequisites, not substitutes — and all are unmerged drafts:
 
 - **Chronological folds** removed leakage from fold construction. Necessary before any per-fold number
   means anything.
