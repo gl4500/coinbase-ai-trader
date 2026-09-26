@@ -11,8 +11,11 @@ Format: reverse-chronological by session date.
 
 - Replace future-inclusive CV with expanding chronological inner/outer folds,
   initial warmup and label-horizon purging; omit unusable folds.
-- Sort/validate hourly timestamps before mining and skip folds without inner
-  training history. Preserve feature/label alignment through prefix training.
+- Sort/validate hourly timestamps before mining. Preserve feature/label alignment
+  through prefix training. Require five evaluable outer folds, three inner folds
+  each and minimum training history; report insufficient evidence explicitly.
+  Schema-2 profiles record evaluated fold count and chronological validation
+  version; legacy defaults remain unverified.
 - Phase 4 JSON and Markdown now explicitly block deployment. Passing numeric
   gates rank research candidates only; historical results require regeneration.
 - Add regression tests, an evaluation contract and the active Claude/Codex issue
