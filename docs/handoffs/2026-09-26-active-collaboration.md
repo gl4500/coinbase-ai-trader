@@ -152,7 +152,8 @@ artifacts were still accepted; producer and loader now require
 
 57 targeted miner/loader/writer/driver tests passed; one expensive synthetic
 mining test is reserved for the full hook. Pinned Ruff 0.9.0 lint/format pass on
-253 backend files. Full validation and commit wait for Claude's test-slot release.
+253 backend files. Full hook passed in 71b0083: 1534 passed, 65 skipped, one deselected, one
+xfailed, two xpassed; 14 existing warnings, 383.43 seconds.
 The deflation search count is a separate constant (nine combinations) and the
 standard deviation comes from inner scores; neither reads fold_pass_count.
 Selected-only trade aggregation and the latest-leaf summary remain unresolved,
