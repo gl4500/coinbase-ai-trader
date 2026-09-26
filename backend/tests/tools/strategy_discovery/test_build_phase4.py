@@ -111,7 +111,9 @@ def _write_minimal_phase3(phase3_dir: Path):
         ),
     ]
     df = pd.DataFrame(rows, columns=_PROFILE_COLUMNS)
-    df["schema_version"] = 2
+    df["schema_version"] = 3
+    df["rule_version"] = "profile_rule_binding_v1"
+    df["rule_digest"] = None
     df["validation_version"] = "chronological_distinct_folds_v2"
     df["n_folds_evaluated"] = 5
     phase3_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +125,9 @@ def _write_minimal_phase3(phase3_dir: Path):
         "ETH-USD__1": "price_over_ema20 > 1.0",
         "SOL-USD__2": "price_over_ema20 > 1.0",
     }
-    (phase3_dir / "rule_paths_h24.json").write_text(json.dumps(sidecar), encoding="utf-8")
+    from tests.tools.strategy_discovery.rule_fixtures import write_bound_sidecar_fixture
+
+    write_bound_sidecar_fixture(phase3_dir / "rule_paths_h24.json", sidecar)
 
 
 def _write_minimal_phase2(phase2_dir: Path, pids):
