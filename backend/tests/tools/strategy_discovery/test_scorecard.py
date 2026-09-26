@@ -120,7 +120,9 @@ def test_verdict_picks_highest_deflated_passing_cap():
     ]
     chosen_cap, verdict = pick_verdict(cards)
     assert chosen_cap == 5
-    assert "deploy" in verdict.lower()
+    assert "research candidate" in verdict.lower()
+    assert "deployment blocked" in verdict.lower()
+    assert "deploy at" not in verdict.lower()
     assert "5" in verdict
 
 
@@ -186,3 +188,10 @@ def test_render_scorecard_produces_markdown_with_all_cap_sections():
     # Mentions each cap and the verdict
     assert "N=3" in md and "N=4" in md and "N=5" in md
     assert "Verdict" in md or "verdict" in md
+
+
+def test_empty_scorecard_still_discloses_missing_validation():
+    md = render_scorecard([])
+    assert "Deployment blocked" in md
+    assert "untouched holdout" in md.lower()
+    assert "research" in md.lower()

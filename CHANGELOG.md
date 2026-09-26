@@ -7,6 +7,17 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.85 - 2026-09-26 - Causal strategy validation and research-only verdicts
+
+- Replace future-inclusive CV with expanding chronological inner/outer folds,
+  initial warmup and label-horizon purging; omit unusable folds.
+- Sort/validate hourly timestamps before mining and skip folds without inner
+  training history. Preserve feature/label alignment through prefix training.
+- Phase 4 JSON and Markdown now explicitly block deployment. Passing numeric
+  gates rank research candidates only; historical results require regeneration.
+- Add regression tests, an evaluation contract and the active Claude/Codex issue
+  register. No retraining, production data changes or live execution changes.
+
 ### Session 58.84 - 2026-09-26 - Review fixes and reconciled maker fallback
 
 - Preserve all non-current outcome rows: the pending query and every v2 mutation

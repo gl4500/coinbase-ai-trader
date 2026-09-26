@@ -152,3 +152,79 @@ def test_mine_profiles_for_pid_horizon_returns_qualifying_leaves_only(tmp_path):
     assert len(winners) >= 1, (
         f"no winners; got profiles: {[(p.avg_win, p.cumulative_profit_deflated) for p in profiles]}"
     )
+
+
+def _stub_mining_frame(monkeypatch, timestamps, labels=None):
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tools.strategy_discovery import mine_profiles as miner
+
+    n = len(timestamps)
+    frame = pd.DataFrame({name: np.arange(n, dtype=float) for name in miner._FEATURE_COLUMNS})
+    frame["ts"] = timestamps
+    frame["label_h168"] = np.arange(n, dtype=float) if labels is None else labels
+    monkeypatch.setattr(pq, "read_table", lambda _: pa.Table.from_pandas(frame))
+    return miner
+
+
+def test_miner_sorts_rows_before_building_tensors(monkeypatch):
+    timestamps = np.arange(300, dtype="int64")[::-1] * 3_600_000
+    miner = _stub_mining_frame(monkeypatch, timestamps)
+
+    class Captured(Exception):
+        pass
+
+    def capture(ts, **kwargs):
+        np.testing.assert_array_equal(ts.cpu().numpy(), np.sort(timestamps))
+        raise Captured
+
+    monkeypatch.setattr(miner, "build_next_eligible", capture)
+    with pytest.raises(Captured):
+        miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "subhour", "null", "fractional"])
+def test_miner_rejects_invalid_hourly_timestamps(monkeypatch, kind):
+    ts = np.arange(300, dtype="int64") * 3_600_000
+    if kind == "duplicate":
+        ts[1] = ts[0]
+    elif kind == "subhour":
+        ts[1] = ts[0] + 1
+    else:
+        ts = ts.astype(float)
+        ts[1] = np.nan if kind == "null" else ts[1] + 0.5
+    miner = _stub_mining_frame(monkeypatch, ts)
+    with pytest.raises(ValueError, match="timestamp"):
+        miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")
+
+
+def test_miner_skips_outer_folds_without_usable_inner_history(monkeypatch):
+    miner = _stub_mining_frame(monkeypatch, np.arange(300, dtype="int64") * 3_600_000)
+
+    def forbidden(**kwargs):
+        pytest.fail("must not fit a tree without usable inner folds")
+
+    monkeypatch.setattr(miner, "fit_tree", forbidden)
+    assert miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu") == []
+
+
+def test_miner_training_prefix_preserves_feature_label_alignment(monkeypatch):
+    timestamps = np.arange(2000, dtype="int64")[::-1] * 3_600_000
+    miner = _stub_mining_frame(monkeypatch, timestamps)
+
+    class Captured(Exception):
+        pass
+
+    def capture(features, labels, next_eligible, **kwargs):
+        assert len(features) < len(labels)
+        np.testing.assert_array_equal(
+            features[:, 0].cpu().numpy(), labels[: len(features)].cpu().numpy()
+        )
+        assert features[0, 0].item() == 1999
+        raise Captured
+
+    monkeypatch.setattr(miner, "fit_tree", capture)
+    with pytest.raises(Captured):
+        miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")

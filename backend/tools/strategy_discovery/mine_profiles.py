@@ -280,11 +280,19 @@ def mine_profiles_for_pid_horizon(
     from collections import defaultdict
 
     import pyarrow.parquet as _pq
+    from pandas.api.types import is_integer_dtype
 
     df = _pq.read_table(parquet_path).to_pandas()
     label_col = f"label_h{int(horizon)}"
     if label_col not in df.columns:
         return []
+    # Positional purging assumes bars are at least one hour apart. Validate
+    # before dropping unlabeled rows so invalid source rows cannot be hidden.
+    if "ts" not in df or not is_integer_dtype(df["ts"].dtype) or df["ts"].isna().any():
+        raise ValueError("timestamps must be non-null integer milliseconds")
+    df = df.sort_values("ts", kind="stable")
+    if df["ts"].duplicated().any() or (df["ts"].diff().dropna() < 3_600_000).any():
+        raise ValueError("timestamps must be unique and at least one hour apart")
     df = df.dropna(subset=[label_col]).reset_index(drop=True)
     n = len(df)
     if n < 200:
@@ -305,6 +313,11 @@ def mine_profiles_for_pid_horizon(
 
     for outer_train_idx, outer_test_idx in outer:
         inner = inner_folds(outer_train_idx, n_folds=3, embargo_bars=int(horizon))
+        if not inner:
+            continue
+        # Both levels are prefixes of the sorted frame. fit_tree uses local
+        # row IDs against the full labels/next_eligible arrays, so the prefix
+        # invariant is required for correct feature/label alignment.
         inner_scores: Dict[tuple, list] = defaultdict(list)
         for depth in _DEPTH_GRID:
             for min_leaf in _MIN_LEAF_GRID:
