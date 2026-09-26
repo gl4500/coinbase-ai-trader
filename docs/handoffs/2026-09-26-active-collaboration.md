@@ -18,6 +18,8 @@ TaskCreate is unavailable; this register records the required find-list-fix sequ
 
 8. Completed, round-trip tests pass: parquet schema assertion exposed newly added validation metadata. Version new profile rows as schema 2 and round-trip both causal and legacy-unverified defaults. Existing rows are not relabeled.
 
+9. Deferred (Claude review): profile_loader still accepts missing/legacy validation metadata. Enforce chronological_v1 and five evaluated folds with counted exclusions before treating archived profiles as current research inputs. Phase 4 remains deployment-blocked regardless.
+
 ## Coordination decisions
 
 - Claude acknowledged c7249dc supersedes maker PR #59, including confirmed empty-cancel, missing-fill, SELL sizing and pending-cancel defects. PR #59 must not be merged in its present form. Claude subsequently reported PR #59 closed by operator authorization; preserved branch for provenance. No PR closed by Codex.
@@ -46,4 +48,13 @@ Claude reports both scan and WS resolver paths implemented; commit/tests pending
 - Additional source defect registered with Claude: manual execute_market_order accepts a missing exchange success/order ID, and cancel_order marks canceled without verifying per-order success. These are separate from the repaired maker path and remain pending a shared execution adapter.
 
 
-Follow-up validation: all 17 miner tests passed, including the unchanged positive-cohort profitability assertions on adequate history. The parquet metadata test then exposed its obsolete schema expectation; new rows now use schema 2 and round-trip tests verify causal metadata versus legacy-unverified defaults. Final targeted check: 19 passed, one already-passed expensive cohort test deselected. Final full pre-commit run pending; results will be recorded in the PR/session-link handoff.
+Follow-up validation: all 17 miner tests passed, including the unchanged positive-cohort profitability assertions on adequate history. The parquet metadata test then exposed its obsolete schema expectation; new rows now use schema 2 and round-trip tests verify causal metadata versus legacy-unverified defaults. Final targeted check: 19 passed, one already-passed expensive cohort test deselected. Final full pre-commit suite passed: 1440 passed, 65 skipped, 1 deselected, 1 xfailed, 2 xpassed; 14 existing sklearn warnings; 425.30 seconds. Implementation commits f301298 and 06f376e. Scoped Ruff and whitespace checks pass. No tests were bypassed.
+
+
+## Review closure
+
+Claude reviewed PR #60 with no blockers: https://github.com/gl4500/coinbase-ai-trader/pull/60#issuecomment-5849379672 . GitHub checks on that commit passed. Legacy rows are excluded in both query and mutation guards, which also prevents old pending rows consuming the resolver queue indefinitely. An explicit legacy-pending diagnostic remains an optional follow-up.
+
+PR #61 contains Claude's independently based executor patch. Its full-suite result is Claude-reported (1315 passed); Codex independently verified the 29 lifecycle/exit tests. No integration merge was performed.
+
+The dollar-bar worktree uses bar-count horizons and requires its own integration review; hourly timestamp spacing validation must not be copied into it blindly. The agreed position/order lifecycle spec and pure validator are Claude's next local deliverables, not completed components of this patch.
