@@ -1021,16 +1021,18 @@ async def insert_signal_outcome(d: Dict) -> None:
 
 
 async def get_pending_outcomes() -> List[Dict]:
-    """Return all rows whose check_after has passed and are still unresolved."""
+    """Return matured pending rows of the current version only."""
     import time as _time
+
+    from services import outcome_labels as ol
 
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT * FROM signal_outcomes WHERE outcome IS NULL "
+            "SELECT * FROM signal_outcomes WHERE outcome IS NULL AND label_version=? "
             "AND COALESCE(target_time, check_after) <= ? "
             "ORDER BY COALESCE(target_time, check_after) ASC LIMIT 100",
-            (_time.time(),),
+            (ol.LABEL_VERSION, _time.time()),
         )
         return [dict(r) for r in await cursor.fetchall()]
 
@@ -1132,7 +1134,7 @@ async def resolve_signal_outcome_v2(
                    price_observed_at=?, price_source=?, processed_at=?,
                    label_version=?, lesson_text=?,
                    exit_price=?, pct_change=?, checked_at=?
-               WHERE id=? AND outcome IS NULL""",
+               WHERE id=? AND outcome IS NULL AND label_version=?""",
             (
                 outcome,
                 signed_return,
@@ -1147,6 +1149,7 @@ async def resolve_signal_outcome_v2(
                 signed_return,
                 _now(),
                 row_id,
+                ol.LABEL_VERSION,
             ),
         )
         await db.commit()
@@ -1159,12 +1162,14 @@ async def mark_signal_outcome_unavailable(row_id: int, reason: str) -> bool:
     UNAVAILABLE is not a scoring outcome and is excluded from accuracy
     denominators. Guarded by `outcome IS NULL` for the same reason as above.
     """
+    from services import outcome_labels as ol
+
     async with _db() as db:
         cursor = await db.execute(
             """UPDATE signal_outcomes
                SET outcome='UNAVAILABLE', unresolved_reason=?, processed_at=?
-               WHERE id=? AND outcome IS NULL""",
-            (reason, _now(), row_id),
+               WHERE id=? AND outcome IS NULL AND label_version=?""",
+            (reason, _now(), row_id, ol.LABEL_VERSION),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -1172,11 +1177,13 @@ async def mark_signal_outcome_unavailable(row_id: int, reason: str) -> bool:
 
 async def bump_signal_outcome_attempts(row_id: int) -> None:
     """Count one failed resolution attempt without resolving the row."""
+    from services import outcome_labels as ol
+
     async with _db() as db:
         await db.execute(
             "UPDATE signal_outcomes SET resolve_attempts = COALESCE(resolve_attempts,0) + 1 "
-            "WHERE id=? AND outcome IS NULL",
-            (row_id,),
+            "WHERE id=? AND outcome IS NULL AND label_version=?",
+            (row_id, ol.LABEL_VERSION),
         )
         await db.commit()
 

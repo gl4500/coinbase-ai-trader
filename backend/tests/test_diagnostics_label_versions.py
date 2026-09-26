@@ -216,3 +216,28 @@ def test_return_uses_the_versioned_signed_return_column(tmp_path):
     _insert(con, rows)
     out = d.signal_edge(con, cutoff=None, now=_NOW)
     assert out["e_return"] == 0.04
+
+
+def test_future_scored_rows_do_not_enter_any_current_denominator(tmp_path, monkeypatch):
+    con = _seed(tmp_path)
+    _insert(con, [_row("WIN", target=_FUTURE), _row("LOSS", target=_MATURED)])
+    monkeypatch.setattr(d.time, "time", lambda: _NOW)
+    out = d.signal_edge(con, cutoff=None, now=_NOW)
+    assert out["n"] == 1
+    assert out["wins"] == 0
+    assert out["confidence_buckets"][0]["n"] == 1
+    assert d.signal_funnel(con, None)["matured"] == 1
+    con.close()
+
+
+def test_compute_diagnostics_honors_its_asof_time(tmp_path, monkeypatch):
+    con = _seed(tmp_path)
+    _insert(con, [_row("WIN", target=_NOW - 1)])
+    con.close()
+    d._CACHE.clear()
+    monkeypatch.setattr(d.time, "time", lambda: _NOW - 100)
+    out = d.compute_diagnostics("all", str(tmp_path / "d.db"), now=_NOW)
+    assert out["signal_edge"]["counts"]["eligible"] == 1
+    assert out["signal_edge"]["n"] == 1
+    assert out["signal_funnel"]["matured"] == 1
+    d._CACHE.clear()

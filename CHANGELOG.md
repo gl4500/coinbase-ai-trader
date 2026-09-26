@@ -7,6 +7,26 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.84 - 2026-09-26 - Review fixes and reconciled maker fallback
+
+- Preserve all non-current outcome rows: the pending query and every v2 mutation
+  now enforce label_version, including legacy rows that never resolved.
+- Store the actual endpoint prices and return without six-decimal truncation;
+  malformed, nonfinite or nonpositive prices and overflowing returns are unavailable.
+- Exclude outcomes before target_time from scored totals, confidence buckets and
+  funnel counts; propagate the diagnostics caller's as-of clock.
+- After maker timeout, require a successful cancellation result for the exact
+  order plus final CANCELLED state, no pending cancel and explicit zero filled
+  size/value before sending a replacement. Partial/uncertain states return
+  reconciliation_required; a full-fill race returns the original maker order.
+- Validate maker and fallback placement responses; preserve order IDs on uncertain
+  outcomes and never automatically retry ambiguous replacement placement.
+- Market SELL replacement uses the original base quantity; BUY keeps quote sizing.
+- Added regression coverage and updated finding-4 characterisation assertions to
+  the repaired contract. Findings 1-3 remain documented and unfixed in this patch.
+- Work is isolated on fix/validated-labels-maker-fallback, stacked on 7bd327c.
+  No live migration, backend restart, push, merge or deployment.
+
 ### Session 58.83 — 2026-09-26 — Outcome-label contract v2 + diagnostics separation + execution findings
 
 Prerequisite work for any further model or strategy experiment, driven by
