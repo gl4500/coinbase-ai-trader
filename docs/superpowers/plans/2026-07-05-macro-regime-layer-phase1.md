@@ -50,7 +50,7 @@
 **Interfaces:**
 - Produces: `RegimeState` dataclass with fields `date:str, mvrv:Optional[float], mvrv_prior:float, corr_spx_90d:Optional[float], macro_risk_raw:Optional[float], macro_mult:float, exposure_scalar:float, confidence:float, components:Dict[str,float]`; module constants `MVRV_ANCHORS`, `MACRO_K`, `EXPOSURE_CLAMP`, `REGIME_STALE_DAYS`; method `RegimeState.to_row() -> dict` and `RegimeState.from_row(dict) -> RegimeState`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/__init__.py` (empty) and `backend/tests/regime/test_state.py`:
 
@@ -93,12 +93,12 @@ def test_roundtrip_row():
     assert back.mvrv == 1.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_state.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'services.regime'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `backend/services/regime/__init__.py` (empty file). Create `backend/services/regime/state.py`:
 
@@ -153,12 +153,12 @@ class RegimeState:
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_state.py -v`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rev-parse --abbrev-ref HEAD   # expect feat/macro-regime-layer
@@ -185,7 +185,7 @@ git log -1 --stat
   - `macro_mult(corr_spx_90d: Optional[float], macro_risk_raw: Optional[float], k: float = MACRO_K) -> float` — `1 + k*max(0,corr)*risk`; any `None` → 1.0.
   - `evaluate(*, date: str, mvrv: Optional[float], corr_spx_90d: Optional[float], macro_risk_raw: Optional[float], mvrv_age_days: int = 0, macro_age_days: int = 0) -> RegimeState` — applies staleness (age > `REGIME_STALE_DAYS` ⇒ treat input as `None`), combines + clamps, sets `confidence` = fraction of fresh factors, never raises.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/test_macro_regime.py`:
 
@@ -281,12 +281,12 @@ class TestEvaluate:
         assert 0.4 <= rs.exposure_scalar <= 1.25
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_macro_regime.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'services.regime.macro_regime'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `backend/services/regime/macro_regime.py`:
 
@@ -370,12 +370,12 @@ def evaluate(*, date: str, mvrv: Optional[float], corr_spx_90d: Optional[float],
     )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_macro_regime.py -v`
 Expected: PASS (all tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -399,7 +399,7 @@ git log -1 --stat
   - `corr_spx_90d(btc_closes: list[float], spx_closes: list[float], window: int = 90) -> Optional[float]` — Pearson corr of daily log returns over the last `window` overlapping pairs; `None` if < 30 usable pairs.
   - `macro_risk_raw(spx_closes: list[float], dxy_closes: list[float], real_yield: list[float]) -> Optional[float]` — mean of available standardized sub-signals (equity trend, dollar direction, real-yield direction), clipped to [-1, 1]; `None` if none computable.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/test_features.py`:
 
@@ -455,12 +455,12 @@ def test_macro_risk_clipped():
     assert -1.0 <= v <= 1.0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_features.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'services.regime.features'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `backend/services/regime/features.py`:
 
@@ -529,12 +529,12 @@ def macro_risk_raw(spx_closes: List[float], dxy_closes: List[float],
     return _clip(sum(subs) / len(subs))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_features.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -560,7 +560,7 @@ git log -1 --stat
   - `load_aligned(start: str, cache_dir: str, session_get=_urlopen) -> "pd.DataFrame"` — columns `btc, spx, dxy, real_yield, mvrv`, daily, ffilled ≤4d; reads a `<cache_dir>/regime_sources.parquet` cache first and refetches only if the cache is stale/absent, then rewrites it. Network failure falls back to whatever the cache holds.
 - Notes: `session_get(url, headers)->bytes` is injected so tests never hit the network. CoinMetrics REQUIRES a browser User-Agent (else 403); FRED needs none. Series ids: BTC=`CBBTCUSD`, SPX=`SP500`, DXY=`DTWEXBGS`, real_yield=`DFII10`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/test_sources.py`:
 
@@ -626,12 +626,12 @@ def test_load_aligned_uses_cache_on_network_failure(tmp_path):
     assert len(out) == 2
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_sources.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'services.regime.sources'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `backend/services/regime/sources.py`:
 
@@ -724,12 +724,12 @@ def load_aligned(start: str, cache_dir: str, session_get: Callable = _urlopen) -
     return df
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_sources.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -755,7 +755,7 @@ git log -1 --stat
   - `async get_latest_regime_state() -> Optional[dict]` — newest row as dict (or None).
   - `async get_regime_series(start: str, end: str) -> List[dict]` — rows in `[start, end]` ascending by date.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/test_regime_store.py`:
 
@@ -805,12 +805,12 @@ async def test_series_range(tmp_path, monkeypatch):
 
 Note: if the DB init entry point is not named `init_db`, match the existing name used elsewhere in the test suite (grep `def init` in `database.py`); use that name in both the test and Step 3.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_regime_store.py -v`
 Expected: FAIL — `AttributeError: module 'database' has no attribute 'upsert_regime_state'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `backend/database.py`, add this table inside the existing `CREATE TABLE IF NOT EXISTS ...` init block (alongside the other tables):
 
@@ -872,12 +872,12 @@ async def get_regime_series(start: str, end: str) -> List[dict]:
         return [dict(r) for r in await cur.fetchall()]
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_regime_store.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -900,7 +900,7 @@ git log -1 --stat
 - Consumes: `sources.load_aligned` (Task 4), `features.corr_spx_90d`/`macro_risk_raw` (Task 3), `macro_regime.evaluate` (Task 2), `database.upsert_regime_state` (Task 5).
 - Produces: `build_series(df: "pd.DataFrame") -> list[RegimeState]` — for each date from index position 90 onward, compute features from the trailing window + evaluate; and `async persist(states: list[RegimeState]) -> int` — upsert each, returns count. A `__main__` CLI wires `load_aligned -> build_series -> persist`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/test_build_regime_series.py`:
 
@@ -946,12 +946,12 @@ def test_build_series_empty_frame():
     assert build_series(pd.DataFrame(columns=["btc", "spx", "dxy", "real_yield", "mvrv"])) == []
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_build_regime_series.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'tools.regime.build_regime_series'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `backend/tools/regime/__init__.py` (empty). Create `backend/tools/regime/build_regime_series.py`:
 
@@ -1021,12 +1021,12 @@ if __name__ == "__main__":
     asyncio.run(_main(a.start, a.cache_dir))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_build_regime_series.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -1054,7 +1054,7 @@ git log -1 --stat
   - `compare(trades, scalar_by_date) -> dict` — `{baseline: metrics, scaled: metrics, delta: {...}, by_year: {...}, verdict: str}`. `verdict` = "HELPS" if scaled sharpe ≥ baseline AND scaled max_drawdown ≤ baseline (less negative) AND scaled total ≥ 0.9×baseline; else "NO".
   - A `__main__` CLI loads real trades + regime series from the DB and prints the comparison.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `backend/tests/regime/test_backtest_regime.py`:
 
@@ -1103,12 +1103,12 @@ def test_compare_flags_improvement():
     assert res["verdict"] in ("HELPS", "NO")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_backtest_regime.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'tools.regime.backtest_regime'`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `backend/tools/regime/backtest_regime.py`:
 
@@ -1209,12 +1209,12 @@ if __name__ == "__main__":
     asyncio.run(_main())
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/test_backtest_regime.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full regime suite + commit**
+- [x] **Step 5: Run the full regime suite + commit**
 
 ```bash
 cd backend && "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe" -m pytest tests/regime/ -q
@@ -1234,13 +1234,13 @@ git log -1 --stat
 **Files:**
 - Modify: `CHANGELOG.md` (new session entry), `CLAUDE.md` (Architecture Quick Reference — note the offline regime layer), memory `coinbase_trader_session_log.md` + `btc_macro_drivers_findings.md` (after commit).
 
-- [ ] **Step 1: CHANGELOG entry** — prepend a Session entry describing the Phase-1 offline macro-regime layer (new `services/regime/*`, `regime_state` table, offline builder + backtest harness, no live wiring, Phase-2 gated on the backtest verdict).
+- [x] **Step 1: CHANGELOG entry** — prepend a Session entry describing the Phase-1 offline macro-regime layer (new `services/regime/*`, `regime_state` table, offline builder + backtest harness, no live wiring, Phase-2 gated on the backtest verdict).
 
-- [ ] **Step 2: CLAUDE.md** — under Architecture Quick Reference, add one line noting `services/regime/` is an **offline** macro-regime evaluator (daily cadence, not yet wired to the scan loop; Phase 2 pending backtest verdict). Do NOT add a "never break" invariant yet — there is no live contract until Phase 2.
+- [x] **Step 2: CLAUDE.md** — under Architecture Quick Reference, add one line noting `services/regime/` is an **offline** macro-regime evaluator (daily cadence, not yet wired to the scan loop; Phase 2 pending backtest verdict). Do NOT add a "never break" invariant yet — there is no live contract until Phase 2.
 
-- [ ] **Step 3: Run the operator step (offline, manual)** — `python -m tools.regime.build_regime_series --start 2016-01-01` then `python -m tools.regime.backtest_regime`; record the verdict + per-year deltas in the CHANGELOG entry. (This is the Phase-1 gate; if VERDICT=NO, stop and do not plan Phase 2.)
+- [x] **Step 3: Run the operator step (offline, manual)** — `python -m tools.regime.build_regime_series --start 2016-01-01` then `python -m tools.regime.backtest_regime`; record the verdict + per-year deltas in the CHANGELOG entry. (This is the Phase-1 gate; if VERDICT=NO, stop and do not plan Phase 2.)
 
-- [ ] **Step 4: Commit docs**
+- [x] **Step 4: Commit docs**
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -1251,7 +1251,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 git log -1 --stat
 ```
 
-- [ ] **Step 5: Update memory** (after commit): append a Session entry to `coinbase_trader_session_log.md`; update `btc_macro_drivers_findings.md` status with the Phase-1 build + backtest verdict; cross-link `win_factors_improvement_loop.md`.
+- [x] **Step 5: Update memory** (after commit): append a Session entry to `coinbase_trader_session_log.md`; update `btc_macro_drivers_findings.md` status with the Phase-1 build + backtest verdict; cross-link `win_factors_improvement_loop.md`.
 
 ---
 
@@ -1270,3 +1270,60 @@ git log -1 --stat
 **Placeholder scan:** none — every code/test step shows full content. Task 5 notes the one lookup an implementer must confirm (the DB-init function name) with an explicit grep instruction rather than a guess.
 
 **Type consistency:** `RegimeState` fields identical across T1/T2/T5/T6. `evaluate(*, date, mvrv, corr_spx_90d, macro_risk_raw, mvrv_age_days, macro_age_days)` used identically in T2 and T6. `to_row()`/`from_row()` keys match the `regime_state` columns (T1 ↔ T5). `exposure_scalar` is the single consumed field name throughout. `load_aligned(start, cache_dir, session_get)` signature consistent T4 ↔ T6. `compare/apply_scaling/metrics` signatures consistent T7.
+
+---
+
+## Execution record — 2026-09-26
+
+Tasks 1–4 were built 2026-07-05/09. Tasks 5–8 executed 2026-09-26 (Session
+58.80). `tests/regime/` = **40 passed**. All work is on `feat/macro-regime-layer`.
+
+**Deviations from this plan, and why:**
+
+1. **`database.py` helpers use `_db()`, not bare `aiosqlite.connect`.** The
+   module already wraps every connection in an `_db()` context manager that sets
+   `PRAGMA busy_timeout` — the C-level retry that actually survives concurrent
+   writers. The live scan loop writes continuously, so a raw `connect()` here
+   would have been the one code path in the module without lock retry.
+
+2. **`persist` now calls `init_db` first.** The plan's CLI assumed
+   `regime_state` already existed; it crashed with `no such table: regime_state`
+   against any DB the backend had not initialised — which is every DB an offline
+   tool is pointed at. Covered by
+   `test_persist_creates_schema_on_a_fresh_db`.
+
+3. **The verdict gained INCONCLUSIVE + a `reason`.** As specified, `compare`
+   returned only HELPS/NO. Both can be produced by a window that cannot test the
+   overlay at all: a near-constant scalar collapses `scaled_pnl` to `k * pnl`
+   (sharpe unchanged, total shrunk by `k`), and a scalar that never drops below
+   1.0 exercises only the leverage half of the design. Either case would have
+   reported a confident NO and killed the layer on non-evidence. Guarded by
+   `MIN_SCALAR_DISPERSION` and `protective_days`, with two regression tests each.
+
+**Phase-1 gate result — INCONCLUSIVE (Phase 2 NOT opened).**
+
+Run offline against a scratch snapshot of `coinbase.db`; the live DB was never
+written to.
+
+| | value |
+|---|---|
+| Regime series | 3,831 days, 2016-03-31 → 2026-09-25 (FRED + CoinMetrics) |
+| Trades overlaid | 2,085 closed, 2026-04-12 → 2026-08-16, coverage 100% |
+| Baseline | total −$165.38, sharpe −0.0314, maxDD −$305.49 |
+| Scaled | total −$170.62, sharpe −0.0280, maxDD −$337.63 |
+| Applied scalar | 1.047 → 1.243, stdev 0.048, **protective_days 0** |
+
+The scalar never went below 1.0 over the trade window, so the overlay only
+levered up. The layer itself behaves as designed — across the full series 24.3%
+of days scale below 1.0, bottoming at 0.795 in 2021 (the cycle top) — it simply
+never engaged during the only months we hold trades for (MVRV 1.10–1.52, BTC-SPX
+corr 0.24–0.52).
+
+Supported sub-finding: regime **leverage** on this window was mildly harmful
+(−$5.25 total, drawdown $32 worse). The +0.0035 sharpe is reweighting noise.
+
+**To close the gate, Phase 2 needs one of:** a trade record spanning a risk-off
+regime (MVRV > 3, or a high-correlation drawdown), or a longer proxy return
+series standing in for the 4-month live record. Note the overlay is in-sample
+with no purged walk-forward and no DSR/PBO deflation, so even a HELPS would have
+been a kill-filter pass, not a deploy signal.
