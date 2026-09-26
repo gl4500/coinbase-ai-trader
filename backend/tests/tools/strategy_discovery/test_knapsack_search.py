@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from tests.tools.strategy_discovery.rule_fixtures import machine_rule_fixture
 from tools.strategy_discovery.knapsack_search import (
     beam_search_knapsack,
 )
@@ -17,6 +18,7 @@ def _make_profile(pid: str, leaf_id: int, horizon: int, deflated: float) -> Load
         horizon=horizon,
         leaf_id=leaf_id,
         rule_path="price_over_ema20 > 1.0",
+        machine_rule=machine_rule_fixture("price_over_ema20 > 1.0"),
         cumulative_profit_raw=deflated + 0.02,
         cumulative_profit_deflated=deflated,
         deflation_pp=0.02,

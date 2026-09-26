@@ -159,3 +159,35 @@ standard deviation comes from inner scores; neither reads fold_pass_count.
 Selected-only trade aggregation and the latest-leaf summary remain unresolved,
 so a counted period still means at least one qualifying leaf in that direction,
 not a validated frozen strategy. No profitable/deployable strategy is claimed.
+
+Claude's PR #67 review confirmed the count fix and provenance exclusion. The
+v2 version fixes period double-counting only: each profile's metrics aggregate
+multiple qualifying leaves within a root-direction group, whereas its attached
+rule represents one leaf. Its output leaf_id is an enumerated group identifier,
+not the source tree leaf ID. Exact rule serialization must preserve source leaf
+and fold identity separately and cannot certify the group metrics as that rule's
+performance. This remains a blocker for fixed-policy evaluation.
+
+
+## Exact rule producer/consumer integration
+
+Branch `fix/exact-rule-artifacts` off PR #67 (84ab2e8). The writer now emits
+schema 3 with an independent rule_digest and binding version in each row. Sidecars
+contain exact machine paths, not rounded summaries. Loader re-verifies identity,
+ordered feature schema, version and digest. Simulator evaluates machine rules;
+string parser remains a compatibility utility, outside the execution path.
+Profile IDs include the full content digest to distinguish changing group ordinals.
+
+New regressions first reproduced rounded-sidecar output, exact-artifact rejection,
+simulator use of display text, and fitting after a feature tensor was downcast.
+Research suite: 191 passed with one expensive synthetic test deferred; the added
+dtype guard regression separately passed. Full hook pending. Claude independently
+reviewed codec/producer design; its dtype finding is addressed by rejecting any
+actual non-float64 feature tensor before fitting, not merely changing its hash.
+Generated-tree tests check exactly one matching leaf and equivalence to the real
+router across boundaries, NaN, infinities and signed-zero cases.
+
+Digest integrity is not provenance attestation or fixed-policy performance.
+The selected-only group aggregation, representative-leaf mismatch, overlapping
+policy exposure and additive-return drawdown remain unresolved. No live orders,
+retraining, data migration, archive rewriting, merge or deployment occurred.

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.tools.strategy_discovery.rule_fixtures import machine_rule_fixture
 from tools.strategy_discovery.portfolio_sim import (
     simulate_portfolio,
 )
@@ -20,6 +21,7 @@ def _make_profile(
         horizon=horizon,
         leaf_id=leaf_id,
         rule_path=rule_path,
+        machine_rule=machine_rule_fixture(rule_path),
         cumulative_profit_raw=deflated + 0.02,
         cumulative_profit_deflated=deflated,
         deflation_pp=0.02,
@@ -191,4 +193,16 @@ def test_explicit_root_can_trade_without_conditions():
     profile = _make_profile("BTC-USD", 0, 1, "(root)")
     feats = _make_pid_features("BTC-USD", 3, 0.0, 0.1)
     metrics, _ = simulate_portfolio([profile], 1, {"BTC-USD": feats})
+    assert metrics.trade_count > 0
+
+
+def test_simulation_uses_exact_rule_not_rounded_display():
+    from tools.strategy_discovery.profit_tree import TreeNode
+    from tools.strategy_discovery.rule_contract import encode_leaf_rule
+
+    profile = _make_profile("BTC-USD", 0, 1, "price_over_ema20 <= 1.02")
+    tree = TreeNode(feature=0, threshold=1.0249, left=TreeNode(), right=TreeNode())
+    profile.machine_rule = encode_leaf_rule(tree, 0, ["price_over_ema20"])
+    features = _make_pid_features("BTC-USD", 3, 1.023, 0.1)
+    metrics, _ = simulate_portfolio([profile], 1, {"BTC-USD": features})
     assert metrics.trade_count > 0
