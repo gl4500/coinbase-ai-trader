@@ -338,3 +338,23 @@ async def test_legacy_rows_keep_null_label_version_and_are_not_rewritten(db):
     assert stored["outcome"] == "WIN"
     assert stored["signed_return"] is None
     assert stored["target_time"] is None
+
+
+@pytest.mark.parametrize("version", [None, 1, 3])
+async def test_current_resolver_cannot_modify_other_versions(db, version):
+    import aiosqlite
+
+    row = await _insert(db)
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE signal_outcomes SET label_version=? WHERE id=?", (version, row["id"])
+        )
+        await conn.commit()
+    before = await db.get_signal_outcome(row["id"])
+    assert row["id"] not in {r["id"] for r in await db.get_pending_outcomes()}
+    assert not await db.resolve_signal_outcome_v2(
+        row["id"], "WIN", 0.02, 100.0, 102.0, 1, "local_candles", "incorrect conversion"
+    )
+    assert not await db.mark_signal_outcome_unavailable(row["id"], "missing_exit_candle")
+    await db.bump_signal_outcome_attempts(row["id"])
+    assert await db.get_signal_outcome(row["id"]) == before

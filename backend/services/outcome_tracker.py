@@ -181,9 +181,9 @@ class OutcomeTracker:
                 changed = await database.resolve_signal_outcome_v2(
                     row_id=row["id"],
                     outcome=result.outcome,
-                    signed_return=round(result.signed_return, 6),
-                    entry_price_v2=round(result.entry_price, 6),
-                    target_price=round(result.target_price, 6),
+                    signed_return=result.signed_return,
+                    entry_price_v2=result.entry_price,
+                    target_price=result.target_price,
                     price_observed_at=result.price_observed_at,
                     price_source=result.price_source,
                     lesson_text=_lesson(row, result),
