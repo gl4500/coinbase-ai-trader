@@ -23,8 +23,8 @@ from typing import Dict, List, Optional
 import httpx
 
 import database
-from clients import coinbase_client
 from config import config
+from services import outcome_labels as ol
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class OutcomeTracker:
     ) -> None:
         """Save a pending signal. Outcome checked 4 h later by check_pending()."""
         try:
+            signal_time = time.time()
             await database.insert_signal_outcome(
                 {
                     "source": source,
@@ -59,7 +60,8 @@ class OutcomeTracker:
                     "confidence": round(confidence, 4),
                     "entry_price": round(price, 6),
                     "indicators_json": json.dumps(indicators),
-                    "check_after": time.time() + _CHECK_HORIZON,
+                    "check_after": signal_time + _CHECK_HORIZON,
+                    "signal_time": signal_time,
                 }
             )
             logger.debug(f"OutcomeTracker recorded {source} {side} {product_id} @ ${price:.4f}")
@@ -143,71 +145,57 @@ class OutcomeTracker:
 
     # ── Check pending outcomes ─────────────────────────────────────────────────
 
-    async def check_pending(self) -> int:
+    async def check_pending(self, now: Optional[float] = None) -> int:
+        """Resolve matured outcomes at their defined target time.
+
+        Label version 2 (docs/specs/2026-09-26-outcome-label-contract.md): the
+        label is the endpoint return between two completed hourly bars fixed at
+        record time. This method never reads a live price — version 1 resolved
+        overdue rows with whatever price was current when it ran, which the
+        2026-09-26 audit measured at a mean 45.75 h after the nominal horizon.
+
+        A row whose bars are missing stays unresolved and its attempt count
+        rises; once the contract's retry budget or grace window is spent it is
+        marked UNAVAILABLE, which is terminal and never scored.
         """
-        Resolve all outcomes whose 4-hour window has passed.
-        Fetches the current price, computes WIN/LOSS/NEUTRAL, writes lesson_text.
-        Returns count of outcomes resolved.
-        """
+        now = time.time() if now is None else now
         rows = await database.get_pending_outcomes()
         resolved = 0
+
         for row in rows:
             pid = row["product_id"]
-            side = row["side"]
-            entry = row["entry_price"]
-            source = row["source"]
-            confidence = row["confidence"]
+            signal_time = _signal_time_of(row)
+            plan_entry = ol.entry_candle_start(signal_time)
+            plan_exit = ol.exit_candle_start(plan_entry)
 
-            # Get current price — prefer fresh candle close, fallback to DB
-            exit_price = None
-            try:
-                candles = await coinbase_client.get_candles(pid, "ONE_HOUR", limit=1)
-                if candles:
-                    exit_price = candles[-1]["close"]
-            except Exception:
-                pass
-            if not exit_price:
-                product = await database.get_product(pid)
-                if product:
-                    exit_price = product.get("price")
-            if not exit_price:
-                continue  # can't resolve — skip until next run
-
-            # pct_change from the signal's perspective:
-            # BUY: positive = good, SELL: negative entry→exit = good
-            raw_chg = (exit_price - entry) / max(entry, 1e-9)
-            if side == "SELL":
-                pct_change = -raw_chg  # SELL wins when price drops
-            else:
-                pct_change = raw_chg
-
-            if pct_change > _WIN_THRESHOLD:
-                outcome = "WIN"
-            elif pct_change < -_LOSS_THRESHOLD:
-                outcome = "LOSS"
-            else:
-                outcome = "NEUTRAL"
-
-            # Build compact lesson text
-            try:
-                ind = json.loads(row.get("indicators_json") or "{}")
-            except Exception:
-                ind = {}
-            ind_str = _format_indicators(source, ind)
-            lesson_text = (
-                f"{source} {side} conf={confidence:.2f} {ind_str} "
-                f"→ {raw_chg:+.1%} after 4h [{outcome}]"
+            candles = await database.get_candles_at(pid, [plan_entry, plan_exit])
+            result = ol.resolve(
+                signal_time=signal_time,
+                side=row["side"],
+                candles=candles,
+                now=now,
+                attempts=row.get("resolve_attempts") or 0,
             )
 
-            await database.resolve_signal_outcome(
-                row_id=row["id"],
-                exit_price=round(exit_price, 6),
-                pct_change=round(pct_change, 6),
-                outcome=outcome,
-                lesson_text=lesson_text,
-            )
-            resolved += 1
-            logger.info(f"Outcome resolved: {lesson_text}")
+            if result.status == "RESOLVED":
+                changed = await database.resolve_signal_outcome_v2(
+                    row_id=row["id"],
+                    outcome=result.outcome,
+                    signed_return=round(result.signed_return, 6),
+                    entry_price_v2=round(result.entry_price, 6),
+                    target_price=round(result.target_price, 6),
+                    price_observed_at=result.price_observed_at,
+                    price_source=result.price_source,
+                    lesson_text=_lesson(row, result),
+                )
+                if changed:
+                    resolved += 1
+                    logger.info(f"Outcome resolved: {_lesson(row, result)}")
+            elif result.status == "UNAVAILABLE":
+                await database.mark_signal_outcome_unavailable(row["id"], result.reason)
+                logger.info(f"Outcome unavailable: {pid} id={row['id']} reason={result.reason}")
+            elif result.reason != "not_matured":
+                await database.bump_signal_outcome_attempts(row["id"])
 
         return resolved
 
@@ -231,6 +219,36 @@ class OutcomeTracker:
             except Exception as e:
                 logger.error(f"OutcomeTracker loop error: {e}")
             await asyncio.sleep(interval)
+
+
+# ── Label-version-2 helpers ───────────────────────────────────────────────────
+
+
+def _signal_time_of(row: Dict) -> float:
+    """Recover the signal time a row's schedule was derived from.
+
+    Version-2 rows store `entry_candle_start`; any instant inside the preceding
+    bar maps back to it, so `entry_candle_start - 1` reproduces the schedule
+    exactly. Legacy pending rows have no schedule, so it is derived from
+    `check_after`, which version 1 set to signal time + the horizon.
+    """
+    entry_start = row.get("entry_candle_start")
+    if entry_start:
+        return float(entry_start) - 1
+    return float(row["check_after"]) - ol.H_BARS * ol.BAR_SECS
+
+
+def _lesson(row: Dict, result: "ol.Resolution") -> str:
+    """Compact lesson string describing the measured window, not the delay."""
+    try:
+        ind = json.loads(row.get("indicators_json") or "{}")
+    except Exception:
+        ind = {}
+    ind_str = _format_indicators(row["source"], ind)
+    return (
+        f"{row['source']} {row['side']} conf={row['confidence']:.2f} {ind_str} "
+        f"-> {result.signed_return:+.1%} over {ol.H_BARS}h [{result.outcome}]"
+    )
 
 
 # ── Indicator summary helpers ─────────────────────────────────────────────────

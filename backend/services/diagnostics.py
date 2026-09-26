@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+from services import outcome_labels as ol
+
 _WINDOW_DAYS = {"30d": 30, "90d": 90}
 _CACHE: Dict[str, tuple] = {}  # window -> (expires_at, payload)
 _TTL_SECS = 60.0
@@ -49,39 +51,92 @@ def _where_since(col: str, cutoff: Optional[str]) -> tuple[str, list[Any]]:
     return (f" AND {col} >= ?", [cutoff]) if cutoff else ("", [])
 
 
-def signal_edge(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[str, Any]:
-    """Compute signal edge metrics and calibration buckets.
+_CALIBRATION_SUPPRESSED = (
+    "Suppressed: this label is a path-independent endpoint return over 4 bars, "
+    "while the scoring models train on a path-dependent triple-barrier target "
+    "(first touch of +/-1% on intrabar extremes for v3/v4, +/-label_thresh on "
+    "closes for v4.5). Win rate by confidence bucket is therefore descriptive "
+    "only, not a calibration curve. See "
+    "docs/specs/2026-09-26-outcome-label-contract.md section 7."
+)
 
-    Args:
-        conn: SQLite connection
-        cutoff: ISO8601 timestamp or None for no cutoff
 
-    Returns:
-        Dict with keys: n, wins, losses, neutrals, precision, e_return, calibration
-        precision = wins/n; calibration win_rate excludes NEUTRAL (wins/(wins+losses))
+def _scoring_clause() -> str:
+    quoted = ",".join(f"'{o}'" for o in ol.SCORING_OUTCOMES)
+    return f"outcome IN ({quoted})"
+
+
+def signal_edge(
+    conn: sqlite3.Connection,
+    cutoff: Optional[str],
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Signal-label accuracy for the current label version only.
+
+    Version-1 rows are reported separately under "legacy" rather than pooled:
+    they were resolved with whatever price was current when the resolver ran
+    (mean 45.75 h late per the 2026-09-26 audit), so pooling them would restate
+    a stale definition as a current score.
+
+    Denominators count only rows that are eligible (target time reached) and
+    carry a scoring outcome. UNAVAILABLE and still-unresolved rows are counted
+    and reported, never scored.
+
+    This is label accuracy, not profitability: it ignores fees, position sizing
+    and whether a trade was executed at all. Executed-trade P&L lives in
+    `exit_attribution`.
     """
+    now = time.time() if now is None else now
     clause, params = _where_since("created_at", cutoff)
-    base = (
-        "FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
-        "AND outcome IN ('WIN','LOSS','NEUTRAL')" + clause
+    scoring = _scoring_clause()
+
+    current = (
+        f"FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
+        f"AND label_version = {ol.LABEL_VERSION}{clause}"
     )
+    legacy = (
+        "FROM signal_outcomes WHERE source='CNN' AND side='BUY' AND label_version IS NULL" + clause
+    )
+
     n, wins, losses, neutrals, e_return = conn.execute(
-        "SELECT COUNT(*), "
-        "SUM(outcome='WIN'), SUM(outcome='LOSS'), SUM(outcome='NEUTRAL'), "
-        "AVG(pct_change) " + base,
+        "SELECT COUNT(*), SUM(outcome='WIN'), SUM(outcome='LOSS'), "
+        "SUM(outcome='NEUTRAL'), AVG(signed_return) " + current + f" AND {scoring}",
         params,
     ).fetchone()
     n = n or 0
-    calibration = []
-    for r in conn.execute(
+
+    eligible = (
+        conn.execute(
+            "SELECT COUNT(*) " + current + " AND COALESCE(target_time, check_after) <= ?",
+            params + [now],
+        ).fetchone()[0]
+        or 0
+    )
+    unresolved = (
+        conn.execute(
+            "SELECT COUNT(*) "
+            + current
+            + " AND outcome IS NULL AND COALESCE(target_time, check_after) <= ?",
+            params + [now],
+        ).fetchone()[0]
+        or 0
+    )
+    unavailable = (
+        conn.execute(
+            "SELECT COUNT(*) " + current + " AND outcome='UNAVAILABLE'", params
+        ).fetchone()[0]
+        or 0
+    )
+
+    buckets = []
+    for bucket, cnt, w, wl, avg_ret in conn.execute(
         "SELECT CAST(confidence*10 AS INT) AS b, COUNT(*), "
-        "SUM(outcome='WIN'), SUM(outcome IN ('WIN','LOSS')), AVG(pct_change) "
-        + base
-        + " GROUP BY b ORDER BY b",
+        "SUM(outcome='WIN'), SUM(outcome IN ('WIN','LOSS')), AVG(signed_return) "
+        + current
+        + f" AND {scoring} GROUP BY b ORDER BY b",
         params,
     ):
-        bucket, cnt, w, wl, avg_ret = r
-        calibration.append(
+        buckets.append(
             {
                 "bucket": round(bucket / 10.0, 1),
                 "n": cnt,
@@ -89,14 +144,49 @@ def signal_edge(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[str, An
                 "avg_ret": avg_ret or 0.0,
             }
         )
+
+    ln, lwins, llosses, lneutrals, le_return = conn.execute(
+        "SELECT COUNT(*), SUM(outcome='WIN'), SUM(outcome='LOSS'), "
+        "SUM(outcome='NEUTRAL'), AVG(pct_change) " + legacy + f" AND {scoring}",
+        params,
+    ).fetchone()
+    ln = ln or 0
+
     return {
+        "label_version": ol.LABEL_VERSION,
         "n": n,
         "wins": wins or 0,
         "losses": losses or 0,
         "neutrals": neutrals or 0,
         "precision": (wins / n) if n else 0.0,
         "e_return": e_return or 0.0,
-        "calibration": calibration,
+        "return_units": "fraction",
+        "is_profitability": False,
+        "counts": {
+            "eligible": eligible,
+            "matured": n,
+            "unresolved": unresolved,
+            "unavailable": unavailable,
+        },
+        # Deliberately empty: see _CALIBRATION_SUPPRESSED.
+        "calibration": [],
+        "calibration_available": False,
+        "calibration_suppressed_reason": _CALIBRATION_SUPPRESSED,
+        "confidence_buckets": buckets,
+        "legacy": {
+            "label_version": 1,
+            "n": ln,
+            "wins": lwins or 0,
+            "losses": llosses or 0,
+            "neutrals": lneutrals or 0,
+            "precision": (lwins / ln) if ln else 0.0,
+            "e_return": le_return or 0.0,
+            "note": (
+                "Resolved under label version 1, which used the price available "
+                "when the resolver ran rather than the price at the target time. "
+                "Not comparable with the current version; shown for continuity only."
+            ),
+        },
     }
 
 
@@ -211,12 +301,25 @@ def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
     executed = conn.execute(
         "SELECT COUNT(*) FROM trades WHERE agent='CNN'" + op_cl, op_p
     ).fetchone()[0]
+    # Scoped to the current label version: pooling version-1 rows here would
+    # restate delayed labels as matured current-version signals.
     matured = conn.execute(
         "SELECT COUNT(*) FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
-        "AND outcome IN ('WIN','LOSS','NEUTRAL')" + cr_cl,
+        f"AND label_version = {ol.LABEL_VERSION} AND {_scoring_clause()}" + cr_cl,
         cr_p,
     ).fetchone()[0]
-    return {"scans": scans, "buy_signals": buys, "executed": executed, "matured": matured}
+    legacy_matured = conn.execute(
+        "SELECT COUNT(*) FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
+        f"AND label_version IS NULL AND {_scoring_clause()}" + cr_cl,
+        cr_p,
+    ).fetchone()[0]
+    return {
+        "scans": scans,
+        "buy_signals": buys,
+        "executed": executed,
+        "matured": matured,
+        "legacy_matured": legacy_matured,
+    }
 
 
 def compute_diagnostics(window: str, db_path: str, now: Optional[float] = None) -> Dict:
