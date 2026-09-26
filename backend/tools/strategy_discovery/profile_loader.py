@@ -44,7 +44,7 @@ class LoadedProfile:
 
     @property
     def profile_id(self) -> str:
-        return f"{self.pid}__{self.leaf_id}"
+        return f"{self.pid}__h{self.horizon}__{self.leaf_id}"
 
 
 def load_all_profiles(
