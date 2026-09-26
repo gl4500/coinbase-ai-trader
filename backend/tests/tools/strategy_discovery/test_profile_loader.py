@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from tools.strategy_discovery.profile_loader import (
     LoadedProfile,
@@ -42,6 +43,9 @@ _PROFILE_COLUMNS = [
 
 def _write_profile_parquet(path: Path, rows):
     df = pd.DataFrame(rows, columns=_PROFILE_COLUMNS)
+    df["schema_version"] = 2
+    df["validation_version"] = "chronological_v1"
+    df["n_folds_evaluated"] = 5
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
 
@@ -288,3 +292,48 @@ def test_filters_profiles_below_min_folds_passed(tmp_path: Path):
     profiles = load_all_profiles(phase3_dir=phase3_dir, horizons=[24], min_folds_passed_q0=4)
     pids = sorted(p.pid for p in profiles)
     assert pids == ["BTC-USD", "ETH-USD"]  # SOL-USD dropped (3 < 4 folds)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"validation_version": "legacy_unverified", "n_folds_evaluated": 5},
+        {"validation_version": "chronological_v1", "n_folds_evaluated": 4},
+        {"validation_version": "chronological_v1", "n_folds_evaluated": None},
+        {"validation_version": "chronological_v1", "n_folds_evaluated": "5"},
+        {"validation_version": "future_unknown", "n_folds_evaluated": 5},
+    ],
+)
+def test_rejects_unverified_profiles_and_reports_exclusion_count(tmp_path, caplog, metadata):
+    row = {name: 0 for name in _PROFILE_COLUMNS}
+    row.update(
+        pid="BTC-USD",
+        horizon=24,
+        leaf_id=0,
+        rule_path_summary="x > 1",
+        schema_version=2,
+        n_folds_passed_q0=5,
+        **metadata,
+    )
+    pd.DataFrame([row, row]).to_parquet(tmp_path / "profiles_h24.parquet", index=False)
+    assert load_all_profiles(tmp_path, horizons=[24]) == []
+    assert "excluded 2" in caplog.text.lower()
+    assert "provenance" in caplog.text.lower()
+
+
+@pytest.mark.parametrize("passed", [None, float("nan"), 4.5, 6, -1])
+def test_invalid_pass_counts_are_rejected_without_truncation(tmp_path, passed):
+    row = {name: 0 for name in _PROFILE_COLUMNS}
+    row.update(
+        pid="BTC-USD",
+        horizon=24,
+        leaf_id=0,
+        rule_path_summary="x > 1",
+        schema_version=2,
+        n_folds_passed_q0=passed,
+        validation_version="chronological_v1",
+        n_folds_evaluated=5,
+    )
+    pd.DataFrame([row]).to_parquet(tmp_path / "profiles_h24.parquet", index=False)
+    assert load_all_profiles(tmp_path, horizons=[24]) == []

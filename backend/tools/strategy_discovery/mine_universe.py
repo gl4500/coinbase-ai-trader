@@ -25,7 +25,7 @@ if BACKEND not in sys.path:
 from tools.strategy_discovery.mine_profiles import LeafProfile  # noqa: E402
 
 _DEFAULT_HORIZONS = (1, 4, 24, 72, 168)
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2  # adds evaluated fold count and chronological-validation provenance
 _DEFAULT_PHASE2_DIR = Path(BACKEND) / "data" / "phase2"
 _DEFAULT_OUTPUT_DIR = Path(BACKEND) / "data" / "phase3"
 

@@ -6,6 +6,7 @@ Pure I/O. No simulation, no selection.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from typing import Dict, List
 
 import pandas as pd
 import pyarrow.parquet as pq
+
+logger = logging.getLogger(__name__)
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BACKEND not in sys.path:
@@ -51,8 +54,9 @@ def load_all_profiles(
 ) -> List[LoadedProfile]:
     """Load all per-horizon profile parquets + rule-path sidecars.
 
-    Filters profiles with n_folds_passed_q0 < min_folds_passed_q0 (re-enforces
-    Phase 3 gate at the Phase 4 input boundary).
+    Require schema 2, chronological_v1 and five evaluated folds. Re-enforce
+    the four-pass minimum (or a stricter caller threshold) at the Phase 4 input
+    boundary; missing, fractional and impossible pass counts are rejected.
     """
     if horizons is None:
         horizons = [1, 4, 24, 72, 168]
@@ -64,13 +68,34 @@ def load_all_profiles(
         if not parquet_path.exists():
             continue
         df = pq.read_table(parquet_path).to_pandas()
+        required = {"schema_version", "validation_version", "n_folds_evaluated"}
+        if not required.issubset(df.columns):
+            logger.warning(
+                "%s: excluded %d profiles with missing provenance", parquet_path.name, len(df)
+            )
+            continue
+        verified = (
+            df["schema_version"].eq(2)
+            & df["validation_version"].eq("chronological_v1")
+            & df["n_folds_evaluated"].eq(5)
+        ).fillna(False)
+        excluded = int((~verified).sum())
+        if excluded:
+            logger.warning(
+                "%s: excluded %d profiles with invalid provenance", parquet_path.name, excluded
+            )
+        df = df.loc[verified]
+        # Membership rejects missing, fractional, string and impossible counts
+        # before integer conversion; passing folds cannot exceed evaluated folds.
+        accepted = df["n_folds_passed_q0"].isin(
+            [count for count in range(4, 6) if count >= min_folds_passed_q0]
+        )
+        df = df.loc[accepted]
         rule_paths: Dict[str, str] = {}
         if sidecar_path.exists():
             with open(sidecar_path, "r", encoding="utf-8") as f:
                 rule_paths = json.load(f)
         for _, row in df.iterrows():
-            if int(row["n_folds_passed_q0"]) < min_folds_passed_q0:
-                continue
             pid = str(row["pid"])
             leaf_id = int(row["leaf_id"])
             profile_id = f"{pid}__{leaf_id}"

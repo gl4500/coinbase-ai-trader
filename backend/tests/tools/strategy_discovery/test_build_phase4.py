@@ -111,6 +111,9 @@ def _write_minimal_phase3(phase3_dir: Path):
         ),
     ]
     df = pd.DataFrame(rows, columns=_PROFILE_COLUMNS)
+    df["schema_version"] = 2
+    df["validation_version"] = "chronological_v1"
+    df["n_folds_evaluated"] = 5
     phase3_dir.mkdir(parents=True, exist_ok=True)
     pq.write_table(
         pa.Table.from_pandas(df, preserve_index=False), phase3_dir / "profiles_h24.parquet"
@@ -228,3 +231,28 @@ def test_main_returns_zero_on_at_least_one_passing_cap(tmp_path: Path, monkeypat
         ]
     )
     assert rc == 0
+
+
+def test_passing_research_artifact_cannot_authorize_deployment(tmp_path):
+    from tools.strategy_discovery.build_phase4 import _write_deployment_json
+    from tools.strategy_discovery.portfolio_sim import PortfolioMetrics
+    from tools.strategy_discovery.scorecard import CapScorecard, evaluate_cap_gates
+
+    metrics = PortfolioMetrics(
+        cumulative_profit_raw=0.3,
+        cumulative_profit_deflated=0.2,
+        max_dd=0.1,
+        sortino=2,
+        trade_count=100,
+    )
+    gates, passed = evaluate_cap_gates(metrics)
+    assert passed
+    card = CapScorecard(3, metrics, 100, 0.1, gates, passed, [])
+    path = tmp_path / "deployment_n3.json"
+    _write_deployment_json(card, path)
+    payload = json.loads(path.read_text())
+    assert payload["evaluation_scope"] == "research_selection"
+    assert payload["deployment_eligible"] is False
+    assert payload["deployment_blockers"]
+    assert payload["gates"]["overall"] == "pass"
+    assert payload["gates"]["scope"] == "research_only"

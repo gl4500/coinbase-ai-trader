@@ -7,6 +7,23 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.85 - 2026-09-26 - Causal strategy validation and research-only verdicts
+
+- Replace future-inclusive CV with expanding chronological inner/outer folds,
+  initial warmup and label-horizon purging; omit unusable folds.
+- Sort/validate hourly timestamps before mining. Preserve feature/label alignment
+  through prefix training. Require five evaluable outer folds, three inner folds
+  each and minimum training history; report insufficient evidence explicitly.
+  Schema-2 profiles record evaluated fold count and chronological validation
+  version; legacy defaults remain unverified.
+- Phase 4 loading now excludes missing/legacy/unknown validation provenance,
+  reports excluded row counts, and rejects missing, fractional or impossible
+  fold-pass counts before conversion. Existing archives remain unchanged.
+- Phase 4 JSON and Markdown now explicitly block deployment. Passing numeric
+  gates rank research candidates only; historical results require regeneration.
+- Add regression tests, an evaluation contract and the active Claude/Codex issue
+  register. No retraining, production data changes or live execution changes.
+
 ### Session 58.84 - 2026-09-26 - Review fixes and reconciled maker fallback
 
 - Preserve all non-current outcome rows: the pending query and every v2 mutation
