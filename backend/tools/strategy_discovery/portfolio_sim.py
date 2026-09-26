@@ -45,9 +45,11 @@ class TelemetryRow:
 def parse_rule_path(rule_path: str) -> List[Tuple[str, str, float]]:
     """Parse 'feat_a > 1.02 AND feat_b <= 0.08' into [(feature, op, threshold), ...].
 
-    Operators supported: >, <, >=, <=. The '(root)' or empty rule returns [] (always fires).
+    Operators supported: >, <, >=, <=. Only explicit '(root)' is unconditional.
     """
-    if rule_path.strip() in ("", "(root)"):
+    if not isinstance(rule_path, str) or not rule_path.strip():
+        raise ValueError("unresolved rule cannot be simulated")
+    if rule_path.strip() == "(root)":
         return []
     conditions: List[Tuple[str, str, float]] = []
     for clause in rule_path.split(" AND "):
@@ -108,6 +110,9 @@ def simulate_portfolio(
     pid_features: Dict[str, pd.DataFrame],
 ) -> Tuple[PortfolioMetrics, List[TelemetryRow]]:
     """Walk historical bars in the subset's union; enforce cap; return metrics + telemetry."""
+    identities = [profile.profile_id for profile in subset]
+    if len(set(identities)) != len(identities):
+        raise ValueError("duplicate research profile identity in simulation subset")
     # Pre-parse rule paths for speed
     parsed_rules = {p.profile_id: parse_rule_path(p.rule_path) for p in subset}
     label_cols = {p.profile_id: f"label_h{int(p.horizon)}" for p in subset}

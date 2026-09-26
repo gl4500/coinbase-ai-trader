@@ -110,3 +110,21 @@ terminal consistency/overfill/strict-boolean probes now reject invalid evidence.
 No blocker remains for those reported cases in the reviewed source; final
 commit/full suite still pending. Persisted exchange correlation remains outside
 this pure validator and is required before live integration.
+
+## Missing-rule and duplicate-identity follow-up
+
+Claude independently reviewed PR #64 and found no blocker in the horizon fix,
+but reproduced a pre-existing missing-rule-to-always-fire path. The loader
+also executed a rounded display summary when its sidecar lookup missed.
+New isolated branch `fix/fail-closed-research-rules` excludes unresolved rules,
+removes summary fallback, keeps explicit `(root)` distinct, and rejects duplicate
+complete identities in loader and simulator. Eleven regressions failed before
+the fix; 48 targeted loader/simulator/driver/selection tests now pass. Full
+pre-commit validation remains pending while Claude holds the test slot.
+
+Additional producer defect verified in `mine_universe.py`: the sidecar value
+is `p.rule_path_summary`, so the sidecar itself is not exact-threshold evidence.
+A separate versioned exact-rule producer/consumer contract is required, including
+legacy exclusion and precision-preserving serialization. This first follow-up
+does not claim to fix sidecar precision, changing trees across folds, or
+selection-only profit reporting. Deployment remains blocked.
