@@ -7,6 +7,67 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.83 — 2026-09-26 — Outcome-label contract v2 + diagnostics separation + execution findings
+
+Prerequisite work for any further model or strategy experiment, driven by
+`docs/audits/2026-09-26-strategy-audit-report.md`. **No strategy threshold, model,
+or live-execution semantic was changed.**
+
+**Task 2 — label contract specified.** `docs/specs/2026-09-26-outcome-label-contract.md`
+pins the target, horizon, entry convention, candle-completeness and boundary rules,
+the three distinct timestamps, return units and thresholds, the missing-data/retry
+policy, and — critically — how the label relates to each model's actual training
+target. It does not.
+
+**Task 3 — versioned, correctly timed outcomes.**
+- New `backend/services/outcome_labels.py`: pure, I/O-free label math. Entry = open of
+  the first bar starting strictly after the signal; target = close of the 4th bar;
+  `target_time` = that bar's close instant. A bar is usable only at `start + 3600`.
+- `OutcomeTracker.check_pending` rewritten: resolves from the *target-time* bars and
+  **never** reads a live price. Version 1 fetched `get_candles(limit=1)` (often the
+  in-progress bar) or the current product price, producing labels a mean 45.75 h late.
+- `database.py`: additive `signal_outcomes` migration (12 nullable columns —
+  `label_version`, `target_time`, `entry_candle_start`, `exit_candle_start`,
+  `entry_price_v2`, `target_price`, `signed_return`, `price_observed_at`,
+  `processed_at`, `price_source`, `resolve_attempts`, `unresolved_reason`) plus
+  `get_signal_outcome`, `get_candles_at`, `resolve_signal_outcome_v2`,
+  `mark_signal_outcome_unavailable`, `bump_signal_outcome_attempts`.
+- Idempotent: every resolution writes `WHERE id=? AND outcome IS NULL`, so retries
+  cannot duplicate or overwrite a finished label. Legacy rows keep NULL
+  `label_version` and are never recomputed.
+- Missing bars stay unresolved and count an attempt; after 5 attempts or 7 days past
+  target the row becomes terminal `UNAVAILABLE`, which is never scored.
+
+**Task 4 — diagnostics no longer mislead.** `signal_edge` scores **only** the current
+label version, reports `counts` (eligible / matured / unresolved / unavailable),
+excludes UNAVAILABLE and unmatured rows from denominators, reports legacy rows
+separately under `legacy`, and **suppresses calibration** with an explicit reason —
+the models train on a path-dependent triple-barrier target while this label is a
+4-bar endpoint return, so a confidence-decile table is descriptive only
+(`confidence_buckets`), not a calibration curve. `signal_funnel.matured` is likewise
+version-scoped. `is_profitability: False` and `return_units: "fraction"` are explicit.
+
+**Task 5 — all four execution findings CONFIRMED, none changed.**
+`docs/handoffs/2026-09-26-execution-findings.md` + characterisation tests in
+`backend/tests/test_execution_findings.py`. Finding 4 is broader than reported: the
+market fallback also runs when the cancel *reports* failure without raising, and a
+partial fill is treated as no fill, so a full-size market order can land on top of it.
+
+**Task 6 — accounting reconciled read-only.**
+`docs/handoffs/2026-09-26-accounting-reconciliation.md`. The $5.98 CNN discrepancy is
+reproduced to the cent (ledger −$82.6357 vs state −$76.6569). Also found: 1,905 closed
+rows where `pnl != usd_close − usd_open` (Σ −$13.36), dominated by rows whose
+`exit_price` echoes `entry_price`; 0 rows in `orders`; no signal→trade→fill link
+anywhere; 52 open trade rows against 3 `positions` rows and an empty CNN
+`positions_json`; and TECH state frozen since 2026-05-17 still holding 38 positions.
+
+**Tests:** +59 new (`test_outcome_labels.py` 17, `test_outcome_store_v2.py` 15,
+`test_outcome_tracker.py` 9, `test_diagnostics_label_versions.py` 9,
+`test_execution_findings.py` 9). `outcome_tracker.py` previously had no test coverage
+at all. `test_diagnostics.py` updated for the versioned contract (stale fixtures, not
+product bugs). Ruff clean under main's config.
+
+**Note:** the migration has NOT been applied to any production database.
 ### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
 
 Completed Tasks 5–8 of the Phase-1 plan (Tasks 1–4 landed 2026-07-05/09). The

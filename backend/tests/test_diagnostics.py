@@ -34,7 +34,9 @@ def _seed(tmp_path: Path) -> sqlite3.Connection:
     con.executescript(
         """
         CREATE TABLE signal_outcomes (source TEXT, side TEXT, confidence REAL,
-            pct_change REAL, outcome TEXT, created_at TEXT);
+            pct_change REAL, outcome TEXT, created_at TEXT,
+            label_version INTEGER, signed_return REAL, target_time REAL,
+            check_after REAL, unresolved_reason TEXT);
         CREATE TABLE trades (agent TEXT, product_id TEXT, pnl REAL, pct_pnl REAL,
             hold_secs REAL, trigger_close TEXT, opened_at TEXT, closed_at TEXT);
         CREATE TABLE cnn_scans (product_id TEXT, side TEXT, model_prob REAL,
@@ -44,35 +46,51 @@ def _seed(tmp_path: Path) -> sqlite3.Connection:
     return con
 
 
+_MATURED = _NOW - 10_000  # target_time already reached
+
+
+def _outcome_row(source, side, confidence, ret, outcome, created_at):
+    """A label-version-2 row: signed_return carries the return, target reached.
+
+    signal_edge scores only the current label version, so fixtures must say
+    which version they are.
+    """
+    return (source, side, confidence, ret, outcome, created_at, 2, ret, _MATURED, _MATURED, None)
+
+
 class TestSignalEdge:
-    def test_precision_and_calibration(self, tmp_path: Path) -> None:
+    def test_precision_and_confidence_buckets(self, tmp_path: Path) -> None:
         con = _seed(tmp_path)
         rows = [
-            ("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-08T00:00:00+00:00"),
-            ("CNN", "BUY", 0.92, -0.01, "LOSS", "2026-08-08T00:00:00+00:00"),
-            ("CNN", "BUY", 0.20, -0.03, "LOSS", "2026-08-08T00:00:00+00:00"),
-            ("CNN", "BUY", 0.20, 0.00, "NEUTRAL", "2026-08-08T00:00:00+00:00"),
-            ("TECH", "BUY", 0.90, 0.05, "WIN", "2026-08-08T00:00:00+00:00"),  # excluded
+            _outcome_row("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-08T00:00:00+00:00"),
+            _outcome_row("CNN", "BUY", 0.92, -0.01, "LOSS", "2026-08-08T00:00:00+00:00"),
+            _outcome_row("CNN", "BUY", 0.20, -0.03, "LOSS", "2026-08-08T00:00:00+00:00"),
+            _outcome_row("CNN", "BUY", 0.20, 0.00, "NEUTRAL", "2026-08-08T00:00:00+00:00"),
+            _outcome_row("TECH", "BUY", 0.90, 0.05, "WIN", "2026-08-08T00:00:00+00:00"),
         ]
-        con.executemany("INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?)", rows)
+        con.executemany("INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
         con.commit()
-        out = d.signal_edge(con, cutoff=None)
+        out = d.signal_edge(con, cutoff=None, now=_NOW)
         assert out["n"] == 4 and out["wins"] == 1 and out["losses"] == 2
         assert out["precision"] == pytest.approx(0.25)
-        b9 = next(b for b in out["calibration"] if b["bucket"] == 0.9)
+        # Win rate by confidence bucket is descriptive only; calibration is
+        # suppressed because the label is not the models' training target.
+        b9 = next(b for b in out["confidence_buckets"] if b["bucket"] == 0.9)
         assert b9["win_rate"] == pytest.approx(0.5)  # 1 win / (1 win + 1 loss)
+        assert out["calibration"] == []
+        assert out["calibration_available"] is False
 
 
 class TestCutoffFiltering:
     def test_signal_edge_excludes_rows_before_cutoff(self, tmp_path: Path) -> None:
         con = _seed(tmp_path)
         rows = [
-            ("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-01T00:00:00+00:00"),  # OLD
-            ("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-08T00:00:00+00:00"),  # RECENT
+            _outcome_row("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-01T00:00:00+00:00"),
+            _outcome_row("CNN", "BUY", 0.90, 0.02, "WIN", "2026-08-08T00:00:00+00:00"),
         ]
-        con.executemany("INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?)", rows)
+        con.executemany("INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
         con.commit()
-        out = d.signal_edge(con, cutoff="2026-08-05T00:00:00+00:00")
+        out = d.signal_edge(con, cutoff="2026-08-05T00:00:00+00:00", now=_NOW)
         assert out["n"] == 1
 
 
@@ -181,12 +199,18 @@ class TestSignalFunnel:
             "'2026-08-08T00:00:00+00:00','2026-08-08T01:00:00+00:00')"
         )
         con.execute(
-            "INSERT INTO signal_outcomes VALUES "
-            "('CNN','BUY',0.6,0.01,'WIN','2026-08-08T00:00:00+00:00')"
+            "INSERT INTO signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            _outcome_row("CNN", "BUY", 0.6, 0.01, "WIN", "2026-08-08T00:00:00+00:00"),
         )
         con.commit()
         out = d.signal_funnel(con, cutoff=None)
-        assert out == {"scans": 2, "buy_signals": 1, "executed": 1, "matured": 1}
+        assert out == {
+            "scans": 2,
+            "buy_signals": 1,
+            "executed": 1,
+            "matured": 1,
+            "legacy_matured": 0,
+        }
 
 
 class TestComputeDiagnostics:

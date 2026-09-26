@@ -4,6 +4,7 @@ All timestamps stored as UTC ISO strings.
 """
 
 import logging
+import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -306,6 +307,21 @@ async def init_db() -> None:
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_threshold REAL",
+            # signal_outcomes label version 2 — see
+            # docs/specs/2026-09-26-outcome-label-contract.md. Additive only:
+            # legacy columns keep their meaning, legacy rows keep NULL label_version.
+            "ALTER TABLE signal_outcomes ADD COLUMN label_version INTEGER",
+            "ALTER TABLE signal_outcomes ADD COLUMN target_time REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN entry_candle_start INTEGER",
+            "ALTER TABLE signal_outcomes ADD COLUMN exit_candle_start INTEGER",
+            "ALTER TABLE signal_outcomes ADD COLUMN entry_price_v2 REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN target_price REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN signed_return REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN price_observed_at REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN processed_at TEXT",
+            "ALTER TABLE signal_outcomes ADD COLUMN price_source TEXT",
+            "ALTER TABLE signal_outcomes ADD COLUMN resolve_attempts INTEGER DEFAULT 0",
+            "ALTER TABLE signal_outcomes ADD COLUMN unresolved_reason TEXT",
         ]:
             try:
                 await db.execute(sql)
@@ -978,12 +994,27 @@ async def get_portfolio_summary() -> Dict:
 
 
 async def insert_signal_outcome(d: Dict) -> None:
+    """Record a pending signal, stamped with its label-version-2 schedule.
+
+    `signal_time` (unix epoch, default now) fixes the entry bar, exit bar and
+    target time at record time, so the label can never be reinterpreted later.
+    See docs/specs/2026-09-26-outcome-label-contract.md.
+    """
+    from services import outcome_labels as ol
+
+    signal_time = d.get("signal_time")
+    if signal_time is None:
+        signal_time = _time.time()
+    entry_start = ol.entry_candle_start(signal_time)
+
     async with _db() as db:
         await db.execute(
             """INSERT INTO signal_outcomes
                (source, product_id, side, confidence, entry_price,
-                indicators_json, check_after, created_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                indicators_json, check_after, created_at,
+                label_version, target_time, entry_candle_start,
+                exit_candle_start, resolve_attempts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)""",
             (
                 d["source"],
                 d["product_id"],
@@ -993,6 +1024,10 @@ async def insert_signal_outcome(d: Dict) -> None:
                 d.get("indicators_json", "{}"),
                 d["check_after"],
                 _now(),
+                ol.LABEL_VERSION,
+                ol.target_time(entry_start),
+                entry_start,
+                ol.exit_candle_start(entry_start),
             ),
         )
         await db.commit()
@@ -1005,8 +1040,9 @@ async def get_pending_outcomes() -> List[Dict]:
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT * FROM signal_outcomes WHERE outcome IS NULL AND check_after <= ? "
-            "ORDER BY check_after ASC LIMIT 100",
+            "SELECT * FROM signal_outcomes WHERE outcome IS NULL "
+            "AND COALESCE(target_time, check_after) <= ? "
+            "ORDER BY COALESCE(target_time, check_after) ASC LIMIT 100",
             (_time.time(),),
         )
         return [dict(r) for r in await cursor.fetchall()]
@@ -1051,6 +1087,111 @@ async def get_recent_lessons(
         )
         rows = await cursor.fetchall()
         return [r["lesson_text"] for r in rows]
+
+
+# ── Outcome label version 2 — provenance-carrying accessors ──────────────
+# Contract: docs/specs/2026-09-26-outcome-label-contract.md
+
+
+async def get_signal_outcome(row_id: int) -> Optional[Dict]:
+    """One outcome row by id, or None."""
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM signal_outcomes WHERE id=?", (row_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_candles_at(product_id: str, starts: List[int]) -> Dict[int, Dict]:
+    """Stored candles for exactly the requested bucket-open timestamps.
+
+    Returns a `{start_time: candle}` map. A bucket with no stored candle is
+    simply absent; the caller must treat absence as missing data and must never
+    substitute another bar.
+    """
+    if not starts:
+        return {}
+    placeholders = ",".join("?" for _ in starts)
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"SELECT * FROM candles WHERE product_id=? AND start_time IN ({placeholders})",
+            (product_id, *starts),
+        )
+        return {int(r["start_time"]): dict(r) for r in await cursor.fetchall()}
+
+
+async def resolve_signal_outcome_v2(
+    row_id: int,
+    outcome: str,
+    signed_return: float,
+    entry_price_v2: float,
+    target_price: float,
+    price_observed_at: float,
+    price_source: str,
+    lesson_text: str,
+) -> bool:
+    """Write a version-2 label. Returns True only if this call set it.
+
+    Guarded by `outcome IS NULL` so a retry or a concurrent pass can never
+    overwrite a completed label.
+    """
+    from services import outcome_labels as ol
+
+    async with _db() as db:
+        cursor = await db.execute(
+            """UPDATE signal_outcomes
+               SET outcome=?, signed_return=?, entry_price_v2=?, target_price=?,
+                   price_observed_at=?, price_source=?, processed_at=?,
+                   label_version=?, lesson_text=?,
+                   exit_price=?, pct_change=?, checked_at=?
+               WHERE id=? AND outcome IS NULL""",
+            (
+                outcome,
+                signed_return,
+                entry_price_v2,
+                target_price,
+                price_observed_at,
+                price_source,
+                _now(),
+                ol.LABEL_VERSION,
+                lesson_text,
+                target_price,
+                signed_return,
+                _now(),
+                row_id,
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def mark_signal_outcome_unavailable(row_id: int, reason: str) -> bool:
+    """Terminally mark a row unresolvable. Returns True only if this call set it.
+
+    UNAVAILABLE is not a scoring outcome and is excluded from accuracy
+    denominators. Guarded by `outcome IS NULL` for the same reason as above.
+    """
+    async with _db() as db:
+        cursor = await db.execute(
+            """UPDATE signal_outcomes
+               SET outcome='UNAVAILABLE', unresolved_reason=?, processed_at=?
+               WHERE id=? AND outcome IS NULL""",
+            (reason, _now(), row_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def bump_signal_outcome_attempts(row_id: int) -> None:
+    """Count one failed resolution attempt without resolving the row."""
+    async with _db() as db:
+        await db.execute(
+            "UPDATE signal_outcomes SET resolve_attempts = COALESCE(resolve_attempts,0) + 1 "
+            "WHERE id=? AND outcome IS NULL",
+            (row_id,),
+        )
+        await db.commit()
 
 
 # ── CNN Training History ───────────────────────────────────────────────────────
