@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Dict, List
 
@@ -97,6 +98,18 @@ def load_all_profiles(
             with open(sidecar_path, "r", encoding="utf-8") as f:
                 rule_paths = json.load(f)
         for _, row in df.iterrows():
+            row_horizon = row.get("horizon")
+            if (
+                not isinstance(row_horizon, Real)
+                or isinstance(row_horizon, bool)
+                or row_horizon != int(h)
+            ):
+                logger.warning(
+                    "%s: excluded profile with invalid or mismatched horizon %r",
+                    parquet_path.name,
+                    row_horizon,
+                )
+                continue
             pid = str(row["pid"])
             leaf_id = int(row["leaf_id"])
             identity = (pid, int(row["horizon"]), leaf_id)

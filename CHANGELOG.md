@@ -13,6 +13,8 @@ Format: reverse-chronological by session date.
   execute a display-summary fallback. Only explicit `(root)` is unconditional.
 - Reject duplicate complete profile identities before loading or simulation
   can overwrite a rule. Rename the per-horizon lookup key to `sidecar_key`.
+- Reject row horizons that do not exactly match their parquet/sidecar horizon;
+  exclude missing, fractional, boolean and non-numeric values without coercion.
 - Exact-threshold rule provenance remains unresolved: the current producer
   writes rounded summaries into sidecars too. Research deployment stays blocked.
 
