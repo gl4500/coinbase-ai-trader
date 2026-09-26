@@ -7,6 +7,47 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Fail-closed order placement and cancellation - 2026-09-26
+
+Three call sites in `agents/order_executor.py` reported success for outcomes the
+exchange never confirmed - the same accepted-versus-confirmed pattern the
+position-lifecycle contract exists to prevent, in the module that places money at
+risk. Registered as findings 5-8 in `docs/handoffs/2026-09-26-execution-findings.md`.
+
+- `execute_market_order` read `resp.get("success_response", resp)`, so a failure
+  body produced `order_id="unknown"`, persisted `status="live"`, and returned
+  success. `resp.get("success")` was never read.
+- `cancel_order` persisted `"canceled"` whenever no exception was raised, never
+  inspecting the per-order `results`. A refused cancel was recorded as completed,
+  and a partially filled order had its fill erased.
+- `execute_signal` had the same fallback and default. It computed the row status
+  correctly as live-or-failed and then returned success regardless, so the
+  database and the caller disagreed about whether an order existed.
+- `execute_signal` also retried placement three times on exception. An exception
+  can be raised after the request reached the exchange, so a blind retry can
+  place a second order for one signal.
+
+One shared validator now serves all three placement paths: `_accepted_placement`
+requires `success is True` as an actual bool plus a usable non-placeholder string
+id, and `_explicit_rejection` is true only for `success is False`. Anything else
+is ambiguous - an order may exist - so it returns `reconciliation_required` and is
+never retried. The retry loop is gone. `cancel_order` requires an affirmative
+per-order acknowledgement plus a terminal snapshot, reusing the existing
+`_confirmed_unfilled_cancel` helper rather than a second copy of the rule; a
+partial fill, a FILLED race or an unknown state keeps the fill evidence, stays
+`reconciliation_required`, and never writes a cancellation row.
+
+95 new tests in `backend/tests/test_order_executor_false_success.py`, parameterised
+across response shapes so the class is covered rather than one example each. The
+33-test maker regression suite passes unchanged. CLAUDE.md gains invariant 25
+(numbered 25 deliberately: 24 arrives with the stacked strategy-validation work).
+
+**Scope limits.** This changes how responses are interpreted and recorded. It adds
+no ledger closure, no reconciliation worker and no live integration, and leaves
+invariant 21's routing semantics untouched. Live promotion remains a separate
+operator decision.
+
+
 ### Session 58.84 - 2026-09-26 - Review fixes and reconciled maker fallback
 
 - Preserve all non-current outcome rows: the pending query and every v2 mutation
