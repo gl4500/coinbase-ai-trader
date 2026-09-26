@@ -1,14 +1,18 @@
-import os, sys, math
+import math
+import os
+import sys
+
 _BACKEND = os.path.join(os.path.dirname(__file__), "..", "..")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
-os.environ.setdefault("COINBASE_API_KEY_NAME",    "organizations/test/apiKeys/test")
+os.environ.setdefault("COINBASE_API_KEY_NAME", "organizations/test/apiKeys/test")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
-os.environ.setdefault("DRY_RUN",                  "true")
-os.environ.setdefault("LOG_LEVEL",                "WARNING")
-os.environ.setdefault("OLLAMA_MODEL",             "llama3.1:8b")
+os.environ.setdefault("DRY_RUN", "true")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.setdefault("OLLAMA_MODEL", "llama3.1:8b")
 
 import pytest
+
 from services.regime.features import corr_spx_90d, macro_risk_raw
 
 
