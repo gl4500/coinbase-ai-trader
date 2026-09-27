@@ -30,8 +30,18 @@ class VariantSpec:
     """One combination of the proposed changes.
 
     `atr_lag_bars`: 0 reproduces production; 1 is the proposed repair -- the threshold for the bar
-    being traded through comes from the last COMPLETED bar.
+    being traded through comes from the last COMPLETED bar. **Under lag 0 every level, including
+    the one this module calls the level "at the open", is computed retrospectively from the bar
+    own completed OHLC** (Codex c6c670ee). So lag-0 gap and opening-event results are
+    counterfactual diagnostics, not a reconstruction of what a trader could have acted on; only
+    lag 1 makes the level knowable at the open it is attributed to.
     `ordering`: which intrabar sequence to assume. Neither is conservative (proposal §4.1).
+    `"low_before_high"` is a **delayed-update policy**, not a literal O-L-H-C traversal: the low
+    is tested against the level in force at the open, and a peak raised by this bar's high only
+    takes effect from the NEXT bar. A literal O-L-H-C path would also test the descent from the
+    high to the close against the newly raised level (Codex cb898726). That leg is deliberately
+    not modelled -- modelling it would be a third distinct policy -- and the limitation is pinned
+    by `test_low_before_high_is_a_delayed_update_policy_not_a_literal_path`.
     `gap_fill`: when True a triggered exit fills at `min(level, open)` rather than at the level,
     because a bar that opened beyond the level could not have filled there.
     """
@@ -144,16 +154,43 @@ def simulate_variant(
         return VariantResult(float("nan"), None, None, None)
 
     peak = entry_price
+    stop_level = entry_price * (1.0 - stop_loss_pct)
     for step in range(1, horizon_cap + 1):
         index = entry_idx + step
         bar_low = float(lows[index])
         bar_high = float(highs[index])
         bar_open = float(opens[index])
+        threshold_at_open = _threshold(atr_pcts, index, spec.atr_lag_bars, atr_trail_floor)
+        trail_level_at_open = peak * (1.0 - threshold_at_open)
+
+        # 0. OPENING EVENTS, for gap-enabled variants only (Codex c6c670ee). A level already
+        #    breached at the open is a TIMED event: it precedes everything else in the bar, so it
+        #    must be resolved before the full-bar extrema, whose order within the bar is unknown.
+        #    Without this, a bar opening below a live trail level but later reaching the stop
+        #    reported the stop -- an exit that could not have happened, because the position was
+        #    already out. Stop keeps priority at the same instant, matching the live ladder.
+        if spec.gap_fill:
+            if bar_open <= stop_level:
+                return VariantResult(
+                    (bar_open / entry_price - 1.0) - round_trip_fee,
+                    step,
+                    "stop",
+                    bar_open,
+                    True,
+                )
+            if bar_open < trail_level_at_open:
+                return VariantResult(
+                    (bar_open / entry_price - 1.0) - round_trip_fee,
+                    step,
+                    "trail",
+                    bar_open,
+                    True,
+                )
 
         # 1. Stop-loss first, matching the live exit ladder.
         if bar_low / entry_price - 1.0 <= -stop_loss_pct:
             # The stop level is a constant of the entry, so it was in force at the open.
-            level = entry_price * (1.0 - stop_loss_pct)
+            level = stop_level
             price, gapped = _fill(level, level, bar_open, spec.gap_fill)
             return VariantResult(
                 (price / entry_price - 1.0) - round_trip_fee, step, "stop", price, gapped
@@ -162,9 +199,8 @@ def simulate_variant(
         # 2. Trail. The ordering decides whether THIS bar's high may raise the peak before its
         #    low is tested against it -- which changes both whether an exit fires and, through
         #    the peak, at what level.
-        threshold = _threshold(atr_pcts, index, spec.atr_lag_bars, atr_trail_floor)
-        # The level in force when this bar opened, before its own high can lift the peak.
-        level_at_open = peak * (1.0 - threshold)
+        threshold = threshold_at_open
+        level_at_open = trail_level_at_open
         if spec.ordering == "high_before_low":
             if bar_high > peak:
                 peak = bar_high
@@ -223,7 +259,9 @@ def bracket_orderings(
     """Run both orderings for one trade and report whether they agree.
 
     Agreement means the same exit kind, bar and value. Disagreement is the measurable form of the
-    ambiguity, and §4.2 makes the published label the lower bound of the two with a blocker.
+    ambiguity. What a PUBLISHED label should then be is operator question 1 and is not decided
+    here -- `lower_bound_pnl` is a diagnostic comparison over the two enumerated orderings, and
+    calling it the published label was an overclaim (Codex c6c670ee).
     """
     shared = dict(
         entry_idx=entry_idx,
