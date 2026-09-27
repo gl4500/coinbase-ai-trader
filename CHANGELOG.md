@@ -123,6 +123,49 @@ was `> 0`, which passes whether or not double counting occurs; it is now an exac
 
 9 tests. Nothing is wired: no consumer calls this yet.
 
+### Replay timeline - 2026-09-27
+
+The pre-integration replay iterated raw bar STARTS and did closing, entry evaluation and
+occupancy sampling at each one. Three problems in one loop: entries were evaluated a bar
+early on close-derived features; an exit on the final bar was unreachable, because that
+bar's close is later than every bar start, so `exit_ts <= ts` never fired and the PnL
+silently vanished; and folding exit examination into the same loop would have changed the
+denominator of `pct_slots_full` and `mean_concurrent`.
+
+`replay_timeline` separates the three. `decision_instants` is the unique union of bar
+CLOSES across **participating** products -- the entry opportunities AND the sampling basis.
+`close_checkpoints` are unique instants at which an open position may become due; they
+SCHEDULE AN INSPECTION and nothing else, create no positions and realize no PnL, so a
+checkpoint for a candidate that never fired is a harmless no-op and the whole list can be
+precomputed. `ordered_instants` returns `(instant, is_decision)`, with a coinciding
+checkpoint collapsing into ONE decision entry so the replay closes, opens, then samples once.
+
+**It emits no per-position events, and that is the design.** An earlier draft did, and it
+would have replaced the existing `-cumulative_profit_deflated` ranking with ALPHABETICAL
+PRODUCT ORDER under a shared cap -- opening events one at a time in name order makes the name
+the tiebreaker -- and would have realized endpoints that were never entered, because seeding
+exits from every candidate creates a close for a position that never opened. Ranking, the cap
+and the per-product constraint stay where they are.
+
+Strict types, after three reproduced gaps. `_whole` originally did `int(value)` and compared
+the round trip, which is still coercion: it caught fractions but accepted integral FLOATS, so
+`bar_duration_ms=1.0` passed as 1. It rejected only Python `bool`, and `np.bool_` is not a
+`bool` subclass, so a numpy boolean converted to 1. And `ordered_instants` validated NEITHER
+input, so `ordered_instants([0.5], [True])` returned `[(0.5, True), (True, False)]` -- the
+bool being the worse half, since `True == 1` means it either vanishes into instant 1 or
+masquerades as it. The property wanted is `numbers.Integral`, checked before conversion;
+numpy integer scalars are accepted because frames hand them out. Every rejection is a
+`ValueError`, since without the explicit check the type depended on the input -- `int(nan)`
+raises `ValueError`, `int(inf)` `OverflowError`, a string `TypeError`.
+
+`bar_availability_instants` requires `row_ids` rather than enumerating. On a filtered frame a
+position is not a source row id, and an endpoint's `entry_row_id` is one, so enumerating would
+pair an instant with the wrong row the moment a caller passed a filtered sequence -- the same
+identity confusion `reset_index(drop=True)` creates downstream. The trap is removed rather
+than documented.
+
+47 tests. Pure module, nothing wired: no consumer imports it yet.
+
 ### Endpoint consumer adapter - 2026-09-26
 
 The publication work proved a frame's identity and put endpoints on disk. Neither
