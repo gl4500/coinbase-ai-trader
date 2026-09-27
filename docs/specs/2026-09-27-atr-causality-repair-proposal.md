@@ -598,7 +598,7 @@ kept for audit with a `SUPERSEDED.txt` note. Its figures are identical; it is su
 because it recorded a commit that could not reproduce it (below).
 
 The artifact carries its own provenance so it can be checked independently: a sha256 per input
-parquet, the selection rule verbatim, ten caveats, and the retained source positions run-length
+parquet, the selection rule verbatim, eleven caveats, and the retained source positions run-length
 encoded per product -- first and last timestamps alone could not reproduce which entries were
 excluded (Codex `dd462ea4`). ABT-USD's ranges show the gap structure directly:
 `[0,243] [270,1006] [1053,1082] [1107,1499]`.
@@ -613,12 +613,22 @@ replaced by a `source_provenance` block: `commit`, `tree_dirty`, `untracked_file
 being clean -- not merely "a commit was found". Untracked files are counted but excluded from
 that conjunction, since an untracked file cannot change what `git checkout <sha>` yields.
 
-The v3 run records `commit: 1e73275`, `tree_dirty: false`, `untracked_files: 0`,
-`reproducible_from_commit: true`. That SHA is `e94408b` plus the commit adding the block, and
-not `e94408b` itself: the fix Codex asked for is a code change, so re-running at `e94408b`
-would have reproduced exactly the defect it was meant to close. Every figure is unchanged --
-the fix altered what the artifact records about itself, not the measurement, and so adds no
-confidence to the measurement.
+The artifact records `commit: 43408cd`, `tree_dirty: false`, `untracked_files: 0`,
+`reproducible_from_commit: true`. It is deliberately NOT `e94408b`: the fix Codex asked for is
+itself a code change, so re-running at `e94408b` would have reproduced exactly the defect it
+was meant to close. Every figure is unchanged across all three runs -- the fixes altered what
+the artifact records about itself, not the measurement, and so add no confidence to the
+measurement.
+
+The artifact was regenerated once more at `43408cd` (Codex `6a2dda16`). An earlier run at
+`1e73275` carried only ten caveats, because `d5de230` later added an eleventh: that
+`reproducible_from_commit` is **source-tree evidence in both directions** -- a True flag says
+the recorded commit describes the tracked sources that ran, and says nothing about the
+interpreter, the installed package versions, or any untracked importable file. Leaving that run
+in place would have meant an artifact missing a limitation its own producing code states, so it
+was rerun from a clean tree rather than annotated after the fact. A key-by-key comparison of
+the two shows exactly two differences, `caveats` and `source_provenance`: every per-product
+scan, every count and all eight input digests are identical.
 
 ---
 
