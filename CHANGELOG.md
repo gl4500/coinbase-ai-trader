@@ -7,6 +7,50 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Pure label-endpoint record validator - 2026-09-26
+
+Implements the validator half of the shared label endpoint contract
+(`docs/specs/2026-09-26-label-endpoint-contract.md`). Pure module plus tests; it
+wires no consumer, regenerates no artifact, reads no config and changes no
+simulation semantics.
+
+New `backend/tools/strategy_discovery/endpoint_records.py`:
+
+- `LabelEndpoint` - a simulated trade's endpoint. Row ids are positional ordinals
+  into the ORIGINAL frame, so `bars_held` is their difference. Carries separate bar
+  starts, a DECLARED `bar_duration_ms`, and `entry_available_at` /
+  `exit_observable_at`, because `ts` is a bar's OPENING instant while the entry price
+  is its close - releasing anything at a raw `ts` would be a full bar early.
+- `ExpectedEndpointContext` - every binding supplied INDEPENDENTLY of the record,
+  plus a digest stored with the artifact. Product, horizon and `data_id` alone cannot
+  detect a swapped cached `label_value` or an altered cap, because the record stays
+  self-consistent; a self-declared `config_id` cannot attest its own embedded cap.
+- `validate_endpoint` - requires every invariant and rejects violations rather than
+  repairing: strictly-after exit (zero-duration rejected), `bars_held` equal to the
+  span and within `min(horizon, max_hold_bars)`, a horizon exit exactly at that cap,
+  timestamps EQUAL to the source bars, availability equal to bar start plus the
+  declared duration, source chronology agreeing with the row ordinals, finite
+  `label_value` rejecting bool, and `exit_kind` consistent with `exit_price_basis`.
+- `map_exit_to_first_retained_candidate` - deliberately separate. Returns an
+  ORIGINAL row id or `TERMINAL_SENTINEL`, and is an ELIGIBILITY CANDIDATE boundary,
+  never a portfolio accounting time and never a working-array position. A valid exit
+  may land on a row the working frame dropped for having no label of its own; that is
+  a mapping step, not a rejection.
+
+Two properties it refuses to assert. `intrabar_timing_known` describes simulated
+within-bar timing under the declared model - `False` for stop and trail, since an
+OHLC bar records four prices and no ordering; `True` for horizon, whose exit is the
+bar's close - and never means a fill was observed. And every record must carry the
+version-wide `label_atr_contemporaneous_causality` blocker, which the validator can
+never clear: the trail threshold reads the CURRENT bar's ATR, verified by changing
+only a bar's close and watching its label move, so labels can depend on information
+from after their own decision point.
+
+104 tests, written first. They cover expected-context mismatches as well as malformed
+records - including coherently tampered records whose internal invariants all hold,
+where only the independent binding can reject them.
+
+
 ### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
 
 Completed Tasks 5–8 of the Phase-1 plan (Tasks 1–4 landed 2026-07-05/09). The
