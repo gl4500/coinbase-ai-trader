@@ -7,6 +7,47 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Endpoint-derived mining eligibility - 2026-09-26
+
+`build_next_eligible` measures the horizon in WALL-CLOCK milliseconds while `walk_and_sum`
+compares ROW POSITIONS, and the label it gates was computed from row offsets with early
+stops. The two agree only on contiguous bars where every exit reached the nominal horizon.
+
+`build_next_eligible_from_endpoints` reads the boundary from published, validated endpoints
+instead, with the same dtype, shape and terminal convention -- so `walk_and_sum`,
+`best_split` and `fit_tree` consume it unchanged. It takes a `ValidatedEndpoints`, never a
+raw sequence: eligibility derived from records nobody checked against the frame would
+reintroduce the silent disagreement the endpoint contract removes.
+
+**`build_next_eligible` is deliberately kept.** It is the baseline the equivalence test
+compares against, and deleting it would remove the only evidence that this is a
+GENERALISATION of the old behaviour rather than a different algorithm producing plausible
+numbers. On contiguous bars with every exit at the nominal horizon the two vectors are
+`torch.equal` element for element -- and the comparison is not vacuous: 9 retained rows,
+7 distinct values, `[3, 4, 5, 6, 7, 8, 9, 9, 9]`.
+
+The divergence is measured in both directions, exactly rather than by inequality:
+
+- an early exit (a stop at bar 1 of a 3-bar horizon) reopens the slot at position 1 where
+  the clock waited until 3 -- the clock UNDERSTATES capacity;
+- one bar of hole between rows with a 2-bar horizon gives `[1, 2, 3, 4, 5, 6]` from the
+  clock against `[2, 3, 4, 5, 6, 6]` from the endpoints. Driven through `walk_and_sum` with
+  identical labels and subset, the endpoint vector admits **3** non-overlapping trades and
+  the clock admits **6**. Twice the trades from the same data, which is the double-count
+  that inflates profit.
+
+Fixture corrections from review, because a weak fixture proves nothing: an earlier version
+clamped exits to the final row, producing `entry == exit` -- a zero-bar hold the producer
+cannot emit and the validator rejects -- and gave endpoints to tail rows whose horizon runs
+past the end, which the producer counts as `insufficient_horizon` and never retains. That
+second mistake made the equivalence assertion fail correctly, by comparing a frame that
+cannot exist. Records now carry `exit_price_basis`, `intrabar_timing_known` and
+`intrabar_order_assumption` consistent with their `exit_kind`, since an early exit claiming
+`bar_close` is a record the real validator would refuse. The old `walk_and_sum` assertion
+was `> 0`, which passes whether or not double counting occurs; it is now an exact sum.
+
+9 tests. Nothing is wired: no consumer calls this yet.
+
 ### Endpoint consumer adapter - 2026-09-26
 
 The publication work proved a frame's identity and put endpoints on disk. Neither
