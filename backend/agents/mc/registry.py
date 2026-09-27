@@ -40,6 +40,47 @@ def _build_chain() -> List[BuyFilter]:
     return chain
 
 
+def _configured_names() -> List[str]:
+    raw = os.getenv("MC_FILTERS", "") or ""
+    return [n.strip() for n in raw.split(",") if n.strip()]
+
+
+def chain_health() -> Dict[str, Any]:
+    """Is the configured filter chain actually running?
+
+    Nothing could answer this before, which is why commit 589b571 (2026-08-01, a lint
+    cleanup) could delete cnn_agent's `from agents.mc import ci_filter` -- an import held
+    solely for its registration side effect -- and leave MC_FILTERS=ci resolving to nothing
+    for two months. The only signal was one WARNING at chain build, and a configured filter
+    that permits every candidate looks exactly like a filter that decided to permit.
+
+    `missing` is the fault condition: a filter that was ASKED FOR and cannot be resolved.
+    An empty MC_FILTERS is the documented default and is healthy, not broken.
+
+    Pure query. It must not build, rebuild or clear the cached chain, because a health
+    check with side effects is not an observation.
+    """
+    configured = _configured_names()
+    active = [name for name in configured if name in _FILTER_CLASSES]
+    missing = [name for name in configured if name not in _FILTER_CLASSES]
+    return {
+        "configured": configured,
+        "active": active,
+        "missing": missing,
+        "healthy": not missing,
+        "registered": sorted(_FILTER_CLASSES),
+        "chain_built": _chain_built,
+        "summary": (
+            "all configured MC filters resolved"
+            if not missing
+            else (
+                f"MC_FILTERS requests {missing!r} but no such filter is registered; "
+                "those candidates are passing UNFILTERED"
+            )
+        ),
+    }
+
+
 def _reset_chain_cache() -> None:
     """Test helper: drop the cached chain so the next apply_* rebuilds."""
     global _chain, _chain_built
