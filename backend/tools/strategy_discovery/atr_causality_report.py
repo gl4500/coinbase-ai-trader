@@ -250,8 +250,14 @@ def _frame_defect(frame) -> Optional[str]:
         values = frame[name].to_numpy(dtype="float64")
         if not np.isfinite(values).all() or (values <= 0.0).any():
             return f"{name} must be finite and positive"
-    if (frame["high"].to_numpy(dtype="float64") < frame["low"].to_numpy(dtype="float64")).any():
+    high = frame["high"].to_numpy(dtype="float64")
+    low = frame["low"].to_numpy(dtype="float64")
+    if (high < low).any():
         return "high must not be below low"
+    for name in ("open", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if (values > high).any() or (values < low).any():
+            return f"{name} must lie within [low, high]"
     return None
 
 

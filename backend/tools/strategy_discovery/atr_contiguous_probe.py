@@ -61,11 +61,70 @@ CAVEATS = (
     "The retained population is NOT representative of the full universe. Per-product gap exposure "
     "ranges from about 0.3% to 84%, so any pooled figure is weighted towards the products with "
     "the cleanest clocks.",
-    "legacy_matches_stored is the provenance anchor. Below retained_entries it means the stored "
-    "labels came from a different config or code, and every delta is then relative to a "
-    "recomputation rather than to the published artifact.",
+    "legacy_matches_stored counts entries where the recomputation REPRODUCES THE STORED VALUE "
+    "bitwise (float.hex, so signed zero cannot pass as a match). That is value identity, and "
+    "does not by itself establish which code or config produced the stored label. Below "
+    "retained_entries the baseline is NOT "
+    "the published label and every delta is relative to a recomputation. A shortfall does not by "
+    "itself identify the cause: a different config or code version would do it, but so would "
+    "float storage or round-tripping, or any intervening transformation of the frame "
+    "(Codex dd462ea4).",
     "Not a profitability measurement, and not a re-measurement of any archived verdict.",
+    # Carried over from atr_causality_report so this file is interpretable on its own.
+    "low_before_high is a DELAYED-UPDATE policy, not a literal low-first path: a peak raised by a "
+    "bar's high takes effect from the next bar, and the high-to-close descent is not modelled.",
+    "Under lag 0 the opening levels are computed retrospectively from the bar's own completed "
+    "OHLC, so lag-0 gap and opening-event figures are counterfactual.",
+    "pnl_delta_abs_mean_over_changed has a CONDITIONAL denominator: it averages the records that "
+    "changed, not the population.",
+    "The two enumerated orderings are not exhaustive bounds over intrabar paths. A bar may visit "
+    "its low, recover, set its high and fall back, touching a level neither ordering triggers.",
+    "Read-only was verified by file size and mtime, which detects modification BY THIS RUN but is "
+    "not a content-integrity proof of the inputs; per-file sha256 is recorded separately.",
 )
+
+
+def _retained_ranges(positions) -> list:
+    """Run-length encode retained positions as [start, end] inclusive pairs.
+
+    First and last timestamps cannot reproduce WHICH entries were excluded (Codex dd462ea4), and a
+    flat list of 11k integers per product is unwieldy. Ranges are exact and compact.
+    """
+    ranges = []
+    for position in positions:
+        if ranges and position == ranges[-1][1] + 1:
+            ranges[-1][1] = position
+        else:
+            ranges.append([position, position])
+    return [[int(a), int(b)] for a, b in ranges]
+
+
+def _file_digest(path) -> str:
+    """sha256 of one input file, so a reader can confirm they hold the same bytes."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _git_commit() -> Optional[str]:
+    """The commit this ran from, or None. Best effort: absence must not fail a diagnostic."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(Path(__file__).resolve().parent),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
 
 
 @dataclass(frozen=True)
@@ -96,6 +155,8 @@ class ContiguousScan:
     legacy_matches_stored: int
     retained_first_ts: Optional[int]
     retained_last_ts: Optional[int]
+    # Exact, reproducible record of WHICH positions were retained, run-length encoded.
+    retained_position_ranges: List[List[int]] = field(default_factory=list)
     variants: List[VariantDelta] = field(default_factory=list)
     skipped_reason: Optional[str] = None
 
@@ -143,7 +204,52 @@ def _frame_defect(frame) -> Optional[str]:
         values = frame[name].to_numpy(dtype="float64")
         if not np.isfinite(values).all() or (values <= 0.0).any():
             return f"{name} must be finite and positive"
+
+    # The RELATIONS, not just the magnitudes (Codex dd462ea4). A bar whose low exceeds its high,
+    # or whose open or close sits outside [low, high], describes no traversable path -- yet the
+    # simulation would still produce an exit from it, so the diagnostic must refuse the frame
+    # rather than report a number derived from an impossible bar.
+    high = frame["high"].to_numpy(dtype="float64")
+    low = frame["low"].to_numpy(dtype="float64")
+    if (low > high).any():
+        return "low must not exceed high"
+    for name in ("open", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if (values > high).any() or (values < low).any():
+            return f"{name} must lie within [low, high]"
     return None
+
+
+def _checked_positive_int(value, field: str) -> int:
+    """A strictly positive integer, without coercion.
+
+    `int(value)` accepted 24.9 and True, and a negative `max_entries` produced an empty range that
+    would read as a clean run with no evidence rather than as bad input.
+    """
+    import numbers
+
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{field} must be an integer without coercion, got {value!r}")
+    if int(value) <= 0:
+        raise ValueError(f"{field} must be strictly positive, got {value!r}")
+    return int(value)
+
+
+def _checked_config(config) -> Mapping[str, float]:
+    """Every threshold present, finite and in range. A missing key must not default silently."""
+    required = ("stop_loss_pct", "atr_trail_floor", "max_hold_bars", "round_trip_fee")
+    missing = [key for key in required if key not in config]
+    if missing:
+        raise ValueError(f"config is missing {sorted(missing)}")
+    for key in ("stop_loss_pct", "atr_trail_floor"):
+        value = float(config[key])
+        if not math.isfinite(value) or not 0.0 < value < 1.0:
+            raise ValueError(f"config[{key!r}] must be a finite fraction in (0, 1), got {value!r}")
+    fee = float(config["round_trip_fee"])
+    if not math.isfinite(fee) or fee < 0.0:
+        raise ValueError(f"config['round_trip_fee'] must be finite and non-negative, got {fee!r}")
+    _checked_positive_int(config["max_hold_bars"], "config['max_hold_bars']")
+    return config
 
 
 def scan_contiguous_windows(
@@ -157,6 +263,11 @@ def scan_contiguous_windows(
 ) -> ContiguousScan:
     """Variants over entries whose own forward window is contiguous hourly."""
     import numpy as np
+
+    horizon = _checked_positive_int(horizon, "horizon")
+    config = _checked_config(config)
+    if max_entries is not None:
+        max_entries = _checked_positive_int(max_entries, "max_entries")
 
     missing = [name for name in _REQUIRED_COLUMNS if name not in frame.columns]
     if missing:
@@ -200,6 +311,7 @@ def scan_contiguous_windows(
     retained = matched = 0
     no_label = incomplete = has_gap = 0
     first_ts = last_ts = None
+    retained_positions = []
 
     for entry in range(considered):
         if not _finite(float(stored[entry])):
@@ -219,10 +331,14 @@ def scan_contiguous_windows(
             continue
 
         retained += 1
+        retained_positions.append(entry)
         if first_ts is None:
             first_ts = int(ts[entry])
         last_ts = int(ts[entry])
-        if base.pnl == float(stored[entry]):
+        # float.hex(), not ==: 0.0 == -0.0 is True while the bits differ, so equality alone cannot
+        # support a bitwise claim (Codex 15e8c1c7). And even a bitwise match establishes only that
+        # the VALUES agree -- never by itself which code or config produced them.
+        if base.pnl.hex() == float(stored[entry]).hex():
             matched += 1
 
         for spec in variants:
@@ -268,6 +384,7 @@ def scan_contiguous_windows(
         legacy_matches_stored=matched,
         retained_first_ts=first_ts,
         retained_last_ts=last_ts,
+        retained_position_ranges=_retained_ranges(retained_positions),
         variants=[_summarise(spec.name, buckets[spec.name]) for spec in variants],
     )
 
@@ -303,6 +420,15 @@ def run_contiguous_probe(
     """Scan read-only, write one JSON to an isolated directory, report no-data explicitly."""
     import pyarrow.parquet as pq
 
+    config = _checked_config(config)
+    horizons = tuple(_checked_positive_int(h, "horizon") for h in horizons)
+    if not horizons:
+        raise ValueError("at least one horizon is required")
+    if limit is not None:
+        limit = _checked_positive_int(limit, "limit")
+    if max_entries is not None:
+        max_entries = _checked_positive_int(max_entries, "max_entries")
+
     frames_dir = Path(frames_dir)
     output_dir = Path(output_dir)
     resolved_frames = frames_dir.resolve()
@@ -316,7 +442,9 @@ def run_contiguous_probe(
         candidates = candidates[: int(limit)]
 
     scans: List[ContiguousScan] = []
+    inputs = {}
     for path in candidates:
+        inputs[path.name] = _file_digest(path)
         frame = pq.read_table(path).to_pandas()
         for horizon in horizons:
             scans.append(
@@ -340,6 +468,8 @@ def run_contiguous_probe(
         "selection_rule": SELECTION_RULE,
         "frames_found": len(candidates),
         "frames_with_evidence": len(with_evidence),
+        "input_digests": inputs,
+        "git_commit": _git_commit(),
         "retained_entries_total": sum(s.retained_entries for s in scans),
         "legacy_matches_stored_total": sum(s.legacy_matches_stored for s in scans),
         "scans": [asdict(s) for s in scans],

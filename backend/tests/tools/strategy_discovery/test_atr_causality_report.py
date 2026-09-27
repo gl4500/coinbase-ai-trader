@@ -28,9 +28,11 @@ _BAR = 3_600_000
 def _frame(rows: int = 400, *, seed: int = 11, atr: float = 0.05):
     rng = np.random.default_rng(seed)
     close = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.02, size=rows))
-    high = close * (1.0 + np.abs(rng.normal(0.0, 0.015, size=rows)))
-    low = close * (1.0 - np.abs(rng.normal(0.0, 0.015, size=rows)))
     open_ = np.concatenate([[close[0]], close[:-1]])
+    span = np.abs(rng.normal(0.0, 0.015, size=rows))
+    # A real bar always contains its own open AND close, so derive the extremes from both.
+    high = np.maximum(open_, close) * (1.0 + span)
+    low = np.minimum(open_, close) * (1.0 - span)
     labels = [0.05 if row + 24 < rows else float("nan") for row in range(rows)]
     return pd.DataFrame(
         {

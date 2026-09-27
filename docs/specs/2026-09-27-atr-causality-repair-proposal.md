@@ -525,9 +525,17 @@ every label VALUE while preserving finiteness moves not one retained entry.
 | excluded: no stored label / incomplete window | 0 |
 | **legacy == stored label** | **11,565 of 11,565 = 100.00%** |
 
-**The provenance anchor is exact.** The probe's legacy baseline reproduces the published label
-bit-for-bit on every retained entry, so every delta below is measured against the ARTIFACT rather
-than against a recomputation. That was the thing §10.1's withdrawn numbers could not claim.
+**The recomputation reproduces every stored value bitwise.** Compared with `float.hex()`, not
+`==`, because `0.0 == -0.0` is True while the bits differ, so equality alone cannot support a
+bitwise claim (Codex `15e8c1c7`). Every delta below is therefore measured against the stored
+values, not against a recomputation that merely resembles them -- the thing §10.1's withdrawn
+numbers could not claim.
+
+**But value identity is not provenance.** Reproducing the numbers does not by itself establish
+which code or config produced the stored labels; it is strong evidence that the simulation and the
+config used here match what produced them, and nothing more. A shortfall would likewise not prove
+a config or code difference -- float storage, round-tripping or any intervening transformation of
+the frame would do it too.
 
 | variant | PnL changed | RESULT changed | sign flips |
 |---|---|---|---|
@@ -542,17 +550,31 @@ BNB 1500/1, BCH 1500/24, ASTER 1474/52, BOBA 1187/190, ABT 1404/260.
 ### 10.6 Two things this forces me to correct, beyond §10.1
 
 **Counting only PnL understated the ordering effect by ~3.6x.** `ordering_only` moves 1.28% of
-PnLs but **4.58% of results** -- 530 entries change exit kind or holding period, and most of those
-land on the same PnL. Every figure I quoted before splitting `pnl_changed` from `result_changed`
-(Codex `c6f81f65` item 7) was the smaller number. Occupancy is exactly what the portfolio replay
-consumes, so for that purpose 4.58% is the relevant figure, not 1.28%.
+PnLs and **4.58% of results**. Stated precisely, because the two are nested rather than separate
+(Codex `15e8c1c7`): `result_changed` is the UNION of a change in PnL, exit kind or holding period.
+So of 530 changed results, 148 also changed PnL and the remaining 382 changed exit kind or holding
+period while landing on the same PnL. Every figure I quoted before splitting `pnl_changed` from
+`result_changed` (Codex `c6f81f65` item 7) was the smaller, nested number.
 
-**The non-additivity I claimed largely dissolves.** On result-changed, `combined` is 543 while the
-isolated variants sum to 8 + 530 + 8 = **546** -- slightly SUB-additive from overlap, not the
-near-doubling I reported. That earlier 299-vs-165 gap was substantially an artifact of PnL-only
-counting, not evidence of interaction. I had already withdrawn the mechanism and the "~80%" figure
-as unsupported by counts; this measurement shows the premise itself was mostly a measurement
-artifact.
+4.58% is **candidate-result sensitivity**, not a measured portfolio effect. Occupancy is what the
+replay consumes, so it is the more relevant of the two for that purpose -- but what the portfolio
+actually executes depends on the cap, the ranking and the per-product constraint, and this
+diagnostic does not run that. Calling it the executed effect would be a further claim I have not
+measured.
+
+**The non-additivity I claimed is not supported here either.** On result-changed, `combined` is
+543 while the isolated variants sum to 8 + 530 + 8 = **546**. Those totals are close, which is all
+I can say: 543 against 546 does **not** establish sub-additivity, nor overlap as its cause, nor
+does it explain the earlier PnL-only gap (Codex `15e8c1c7`). A combined intervention need not
+produce the union of the isolated changed sets at all, so comparing a total to a sum cannot
+identify a mechanism in either direction. Establishing one needs per-entry cross-tabs, which this
+run does not produce.
+
+What survives is narrower and still useful: the earlier 299-vs-165 gap I described as
+"nearly twice the sum" was computed on PnL-changed counts only, and on the fuller result measure
+no comparable gap appears. I had already withdrawn the mechanism and the "~80%" figure as
+unsupported by counts; I am now also withdrawing the claim that the premise was *explained* by
+overlap.
 
 ### 10.7 What may and may not be concluded
 
@@ -570,6 +592,12 @@ the sensitivity of ONE enumerated policy pair, one of which defers the raised pe
 does not model the high-to-close descent (§4.2). It is not the size of a true-path error.
 
 Artifact: `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out_v2\contiguous_window_report.json`
+
+The artifact carries its own provenance so it can be checked independently: the git commit
+it ran from (`a9e07b1`), a sha256 per input parquet, the selection rule verbatim, nine
+caveats, and the retained source positions run-length encoded per product -- first and last
+timestamps alone could not reproduce which entries were excluded (Codex `dd462ea4`). ABT-USD's
+ranges show the gap structure directly: `[0,243] [270,1006] [1053,1082] [1107,1499]`.
 
 ---
 
