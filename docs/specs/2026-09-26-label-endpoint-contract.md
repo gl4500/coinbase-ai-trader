@@ -285,3 +285,147 @@ rule, so the test must compare the two *actual* consumers.
 - Everything in the per-fold policy evidence specification: frozen policies, per-fold reporting,
   funded-capital ledgers, matched-cost baselines, holdout discipline.
 - Whether any labelled return corresponds to an achievable trade.
+
+## 9. Consumer integration: the operational contract
+
+§3 establishes that both consumers read the endpoint and neither re-derives it. This section
+adds what turned out to be needed to actually do it, all of it found by reading and running
+the current code rather than by reasoning about it. Nothing here weakens §3 or §3a; §9.3
+reconciles an apparent conflict with §3a.
+
+### 9.1. Two quantities, two units, never substituted
+
+| quantity | type | unit | decides |
+|---|---|---|---|
+| eligibility boundary | position | index into the consumer's working frame | when a slot reopens |
+| accounting time | instant | milliseconds | when realized PnL lands on the equity curve |
+
+The code this replaces used a single wall-clock `exit_ts` for both roles, and that is why one
+defect produced errors in **opposite directions**: an early exit released the slot late and
+realized PnL late, while a gap realized PnL early and released the slot early, permitting two
+positions in one leaf. A position is not a time. Any function that accepts one where the other
+belongs is wrong even when the arithmetic happens to agree.
+
+**Entry decisions are available at the entry bar's CLOSE, not its start.** The record states
+this directly — `entry_available_at = entry_bar_start + bar_duration_ms` — and the reason is
+information availability: the features a rule reads are close-derived. The replay currently
+iterates raw bar *starts* and evaluates rules there, which dates every entry one bar early.
+§3 fixed the exit clock and left this one unstated; it is stated here.
+
+A consumer MUST cross-check each record's `entry_available_at` against
+`row.ts + bar_duration_ms` for the row it claims, and reject a disagreement. The frame and the
+endpoints must describe the same bars, and this is the cheapest place to find out that they do
+not.
+
+### 9.2. The anchor chain, and where it terminates
+
+The producer writes, beside each product's labelled frame:
+
+- `endpoints/{pid}/endpoints.jsonl` and `endpoints_manifest.json` — the dataset and its manifest;
+- `{pid}.endpoints.json` — a **sidecar** holding `manifest_digest`, `data_id`, `product_id`,
+  `horizons`, `bar_duration_ms`, `feature_recipe`, `label_version`, `cost_version`,
+  `exit_config` (`stop_loss_pct`, `atr_trail_floor`, `max_hold_bars`, `round_trip_fee`), and
+  `record_digests` keyed `"{horizon}:{entry_row_id}"`.
+
+A consumer verifies the manifest against the sidecar's `manifest_digest` — a value it did not
+compute — and each record against `record_digests`, which were computed **at publication**. A
+digest recomputed from the record under test attests nothing, which is the circularity the
+external anchor exists to break.
+
+**The sidecar is an anchor, not a root of trust.** Replacing the frame, the dataset and the
+sidecar together produces a coherent triple that nothing in this pipeline can reject. The chain
+terminates at whatever the consumer independently retains, and here that is the sidecar. This is
+a documented boundary, not a solved problem, and it must not be described as tamper-proof.
+
+**`config_id` equals `data_id` by construction.** The exit config is an input to
+`build_data_id`, so the producer sets them to the same value. Two consequences, both worth
+stating because neither is obvious:
+
+1. Recomputing `build_data_id` from the frame's own arrays **and** the declared `exit_config`
+   verifies frame identity and config identity in one step. Quoting the sidecar's `data_id`
+   back into a loader proves only that the manifest agrees with the sidecar; it does **not**
+   bind the frame. The recompute is what binds it.
+2. On a mismatch, the id alone cannot say whether the frame moved or the config did. That is a
+   diagnostic limitation, not a soundness one, and separating them would be a producer change.
+
+### 9.3. Coverage, and reconciling this with §3a
+
+§3a makes a row whose endpoint is missing an **exclusion with a named reason**, leaving the
+profile alive but reported incomplete. That remains correct for a consumer reading an artifact
+whose coverage it has not verified. It would be wrong to read it as licence to proceed past an
+**artifact-level** mismatch, so the two levels are named separately:
+
+| level | situation | behaviour |
+|---|---|---|
+| artifact | the dataset does not cover the frame's finite-label rows, or the recomputed `data_id` disagrees | **fail loud.** The two artifacts are not a matched pair, and no per-row accounting can repair that |
+| row | one row lacks an endpoint inside an otherwise coverage-verified artifact | §3a: exclude with `endpoint_missing`, profile survives, completeness reported |
+
+In this pipeline the producer publishes an endpoint for every finite-label row, and the consumer
+verifies complete coverage at load. The row-level path is therefore a **defensive assertion**
+rather than the expected path, and a consumer must never reach for horizon arithmetic at either
+level — a silent fallback is precisely what this contract removes.
+
+**Expectations must be built independently of the records, and for every declared horizon.**
+Enumerating expected keys *from* the records makes a missing record undetectable, because
+removing a record removes its own expectation. And a loader that rejects records absent from
+the expectations will reject every record of every *other* horizon if it is handed one
+horizon's expectations — so expectations are built from the **unfiltered** frame across all
+horizons the sidecar declares, and complete coverage is required there.
+
+**"Finite" means `isfinite`, not "not null".** `dropna` retains `+inf` and `-inf`. A consumer
+that retains rows with `notna` while building expectations with `isfinite` disagrees with
+itself: an infinite-labelled row is retained, has no expectation and no endpoint, and then
+fails as a spurious coverage error rather than as the data problem it is. Both sides use
+`isfinite`.
+
+**Two id spaces, two validations.** The unfiltered frame's `source_row_id` must be exactly
+`0..n-1` — the producer writes `arange(n)`, so anything else means the frame was filtered,
+reordered or concatenated after labelling and its positions no longer mean what the endpoints
+reference. Uniqueness must be checked *before* these become dictionary keys, because a
+duplicate silently overwrites rather than fails. A *filtered* frame's ids must be strictly
+increasing and unique, with gaps expected — gaps are the filter's whole purpose.
+
+**Ids are validated, never coerced.** `to_numpy(dtype="int64")` and `int()` truncate silently.
+A truncated timestamp produces a bar start that does not describe the frame; a truncated row id
+is worse, because it still points at a real row — just the wrong one.
+
+### 9.4. The expected cap is the configured cap, not the horizon
+
+A record publishes `max_hold_bars` from the **exit configuration**, not from its own horizon.
+The simulation uses `min(horizon, max_hold_bars)` internally, but the record carries the
+configured value: a `horizon=1` record published under the default configuration carries
+`max_hold_bars = 168`.
+
+Any consumer that reconstructs the expected cap from the horizon **rejects every valid
+short-horizon record.** The cap comes from the declared `exit_config`, strictly validated.
+
+### 9.5. Occupancy metrics keep their sampling basis
+
+`pct_slots_full` and `mean_concurrent` are sampled **once per unique decision instant** across
+the participating products — the same union-of-product-times convention the pre-integration loop
+used. Two consequences for any implementation:
+
+- Additional instants introduced only so that a due position can be examined (for example an
+  exit observable after the last decision instant) MUST NOT become sampling points. Folding them
+  into the sampled set changes both metrics with nothing in the code looking wrong.
+- Only **participating** products contribute instants. Including every supplied product would let
+  an unrelated input change the denominator.
+
+A time-weighted occupancy measure is defensible and is **not** part of this contract. Introducing
+one in the same change that corrects the exit clock would make a metric redefinition
+indistinguishable from the correction.
+
+### 9.6. What consumer integration does not establish
+
+Verifying integrity, attribution and coverage is not the same as validating semantics, and a
+clean load is not evidence of a correct simulation. In particular:
+
+- The `label_atr_contemporaneous_causality` blocker of §5 remains **UNRESOLVED**. Making the
+  pipeline self-consistent makes its numbers *coherent*; it does not make them *trustworthy*, and
+  a coherent number reads as a credible one, which is a hazard worth naming.
+- Every research verdict recorded before this integration was computed on the pre-integration
+  occupancy model and on entries dated one bar early. Those numbers are not comparable with
+  anything produced afterwards.
+- The fold purge remains as it is. Setting it from observed `bars_held` would leak an **outcome**
+  into fold construction — the same error class as post-test rows appearing in TRAIN. If it is
+  ever changed, the defensible quantity is `max_hold_bars`, known before any outcome exists.
