@@ -81,6 +81,10 @@ CAVEATS = (
     "its low, recover, set its high and fall back, touching a level neither ordering triggers.",
     "Read-only was verified by file size and mtime, which detects modification BY THIS RUN but is "
     "not a content-integrity proof of the inputs; per-file sha256 is recorded separately.",
+    "source_provenance.reproducible_from_commit is False whenever the tree carried tracked "
+    "modifications at run time. In that case the recorded commit does NOT reproduce the behaviour "
+    "that produced this artifact, and the run must be repeated from a clean tree before the "
+    "numbers are quoted as reproducible.",
 )
 
 
@@ -110,21 +114,49 @@ def _file_digest(path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def _git_commit() -> Optional[str]:
-    """The commit this ran from, or None. Best effort: absence must not fail a diagnostic."""
+def _git_provenance() -> Dict[str, object]:
+    """The commit this ran from AND whether the tree was modified at the time.
+
+    A bare commit SHA is worse than none when the executed code was uncommitted: it invites a
+    reader to check out that SHA and get different behaviour (Codex 35985ceb -- the first artifact
+    recorded a9e07b1 while the hex matching, coherence guards and these very fields were still
+    working-tree changes later committed as e94408b). `tree_dirty` makes that condition visible in
+    the artifact instead of inferable only by someone who already knows.
+    """
     import subprocess
 
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(Path(__file__).resolve().parent),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return result.stdout.strip() or None if result.returncode == 0 else None
+    def _run(args):
+        try:
+            return subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(Path(__file__).resolve().parent),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    head = _run(["git", "rev-parse", "HEAD"])
+    commit = head.stdout.strip() if head is not None and head.returncode == 0 else None
+
+    # Tracked modifications only: an untracked file cannot change what `git checkout <sha>` yields,
+    # but it is counted separately so the reader can judge.
+    diff = _run(["git", "diff", "--quiet", "HEAD"])
+    dirty = None if diff is None else (diff.returncode != 0)
+
+    untracked = _run(["git", "ls-files", "--others", "--exclude-standard"])
+    count = (
+        len([line for line in untracked.stdout.splitlines() if line.strip()])
+        if untracked is not None and untracked.returncode == 0
+        else None
+    )
+    return {
+        "commit": commit,
+        "tree_dirty": dirty,
+        "untracked_files": count,
+        "reproducible_from_commit": bool(commit) and dirty is False,
+    }
 
 
 @dataclass(frozen=True)
@@ -469,7 +501,7 @@ def run_contiguous_probe(
         "frames_found": len(candidates),
         "frames_with_evidence": len(with_evidence),
         "input_digests": inputs,
-        "git_commit": _git_commit(),
+        "source_provenance": _git_provenance(),
         "retained_entries_total": sum(s.retained_entries for s in scans),
         "legacy_matches_stored_total": sum(s.legacy_matches_stored for s in scans),
         "scans": [asdict(s) for s in scans],
