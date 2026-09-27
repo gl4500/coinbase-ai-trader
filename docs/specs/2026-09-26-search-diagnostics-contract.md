@@ -76,8 +76,7 @@ creates its own RNG, so this is not cross-product coupling in the current driver
 Reproducibility identity includes that order and configuration, not just the seed.
 Changing to identity-derived independent generators is a separate algorithm change.
 
-Preserve
-actual row membership or a membership digest so dropped-label gaps are not hidden by
+Preserve actual row membership or a membership digest so dropped-label gaps are not hidden by
 min/max timestamps. The contract does not prove label maturity from those boundaries;
 that requires independent label provenance and causal-cutoff validation.
 
