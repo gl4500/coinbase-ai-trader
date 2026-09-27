@@ -424,8 +424,14 @@ clean load is not evidence of a correct simulation. In particular:
   pipeline self-consistent makes its numbers *coherent*; it does not make them *trustworthy*, and
   a coherent number reads as a credible one, which is a hazard worth naming.
 - Every research verdict recorded before this integration was computed on the pre-integration
-  occupancy model and on entries dated one bar early. Those numbers are not comparable with
-  anything produced afterwards.
+  occupancy model, and on entries dated one bar early — the latter universally, since the replay
+  evaluated every rule at a bar start regardless of data shape. Whether a given verdict's
+  *numbers* actually moved is a separate question that depends on its inputs: the wall-clock and
+  row-offset occupancy models coincide on contiguous bars whose every exit reached the nominal
+  horizon, and diverge only where a gap or an early exit occurs. Early exits are the common case,
+  since producing them is the purpose of a dynamic-exit label — but "the method was defective" is
+  the defensible claim, and "this specific archived verdict is wrong" requires checking that run's
+  actual inputs.
 - The fold purge remains as it is. Setting it from observed `bars_held` would leak an **outcome**
   into fold construction — the same error class as post-test rows appearing in TRAIN. If it is
   ever changed, the defensible quantity is `max_hold_bars`, known before any outcome exists.
