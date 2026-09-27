@@ -227,12 +227,16 @@ def _publish_endpoints(
     # Same-directory temp then os.replace: a half-written sidecar would be a parse error
     # at best, and a plausible-looking partial document at worst.
     temporary = sidecar_path.with_name(sidecar_path.name + ".partial")
-    temporary.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
     try:
+        # The WRITE is inside the cleanup scope too, not just the rename: a failure
+        # part-way through writing would otherwise leave a .partial behind that the
+        # cleanup claim did not actually cover.
+        temporary.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
         os.replace(temporary, sidecar_path)
     except OSError:
-        # Leave no partial file behind: a later reader could mistake it for a published
-        # artifact, and the previous sidecar is still intact and still correct.
+        # What this guarantees is that the previous sidecar is INTACT -- not that it is
+        # still correct. If the dataset beside it was already replaced, the pair is
+        # mismatched, and it is the consumer's data_id recompute that must reject it.
         temporary.unlink(missing_ok=True)
         raise
     return manifest_digest
