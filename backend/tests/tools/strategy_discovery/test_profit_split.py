@@ -197,6 +197,10 @@ def _validated(pairs, *, horizon, starts, exit_kind="horizon"):
         data_id="sha256:fixture",
         bar_duration_ms=_EP_BAR,
         exit_config={"max_hold_bars": 168},
+        # Eligibility never verifies a frame -- it maps source ids to positions -- so a
+        # placeholder recipe is honest here. The REPLAY is what recomputes frame identity.
+        feature_recipe="atr14_pct_wilder_v1",
+        frame_fingerprint="sha256:fixture-frame",
         token=_VALIDATED_BY_LOADER,
     )
 

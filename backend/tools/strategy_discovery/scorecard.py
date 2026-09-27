@@ -6,7 +6,7 @@ Pure functions on PortfolioMetrics. No I/O (build_phase4 owns writing).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from tools.strategy_discovery.portfolio_sim import PortfolioMetrics
@@ -34,6 +34,10 @@ class CapScorecard:
     gates: Dict[str, bool]
     overall_pass: bool
     selected_profiles: List[LoadedProfile]
+    # Which products were requested, which were actually evaluated, and why any were left
+    # out. A thinner universe has to be visible in the output rather than inferable only from
+    # a smaller profit number.
+    universe: Dict[str, object] = field(default_factory=dict)
 
 
 def evaluate_cap_gates(metrics: PortfolioMetrics) -> Tuple[Dict[str, bool], bool]:

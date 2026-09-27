@@ -7,6 +7,55 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### The replay reads published endpoints instead of re-deriving exits - 2026-09-26
+
+Mining and portfolio replay computed their own exit times from a wall-clock horizon while the
+producer computed a different one from the actual exit rule. Two answers to one question, and
+nothing compared them. The consumers now read the published endpoints, and the horizon
+arithmetic is gone from the replay path.
+
+The error was in **both directions**, which is why neither showed up as an obvious bias:
+
+- Where the source bars have a gap, the clock's exit instant falls on a bar that does not
+  exist, so a position is released too early and its slot resold. The eligibility vector for
+  the gap fixture is `[2,3,4,5,6,6]` against the clock's `[1,2,3,4,5,6]`; run through
+  `walk_and_sum` the same candidate set totals **0.6 on the clock and 0.3 on the endpoints** -
+  the clock counted one entry twice.
+- Where an exit fires early (stop or trail), the clock holds the slot to the full horizon and
+  a real subsequent entry is suppressed.
+
+The distinction that made this tractable: an **eligibility boundary is a POSITION** in the
+working frame, and an **accounting time is an INSTANT**. The single wall-clock `exit_ts` was
+serving as both, which is exactly why its two errors pointed opposite ways. They are now
+`eligibility_boundaries()` and `accounting_times()`, and `replay_timeline.py` holds no
+decision logic at all.
+
+- `simulate_portfolio` requires `endpoints_by_pid` and `bar_duration_ms`; `horizon_ms` is
+  deleted rather than deprecated, so no caller can quietly keep the old basis. PnL comes from
+  the record's own `label_value`, not from the frame, so the exit and the amount can no longer
+  disagree.
+- A frame and a record set are bound by BOTH a recomputed `data_id` and a per-column
+  `frame_fingerprint`, because a swapped frame does not merely change prices - it fires
+  different RULES. The fingerprint hashes each column name WITH its own values; hashing names
+  and values separately let a column-name swap through undetected.
+- Checkpoint-only instants exist so a due position can be examined, and are never sampled.
+  Removing that guard moves `pct_slots_full` from 0.75 to 0.18 on an input that changed
+  nothing about the trading - the regression asserts it by injecting instants that belong to no
+  position.
+- Phase 4 loads endpoints from the same `phase2_dir` the producer wrote them to. A product with
+  **no** publication is excluded with a named reason; a publication that FAILS validation
+  raises `EndpointArtifactError`. Excluding the second case would shrink the optimisation
+  universe while still emitting a scorecard that looks successful.
+- The scorecard and the deployment payload now carry a `universe` record - products requested,
+  evaluated, and every exclusion with its reason, including frames dropped for missing or empty
+  features. A thinner universe has to be visible, not inferable from a smaller profit number.
+
+**Not addressed here, and not implied by any of it:** the unresolved ATR blocker stands, and
+nothing in this change makes a profitability claim. The endpoints are now trustworthy as a
+record of what the exit rule did; whether the strategy earns anything is a separate question
+these commits do not touch.
+
+
 ### Phase 2 publishes endpoints and their sidecar - 2026-09-26
 
 The producer computed which exit fired and then discarded it. It now publishes it, next to

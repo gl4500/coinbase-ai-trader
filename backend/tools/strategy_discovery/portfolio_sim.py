@@ -12,13 +12,26 @@ Pure pandas + numpy. No I/O, no GPU.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from tools.strategy_discovery.endpoint_consumers import (
+    MissingEndpoint,
+    ValidatedEndpoints,
+    accounting_times,
+    verify_frame_matches,
+)
 from tools.strategy_discovery.profile_loader import LoadedProfile
+from tools.strategy_discovery.replay_timeline import (
+    bar_availability_instants,
+    close_checkpoints,
+    decision_instants,
+    ordered_instants,
+)
 from tools.strategy_discovery.rule_contract import rule_matches, validate_rule
 
 
@@ -68,8 +81,26 @@ def simulate_portfolio(
     subset: List[LoadedProfile],
     cap: int,
     pid_features: Dict[str, pd.DataFrame],
+    *,
+    endpoints_by_pid: Dict[str, ValidatedEndpoints],
+    bar_duration_ms: int,
 ) -> Tuple[PortfolioMetrics, List[TelemetryRow]]:
-    """Walk historical bars in the subset's union; enforce cap; return metrics + telemetry."""
+    """Replay the subset on ENDPOINT instants; enforce cap; return metrics + telemetry.
+
+    Both new keywords are REQUIRED, never defaulted: a caller that omitted one would silently
+    keep the wall-clock behaviour this replaces.
+
+    Entries are decided at a bar's CLOSE, because the features a rule reads are close-derived
+    -- the previous loop evaluated rules at bar STARTS, dating every entry one bar early. Exits
+    are realized at the endpoint's `exit_observable_at`, not at `entry + horizon * 1h`, and the
+    cap slot is released then. Contract §9.1: an eligibility boundary is a POSITION and an
+    accounting time is an INSTANT; the single wall-clock `exit_ts` this replaces played both
+    roles, which is why one defect produced errors in opposite directions.
+
+    Each instant is processed as a BATCH -- close every due position, collect ALL eligible
+    firings, then rank and cap them together. Opening one position at a time in product order
+    would replace the `-cumulative_profit_deflated` ranking with alphabetical priority.
+    """
     identities = [(profile.pid, profile.horizon, profile.leaf_id) for profile in subset]
     if len(set(identities)) != len(identities):
         raise ValueError("duplicate research profile identity in simulation subset")
@@ -100,24 +131,129 @@ def simulate_portfolio(
                 raise ValueError(
                     f"missing feature columns for {profile.profile_id}: {sorted(missing)}"
                 )
-    label_cols = {p.profile_id: f"label_h{int(p.horizon)}" for p in subset}
-    horizon_ms = {p.profile_id: int(p.horizon) * 3_600_000 for p in subset}
+    # Accounting times per profile, from VALIDATED records only. A raw list would skip every
+    # frame, config and candidate check the adapter performs.
+    accounting: Dict[str, Dict[int, int]] = {}
+    entry_instants: Dict[str, Dict[int, int]] = {}
+    expected_pnl: Dict[str, Dict[int, float]] = {}
+    for profile in subset:
+        if profile.pid not in endpoints_by_pid:
+            raise MissingEndpoint(
+                f"no endpoints supplied for {profile.pid}; the replay will not invent exits "
+                f"from horizon arithmetic"
+            )
+        validated = endpoints_by_pid[profile.pid]
+        if not isinstance(validated, ValidatedEndpoints):
+            raise TypeError(
+                "expected ValidatedEndpoints from load_validated_endpoints for "
+                f"{profile.pid}, got {type(validated).__name__}; raw endpoints have not been "
+                f"checked against the frame, the config or the candidate values"
+            )
+        if int(validated.bar_duration_ms) != int(bar_duration_ms):
+            raise MissingEndpoint(
+                f"{profile.pid} endpoints declare bar_duration_ms "
+                f"{validated.bar_duration_ms} but the replay was asked for {bar_duration_ms}; "
+                f"the two describe different bars"
+            )
+        horizon = int(profile.horizon)
+        accounting[profile.profile_id] = accounting_times(validated, horizon=horizon)
+        # The record's own claim about when its entry became decidable, kept so it can be
+        # cross-checked against the frame's bar grid rather than trusted.
+        entry_instants[profile.profile_id] = {
+            int(record.entry_row_id): int(record.entry_available_at)
+            for record in validated.records
+            if record.horizon == horizon
+        }
+        # The RECORD is the single source of the expected PnL. Reading it from the frame's
+        # label column instead left the PnL and the exit coming from different places with
+        # nothing rebinding them, so a validated record set paired with a changed frame scored
+        # the wrong number. The adapter already validated each label_value against the frame's
+        # independent candidate values, and it rejects non-finite labels -- which also closes
+        # the pd.isna hole, since isna accepts +/-inf.
+        expected_pnl[profile.profile_id] = {
+            int(record.entry_row_id): float(record.label_value)
+            for record in validated.records
+            if record.horizon == horizon
+        }
 
-    # Build a master timestamp index across all pids in subset
-    all_ts = set()
-    for p in subset:
-        f = pid_features.get(p.pid, pd.DataFrame())
-        if not f.empty and "ts" in f.columns:
-            all_ts.update(f["ts"].astype("int64").tolist())
-    sorted_ts = sorted(all_ts)
+        # These records must describe THIS frame. A validated set proves some frame was
+        # checked; only recomputing the identity proves it was this one, and a mismatched pair
+        # would select trades on one frame and realize the other's outcomes.
+        frame_for_binding = pid_features.get(profile.pid)
+        if frame_for_binding is not None and not frame_for_binding.empty:
+            verify_frame_matches(validated, frame_for_binding, product_id=profile.pid)
 
-    # Per-pid feature lookup by ts
-    pid_ts_to_row: Dict[str, Dict[int, pd.Series]] = {}
-    for pid, f in pid_features.items():
-        if f.empty:
-            continue
-        pid_ts_to_row[pid] = {
-            int(t): row for t, row in zip(f["ts"], (f.iloc[i] for i in range(len(f))), strict=False)
+        # ARTIFACT-level coverage, checked ONCE here rather than row by row inside the loop.
+        # Every finite-label row in the frame must have a record: the frame and the endpoints
+        # were produced together, so a gap means they are not a matched pair, and no per-row
+        # accounting can repair that (contract section 9.3). `isfinite`, not `notna`, because
+        # notna accepts +/-inf.
+        frame = pid_features.get(profile.pid)
+        if frame is not None and not frame.empty:
+            column = f"label_h{horizon}"
+            if column not in frame.columns:
+                raise MissingEndpoint(
+                    f"{profile.pid} frame has no {column} for a horizon-{horizon} profile"
+                )
+            if "source_row_id" not in frame.columns:
+                raise MissingEndpoint(
+                    f"{profile.pid} frame has no source_row_id column; endpoint row identity "
+                    f"cannot be resolved without it"
+                )
+            uncovered = [
+                int(row_id)
+                for row_id, value in zip(
+                    frame["source_row_id"].tolist(),
+                    frame[column].to_numpy(dtype="float64"),
+                    strict=True,
+                )
+                if math.isfinite(value) and int(row_id) not in expected_pnl[profile.profile_id]
+            ]
+            if uncovered:
+                raise MissingEndpoint(
+                    f"{profile.profile_id} has {len(uncovered)} finite-label rows with no "
+                    f"endpoint, first source row {uncovered[0]}; the frame and the endpoints "
+                    f"are not a matched pair"
+                )
+
+    # PARTICIPATING products only: the subset's own pids. Including every supplied frame would
+    # let an unrelated input change the occupancy denominator.
+    participating = sorted(
+        {p.pid for p in subset if not pid_features.get(p.pid, pd.DataFrame()).empty}
+    )
+    # `.tolist()` without astype: the timeline validates these strictly, and coercing here
+    # first would destroy the evidence it checks for.
+    pid_bar_starts = {pid: pid_features[pid]["ts"].tolist() for pid in participating}
+    decisions = decision_instants(
+        pid_bar_starts, bar_duration_ms=bar_duration_ms, participating=participating
+    )
+
+    # Every candidate accounting time becomes an inspection instant, so an exit later than the
+    # last decision instant -- which is every exit on a final bar -- is still examined. These
+    # create nothing and realize nothing on their own.
+    checkpoints = close_checkpoints(
+        instant for table in accounting.values() for instant in table.values()
+    )
+
+    # Rows are keyed by AVAILABILITY instant, not bar start: that is when the row's rule may
+    # fire. Source row identity is passed explicitly rather than enumerated.
+    pid_instant_to_row: Dict[str, Dict[int, pd.Series]] = {}
+    pid_instant_to_source: Dict[str, Dict[int, int]] = {}
+    for pid in participating:
+        frame = pid_features[pid]
+        if "source_row_id" not in frame.columns:
+            raise MissingEndpoint(
+                f"{pid} frame has no source_row_id column; endpoint row identity cannot be "
+                f"resolved without it"
+            )
+        source_ids = frame["source_row_id"].tolist()
+        instant_to_source = bar_availability_instants(
+            frame["ts"].tolist(), source_ids, bar_duration_ms=bar_duration_ms
+        )
+        pid_instant_to_source[pid] = instant_to_source
+        by_position = {int(row_id): frame.iloc[i] for i, row_id in enumerate(source_ids)}
+        pid_instant_to_row[pid] = {
+            instant: by_position[row_id] for instant, row_id in instant_to_source.items()
         }
 
     open_positions: List[dict] = []  # {pid, profile_id, entry_ts, exit_ts, expected_pnl}
@@ -127,7 +263,7 @@ def simulate_portfolio(
     # Per-bar slot tracking: one entry per bar (ts) recording peak n_open for that bar
     bar_max_n_open: List[int] = []
 
-    for ts in sorted_ts:
+    for ts, is_decision in ordered_instants(decisions, checkpoints):
         # 1. Close positions whose exit_ts <= ts
         still_open: List[dict] = []
         closed_this_bar: List[dict] = []
@@ -150,13 +286,18 @@ def simulate_portfolio(
             )
         open_positions = still_open
 
+        # A checkpoint-only instant exists solely so a due position can be examined. Nothing
+        # opens there and nothing is sampled, or the metric denominator would move.
+        if not is_decision:
+            continue
+
         # 2. Evaluate firings (per-pid occupied set updated live during entries)
         occupied_pids = {p["pid"] for p in open_positions}
         firings: List[LoadedProfile] = []
         for profile in subset:
             if profile.pid in occupied_pids:
                 continue
-            row = pid_ts_to_row.get(profile.pid, {}).get(int(ts))
+            row = pid_instant_to_row.get(profile.pid, {}).get(int(ts))
             if row is None:
                 continue
             if rule_matches(machine_rules[profile.profile_id], row):
@@ -173,17 +314,37 @@ def simulate_portfolio(
             # Re-check per-pid max-1 since occupied_pids is updated live
             if profile.pid in occupied_pids:
                 continue
-            label_col = label_cols[profile.profile_id]
-            row = pid_ts_to_row[profile.pid][int(ts)]
-            if label_col not in row.index or pd.isna(row[label_col]):
+            source_row_id = pid_instant_to_source[profile.pid][int(ts)]
+            # A row is a candidate iff a RECORD exists for it. The frame's label column is no
+            # longer consulted: it was the second, unvalidated copy of the same fact.
+            expected = expected_pnl[profile.profile_id].get(source_row_id)
+            if expected is None:
                 continue
-            expected = float(row[label_col])
+            # The record must agree with the frame about WHEN this row became decidable. A
+            # disagreement means the endpoints and the frame describe different bars, and this
+            # is the cheapest place to find that out. It is a necessary check, not a sufficient
+            # one: full binding of a record set to a frame is the adapter's job, via the
+            # recomputed data_id -- see load_validated_endpoints.
+            claimed = entry_instants[profile.profile_id].get(source_row_id)
+            if claimed is not None and claimed != int(ts):
+                raise MissingEndpoint(
+                    f"{profile.profile_id} row {source_row_id} declares entry_available_at "
+                    f"{claimed} but the frame makes it decidable at {int(ts)}; the frame and "
+                    f"the endpoints describe different bars"
+                )
+            exit_at = accounting[profile.profile_id].get(source_row_id)
+            if exit_at is None:
+                raise MissingEndpoint(
+                    f"no endpoint for {profile.profile_id} at source row {source_row_id}; "
+                    f"refusing to invent an exit time from horizon arithmetic"
+                )
             open_positions.append(
                 {
                     "pid": profile.pid,
                     "profile_id": profile.profile_id,
                     "entry_ts": int(ts),
-                    "exit_ts": int(ts) + horizon_ms[profile.profile_id],
+                    # An ACCOUNTING TIME read from the endpoint, never re-derived.
+                    "exit_ts": exit_at,
                     "expected_pnl": expected,
                 }
             )
