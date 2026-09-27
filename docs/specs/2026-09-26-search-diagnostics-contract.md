@@ -83,12 +83,31 @@ Diagnostic null semantics are independent of the legacy qualification implementa
 Record the actual qualification decision and its configuration; do not silently
 change existing gates as part of this collection repair.
 
-Declare the replay assumptions in machine-readable fields: one open position per
-leaf, next-eligible-index entry exclusion, holding horizon in bars, and the actual
-label/cost semantics used. These are per-leaf signal replays, not all signals or
-capital-constrained portfolio returns. Per-leaf non-overlap does not establish
-cross-leaf or cross-product capital feasibility. Unknown cost semantics remain
-unknown; do not claim gross or net classification without evidence.
+Declare replay assumptions in machine-readable fields: the next-eligible-index
+exclusion rule, its clock and units, label holding/exit clock and units, and actual
+label/cost semantics. The current builder advances eligibility by `horizon * 1h`
+in timestamp space, whereas dynamic labels advance by row count (capped at 168)
+and may exit earlier at stops. These are different clocks, not verified trade exits.
+
+**Confirmed blocker: `replay_label_clock_mismatch`.** On timestamps at hours
+`[0, 2, 4, 6, 8]` with horizon 2, a label entered at row 0 can exit at row 2
+(hour 4), while replay admits row 1 at hour 2. Two labelled trades then overlap
+inside one leaf despite the max-one replay description. The miner accepts such
+gaps because it requires spacing of at least one hour, not exactly one hour.
+Dropping missing-label rows can introduce additional replay-index differences.
+
+A synthetic reproduction using `_simulate_one`, `build_next_eligible`, and
+`_replay_trades` with rising prices `[100, 101, 102, 103, 104]`, a 6% trailing floor,
+8% stop and 1.2% round-trip fee admits both rows 0 and 1 with returns about
+0.008 and 0.007802. No stops fire; the first label's exit is after the second entry.
+
+Diagnostics must record this exclusion assumption without asserting actual
+within-leaf non-overlap. Resolving it requires label exit identities/timestamps and
+replay eligibility aligned to those exits or a separately specified conservative
+holding interval. That semantic repair is outside collection and requires its own
+regressions. Until then, funded-capital and non-overlap claims remain blocked even
+within a leaf. Cross-leaf or cross-product feasibility is also unverified. Unknown
+cost semantics remain unknown; do not infer gross/net classification from filenames.
 
 ## Group dispositions
 
@@ -143,7 +162,8 @@ not itself establish a numerical research budget or authorize further holdout us
 Acceptance fixtures include: missing product file, missing horizon label, too few
 labeled rows, invalid timestamps, incomplete nested folds, a losing leaf, a zero-trade
 leaf, several passing leaves in one fold, a group below threshold, all groups rejected,
-and an interrupted run. Assert that losses and exclusions survive serialization and
+an interrupted run, and gapped timestamps where clock-hour eligibility precedes
+the row-count label exit. Assert that losses and exclusions survive serialization and
 that collection does not change which legacy profiles are emitted.
 
 A completed implementation still requires a separately predeclared decision process,
