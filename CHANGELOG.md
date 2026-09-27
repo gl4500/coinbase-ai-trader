@@ -45,6 +45,23 @@ adapter recomputing `data_id` from the frame -- not atomicity. Tested.
 10 tests. Still nothing wired: no consumer reads the sidecar in production, and
 `label_atr_contemporaneous_causality` remains UNRESOLVED.
 
+**Follow-up: the sidecar declares REQUESTED horizons, and lands atomically.** Two defects
+found by executed review of the committed producer.
+
+The sidecar's `horizons` were `sorted({e.horizon for e in endpoints})` -- the SURVIVING set.
+A frame too short for a long horizon emits no endpoints for it, so that horizon vanished from
+the sidecar, a consumer built expectations only for horizons that happened to survive, and
+complete coverage passed **because the missing horizon was never expected.** That is coverage
+derived from the thing under test: the same defect the dataset loader already refuses,
+reintroduced one layer up. Reproduced on a 30-row frame -- declared `[1, 4, 24, 72, 168]`,
+surviving `[1, 4, 24]`, so 72 and 168 disappeared silently. The declared set is published now,
+with a 260-hour regression that has short-horizon endpoints and no long-horizon ones and still
+round-trips through the adapter with complete declared coverage.
+
+The sidecar was also written with `write_text`. A half-written sidecar is a parse error at
+best and a plausible-looking partial document at worst, so it now lands via a same-directory
+temp file and `os.replace`, matching how the dataset and manifest are written.
+
 ### Endpoint-derived mining eligibility - 2026-09-26
 
 `build_next_eligible` measures the horizon in WALL-CLOCK milliseconds while `walk_and_sum`
