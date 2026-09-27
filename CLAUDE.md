@@ -171,6 +171,25 @@ How to apply:
 
 ---
 
+## Session-link coordination — the peer mailbox is windowed
+
+Review from the peer Codex session arrives through `tools/session_bridge`. Two rules belong
+here because breaking them silently corrupts what this session believes:
+
+1. **`inbox()` returns the newest 50 unacknowledged messages, not all of them.** Call
+   `pending_count()` for the true total; `wait()` reports `pending_total` and `truncated`.
+   Acking what you read is what keeps the window inert — an unacknowledged backlog is the
+   only thing that pushes mail out of it.
+2. **Silence is a reading, not an observation.** Before reporting that the peer has not
+   replied, verify your own reader, then the transport, then the peer. On 2026-09-27 that
+   order was reversed and this session reported a question as unanswered for hours while the
+   answer sat outside its window.
+
+Operating detail, including the suite command and why it must run under
+`.coordination-runtime`, lives in `tools/session_bridge/CLAUDE.md`.
+
+---
+
 ## Memory
 
 - Update relevant memory files immediately after every code change.
@@ -200,6 +219,7 @@ Relevant memory files for this repo (`coinbase-ai-trader` / polymarket_app):
 | `feedback_shell_cleanup.md` | Shell cleanup section |
 | `feedback_sync_rule.md` | Memory sync rule |
 | `feedback_python_clean_functions.md` | Code Style + new-code authoring rules |
+| `feedback_verify_your_own_reader.md` | Session-link coordination section |
 | `feedback_xgb_focus_not_cnn.md` | XGB-only scope; CNN frozen for new feature work |
 | `coinbase_trader_architecture.md` | This file's Architecture Quick Reference + per-session change log |
 | `coinbase_trader_schema.md` | DB column lists + code landmarks |
