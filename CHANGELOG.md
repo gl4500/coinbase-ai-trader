@@ -11,8 +11,16 @@ Format: reverse-chronological by session date.
 
 Mining and portfolio replay computed their own exit times from a wall-clock horizon while the
 producer computed a different one from the actual exit rule. Two answers to one question, and
-nothing compared them. The consumers now read the published endpoints, and the horizon
-arithmetic is gone from the replay path.
+nothing compared them.
+
+**What this change actually wires, stated exactly:** portfolio replay and Phase 4 now read the
+published endpoints, and the horizon arithmetic is gone from that path. **The miner is NOT
+wired.** `mine_profiles.py:317` still calls the wall-clock `build_next_eligible`;
+`build_next_eligible_from_endpoints` was built and tested here but has no caller yet. Mined
+eligibility therefore still carries the error described below, and endpoint-driven mining
+remains required and pending. The distinction matters because the point of this work is that a
+claim should not outrun the code, and an earlier draft of this entry said "the consumers now
+read the published endpoints" without qualification.
 
 The error was in **both directions**, which is why neither showed up as an obvious bias:
 
