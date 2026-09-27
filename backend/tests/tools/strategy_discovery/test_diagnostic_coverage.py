@@ -113,3 +113,36 @@ def test_even_all_completed_claims_do_not_validate_fold_or_leaf_evidence():
     assert summary.completed_count == 1
     assert summary.evaluation_validated is False
     assert "fold_leaf_evidence_not_validated" in summary.blockers
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"blockers": ()},
+        {"requested_count": 100},
+        {"pending_count": 1, "completed_count": 0},
+        {"completed_count": -1, "pending_count": 2},
+        {"requested_count": True},
+        {"completed_count": 1.0},
+        {"dispositions_complete": 1},
+        {"blockers": ["fold_leaf_evidence_not_validated"]},
+        {"completed_count": 0, "excluded_count": 1},
+        {"completed_count": 0, "error_count": 1},
+    ],
+)
+def test_direct_summary_constructor_rejects_inconsistent_claims(changes):
+    from tools.strategy_discovery.diagnostic_coverage import CoverageSummary
+
+    values = dict(
+        requested_count=1,
+        pending_count=0,
+        running_count=0,
+        completed_count=1,
+        excluded_count=0,
+        error_count=0,
+        dispositions_complete=True,
+        blockers=("fold_leaf_evidence_not_validated",),
+    )
+    values.update(changes)
+    with pytest.raises(ValueError):
+        CoverageSummary(**values)
