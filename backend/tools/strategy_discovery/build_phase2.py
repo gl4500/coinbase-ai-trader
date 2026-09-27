@@ -228,7 +228,13 @@ def _publish_endpoints(
     # at best, and a plausible-looking partial document at worst.
     temporary = sidecar_path.with_name(sidecar_path.name + ".partial")
     temporary.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
-    os.replace(temporary, sidecar_path)
+    try:
+        os.replace(temporary, sidecar_path)
+    except OSError:
+        # Leave no partial file behind: a later reader could mistake it for a published
+        # artifact, and the previous sidecar is still intact and still correct.
+        temporary.unlink(missing_ok=True)
+        raise
     return manifest_digest
 
 

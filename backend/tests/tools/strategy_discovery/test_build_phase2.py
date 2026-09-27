@@ -479,3 +479,64 @@ def test_the_sidecar_is_replaced_atomically(tmp_path: Path):
         "the temp file must sit in the same directory, or replace is not atomic"
     )
     assert json.loads(before)  # the earlier sidecar was complete and parseable
+
+
+def test_a_failed_replacement_leaves_the_previous_sidecar_byte_for_byte(tmp_path: Path):
+    """The behaviour the temp-and-rename exists for, rather than the fact that it is used.
+
+    Injects a failure at the replacement step while an EXISTING sidecar is in place, and
+    asserts the old file survives with its exact original bytes. A direct `write_text` would
+    have truncated it before failing, leaving a partial document that could parse as
+    plausible. The leftover temp file is also asserted gone, so a later reader cannot mistake
+    it for a published artifact.
+    """
+    from unittest.mock import patch
+
+    result, output_dir, pid = _build_with_endpoints(tmp_path)
+    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    original_bytes = sidecar_path.read_bytes()
+    assert original_bytes and json.loads(original_bytes)
+
+    from tools.strategy_discovery.build_phase2 import _publish_endpoints
+    from tools.strategy_discovery.endpoint_dataset import DATASET_FILENAME
+    from tools.strategy_discovery.endpoint_records import LabelEndpoint  # noqa: F401
+
+    # a second generation's records, so the write would genuinely change the file
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+    sidecar = json.loads(original_bytes)
+    validated = load_validated_endpoints(
+        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
+    )
+
+    # The second publication must produce DIFFERENT bytes, or "preserved" and "overwritten
+    # with the same content" are indistinguishable and the test proves nothing. Verified by
+    # reverting the implementation to a direct write: with identical content the test passed
+    # against the broken variant.
+    changed_horizons = [1, 4]
+    assert sorted(changed_horizons) != sorted(_DEFAULT_HORIZONS)
+
+    # Fail ONLY the sidecar rename. Patching `build_phase2.os.replace` patches the SHARED
+    # os module attribute, so a blanket side_effect also breaks write_dataset's atomic write
+    # and the failure happens before the sidecar is ever touched -- which made an earlier
+    # version of this test pass against a deliberately broken direct write.
+    import os as _os
+
+    real_replace = _os.replace
+
+    def _fail_only_the_sidecar(src, dst):
+        if str(dst).endswith(".endpoints.json"):
+            raise OSError("interrupted before the rename")
+        return real_replace(src, dst)
+
+    with patch("tools.strategy_discovery.build_phase2.os.replace", new=_fail_only_the_sidecar):
+        with pytest.raises(OSError, match="interrupted"):
+            _publish_endpoints(output_dir, pid, list(validated.records), changed_horizons)
+
+    assert sidecar_path.read_bytes() == original_bytes, (
+        "the previous sidecar was damaged by a failed replacement"
+    )
+    assert json.loads(sidecar_path.read_bytes())["horizons"] == sorted(_DEFAULT_HORIZONS)
+    assert not list(output_dir.glob(f"{pid}.endpoints.json.partial")), (
+        "a leftover temp file could be mistaken for a published artifact"
+    )
+    assert (output_dir / "endpoints" / pid / DATASET_FILENAME).exists()
