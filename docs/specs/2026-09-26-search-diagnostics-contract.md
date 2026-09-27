@@ -1,0 +1,151 @@
+# Complete search diagnostics contract
+
+Status: proposed implementation contract, not implemented evidence collection.
+Parent: exact-rule reports in draft PR #70. This complements the per-fold policy
+specification in draft PR #68; it does not satisfy its policy-performance requirements.
+
+## Purpose and limits
+
+Preserve what the search evaluated before selection removes observations. The
+artifact is `search_diagnostics_v1`, with `scope: search_diagnostics` and
+`deployment_eligible: false`. It is not a frozen-policy backtest, a funded ledger,
+or an independent holdout. No field may assert otherwise.
+
+The current miner loses evidence at input/task creation, early input/history
+returns, fold sufficiency checks, empty leaf skips, leaf qualification, and final
+root-direction qualification. Recording only successful profiles cannot reveal
+what was attempted or why nothing survived.
+
+This contract adds an independent diagnostic output. Existing archived files
+remain untouched. It does not change tree fitting, selection thresholds, model
+training, live trading, or the meaning of the existing profile artifacts.
+
+## Run and coverage records
+
+Before input-file checks, declare the complete deduplicated requested product by
+horizon cross-product. Materialize horizon iterables once. Reject invalid horizon
+values rather than coercing booleans or fractions into identities.
+
+The run manifest contains:
+
+- Version, scope, unique run ID, research campaign ID, and producer commit/config.
+- Ordered feature schema, label version if available, and input content identities.
+  Unknown label provenance is explicitly unknown, never inferred from a filename.
+- Requested pairs, each with a unique pair ID and its input location.
+- Expected outer fold count (five), inner count (three), minimum training rows,
+  embargo/holding assumptions, and qualification thresholds/config identity.
+- Start/finish UTC times and lifecycle status: `running`, `complete`, `incomplete`.
+- Access-accounting requirements and explicit unresolved evidence blockers.
+
+Create one pair record for every requested pair, initially `pending`. Pair states
+are `pending`, `running`, `completed`, `excluded`, or `error`. `excluded` and
+`error` require structured reason codes and observed facts. At minimum cover:
+missing input, missing label column, invalid schema/timestamps, insufficient labeled
+rows, insufficient fold structure, and evaluation exception. Record raw/labeled
+row counts, actual outer count and per-outer inner counts when available. A failed
+run must preserve pending/running pairs as incomplete; it cannot fabricate empty
+successful results for them.
+
+Coverage has two independent meanings: all requested pairs have recorded dispositions,
+and all required folds have complete evaluation evidence. A fully accounted run
+with excluded pairs is not fully evaluated. Consumers must report both explicitly.
+
+Write immutable run-specific outputs. Persist the declared manifest before work;
+atomically replace individual checkpoints and the final manifest. A crash may leave
+an incomplete run, never an apparently complete file assembled from mixed runs.
+Content digests detect alteration; they do not attest that code executed correctly.
+
+## Fold and leaf records
+
+For each evaluated outer fold record fold ID, sorted-frame index boundaries,
+training/test timestamp boundaries with interval convention, actual inner boundaries,
+chosen fitting parameters, tree digest, and declared fitted leaf IDs/count. Preserve
+actual row membership or a membership digest so dropped-label gaps are not hidden by
+min/max timestamps. The contract does not prove label maturity from those boundaries;
+that requires independent label provenance and causal-cutoff validation.
+
+Record one row for every fitted leaf, before the empty-row skip or qualification
+filter. Leaf identity is `(run_id, pair_id, outer_fold_id, source_leaf_id)`, bound
+to the exact machine rule, source tree digest and ordered feature schema. Do not
+substitute the cross-fold group ordinal for the source leaf ID.
+
+Each leaf row carries routed-row count, replay trade count, descriptive return
+metrics, qualification result/reasons, and root-feature/direction group key.
+Record failed as well as successful leaves. A fitted zero-trade leaf is an observed
+empty sample, not a missing record: count is zero, undefined sample statistics are
+null, and qualification is false with `no_trades` reason. In particular, do not emit
+zero win rate, average win/loss or Sortino for an empty sample. Conditional averages
+with no winning or no losing observations are null even when other trades exist.
+Use strict JSON: NaN and infinity must not escape as numeric literals. Record
+undefined-metric reasons rather than pretending an undefined value is a zero.
+
+Diagnostic null semantics are independent of the legacy qualification implementation.
+Record the actual qualification decision and its configuration; do not silently
+change existing gates as part of this collection repair.
+
+Declare the replay assumptions in machine-readable fields: one open position per
+leaf, next-eligible-index entry exclusion, holding horizon in bars, and the actual
+label/cost semantics used. These are per-leaf signal replays, not all signals or
+capital-constrained portfolio returns. Per-leaf non-overlap does not establish
+cross-leaf or cross-product capital feasibility. Unknown cost semantics remain
+unknown; do not claim gross or net classification without evidence.
+
+## Group dispositions
+
+Record every root-feature/direction group observed in fitted trees, including groups
+with no qualifying leaves. Thresholds can differ across folds within one group.
+For each group record observed fold IDs, qualifying fold IDs, distinct passing count,
+required passing count, emitted-profile identity if any, and rejection reasons.
+Absent groups in a particular fold are marked absent, not as a fabricated leaf.
+Group statistics remain search summaries. No representative leaf inherits the
+aggregate as its own performance. Leaf records cannot be dropped because their
+group failed the four-of-five gate.
+
+## Reading, accounting, and fail-closed behavior
+
+A validator checks declared-pair coverage, unique identities, pair/fold/leaf
+referential consistency, leaf counts, schema versions, rule bindings and content
+digests before producing a validated diagnostic view. It distinguishes incomplete
+coverage from a completed evaluation with no survivors. A missing sidecar is not
+an empty successful run. Legacy artifacts are excluded with a named diagnostic;
+no automatic migration invents missing observations.
+
+Audit inspection and candidate selection are separate access purposes. Record both.
+Before a supported selection consumer reveals results, append an access event with
+campaign ID, artifact digest, declared candidate universe/identities examined,
+selection procedure identity, purpose and time. Scanning all leaves counts all
+examined candidates, not just the final winner. Raw diagnostics are selection data;
+no later consumer can rename them an untouched holdout. Reproducibility reruns use
+the same immutable inputs/procedure and are logged separately from new candidates.
+
+Until this accounting consumer exists, declare selection consumption unsupported
+and block supported selection entry points rather than silently omitting the log.
+A scope string is not access control: manually reading a local file can bypass an
+application log. Reports must disclose that enforcement boundary and cannot claim
+complete access history without independent access controls. Audit collection does
+not itself establish a numerical research budget or authorize further holdout use.
+
+## Implementation slices and acceptance cases
+
+1. Pure records and validator: incomplete/duplicate pair coverage; missing or duplicate
+   fold/leaf IDs; explicit exclusions; zero-trade nulls; unknown provenance; corrupted
+   rule/data bindings. No writer or miner changes in this first slice.
+2. Producer capture: declare all requested pairs before file checks, preserve every
+   early-return disposition, record each fitted leaf before filters, and record
+   rejected groups. Preserve existing profile-return behavior. Tests stub fitting
+   and use synthetic data; they must not mine real archives.
+3. Run writer: atomic run-isolated persistence, interruption recovery, strict JSON,
+   and no mixing of prior-run outputs. Test failures at each persistence boundary.
+4. Read-only diagnostic reporting and accountable selection consumption: reject
+   incomplete evidence where complete evaluation is required; report exclusions
+   without policy-performance claims; require selection access events before use.
+
+Acceptance fixtures include: missing product file, missing horizon label, too few
+labeled rows, invalid timestamps, incomplete nested folds, a losing leaf, a zero-trade
+leaf, several passing leaves in one fold, a group below threshold, all groups rejected,
+and an interrupted run. Assert that losses and exclusions survive serialization and
+that collection does not change which legacy profiles are emitted.
+
+A completed implementation still requires a separately predeclared decision process,
+causal feature/label validation, holdout access discipline, funded-equity replay,
+matched-cost baselines and prospective execution evidence before trading conclusions.
