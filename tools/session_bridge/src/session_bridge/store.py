@@ -84,11 +84,45 @@ class Store:
                        (mid, self.role, recipient, body, time.time(), request_key))
             return dict(db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone())
 
-    def inbox(self):
+    INBOX_WINDOW = 50
+
+    def pending_count(self):
+        """How many unacknowledged messages this role actually has, window or no window.
+
+        `inbox()` is bounded, and a bound that cannot be seen is indistinguishable from a
+        quiet link. This is the number that makes truncation observable.
+        """
         with self.connect() as db:
-            return [dict(r) for r in db.execute(
-                'SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL ORDER BY created LIMIT 50',
-                (self.role,))]
+            return db.execute(
+                'SELECT COUNT(*) FROM messages WHERE recipient=? AND acknowledged IS NULL',
+                (self.role,)).fetchone()[0]
+
+    def inbox(self, limit=None):
+        """The NEWEST unacknowledged messages, returned oldest-first.
+
+        Newest, not oldest, and the distinction is the whole point. This read `ORDER BY
+        created LIMIT 50` until 2026-09-27, which meant that once fifty unacknowledged
+        messages accumulated every later arrival fell outside the window: the reader saw a
+        frozen snapshot of old mail and concluded the peer had stopped replying. It had not.
+        A backlog silently disabled the link, and `wait()` -- which reads through here --
+        could not wake on a message it was unable to see.
+
+        Newest-bias trades one blind spot for a smaller one: old mail leaves the window
+        instead. That direction is self-correcting, because acknowledging what you can see
+        brings the rest back, whereas the old direction got worse the longer it ran.
+        Callers that need to know the window bit should ask `pending_count()`.
+        """
+        window = self.INBOX_WINDOW if limit is None else int(limit)
+        if window < 1:
+            raise ValueError('limit must be at least 1')
+        with self.connect() as db:
+            newest = [dict(r) for r in db.execute(
+                'SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL '
+                'ORDER BY created DESC, id DESC LIMIT ?',
+                (self.role, window))]
+        # Selected newest-first so the bound keeps the right end; presented oldest-first
+        # because reading order carries the thread of the conversation.
+        return list(reversed(newest))
 
     MAX_WAIT_SECS = 900.0
     MAX_POLL_SECS = 30.0
@@ -119,12 +153,16 @@ class Store:
         while True:
             pending = self.inbox()
             if pending:
+                total = self.pending_count()
                 return {'status': 'messages', 'messages': pending,
+                        'pending_total': total,
+                        'truncated': max(0, total - len(pending)),
                         'waited_secs': round(time.monotonic() - started, 3),
                         'timeout_secs': timeout_secs}
             remaining = timeout_secs - (time.monotonic() - started)
             if remaining <= 0:
                 return {'status': 'timeout', 'messages': [],
+                        'pending_total': 0, 'truncated': 0,
                         'waited_secs': round(time.monotonic() - started, 3),
                         'timeout_secs': timeout_secs}
             # Never sleep past the deadline: a poll interval wider than the remaining budget
