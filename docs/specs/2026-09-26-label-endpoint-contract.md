@@ -83,10 +83,22 @@ Identities are **original-frame row ids**, never positions in a filtered or rein
 
 ### Required validations
 
-Reject, rather than repair: `exit_row_id > entry_row_id`; `bars_held` equal to the difference **and**
-`≤ min(horizon, max_hold_bars)`; all prices and the return finite; and `exit_kind` consistent with
-`exit_price_basis` (`horizon` ⇔ `bar_close`, `stop` ⇔ `assumed_stop_level`, `trail` ⇔
-`assumed_trail_level`). A row id unresolvable in the declared `data_id` is malformed, not recoverable.
+**Require** all of the following, and **reject any violation** rather than repairing it:
+
+- `exit_row_id > entry_row_id` — a zero-duration endpoint (`exit == entry`) is rejected, as is any
+  reversed pair.
+- `bars_held == exit_row_id − entry_row_id`, and `bars_held ≤ min(horizon, max_hold_bars)`.
+- `entry_bar_start` and `exit_bar_start` equal to the **source bars'** timestamps at those row ids in
+  the declared `data_id` — not merely plausible values.
+- `entry_available_at == entry_bar_start + bar_duration_ms`, and likewise for `exit_observable_at`, with
+  the **declared** `bar_duration_ms`.
+- all prices and the return finite.
+- `exit_kind` consistent with `exit_price_basis`: `horizon` ⇔ `bar_close`, `stop` ⇔
+  `assumed_stop_level`, `trail` ⇔ `assumed_trail_level`.
+
+A row id unresolvable in the declared `data_id` is malformed, not recoverable. (An earlier draft opened
+this list with "Reject, rather than repair: `exit_row_id > entry_row_id`", which read as an instruction
+to reject every *valid* exit — the requirement and its violation had been collapsed into one sentence.)
 
 ## 3. Both consumers read it; neither re-derives it
 
@@ -107,8 +119,20 @@ source index and a working-array index are different coordinate systems, and com
 the same error class as comparing a row's horizon against the file it came from. Each consumer must
 carry an explicit original-id → working-position map alongside its frame, or resolve by timestamp
 search; and the label producer must **preserve each row's original identity across the `dropna`** so the
-map can exist at all. A row id that does not resolve in the working frame is a validation failure, not
-an occasion to fall back to positional arithmetic.
+map can exist at all.
+
+**An absent exit row is not an invalid endpoint.** A perfectly valid exit can land on a source row that
+the working frame dropped, because that row has no label of its own — so requiring the exit row to be
+present among the filtered candidates would reject correct endpoints. Resolution is therefore two-step:
+resolve `entry_row_id` and `exit_row_id` against the **original** frame identified by `data_id`, then map
+the exit to the **first retained eligible row at or after the source exit** — or to a terminal sentinel
+when no retained row follows it.
+
+> Original rows at hours `[0, 1, 2, 3, 4]`; retained `[0, 1, 3, 4]`; a valid exit at source row `2`.
+> The next eligible candidate is source row `3`. It is **not** a rejection.
+
+Only an id that cannot be resolved **in the original frame** is a validation failure. Absence from the
+working frame is a mapping step, not an error.
 
 ### 3a. Exclusion granularity
 
@@ -136,12 +160,17 @@ exit bar on the strength of an intrabar exit whose time is unknown (§4).
 ## 4. A simulated endpoint is not a fill
 
 `exit_row_id` and `exit_bar_start` name **the bar on which the condition was observed**, and
-`exit_observable_at` names the earliest instant at which that observation was possible. None of them is
-the time of a fill, and for `stop` and `trail` none is even a known time *within* the bar — an OHLC bar
-records four prices and no ordering. So `exit_observable_at` is a lower bound on when a fill could have
-happened, not an estimate of when it did. Reports may not describe any of these as an execution time,
-and `intrabar_timing_known` is `false` precisely so no downstream consumer can quietly assume
-otherwise.
+`exit_observable_at` names the earliest instant at which **that evidence** is available under the
+declared bar model. None of them is the time of a fill, and for `stop` and `trail` none is even a known
+time *within* the bar — an OHLC bar records four prices and no ordering.
+
+**`exit_observable_at` is not a bound on the fill in either direction.** An earlier draft called it a
+lower bound on when a fill could have happened, which is backwards: a real stop or trail fill would occur
+**during** the bar, therefore *before* `exit_observable_at`. The field says only when the completed-bar
+evidence became available. Realising PnL at the bar close is an **accounting convention** adopted because
+nothing finer is knowable from OHLC — it is not a claim about execution timing, and not an attestation of
+anything. Reports may not describe any of these fields as an execution time, and
+`intrabar_timing_known` is `false` precisely so no downstream consumer can quietly assume otherwise.
 
 The prices are assumptions too: both triggered exits fill **exactly at the threshold** (the stop level,
 or `peak × (1 − atr_pct)`), never at the observed low. Real execution gaps through stops. Labels are
@@ -194,11 +223,23 @@ sessions; reproduction retained at `.coordination/atr-current-close-reproduction
 This is what makes the defect unarguable: it is not an inference from how ATR is conventionally
 computed, it is an observed dependence of a label on information from after its own decision point.
 
+**The contamination is version-wide, not confined to trail exits.** An earlier draft of this document
+said only that trail-exit labels are affected. That understates it: the ATR comparison is evaluated at
+**every** bar the walk traverses, so deciding *not* to trail at bar `i` also consults bar `i`'s
+contemporaneous ATR. A `horizon` label and a later `stop` label therefore inherit the same defect
+through the bars they survived. `exit_kind` cannot isolate the affected rows, and filtering on it would
+imply a cleanliness that does not exist.
+
+The one narrow exception is not usable as a filter either: because the code is **stop-first**, a label
+whose stop fires on its very first bar returns before any ATR is read. But `exit_kind = stop` alone does
+not establish that — a stop on bar five consulted the ATR on bars one to four — so distinguishing the
+exempt rows requires knowing the whole prior path, which is exactly what the label scalar does not carry.
+
 Consequences that must be honoured until it is resolved: `label_version` may **not** be described as
-causal; the record must name which ATR column was used; and any trail-exit label must be treated as
-conditioned on information not available at decision time. Neither a lagged ATR nor a changed fill
-ordering may be introduced as part of an endpoint change — each is a separate versioned semantic
-decision requiring its own contract and re-mining.
+causal; the record must name which ATR column was used; **the entire label version carries a causality
+blocker** pending a corrected replay, rather than a per-row annotation; and neither a lagged ATR nor a
+changed fill ordering may be introduced as part of an endpoint change — each is a separate versioned
+semantic decision requiring its own contract and re-mining.
 
 Both are stated as open because a contract that quietly assumed them away would be the same failure as
 the clock mismatch it is written to remove.
