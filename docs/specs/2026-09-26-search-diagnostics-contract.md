@@ -59,7 +59,24 @@ Content digests detect alteration; they do not attest that code executed correct
 
 For each evaluated outer fold record fold ID, sorted-frame index boundaries,
 training/test timestamp boundaries with interval convention, actual inner boundaries,
-chosen fitting parameters, tree digest, and declared fitted leaf IDs/count. Preserve
+chosen fitting parameters, tree digest, and declared fitted leaf IDs/count. Also
+preserve the actual candidate parameter grid searched, its measured count, every
+candidate's score on each inner fold, and the aggregation/dispersion definition.
+Record the candidate count actually passed to deflation separately; disagreement
+with the searched grid is a named `deflation_search_count_mismatch` blocker.
+The current literal nine matches today's grid but is not evidence of what ran.
+Retaining the score matrix makes dispersion auditable; it does not establish that
+the current cross-candidate standard deviation is a valid standard error.
+
+Preserve seed, RNG algorithm/library version, bootstrap iteration count and ordered
+group emission identities. Current bootstrap RNG state is shared sequentially
+within one product/horizon call: inserting/removing a qualifying group can change
+later groups' confidence intervals without changing their trade lists. Each call
+creates its own RNG, so this is not cross-product coupling in the current driver.
+Reproducibility identity includes that order and configuration, not just the seed.
+Changing to identity-derived independent generators is a separate algorithm change.
+
+Preserve
 actual row membership or a membership digest so dropped-label gaps are not hidden by
 min/max timestamps. The contract does not prove label maturity from those boundaries;
 that requires independent label provenance and causal-cutoff validation.
@@ -99,7 +116,10 @@ Dropping missing-label rows can introduce additional replay-index differences.
 A synthetic reproduction using `_simulate_one`, `build_next_eligible`, and
 `_replay_trades` with rising prices `[100, 101, 102, 103, 104]`, a 6% trailing floor,
 8% stop and 1.2% round-trip fee admits both rows 0 and 1 with returns about
-0.008 and 0.007802. No stops fire; the first label's exit is after the second entry.
+0.008 and 0.007802. No stops fire; the first label's exit is after the second entry. The Phase 4
+portfolio simulator also realizes the first label at hour 2 and releases the slot,
+two hours before its labelled exit. Trade counts and return statistics can therefore
+include overlapping occupancy, and the portfolio equity path can recognize PnL early.
 
 Diagnostics must record this exclusion assumption without asserting actual
 within-leaf non-overlap. Resolving it requires label exit identities/timestamps and
