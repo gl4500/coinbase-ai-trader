@@ -17,7 +17,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -157,7 +157,7 @@ def build_phase2_for_pid(
     out_path = Path(output_dir) / f"{pid}.parquet"
     df_labeled.to_parquet(out_path, compression="snappy", index=False)
 
-    endpoint_digest_value = _publish_endpoints(Path(output_dir), pid, endpoints)
+    endpoint_digest_value = _publish_endpoints(Path(output_dir), pid, endpoints, _DEFAULT_HORIZONS)
     return BuildResult(
         pid=pid,
         rows_written=len(df_labeled),
@@ -168,7 +168,9 @@ def build_phase2_for_pid(
     )
 
 
-def _publish_endpoints(output_dir: Path, pid: str, endpoints: List) -> Optional[str]:
+def _publish_endpoints(
+    output_dir: Path, pid: str, endpoints: List, declared_horizons: Sequence[int]
+) -> Optional[str]:
     """Write the endpoint dataset and the sidecar a consumer verifies it against.
 
     Returns the manifest digest, or None when the frame produced no endpoints -- which is
@@ -200,7 +202,14 @@ def _publish_endpoints(output_dir: Path, pid: str, endpoints: List) -> Optional[
         "manifest_digest": manifest_digest,
         "data_id": data_id,
         "product_id": pid,
-        "horizons": sorted({int(e.horizon) for e in endpoints}),
+        # The REQUESTED horizons, never the surviving ones. A frame too short for a long
+        # horizon emits no endpoints for it, and a survivor-derived set would drop that
+        # horizon from the sidecar entirely -- so a consumer would build expectations only
+        # for horizons that happened to survive, and complete coverage would pass because
+        # the missing horizon was never expected. That is coverage derived from the thing
+        # under test, the same defect the dataset loader already refuses. Executed on a
+        # 30-row frame: declared [1, 4, 24, 72, 168], surviving [1, 4, 24].
+        "horizons": sorted(int(h) for h in declared_horizons),
         "bar_duration_ms": int(endpoints[0].bar_duration_ms),
         "feature_recipe": _FEATURE_RECIPE,
         "label_version": LABEL_VERSION,
@@ -215,7 +224,11 @@ def _publish_endpoints(output_dir: Path, pid: str, endpoints: List) -> Optional[
         },
         "record_digests": {f"{e.horizon}:{e.entry_row_id}": endpoint_digest(e) for e in endpoints},
     }
-    sidecar_path.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
+    # Same-directory temp then os.replace: a half-written sidecar would be a parse error
+    # at best, and a plausible-looking partial document at worst.
+    temporary = sidecar_path.with_name(sidecar_path.name + ".partial")
+    temporary.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
+    os.replace(temporary, sidecar_path)
     return manifest_digest
 
 

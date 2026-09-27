@@ -397,5 +397,85 @@ def test_a_frame_with_no_endpoints_leaves_no_stale_sidecar_behind(tmp_path: Path
 
     from tools.strategy_discovery.build_phase2 import _publish_endpoints
 
-    assert _publish_endpoints(output_dir, pid, []) is None
+    assert _publish_endpoints(output_dir, pid, [], _DEFAULT_HORIZONS) is None
     assert not sidecar_path.exists(), "an earlier run's sidecar outlived its data"
+
+
+def _write_short_history(path: Path, n_hours: int):
+    _write_history_parquet(path, n_hours=n_hours)
+
+
+def test_the_sidecar_declares_requested_horizons_not_surviving_ones(tmp_path: Path):
+    """The survivor-set hole, reproduced before fixing.
+
+    A frame too short for the long horizons emits no endpoints for them, so
+    `sorted({e.horizon for e in endpoints})` silently omits those horizons from the sidecar.
+    A consumer then builds expectations only for the horizons that happen to have survived,
+    and complete coverage passes because the missing horizon was never expected -- coverage
+    derived from the thing under test, which is exactly the defect class the dataset loader
+    already refuses.
+
+    Executed on a 30-row frame: declared [1, 4, 24, 72, 168], surviving [1, 4, 24].
+    """
+    pid = "FOO-USD"
+    history_dir = tmp_path / "history"
+    marketcap_dir = tmp_path / "marketcap"
+    supply_path = tmp_path / "supply" / "snapshot.parquet"
+    output_dir = tmp_path / "phase2"
+    # long enough to pass the 200-bar warmup and produce SHORT-horizon endpoints, but not
+    # long enough for every declared horizon
+    _write_short_history(history_dir / f"{pid}.parquet", n_hours=260)
+    _write_marketcap_parquet(marketcap_dir / f"{pid}.parquet", n_days=20)
+    _write_supply_snapshot(supply_path, pid=pid)
+
+    result = build_phase2_for_pid(pid, history_dir, marketcap_dir, supply_path, output_dir)
+    assert result.error is None, f"unexpected error: {result.error}"
+
+    sidecar = json.loads((output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8"))
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+
+    published = {int(h) for h in sidecar["horizons"]}
+    assert published == set(_DEFAULT_HORIZONS), (
+        "the sidecar must declare the REQUESTED horizons; a survivor-derived set lets a "
+        "horizon disappear from its own expectation"
+    )
+
+    # and the round trip still holds with the full declared set
+    validated = load_validated_endpoints(
+        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
+    )
+    assert validated.semantic_validation_performed is True
+    surviving = {r.horizon for r in validated.records}
+    assert surviving, "short horizons must still produce endpoints"
+    assert surviving < set(_DEFAULT_HORIZONS), (
+        "this fixture is only meaningful if some declared horizon produced nothing"
+    )
+
+
+def test_the_sidecar_is_replaced_atomically(tmp_path: Path):
+    """A half-written sidecar would be a JSON parse error at best and a plausible-looking
+    partial document at worst. Written to a temp name in the same directory and renamed, so
+    no reader observes a partial file."""
+    import os
+    from unittest.mock import patch
+
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    before = (output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8")
+
+    real_replace = os.replace
+    seen = {}
+
+    def _capture(src, dst):
+        if str(dst).endswith(".endpoints.json"):
+            seen["src"] = str(src)
+            seen["dst"] = str(dst)
+        return real_replace(src, dst)
+
+    with patch("tools.strategy_discovery.build_phase2.os.replace", side_effect=_capture):
+        _, output_dir2, pid2 = _build_with_endpoints(tmp_path / "again")
+
+    assert seen, "the sidecar must land via os.replace, not a direct write"
+    assert Path(seen["src"]).parent == Path(seen["dst"]).parent, (
+        "the temp file must sit in the same directory, or replace is not atomic"
+    )
+    assert json.loads(before)  # the earlier sidecar was complete and parseable
