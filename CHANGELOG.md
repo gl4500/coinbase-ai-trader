@@ -62,6 +62,26 @@ The sidecar was also written with `write_text`. A half-written sidecar is a pars
 best and a plausible-looking partial document at worst, so it now lands via a same-directory
 temp file and `os.replace`, matching how the dataset and manifest are written.
 
+**Follow-up: the interrupted-publication test, and two ways it was vacuous first.**
+Requested by review, because asserting that `os.replace` is *called* tests an implementation
+choice rather than the behaviour it exists for. The test now injects a failure at the rename
+with an existing sidecar in place and asserts the old file survives byte for byte.
+
+It took two corrections to become a real test, and both are worth recording because a test
+that passes immediately proves nothing:
+
+1. It first republished IDENTICAL content, so "preserved" and "overwritten with the same
+   bytes" were indistinguishable. It now publishes a different declared horizon set.
+2. Patching `build_phase2.os.replace` patches the **shared `os` module attribute**, so a
+   blanket `side_effect` also broke `write_dataset`'s atomic write -- the failure happened
+   before the sidecar was ever touched, and the assertion passed on a file nothing had
+   written. The mock now fails only when the destination ends in `.endpoints.json`.
+
+Verified by falsification, not by observing green: reverting the implementation to a direct
+`write_text` makes the test fail with "the previous sidecar was damaged by a failed
+replacement". A failed rename also unlinks its temp file now, so no `.partial` can be mistaken
+for a published artifact.
+
 ### Endpoint-derived mining eligibility - 2026-09-26
 
 `build_next_eligible` measures the horizon in WALL-CLOCK milliseconds while `walk_and_sum`
