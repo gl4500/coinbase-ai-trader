@@ -7,6 +7,196 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Endpoint dataset and manifest - 2026-09-26
+
+Part 1 could prove two frames were the same inputs. It could not put endpoints on disk
+and read them back with any guarantee they were the ones written. This adds that, and
+the single design point that earns its keep is the **external anchor**.
+
+The first draft had the manifest carry the dataset's checksum, and treated that as the
+binding. It isn't. A manifest is freely replaceable, so swapping the dataset *and*
+regenerating its manifest produces a coherent pair whose every internal hash agrees --
+a checksum stored inside the thing being checked detects accident, never substitution.
+`load_dataset` therefore requires an independently supplied expected manifest digest,
+retained by whatever artifact references the dataset:
+
+    referencing artifact -> expected manifest digest -> manifest
+                         -> dataset checksum -> dataset content
+
+Every link verified against something outside itself. The headline regression publishes
+a complete, internally coherent replacement over the top of the original and asserts it
+is refused.
+
+- `serialize_dataset` sorts by `(product_id, horizon, entry_row_id)` and encodes labels
+  as `float.hex()`, so identical endpoints always produce identical bytes -- a digest
+  comparison across runs and machines is only meaningful if the encoding is stable. It
+  refuses to publish an empty set: nothing-survived must not look like
+  nothing-was-attempted.
+- `write_dataset` writes each file under a temporary name and `os.replace`s it, so no
+  reader sees a PARTIAL file. Stated precisely, because the difference matters:
+  publication is per-file atomic, **not pair-atomic**. On an OVERWRITE, an interruption
+  after the dataset lands leaves the OLD manifest, not no manifest -- that pair is
+  contained by the checksum, which no longer matches, not by atomicity. Tested.
+- Rows bind to their own header. `data_id`, `label_version`, `cost_version` and
+  `config_id` live in the manifest, and every row is checked against it. The writer
+  refuses the same inconsistencies rather than emitting artifacts its own loader
+  rejects, and requires the mandatory `label_atr_contemporaneous_causality` blocker on
+  every record at both ends.
+- Coverage is checked against expectations built INDEPENDENTLY of the dataset -- the
+  declared product and horizons crossed with every finite candidate row. Enumerating
+  expected keys from the records would make a missing record undetectable, since
+  removing one removes its own expectation. Incomplete loads are possible only when
+  explicitly allowed, and still report `coverage_complete=False` with a named
+  disposition; an arbitrary subset never presents itself as the whole.
+
+**What a clean load establishes, and what it does not.** Integrity (content unchanged),
+attribution (labels agree with the independent candidate frame) and coverage. NOT
+semantics: it does not check that a record's bar clocks, durations or cap agree with the
+source frame, because that needs independently sourced clock and config context this
+function is not given, and reconstructing those expectations from the very fields under
+check would prove nothing. Results carry `semantic_validation_required = True`, which is
+`field(init=False)` -- a guarantee a caller can pass `False` to is documentation, not a
+guarantee -- and the causality blocker survives every successful load.
+
+50 tests. Found by executed adversarial review (parallel Codex session), reproduced
+before fixing: replacing every record's `data_id` with `sha256:wrong-source` and
+emptying its blockers, then publishing under the ORIGINAL `data_id`, LOADED CLEANLY with
+`coverage_complete=True`. The manifest's `data_id` was externally anchored; each row's
+own copy never was. One fact in two places, one of them checked -- the same defect class
+as every other finding in this work. Also fixed: `True == 1` accepted a bool where a
+schema version belongs, and a truthy `require_complete_coverage` silently relaxed a
+coverage requirement.
+
+One boundary is documented as unreachable rather than papered over. A bool key component
+aliases an integer, so `values[("BTC-USD", True, 0)] = 0.0` does not insert a malformed
+key -- it OVERWRITES the expectation at `("BTC-USD", 1, 0)` and `dict` keeps the original
+int key. The bool is gone before any validator runs. Typed-key validation catches bools
+that survive into the mapping; an aliased overwrite is caught later only if its value
+disagrees with the published label, and if the overwrite happened to store an identical
+value the history is unobservable and acceptance is correct. No universal fail-closed
+claim is made.
+
+Nothing is wired. No consumer reads a published dataset, and no live artifact is
+regenerated.
+
+**Follow-up: non-finite labels are rejected by DECODED VALUE, not by token spelling.**
+Found by executed review and reproduced before fixing. The check was
+`encoded_label in _NON_FINITE`, a lowercase token blacklist -- but `float.fromhex` is
+case-insensitive AND accepts long forms, so `"NaN"`, `"Infinity"` and `"-INF"` sailed
+past it and decoded to non-finite floats. Attribution could not catch it either:
+`nan.hex() == nan.hex()`, so a NaN expectation agreed with a NaN row and the artifact
+loaded with `coverage_complete=True`. The root cause is the same shape as everything
+else here -- the TOKEN was validated as a proxy for the property instead of the
+property. `math.isfinite` on the decoded value is the property. A non-finite label is a
+disposition, never candidate evidence, so it is now refused on BOTH sides: rows at load,
+and `expected_candidate_values` entries as caller input (which must be finite, real and
+non-bool). The writer refuses one too. Same trap closed on `row_count`, which `True == 1`
+and `5.0 == 5` had let through by equality.
+
+One test-design note, because the test nearly passed for the wrong reason: the row-level
+regression originally set a NaN *expectation* as well, which fires the argument
+validator before any row is read. Expectations are now left correct and finite so the
+assertion can only be satisfied by the row check itself.
+
+
+
+### Label endpoint publication - 2026-09-26
+
+`_simulate_one` computed which of three exit branches fired -- stop, trail, horizon --
+and then discarded it, returning only a PnL. Three downstream components each
+re-derived that fact from a different clock, and on gapped data they disagreed. The
+simulation now PUBLISHES it.
+
+- One shared `_SimResult` (pnl, exit_offset, exit_kind) feeds both the scalar labels
+  and the endpoint records, so the two cannot drift into separate algorithms -- which
+  is the defect class that produced the mismatch in the first place.
+- `simulate_dynamic_exit_labels` keeps its exact public signature and behaviour.
+- New `simulate_labels_with_endpoints` returns the labelled frame plus `LabelEndpoint`
+  records, optionally with dispositions. The frame carries `source_row_id`, so later
+  filtering has an identity to preserve rather than reconstructing positions.
+- New `endpoint_dataset.build_data_id` binds everything the exit decision reads:
+  product, DECLARED bar duration, ordered timestamps and row count, the consumed
+  close/high/low arrays AND the ATR column, the feature recipe, and the exit config.
+  Floats encode as `float.hex()` with explicit non-finite tokens, so a NaN ATR -- which
+  is legitimate input, since the simulation falls back to its floor -- hashes
+  consistently instead of aborting.
+
+**Nothing published claims more than it can.** `intrabar_timing_known` is False for
+stop and trail (an OHLC bar has four prices and no ordering) and True only for horizon,
+describing simulated within-bar timing under the declared model, never an observed
+fill. Trail records carry `intrabar_order_assumption`, since the trail raises its peak
+from a bar's high and then compares it against that bar's low. Every record declares
+the version-wide `label_atr_contemporaneous_causality` blocker, which remains
+UNRESOLVED and is untouched by this change.
+
+**Label values are preserved bit-for-bit.** 12 parity tests pin `float.hex()` outputs
+captured from the pre-refactor implementation across stop, trail, horizon, cap,
+ATR-fallback and tail cases, including NaN availability masks -- verified independently
+by the parallel Codex session loading the pre-refactor module directly. What this does
+NOT preserve is eligibility, trade counts, occupancy or replay metrics: those were
+computed from the wrong clock and will change once consumers read endpoints, which is
+the point.
+
+Nothing is wired. No consumer reads these records yet, no artifact is regenerated, and
+no ATR, fill or replay semantics change.
+
+**One clarification on scope, because the words are easy to conflate:** `build_data_id`
+is IDENTITY HASHING, not artifact publication. It answers "are these the same inputs?"
+and nothing else. It does not write a dataset, does not survive a process, and offers no
+roundtrip or tamper detection -- all of which were explicitly outstanding at this
+commit and are delivered by the entry above.
+
+80 tests. Findings fixed during review, each the same shape -- a value trusted where it
+should have been validated: an exit offset was taken as availability without checking
+the PnL was finite, so a NaN close published a record carrying `label_value = NaN`;
+`to_numpy(dtype="int64")` TRUNCATED a fractional timestamp into a plausible bar start
+before anything checked it; a bool horizon would have become 1 through `int()`; and a
+placeholder product identity could have become an artifact's identity.
+
+
+### Pure label-endpoint record validator - 2026-09-26
+
+Implements the validator half of the shared label endpoint contract
+(`docs/specs/2026-09-26-label-endpoint-contract.md`). Pure module plus tests; it
+wires no consumer, regenerates no artifact, reads no config and changes no
+simulation semantics.
+
+New `backend/tools/strategy_discovery/endpoint_records.py`:
+
+- `LabelEndpoint` - a simulated trade's endpoint. Row ids are positional ordinals
+  into the ORIGINAL frame, so `bars_held` is their difference. Carries separate bar
+  starts, a DECLARED `bar_duration_ms`, and `entry_available_at` /
+  `exit_observable_at`, because `ts` is a bar's OPENING instant while the entry price
+  is its close - releasing anything at a raw `ts` would be a full bar early.
+- `ExpectedEndpointContext` - every binding supplied INDEPENDENTLY of the record,
+  plus a digest stored with the artifact. Product, horizon and `data_id` alone cannot
+  detect a swapped cached `label_value` or an altered cap, because the record stays
+  self-consistent; a self-declared `config_id` cannot attest its own embedded cap.
+- `validate_endpoint` - requires every invariant and rejects violations rather than
+  repairing: strictly-after exit (zero-duration rejected), `bars_held` equal to the
+  span and within `min(horizon, max_hold_bars)`, a horizon exit exactly at that cap,
+  timestamps EQUAL to the source bars, availability equal to bar start plus the
+  declared duration, source chronology agreeing with the row ordinals, finite
+  `label_value` rejecting bool, and `exit_kind` consistent with `exit_price_basis`.
+- `map_exit_to_first_retained_candidate` - deliberately separate. Returns an
+  ORIGINAL row id or `TERMINAL_SENTINEL`, and is an ELIGIBILITY CANDIDATE boundary,
+  never a portfolio accounting time and never a working-array position. A valid exit
+  may land on a row the working frame dropped for having no label of its own; that is
+  a mapping step, not a rejection.
+
+Two properties it refuses to assert. `intrabar_timing_known` describes simulated
+within-bar timing under the declared model - `False` for stop and trail, since an
+OHLC bar records four prices and no ordering; `True` for horizon, whose exit is the
+bar's close - and never means a fill was observed. And every record must carry the
+version-wide `label_atr_contemporaneous_causality` blocker, which the validator can
+never clear: the trail threshold reads the CURRENT bar's ATR, verified by changing
+only a bar's close and watching its label move, so labels can depend on information
+from after their own decision point.
+
+104 tests, written first. They cover expected-context mismatches as well as malformed
+records - including coherently tampered records whose internal invariants all hold,
+where only the independent binding can reject them.
+
 ### Requested-pair diagnostic coverage foundation - 2026-09-26
 
 - Declare the complete requested product/horizon cross-product independently of
