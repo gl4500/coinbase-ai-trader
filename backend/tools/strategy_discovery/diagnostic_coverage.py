@@ -45,6 +45,38 @@ class CoverageSummary:
     dispositions_complete: bool
     blockers: tuple[str, ...]
 
+    def __post_init__(self):
+        counts = (
+            self.pending_count,
+            self.running_count,
+            self.completed_count,
+            self.excluded_count,
+            self.error_count,
+        )
+        if (
+            type(self.requested_count) is not int
+            or self.requested_count <= 0
+            or any(type(count) is not int or count < 0 for count in counts)
+            or sum(counts) != self.requested_count
+        ):
+            raise ValueError("coverage counts must be nonnegative integers summing to request")
+        complete = not (self.pending_count or self.running_count)
+        if type(self.dispositions_complete) is not bool or self.dispositions_complete != complete:
+            raise ValueError("disposition completeness contradicts pending/running counts")
+        if not isinstance(self.blockers, tuple) or any(
+            not isinstance(item, str) or not item.strip() for item in self.blockers
+        ):
+            raise ValueError("blockers must be an immutable tuple of names")
+        required = {"fold_leaf_evidence_not_validated"}
+        if not complete:
+            required.add("incomplete_pair_dispositions")
+        if self.excluded_count:
+            required.add("excluded_pairs")
+        if self.error_count:
+            required.add("errored_pairs")
+        if not required.issubset(self.blockers):
+            raise ValueError("coverage summary is missing required evidence blockers")
+
     @property
     def evaluation_validated(self) -> bool:
         return False  # Counts and lifecycle claims are not fold/leaf evidence.

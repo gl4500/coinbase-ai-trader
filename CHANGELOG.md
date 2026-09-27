@@ -13,6 +13,8 @@ Format: reverse-chronological by session date.
   surviving mining tasks; reject coerced identities and empty requests.
 - Require exactly one explicit disposition per pair, including pending, excluded
   and failed work. Distinguish complete accounting from claimed completion counts.
+- Direct summary construction enforces count totals, completion consistency and
+  mandatory blockers; callers cannot omit the evidence-validation limitation.
 - This pure validator does not validate fold/leaf evidence, authorize deployment,
   or collect diagnostics yet. Producer and persistence integration remain pending.
 
