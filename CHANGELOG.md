@@ -7,6 +7,55 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Endpoint consumer adapter - 2026-09-26
+
+The publication work proved a frame's identity and put endpoints on disk. Neither
+consumer could use them yet, and the two things they need are not the same thing.
+
+An **eligibility boundary** is a position in a consumer's working frame; an **accounting
+time** is a clock instant. The wall-clock `exit_ts` this replaces played both roles, which
+is why a single defect produced errors in OPPOSITE directions: an early exit released the
+slot late and realized PnL late, while a gap realized PnL early and released the slot
+early, permitting two positions in one leaf. A position is not a time, and the new module
+will not accept one where the other belongs.
+
+`load_validated_endpoints` is the single path both consumers will use. It establishes, in
+order: the frame's row identity is the one the endpoints reference; the frame IS the frame
+they describe, by RECOMPUTING `build_data_id` from the frame's own arrays and the declared
+exit config -- quoting the sidecar's `data_id` into the loader would prove only that the
+manifest agrees with the sidecar; integrity, attribution and complete coverage; and then
+SEMANTICS, via `validate_endpoint` per record. That last step is what the integrity-only
+loader deliberately does not do, and a verified digest never establishes it.
+
+- The expected cap is the **configured** cap, never the horizon. A horizon-1 record
+  publishes `max_hold_bars = 168` under the default configuration, because the simulation
+  uses `min(horizon, cap)` internally while the record carries the cap. Rebuilding it from
+  the horizon rejects every valid short-horizon record.
+- "Finite" means `isfinite`, not "not null". `dropna` RETAINS +/-inf, so a consumer
+  retaining rows with `notna` while building expectations with `isfinite` disagrees with
+  itself, and an infinite-labelled row fails as a spurious coverage error instead of as
+  the data problem it is.
+- Two id spaces, two rules. The unfiltered frame's ids must be exactly `0..n-1`; a filtered
+  frame's must be strictly increasing and unique, with gaps expected. Uniqueness is checked
+  before the ids become dictionary keys, where a duplicate silently overwrites.
+- The clock map is built once and each `validate_endpoint` call receives only the two rows
+  its record references -- that function type-validates every key it is handed, so passing
+  the whole frame per record is quadratic.
+
+Two defects found by executed adversarial review and reproduced before fixing. First,
+`validated_source_ordinals([False, 1])` returned `[0, 1]`: `np.asarray` coerced the mixed
+sequence before the bool check could see it, and because an all-bool input WAS rejected the
+check looked correct. Second, `ValidatedEndpoints(...)` could be constructed directly with
+arbitrary records and still reported `semantic_validation_performed = True` -- `init=False`
+stops a caller choosing False but does not establish that validation happened, so every
+downstream `isinstance` check would have trusted fabricated records. Construction is now
+gated on a module-private token, and the module says plainly that this stops accidents and
+misplaced trust rather than a caller who reads the file. A frozen dataclass also does not
+freeze a dict it holds, so `exit_config` is copied and made read-only.
+
+41 tests. Nothing is wired: no consumer reads this module yet, and the
+`label_atr_contemporaneous_causality` blocker remains UNRESOLVED.
+
 ### Endpoint dataset and manifest - 2026-09-26
 
 Part 1 could prove two frames were the same inputs. It could not put endpoints on disk
