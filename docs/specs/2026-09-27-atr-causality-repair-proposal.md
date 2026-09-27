@@ -387,6 +387,12 @@ either. They remain uninformative for the reasons already recorded in the occupa
 Run on 2026-09-27 with `atr_causality_report.run_probe`, read-only over the first 8 products of
 `backend/data/phase2`, horizon 24. Result:
 
+Artifacts, absolute paths, all outside the repository:
+
+- corrected variant report: `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out_v2\atr_causality_report.json`
+- clock audit, all 50 frames: `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out_v2\clock_audit.json`
+- **SUPERSEDED, do not quote:** `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out\atr_causality_report.json`
+
 ```
 status: no_data
 frames_found: 8   frames_scanned: 0
@@ -431,18 +437,48 @@ both independent of the clock:
 The generalisation was also drawn from the first 1500 rows of 8 products, with the time range and
 config binding unexamined. That alone would have made "nearly inert" an unsafe conclusion.
 
-### 10.2 The finding that survives, and it is a bigger one
+### 10.2 The finding that survives, stated at the right width
 
-**No Phase 2 frame on disk satisfies the precondition that row-count labels require.** The labels
-in these artifacts were produced by walking `entry_idx + horizon` ROWS while the timestamps skip
-hours, so a nominal 24-hour horizon spans more wherever a hole falls inside the window. This is
-the same defect class as the occupancy correction: a row offset and a wall-clock duration treated
-as interchangeable.
+**No Phase 2 frame on disk satisfies the contiguous-hourly precondition** the full-frame guard
+requires: 50 of 50 have at least one non-hourly step.
+
+But a frame failing that guard is **not** the same as every label being affected, and an earlier
+draft of this section blurred the two (Codex `c6e41c6a`). Only entries whose own
+`[entry, entry + horizon]` window spans a non-hourly step have a row-count horizon differing from
+the nominal duration. Measured per entry at horizon 24 across all 50 frames:
+
+| | count |
+|---|---|
+| labelled entries counted | **382,900** |
+| entries whose window spans a gap | **39,461** |
+| share | **10.31%** |
+
+So ~90% of labelled entries have a clean window. The per-product spread is what matters:
+
+| product | rows | gaps | labelled | exposed | share |
+|---|---|---|---|---|---|
+| TIME-USD | 6670 | 1056 | 6646 | 5564 | **83.72%** |
+| BOBA-USD | 6666 | 1104 | 6642 | 4956 | **74.62%** |
+| RSC-USD | 5361 | 713 | 5337 | 3641 | 68.22% |
+| GNO-USD | 6306 | 1074 | 6282 | 3526 | 56.13% |
+| BTRST-USD | 7455 | 718 | 7431 | 3728 | 50.17% |
+| ABT-USD | 7628 | 277 | 7604 | 3146 | 41.37% |
+| ... | | | | | |
+| SHIB-USD, PEPE-USD | 7856 | 1 | 7832 | 24 | **0.31%** |
+
+**Zero frames have zero exposed entries.** The 24-entry figure for a single-hole frame is the exact
+window-width signature: one hole contaminates precisely the `horizon` windows covering it.
+
+Where an entry IS exposed, its label came from walking `entry_idx + horizon` ROWS while the
+timestamps skip hours, so the nominal 24-hour horizon spans more. Same defect class as the
+occupancy correction -- a row offset and a wall-clock duration treated as interchangeable -- but
+applying to a measured 10.31% of entries, not to all of them.
 
 It also has an immediate operational consequence worth checking before any mining run.
-`mine_profiles_for_pid_horizon` refuses a non-contiguous frame -- *"timestamps must be unique,
-ascending and contiguous hourly"* -- so on this evidence **none of these 50 frames can currently
-be mined at all**, independently of anything in this proposal.
+`mine_profiles_for_pid_horizon` applies its guard to the WHOLE frame, so on this evidence **none
+of these 50 frames can currently be mined at all** -- including those whose per-entry exposure is
+0.31%. That is a property of the frame-level guard rather than of the individual labels, and it
+holds independently of anything in this proposal.
 
 ### 10.3 What this does to the ATR question
 
@@ -458,8 +494,10 @@ To measure it, one of these is needed, and all are operator decisions:
    authorisation;
 2. a gap-tolerant variant of the probe whose horizons are defined on the CLOCK rather than on row
    counts -- a different labelling policy, not a diagnostic of the current one;
-3. a restriction to contiguous sub-ranges within each frame, which changes the population and
-   would need its own selection rule stated up front.
+3. a restriction to the 89.69% of entries whose windows are clean (§10.2). This changes the
+   population and needs its own selection rule stated up front -- and it is NOT uniform: it would
+   retain ~99.7% of SHIB-USD entries but only ~16% of TIME-USD, so any pooled result is weighted
+   towards the cleanest products and must not be read as a full-universe effect.
 
 I am not choosing among those. Note that the floor observation in the withdrawn text -- that
 `atr14_pct` medians run 0.011-0.020 against an `atr_trail_floor` of 0.06, so `max(atr, floor)` is

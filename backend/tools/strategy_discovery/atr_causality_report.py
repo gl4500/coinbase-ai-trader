@@ -411,3 +411,121 @@ def run_probe(
             )
     payload["output_path"] = str(destination)
     return payload
+
+
+@dataclass(frozen=True)
+class ClockAudit:
+    """How badly one frame's clock breaks the row-count label assumption.
+
+    `frames failing the guard` and `entries actually affected` are very different quantities, and
+    conflating them overstates the damage (Codex c6e41c6a). A frame with two holes in 8,713 steps
+    fails the guard, yet almost every entry's window is clean. `exposed_entries` is the number of
+    labelled entries whose own `[entry, entry + horizon]` row window spans a non-hourly step --
+    the only entries whose row-count horizon is not the nominal duration.
+    """
+
+    product_id: str
+    horizon: int
+    rows: int
+    bad_steps: int
+    stored_labels_finite: int
+    exposed_entries: int
+    exposed_fraction: Optional[float] = None
+
+
+def audit_frame_clock(frame, *, product_id: str, horizon: int) -> ClockAudit:
+    """Per-entry exposure to clock gaps, which is narrower than per-frame failure."""
+    import numpy as np
+
+    ts = frame["ts"].to_numpy(dtype="int64")
+    steps = np.diff(ts) if len(ts) > 1 else np.zeros(0, dtype="int64")
+    bad = (steps != _BAR_MS).astype("int64")
+    # prefix[k] = number of bad steps strictly before index k, so a window [i, i+h) is clean
+    # exactly when prefix[i + h] == prefix[i].
+    prefix = np.concatenate([[0], np.cumsum(bad)])
+
+    label_col = f"label_h{int(horizon)}"
+    stored = (
+        frame[label_col].to_numpy(dtype="float64")
+        if label_col in frame.columns
+        else np.full(len(frame), np.nan)
+    )
+    finite = np.isfinite(stored)
+
+    exposed = 0
+    counted = 0
+    for entry in range(len(frame)):
+        if not finite[entry]:
+            continue
+        end = entry + int(horizon)
+        if end >= len(ts):
+            continue
+        counted += 1
+        if prefix[end] != prefix[entry]:
+            exposed += 1
+
+    return ClockAudit(
+        product_id=product_id,
+        horizon=int(horizon),
+        rows=len(frame),
+        bad_steps=int(bad.sum()),
+        stored_labels_finite=counted,
+        exposed_entries=exposed,
+        exposed_fraction=(exposed / counted) if counted else None,
+    )
+
+
+def run_clock_audit(
+    frames_dir,
+    output_dir,
+    *,
+    horizons: Sequence[int] = (24,),
+) -> dict:
+    """Audit every frame's clock and persist the result. Read-only, isolated output."""
+    import pyarrow.parquet as pq
+
+    frames_dir = Path(frames_dir)
+    output_dir = Path(output_dir)
+    resolved_frames = frames_dir.resolve()
+    resolved_output = output_dir.resolve()
+    if resolved_output == resolved_frames or resolved_frames in resolved_output.parents:
+        raise ValueError("output_dir must not be the frames directory or inside it")
+
+    audits: List[ClockAudit] = []
+    for path in sorted(frames_dir.glob("*.parquet")):
+        frame = pq.read_table(path).to_pandas()
+        for horizon in horizons:
+            audits.append(audit_frame_clock(frame, product_id=path.stem, horizon=int(horizon)))
+
+    failing = [a for a in audits if a.bad_steps > 0]
+    counted = sum(a.stored_labels_finite for a in audits)
+    exposed = sum(a.exposed_entries for a in audits)
+    payload = {
+        "schema_version": 1,
+        "frames_dir": str(resolved_frames),
+        "horizons": [int(h) for h in horizons],
+        "frames_audited": len({a.product_id for a in audits}),
+        "frames_with_gaps": len({a.product_id for a in failing}),
+        "labelled_entries_counted": counted,
+        "entries_whose_window_spans_a_gap": exposed,
+        "exposed_fraction": (exposed / counted) if counted else None,
+        "audits": [asdict(a) for a in audits],
+        "caveats": [
+            "A frame failing the contiguous-hourly guard is NOT the same as every entry being "
+            "affected: only entries whose own [entry, entry+horizon] window spans a non-hourly "
+            "step have a row-count horizon that differs from the nominal duration.",
+            "This audits the CLOCK only. It says nothing about whether the stored label values "
+            "are otherwise correct, and nothing about profitability.",
+        ],
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / "clock_audit.json"
+    temporary = destination.with_name(destination.name + ".partial")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, destination)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    payload["output_path"] = str(destination)
+    return payload
