@@ -64,7 +64,8 @@ catching.
 
 - `label_atr_contemporaneous_causality` — repaired by §3, absent from v3 records.
 - `label_intrabar_order_assumption` — **permanent** for `stop`/`trail` records under bar data,
-  present on v3 records too, and it must remain a blocker on any deployment claim.
+  present on v3 records too, and it must remain a blocker on any deployment claim. §4.1 shows the
+  assumption is not merely a technicality: on a two-bar path the two orderings differ by 3.5x.
 
 A v3 record therefore still carries a blocker. That is the correct outcome, and anyone reading a
 "causality fixed" headline should be pointed at this paragraph.
@@ -108,25 +109,62 @@ tuned** — that is explicitly outside this proposal and outside the current aut
 
 ## 4. Explicit fill and stop ordering
 
-Issue B cannot be resolved, so it must be *declared and bounded*. Three options:
+Issue B cannot be resolved, so it must be *declared and bounded*.
 
-| option | rule | effect on labels | recommendation |
-|---|---|---|---|
-| **B1** keep `high_before_low` | peak raised from `high_i`, then compared to `low_i` | status quo; the most optimistic reading (a higher peak means a higher trail exit price) | **not recommended as the only basis** — it is the favourable branch of an ambiguity |
-| **B2** conservative `low_before_high` | compare `low_i` against the peak **as of `i-1`**, then raise the peak | strictly ≤ B1 PnL; exits fire at a lower level | **recommended as the published basis** |
-| **B3** bracket both | compute B1 and B2; agree → one label, disagree → mark the record ambiguous | most honest, but yields a third state downstream consumers do not model | **recommended as a diagnostic**, reported alongside B2, not as the label |
+### 4.1 Correction: neither ordering dominates
 
-Recommending B2 for the label and B3 as a measured diagnostic: B2 never reports a profit the
-ordering assumption manufactured, and B3 quantifies how many records the ambiguity actually
-touches. If B3 shows the disagreement is rare, that is itself the strongest available statement
-about the assumption's materiality; if it is common, the honest conclusion is that hourly OHLC is
-too coarse for a trail-stop label, which is a finding worth having explicitly.
+An earlier version of this section claimed the conservative ordering `low_before_high` (B2) was
+strictly no better than `high_before_low` (B1), recommended it as the published basis, and
+specified a test asserting the inequality. **That was wrong.** Codex review `c3c5acc8` refuted it
+by construction and the counterexample reproduces by execution:
+
+```
+entry 100, trail floor 6%, stop 8%
+bar 1: high 120  low  95  close 115
+bar 2: high 150  low 114  close 145
+
+high_before_low   exit 112.80 (trail @ bar 1)   pnl +0.1280
+low_before_high   exit 145.00 (horizon)         pnl +0.4500
+```
+
+The reasoning error is worth naming because it is easy to repeat: I considered only the exit
+**price** — a lower peak gives a lower trail level, hence a lower exit — and ignored that a lower
+level also makes the trail **less likely to fire at all**. Under B2 the position survives bar 1
+and then rides bar 2's rally. Delaying an exit is not conservative; it trades one risk for
+another.
+
+So neither ordering dominates the other, in either direction, and **there is no single
+"conservative path" available to publish.**
+
+### 4.2 What follows: bracketing is required, not optional
+
+| option | rule | status |
+|---|---|---|
+| B1 `high_before_low` | raise peak from `high_i`, then compare `low_i` | one arbitrary branch of an ambiguity |
+| B2 `low_before_high` | compare `low_i` against the peak as of `i-1`, then raise | the other arbitrary branch; **not** a conservative one |
+| **B3 bracket both** | compute B1 and B2; agree → one label; disagree → declare it | **required policy** |
+
+Proposed B3 semantics:
+
+- Compute both orderings for every record.
+- **They agree** (same exit row, kind and value): publish that value, unambiguous.
+- **They disagree**: publish `min(pnl_B1, pnl_B2)` and carry a new blocker
+  `label_intrabar_order_ambiguous`, plus both values in the record so nothing downstream has to
+  re-derive them.
+
+`min` is defensible precisely because it does **not** pretend to be a simulated path: it is an
+explicit **lower bound** over the orderings the data cannot distinguish, and the record says so.
+Publishing either branch alone would report a number the ordering assumption manufactured, which
+§4.1 shows can differ by 3.5x on a two-bar path.
+
+The ambiguity rate therefore becomes a **headline figure of the §5 probe, not a footnote**. If it
+is small, that is the strongest available statement about the assumption's materiality. If it is
+large, the honest conclusion is that hourly OHLC is too coarse to label a trail-stop strategy at
+all — a finding worth having explicitly rather than hidden inside a single published branch.
 
 Stop-versus-trail priority is unchanged: stop-loss is checked first, matching
-`cnn_agent._check_risk_exits`. That ordering is a deliberate correspondence with the live exit
-ladder and is not part of this repair.
-
----
+`cnn_agent._check_risk_exits`. That correspondence with the live exit ladder is deliberate and is
+not part of this repair.
 
 ## 5. Before/after reproduction — offline, no regeneration
 
@@ -162,7 +200,7 @@ already governs outcome-label v1 versus v2 (invariant 22), and for the same reas
 | `LABEL_VERSION` | new value, e.g. `label_endpoint_v3`; v2 stays valid for existing records |
 | `exit_config` | gains `atr_lag_bars: 1` and `intrabar_order: "low_before_high"` |
 | `config_id` / `data_id` | change automatically — `build_data_id` covers the config, so a v3 dataset cannot validate against a v2 frame binding, and vice versa. The existing anchor does this work; no new mechanism needed. |
-| blockers | `label_atr_contemporaneous_causality` absent on v3; `label_intrabar_order_assumption` present on both |
+| blockers | `label_atr_contemporaneous_causality` absent on v3; `label_intrabar_order_assumption` present on both; `label_intrabar_order_ambiguous` on v3 records where the two orderings disagree (§4.2) |
 | loader | must **reject a mixed-version dataset** (already rejects heterogeneous `label_version` via `_HEADER_FIELDS`) |
 | consumers | no signature change; they read whatever version the sidecar declares |
 | Phase 4 | `deployment_eligible` stays `false`. v3 removes one blocker; the others (independent holdout, cost/fill, accounting, prospective execution) are untouched. |
@@ -186,8 +224,13 @@ either. They remain uninformative for the reasons already recorded in the occupa
    `label_atr_contemporaneous_causality`; a v3 record missing the intrabar blocker is rejected.
 6. **Version isolation.** A dataset mixing v2 and v3 records fails to load. A v3 dataset fails to
    validate against a v2 frame binding.
-7. **B2 is conservative.** For every record where the two orderings disagree, v3 (B2) PnL is
-   strictly less than the B1 value. A property test over generated bars, not one example.
+7. **Neither ordering dominates, and the bound holds.** Pin §4.1's counterexample exactly as a
+   fixture -- entry 100, bars (120, 95, 115) and (150, 114, 145), floor 6% -- and assert
+   `high_before_low` yields +0.1280 while `low_before_high` yields +0.4500. This is the
+   regression for a claim I actually got wrong, so it is asserted with the very numbers that
+   refuted it. Then, as a property test over generated bars: the published value equals
+   `min(B1, B2)`, is `<=` both, and equals both exactly whenever the orderings agree. Do NOT
+   assert any dominance between B1 and B2 in either direction -- that is the false claim.
 8. **No silent regeneration.** The probe writes only under its own output directory; assert the
    Phase 2 directory's contents are unchanged after a run.
 9. **Equivalence where it should hold.** On a frame with no trail exits at all, v2 and v3 labels
@@ -207,9 +250,12 @@ either. They remain uninformative for the reasons already recorded in the occupa
 
 ## 9. Open questions for the operator
 
-1. **B2 versus B1** as the published basis (§4). B2 is the conservative choice and my
-   recommendation; B1 preserves comparability with v2 exit kinds. This is a modelling decision,
-   not a correctness one, so it is yours.
+1. **Whether `min(B1, B2)` as a declared lower bound is acceptable as the published label**
+   (§4.2), given that §4.1 rules out publishing either branch as "the conservative one". The
+   alternative is to keep B1 for continuity with v2 exit kinds and rely on the ambiguity blocker
+   alone. This is a modelling decision, not a correctness one, so it is yours -- but note that
+   the earlier version of this document recommended a conservative single branch that does not
+   exist.
 2. Whether the probe should run over the full universe or a named subset first.
 3. Whether v3 should be built at all before the other Phase 4 blockers are addressed, given that
    removing one of four does not change `deployment_eligible`.
