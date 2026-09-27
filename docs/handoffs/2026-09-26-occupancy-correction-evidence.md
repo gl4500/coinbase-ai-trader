@@ -124,18 +124,36 @@ uses horizon 1 for exactly this reason.
 
 ## 4. Scope — what is wired and what is not
 
-**Wired:** `simulate_portfolio`, `knapsack_search`, `build_phase4`.
+**Wired:** `simulate_portfolio`, `knapsack_search`, `build_phase4`, and -- as of the miner
+commit -- `mine_profiles`. The miner no longer imports the wall-clock baseline at all; it
+survives only in `profit_split`, as the equivalence test's baseline.
 
-**NOT wired: the miner.** `mine_profiles.py:317` still calls the wall-clock
-`build_next_eligible`. `build_next_eligible_from_endpoints` is built and tested but has **no
-caller**. Mined eligibility therefore still carries the §2 error, and endpoint-driven mining is
-required and pending.
+The sequence is recorded rather than tidied away, because it is the clearest instance of the
+pattern this note is about. An earlier draft of the CHANGELOG and of CLAUDE.md invariant 26 said
+"mining and portfolio replay" both read endpoints. They did not: only the helper existed, and
+`mine_profiles.py:317` still called the clock. Codex review `17814674` caught it, `27fd5ae`
+narrowed both documents to what was true, and the wiring followed afterwards. That was the
+**fifth** time in this effort that prose claimed more than the code delivered -- the same defect
+class the endpoint contract exists to remove: one fact living in two places with only one of
+them checked.
 
-This is recorded plainly because an earlier draft of the CHANGELOG and of CLAUDE.md invariant 26
-claimed that "mining and portfolio replay" both read endpoints. They did not. Codex review
-`17814674` caught it and commit `27fd5ae` corrected both documents. That was the **fifth** time in
-this effort that prose claimed more than the code delivered — the same defect class the endpoint
-contract exists to remove: one fact living in two places with only one of them checked.
+Four further defects surfaced while wiring the miner, none of them found by re-reading my own
+work:
+
+- The miner kept a **dead** `build_next_eligible` import and a dead `ts_ms` tensor after the
+  switch, and my comment called the import deliberate. It was not: the baseline lives in
+  `profit_split`, where its own test imports it (Codex `26224ddf`).
+- Real record validation rejected the new publication fixture twice, correctly. A `stop` exit
+  may not claim `bar_close` as its price basis, and a horizon-1 record may not claim a 2-bar
+  hold (`bars_held <= min(horizon, cap)`). Both were fixture errors; the production guards were
+  left alone.
+- The miner used to **sort** its input. Under the frame binding it cannot: `build_data_id`
+  hashes the arrays in frame order, so a reordered parquet is not the published artifact.
+  Sorting was a silent repair, so it is gone and out-of-order input is now rejected.
+- NaN-ing the unlabelable tail silently **broke an existing test's premise**: at horizon 168 a
+  300-row fixture retains only 132 rows, so the miner returned at the `n < 200` guard and the
+  inner-fold test it was written for never ran. Caught by Codex `29950d93`, not by me, and it is
+  the same vacuity class as the empty-universe Phase 4 tests in section 6.1.
 
 ### 4.1 One direction is contained rather than exercised
 

@@ -6,15 +6,21 @@ Pure functions on torch.Tensor inputs (caller loads the parquet). No filesystem.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
-from tools.strategy_discovery.profit_split import build_next_eligible, walk_and_sum
+from tools.strategy_discovery.endpoint_consumers import load_validated_endpoints
+from tools.strategy_discovery.profit_split import (
+    build_next_eligible_from_endpoints,
+    walk_and_sum,
+)
 from tools.strategy_discovery.profit_tree import TreeNode, collect_leaves, fit_tree
 from tools.strategy_discovery.purged_wf import inner_folds, outer_folds
 from tools.strategy_discovery.rule_contract import bind_rule, encode_leaf_rule, tree_source_digest
@@ -264,6 +270,36 @@ def _assign_leaves(root: TreeNode, features_subset: torch.Tensor) -> List[int]:
     return assignments
 
 
+def _require_published_endpoints(frame, *, pid: str, parquet_path):
+    """Validated endpoints for this product, or raise. There is no fallback on purpose.
+
+    The layout is the producer's own: `build_phase2` writes `{pid}.endpoints.json` and
+    `endpoints/{pid}/` beside `{pid}.parquet`, so the location is derived from the parquet's
+    parent rather than threaded through a new parameter no caller would have a better value
+    for.
+
+    Mining a product on horizon arithmetic because its publication is missing would be the
+    worst available outcome: the run would emit ordinary-looking profiles measured on an
+    occupancy basis that disagrees with the labels, and nothing downstream could tell.
+    """
+    directory = Path(parquet_path).parent
+    sidecar_path = directory / f"{pid}.endpoints.json"
+    if not sidecar_path.exists():
+        raise FileNotFoundError(
+            f"{sidecar_path} is missing, so {pid} has no published endpoints. Mining cannot "
+            f"fall back to a wall-clock horizon -- that is the disagreement the endpoint "
+            f"contract removes. Re-run Phase 2 for this product first."
+        )
+    with open(sidecar_path, "r", encoding="utf-8") as handle:
+        sidecar = json.load(handle)
+    return load_validated_endpoints(
+        directory / "endpoints" / pid,
+        frame=frame,
+        sidecar=sidecar,
+        product_id=pid,
+    )
+
+
 def mine_profiles_for_pid_horizon(
     pid: str,
     horizon: int,
@@ -296,12 +332,28 @@ def mine_profiles_for_pid_horizon(
     # before dropping unlabeled rows so invalid source rows cannot be hidden.
     if "ts" not in df or not is_integer_dtype(df["ts"].dtype) or df["ts"].isna().any():
         raise ValueError("timestamps must be non-null integer milliseconds")
-    df = df.sort_values("ts", kind="stable")
+    # Checked on the frame AS READ, with no sort. The miner used to sort first, which was a
+    # silent repair: a reordered parquet is not the artifact Phase 2 published, and reordering
+    # it to make the checks pass hides that. A published frame is already unique, ascending and
+    # contiguous, so this rejects exactly the frames that were never publishable.
     if df["ts"].duplicated().any() or (df["ts"].diff().dropna() != 3_600_000).any():
         raise ValueError(
-            "timestamps must be unique and contiguous hourly; label exit provenance required for gaps"
+            "timestamps must be unique, ascending and contiguous hourly; label exit provenance "
+            "required for gaps, and a frame out of published order is not the published artifact"
         )
-    df = df.dropna(subset=[label_col]).reset_index(drop=True)
+
+    # Now the publication, still against the unfiltered frame in its published order (Codex
+    # 26224ddf). `build_data_id` hashes the timestamps and every price array IN FRAME ORDER, so
+    # a frame that validates IS the published artifact row for row; and `source_row_id` must
+    # still be the original ordinals 0..n-1, which a filtered frame could never satisfy.
+    validated = _require_published_endpoints(df, pid=pid, parquet_path=parquet_path)
+
+    # `isfinite`, not `dropna`: dropna KEEPS +/-inf (executed -- [0.1, nan, inf, -0.2].dropna()
+    # returns [0.1, inf, -0.2]), while the publication selected its rows by isfinite. A row
+    # retained here but absent there surfaces later as a spurious missing endpoint.
+    retained = np.isfinite(df[label_col].to_numpy(dtype="float64"))
+    df = df.loc[retained].reset_index(drop=True)
+    retained_row_ids = df["source_row_id"]
     n = len(df)
     if n < 200:
         _logger.warning(
@@ -309,12 +361,16 @@ def mine_profiles_for_pid_horizon(
         )
         return []
     dev = torch.device(device if (device == "cpu" or torch.cuda.is_available()) else "cpu")
-    ts_ms = torch.tensor(df["ts"].to_numpy(dtype="int64"), device=dev)
     labels = torch.tensor(df[label_col].to_numpy(dtype="float64"), device=dev)
     features = torch.tensor(df[list(_FEATURE_COLUMNS)].to_numpy(dtype="float64"), device=dev)
     if features.dtype != torch.float64:
         raise ValueError("exact rule routing requires float64 feature tensors before fitting")
-    next_eligible = build_next_eligible(ts_ms, horizon_bars=int(horizon))
+    # Read from the records, not re-derived from a clock. The wall-clock baseline is gone from
+    # this module entirely -- it survives in `profit_split`, where the equivalence test compares
+    # the two and so keeps the evidence that this generalises the old behaviour.
+    next_eligible = build_next_eligible_from_endpoints(
+        validated, retained_row_ids, horizon=int(horizon), device=dev
+    )
 
     outer = outer_folds(n, n_folds=5, embargo_bars=int(horizon))
     nested = [inner_folds(train, n_folds=3, embargo_bars=int(horizon)) for train, _ in outer]
