@@ -313,3 +313,10 @@ def test_miner_rejects_changed_feature_dtype_before_fitting(monkeypatch):
     monkeypatch.setattr(miner, "fit_tree", forbidden)
     with pytest.raises(ValueError, match="float64"):
         miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")
+
+
+def test_miner_rejects_gapped_source_before_row_count_labels_can_overlap(monkeypatch):
+    ts = np.arange(300, dtype="int64") * 7_200_000
+    miner = _stub_mining_frame(monkeypatch, ts)
+    with pytest.raises(ValueError, match="contiguous hourly"):
+        miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")

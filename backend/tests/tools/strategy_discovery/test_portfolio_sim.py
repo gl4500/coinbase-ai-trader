@@ -206,3 +206,25 @@ def test_simulation_uses_exact_rule_not_rounded_display():
     features = _make_pid_features("BTC-USD", 3, 1.023, 0.1)
     metrics, _ = simulate_portfolio([profile], 1, {"BTC-USD": features})
     assert metrics.trade_count > 0
+
+
+def test_simulator_rejects_gaps_before_realizing_future_label_returns():
+    from tools.strategy_discovery.labels import simulate_dynamic_exit_labels
+
+    prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0])
+    frame = pd.DataFrame(
+        {
+            "ts": np.arange(5, dtype="int64") * 7_200_000,
+            "open": prices,
+            "high": prices,
+            "low": prices,
+            "close": prices,
+            "atr14_pct": 0.06,
+        }
+    )
+    frame = simulate_dynamic_exit_labels(frame, horizons=[2])
+    profile = _make_profile("GAP-USD", 0, 2, "(root)")
+    # This return requires row 2 (hour 4), but old replay realized it at hour 2.
+    assert frame.loc[0, "label_h2"] == pytest.approx(0.008)
+    with pytest.raises(ValueError, match="contiguous hourly"):
+        simulate_portfolio([profile], 1, {"GAP-USD": frame})
