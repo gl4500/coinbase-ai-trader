@@ -199,8 +199,8 @@ class LoadedEndpointDataset:
     semantic_validation_required: bool = field(init=False, default=True)
 
 
-def _validate_expected_keys(values: Mapping[tuple, float]) -> None:
-    """Expected keys must be well-formed before anything is compared against them.
+def _validate_expected_candidate_values(values: Mapping[tuple, float]) -> None:
+    """Expected keys AND values must be well-formed before anything is compared to them.
 
     A bool key component silently aliases an integer (`True` IS dict key `1`), so a
     malformed expectation would quietly match the wrong row rather than fail.
@@ -226,6 +226,18 @@ def _validate_expected_keys(values: Mapping[tuple, float]) -> None:
                     f"expected_candidate_values key {key!r} has a malformed {name}: a "
                     f"bool aliases an integer row id and would match the wrong record"
                 )
+        expected = values[key]
+        # A non-finite EXPECTATION is the other half of the same defect: `nan.hex()`
+        # equals `nan.hex()`, so a NaN expectation would vouch for a NaN row.
+        if isinstance(expected, bool) or not isinstance(expected, (int, float)):
+            raise ValueError(
+                f"expected_candidate_values[{key!r}] must be a real number, got {expected!r}"
+            )
+        if not math.isfinite(expected):
+            raise ValueError(
+                f"expected_candidate_values[{key!r}] is non-finite ({expected!r}); a "
+                f"non-finite label is a disposition, never candidate evidence"
+            )
 
 
 def dataset_checksum(content: bytes) -> str:
@@ -325,6 +337,14 @@ def _validated_header(endpoints: Sequence[Any], data_id: str) -> dict:
                     f"record {position} declares {name} {actual!r} while another record "
                     f"declares {header[name]!r}; one publication carries one {name}"
                 )
+        label = endpoint.label_value
+        if isinstance(label, bool) or not isinstance(label, (int, float)):
+            raise ValueError(f"record {position} has a label_value that is not a real number")
+        if not math.isfinite(label):
+            raise ValueError(
+                f"record {position} has a non-finite label_value {label!r}; a non-finite "
+                f"label is a disposition to report, never a published endpoint"
+            )
         if CAUSALITY_BLOCKER not in tuple(endpoint.blockers):
             raise ValueError(
                 f"record {position} is missing the mandatory blocker "
@@ -420,7 +440,7 @@ def load_dataset(
             "require_complete_coverage must be an actual bool; a truthy value silently "
             "relaxing a coverage requirement is the accident this module refuses"
         )
-    _validate_expected_keys(expected_candidate_values)
+    _validate_expected_candidate_values(expected_candidate_values)
 
     manifest_path = directory / MANIFEST_FILENAME
     dataset_path = directory / DATASET_FILENAME
@@ -476,9 +496,14 @@ def load_dataset(
     except UnicodeDecodeError as exc:
         raise ValueError(f"dataset content is malformed: {exc}") from exc
     lines = [line for line in text.splitlines() if line.strip()]
-    if len(lines) != manifest.get("row_count"):
+    declared_rows = manifest.get("row_count")
+    # `True == 1` and `5.0 == 5`, so equality alone accepts a bool or a float where a
+    # count belongs -- the same trap as the schema version.
+    if isinstance(declared_rows, bool) or not isinstance(declared_rows, int):
+        raise ValueError(f"manifest row_count must be an int, got {declared_rows!r}")
+    if len(lines) != declared_rows:
         raise ValueError(
-            f"row_count {manifest.get('row_count')!r} does not match the {len(lines)} rows present"
+            f"row_count {declared_rows!r} does not match the {len(lines)} rows present"
         )
 
     records = []
@@ -521,10 +546,27 @@ def load_dataset(
         seen.add(key)
 
         encoded_label = row["label_value"]
-        if not isinstance(encoded_label, str) or encoded_label in _NON_FINITE:
-            raise ValueError(f"dataset row {position} has a non-finite label_value")
+        if not isinstance(encoded_label, str):
+            raise ValueError(
+                f"dataset row {position} has a label_value that is not an encoded string"
+            )
+        try:
+            decoded_label = float.fromhex(encoded_label)
+        except ValueError as exc:
+            raise ValueError(
+                f"dataset row {position} has a malformed label_value {encoded_label!r}: {exc}"
+            ) from exc
+        # The DECODED VALUE decides, never the token that spells it. `float.fromhex` is
+        # case-insensitive and accepts long forms, so a token blacklist let "NaN",
+        # "Infinity" and "-INF" through -- and `nan.hex() == nan.hex()`, so the
+        # attribution check below would have agreed with a NaN expectation.
+        if not math.isfinite(decoded_label):
+            raise ValueError(
+                f"dataset row {position} has a non-finite label_value {encoded_label!r}; "
+                f"a non-finite label is a disposition, never candidate evidence"
+            )
         row = dict(row)
-        row["label_value"] = float.fromhex(encoded_label)
+        row["label_value"] = decoded_label
         row["blockers"] = tuple(row["blockers"])
 
         if key not in expected_candidate_values:

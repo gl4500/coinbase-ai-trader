@@ -79,6 +79,26 @@ claim is made.
 Nothing is wired. No consumer reads a published dataset, and no live artifact is
 regenerated.
 
+**Follow-up: non-finite labels are rejected by DECODED VALUE, not by token spelling.**
+Found by executed review and reproduced before fixing. The check was
+`encoded_label in _NON_FINITE`, a lowercase token blacklist -- but `float.fromhex` is
+case-insensitive AND accepts long forms, so `"NaN"`, `"Infinity"` and `"-INF"` sailed
+past it and decoded to non-finite floats. Attribution could not catch it either:
+`nan.hex() == nan.hex()`, so a NaN expectation agreed with a NaN row and the artifact
+loaded with `coverage_complete=True`. The root cause is the same shape as everything
+else here -- the TOKEN was validated as a proxy for the property instead of the
+property. `math.isfinite` on the decoded value is the property. A non-finite label is a
+disposition, never candidate evidence, so it is now refused on BOTH sides: rows at load,
+and `expected_candidate_values` entries as caller input (which must be finite, real and
+non-bool). The writer refuses one too. Same trap closed on `row_count`, which `True == 1`
+and `5.0 == 5` had let through by equality.
+
+One test-design note, because the test nearly passed for the wrong reason: the row-level
+regression originally set a NaN *expectation* as well, which fires the argument
+validator before any row is read. Expectations are now left correct and finite so the
+assertion can only be satisfied by the row check itself.
+
+
 
 ### Label endpoint publication - 2026-09-26
 

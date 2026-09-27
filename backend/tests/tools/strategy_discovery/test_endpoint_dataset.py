@@ -695,3 +695,103 @@ def test_an_interrupted_overwrite_leaves_a_stale_manifest_that_is_still_rejected
     assert manifest_digest(manifest) == digest, "the stale manifest is still the old one"
     with pytest.raises(ValueError, match="checksum"):
         _load(tmp_path, labelled, endpoints, digest)
+
+
+# ── non-finite labels are rejected by DECODED VALUE, not by token spelling ────
+#
+# Found by executed review (Codex 9b3eb018) and reproduced before fixing. The check was
+# `encoded_label in _NON_FINITE`, a lowercase token blacklist -- but `float.fromhex` is
+# case-insensitive AND accepts long forms, so "NaN", "Infinity" and "-INF" all sailed
+# past it and decoded to non-finite floats. The attribution check could not catch it
+# either: `nan.hex() == nan.hex()` is True, so a NaN expectation agreed with a NaN row.
+#
+# Root cause is the same shape as the rest of this work: the TOKEN was validated as a
+# proxy for the property, instead of the property itself. `math.isfinite` on the decoded
+# value is the property.
+
+
+def _reanchor(tmp_path, mutate_row=None, mutate_manifest=None):
+    """Rewrite a published artifact and re-anchor it HONESTLY.
+
+    The new manifest digest is supplied to the loader, so these tests exercise schema
+    and attribution validation -- not tamper detection, which is already covered.
+    """
+    labelled, endpoints, _ = _published(tmp_path)
+    lines = (tmp_path / DATASET_FILENAME).read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    key = (first["product_id"], first["horizon"], first["entry_row_id"])
+    if mutate_row is not None:
+        mutate_row(first)
+        lines[0] = json.dumps(first, sort_keys=True, separators=(",", ":"))
+    content = ("\n".join(lines) + "\n").encode("utf-8")
+    (tmp_path / DATASET_FILENAME).write_bytes(content)
+
+    manifest = _read_manifest(tmp_path)
+    manifest["dataset_checksum"] = dataset_checksum(content)
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    _write_manifest(tmp_path, manifest)
+    return labelled, endpoints, manifest_digest(manifest), key
+
+
+@pytest.mark.parametrize("token", ["NaN", "nan", "Infinity", "-INF", "inf", "-Infinity"])
+def test_a_nonfinite_label_is_rejected_however_it_is_spelled(tmp_path, token):
+    """`float.fromhex` accepts every one of these; a lowercase blacklist accepts most."""
+    labelled, endpoints, digest, key = _reanchor(
+        tmp_path, mutate_row=lambda row: row.update(label_value=token)
+    )
+    # Expectations stay CORRECT and finite, so the argument validator cannot fire and
+    # this isolates the ROW check. A NaN expectation here would have satisfied the test
+    # for the wrong reason -- the error would come from validating the caller's input,
+    # never from reading the row.
+    with pytest.raises(ValueError, match=r"dataset row \d+ has a non-finite label_value"):
+        _load(tmp_path, labelled, endpoints, digest, expected_manifest_digest=digest)
+
+
+def test_a_nan_expectation_cannot_vouch_for_a_nan_row(tmp_path):
+    """`nan.hex() == nan.hex()`, so attribution agrees with itself. A non-finite label is
+    a DISPOSITION, never candidate evidence -- on either side of the comparison."""
+    labelled, endpoints, digest = _published(tmp_path)
+    values = dict(_candidate_values(labelled))
+    values[("BTC-USD", 1, 0)] = float("nan")
+    with pytest.raises(ValueError, match="expected_candidate_values"):
+        _load(tmp_path, labelled, endpoints, digest, expected_candidate_values=values)
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), True, False, "0.5", None])
+def test_malformed_expected_candidate_values_are_rejected(tmp_path, value):
+    labelled, endpoints, digest = _published(tmp_path)
+    values = dict(_candidate_values(labelled))
+    values[("BTC-USD", 1, 0)] = value
+    with pytest.raises(ValueError, match="expected_candidate_values"):
+        _load(tmp_path, labelled, endpoints, digest, expected_candidate_values=values)
+
+
+def test_a_malformed_label_encoding_is_rejected_not_crashed_on(tmp_path):
+    labelled, endpoints, digest, key = _reanchor(
+        tmp_path, mutate_row=lambda row: row.update(label_value="not-a-float")
+    )
+    with pytest.raises(ValueError, match="label_value"):
+        _load(tmp_path, labelled, endpoints, digest, expected_manifest_digest=digest)
+
+
+def test_the_writer_refuses_a_nonfinite_label(tmp_path):
+    """Caught at publication too, where it is cheapest. Part 1 already declines to
+    BUILD such a record; this refuses to publish one that arrives another way."""
+    import dataclasses
+
+    labelled, endpoints = _produce()
+    poisoned = [dataclasses.replace(endpoints[0], label_value=float("nan"))] + list(endpoints[1:])
+    with pytest.raises(ValueError, match="non-finite"):
+        write_dataset(tmp_path, endpoints=poisoned, data_id=endpoints[0].data_id)
+
+
+@pytest.mark.parametrize("row_count", [True, 5.0])
+def test_a_bool_or_float_row_count_is_not_a_valid_row_count(tmp_path, row_count):
+    """`True == 1` and `5.0 == 5`, so equality alone accepts either where a count
+    belongs -- the same trap as the schema version."""
+    labelled, endpoints, digest, _ = _reanchor(
+        tmp_path, mutate_manifest=lambda m: m.update(row_count=row_count)
+    )
+    with pytest.raises(ValueError, match="row_count"):
+        _load(tmp_path, labelled, endpoints, digest, expected_manifest_digest=digest)
