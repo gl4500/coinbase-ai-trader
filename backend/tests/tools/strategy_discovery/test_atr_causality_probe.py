@@ -479,3 +479,99 @@ def test_a_trail_level_in_force_at_the_open_still_registers_a_gap():
     assert gapped.gapped is True, "the 112.8 level was in force at bar 2's open of 105"
     assert gapped.exit_price == pytest.approx(105.0)
     assert gapped.pnl < legacy.pnl
+
+
+def test_an_opening_breach_beats_a_later_stop_in_the_same_bar():
+    """Codex c6c670ee. A level already breached at the open is a TIMED event; the full-bar extrema
+    are not.
+
+    Bar 1 lifts the peak to 120 (trail level 112.8) and survives. Bar 2 OPENS at 105 -- already
+    through that level -- and only later falls to 90, below the 92 stop. The earlier version
+    reported stop @ 92 (-0.0800), an exit that could not have happened because the position was
+    already out at 105. Legacy keeps the full-bar stop-first behaviour unchanged.
+    """
+    opens = np.array([100.0, 116.0, 105.0], dtype="float64")
+    closes = np.array([100.0, 118.0, 95.0], dtype="float64")
+    highs = np.array([100.0, 120.0, 106.0], dtype="float64")
+    lows = np.array([100.0, 115.0, 90.0], dtype="float64")
+    atrs = np.array([0.06, 0.06, 0.06], dtype="float64")
+    args = dict(
+        entry_idx=0,
+        horizon=2,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+    )
+    legacy = simulate_variant(spec=LEGACY, **args)
+    gapped = simulate_variant(spec=GAP_ONLY, **args)
+
+    assert legacy.exit_kind == "stop" and legacy.exit_price == pytest.approx(92.0), (
+        "legacy must be untouched by the opening-event rule"
+    )
+    assert gapped.exit_kind == "trail", "the trail level was already through at the open"
+    assert gapped.exit_price == pytest.approx(105.0)
+    assert gapped.gapped is True
+    assert gapped.bars_held == 2
+    assert gapped.pnl == pytest.approx(0.05)
+    assert gapped.pnl > legacy.pnl, (
+        "here the honest answer is BETTER than legacy -- the gap variant is not a one-way "
+        "pessimism knob, which is itself worth knowing"
+    )
+
+
+def test_a_stop_breached_at_the_open_keeps_priority_over_a_trail_also_breached():
+    """Both levels through at the open: the stop wins, matching the live exit ladder."""
+    opens = np.array([100.0, 116.0, 80.0], dtype="float64")
+    closes = np.array([100.0, 118.0, 82.0], dtype="float64")
+    highs = np.array([100.0, 120.0, 83.0], dtype="float64")
+    lows = np.array([100.0, 115.0, 79.0], dtype="float64")
+    atrs = np.array([0.06, 0.06, 0.06], dtype="float64")
+    gapped = simulate_variant(
+        entry_idx=0,
+        horizon=2,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+        spec=GAP_ONLY,
+    )
+    assert gapped.exit_kind == "stop"
+    assert gapped.exit_price == pytest.approx(80.0)
+    assert gapped.gapped is True
+
+
+def test_low_before_high_is_a_delayed_update_policy_not_a_literal_path():
+    """Codex cb898726. Pins the limitation instead of leaving it implicit.
+
+    Bar 1: low 96 clears the level in force at the open (94), then the high lifts the peak to 120
+    so the level becomes 112.8 -- and the close at 100 is BELOW it. A literal O-L-H-C traversal
+    would exit on that descent, within bar 1. This policy defers the raised peak to the next bar,
+    so the exit lands on bar 2 instead. Asserted so the choice is visible and cannot drift.
+    """
+    opens = np.array([100.0, 100.0, 100.0], dtype="float64")
+    closes = np.array([100.0, 100.0, 100.0], dtype="float64")
+    highs = np.array([100.0, 120.0, 100.0], dtype="float64")
+    lows = np.array([100.0, 96.0, 100.0], dtype="float64")
+    atrs = np.array([0.06, 0.06, 0.06], dtype="float64")
+    result = simulate_variant(
+        entry_idx=0,
+        horizon=2,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+        spec=VariantSpec("lbh", ordering="low_before_high"),
+    )
+    assert result.exit_kind == "trail"
+    assert result.bars_held == 2, (
+        "delayed update: the peak raised by bar 1's high only bites from bar 2. A literal "
+        "O-L-H-C model would have exited during bar 1 on the high-to-close descent."
+    )
+    assert result.exit_price == pytest.approx(112.8)
