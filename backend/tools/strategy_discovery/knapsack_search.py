@@ -59,6 +59,9 @@ def beam_search_knapsack(
     all_qualifying: List[LoadedProfile],
     cap: int,
     pid_features: Dict[str, pd.DataFrame],
+    *,
+    endpoints_by_pid: Dict[str, object],
+    bar_duration_ms: int,
     beam_width: int = _DEFAULT_BEAM_WIDTH,
     pool_size: int = _DEFAULT_POOL_SIZE,
     bootstrap_iter: int = _DEFAULT_BOOTSTRAP_N,
@@ -95,7 +98,11 @@ def beam_search_knapsack(
                     continue
                 new_subset = subset + [cand]
                 metrics, telemetry = simulate_portfolio(
-                    new_subset, cap=int(cap), pid_features=pid_features
+                    new_subset,
+                    cap=int(cap),
+                    pid_features=pid_features,
+                    endpoints_by_pid=endpoints_by_pid,
+                    bar_duration_ms=bar_duration_ms,
                 )
                 trade_pnls = [t.realized_pnl for t in telemetry if t.realized_pnl is not None]
                 k_evaluated += 1

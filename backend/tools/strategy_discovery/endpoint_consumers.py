@@ -27,6 +27,7 @@ effort has been unwinding.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,11 @@ _REQUIRED_SIDECAR_FIELDS = (
 )
 
 _FRAME_COLUMNS = ("ts", "close", "high", "low", "atr14_pct", "source_row_id")
+
+# A field separator for the frame fingerprint. Written as bytes([0]) rather than a
+# \x00 literal because shell-mediated edits flattened that escape into a real NUL byte
+# inside this file once already.
+_SEP = bytes([0])
 
 
 class MissingEndpoint(ValueError):
@@ -86,6 +92,13 @@ class ValidatedEndpoints:
     data_id: str
     bar_duration_ms: int
     exit_config: Mapping
+    # Carried so a consumer can RECOMPUTE the frame's identity rather than trust that someone
+    # validated it. Without this, a validated set from one frame pairs silently with another
+    # that shares row ids but differs in the features a rule reads.
+    feature_recipe: str
+    # Digest of the FULL frame content this set was validated against, so a consumer can
+    # confirm it holds THAT frame rather than another with the same row ids and clocks.
+    frame_fingerprint: str
     token: Any = None
     semantic_validation_performed: bool = field(init=False, default=True)
 
@@ -342,11 +355,103 @@ def load_validated_endpoints(
         data_id=sidecar["data_id"],
         bar_duration_ms=int(sidecar["bar_duration_ms"]),
         exit_config=dict(sidecar["exit_config"]),
+        feature_recipe=sidecar["feature_recipe"],
+        frame_fingerprint=frame_fingerprint(frame),
         token=_VALIDATED_BY_LOADER,
     )
 
 
 # ── the two quantities, from validated records only ─────────────────────────
+
+
+def frame_fingerprint(frame) -> str:
+    """Digest of the frame's FULL content: every column and every value.
+
+    Needed because `build_data_id` is NARROWER than it looks. It covers the arrays the exit
+    simulation consumed -- ts, close, high, low, atr14_pct -- plus the config, and nothing
+    else. It does NOT cover the feature columns a RULE reads, `source_row_id`, or the label
+    columns, so two frames differing only in `price_over_ema20` share a `data_id`. A replay
+    bound on `data_id` alone would happily select trades on one frame and realize the other's
+    outcomes.
+
+    This is an IN-PROCESS binding, not a persisted artifact digest: a `ValidatedEndpoints`
+    lives in memory, so the fingerprint only has to be stable within one process, and the
+    producer's `data_id` version is deliberately untouched.
+    """
+    import pandas as pd
+
+    names = [str(column) for column in frame.columns]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            "frame has duplicate column names; a fingerprint cannot bind names to values"
+        )
+
+    # Each column's NAME is hashed together with ITS OWN values, in sorted name order. An
+    # earlier version hashed sorted names and then all row values, which was wrong in BOTH
+    # directions and both were reproduced: renaming two columns to swap their names without
+    # moving any value produced an IDENTICAL fingerprint (the sorted header lost the
+    # name-to-position binding while the row hashes followed physical order), and a harmless
+    # column REORDER produced a different one. Binding per column fixes both: a swap changes
+    # which values sit under a name, while a reorder does not.
+    digest = hashlib.sha256()
+    for name in sorted(names):
+        column = frame[name]
+        digest.update(name.encode("utf-8"))
+        digest.update(_SEP)
+        digest.update(str(column.dtype).encode("utf-8"))
+        digest.update(_SEP)
+        digest.update(pd.util.hash_pandas_object(column, index=True).to_numpy().tobytes())
+        digest.update(_SEP)
+    return "sha256:" + digest.hexdigest()
+
+
+def verify_frame_matches(validated, frame, *, product_id: str) -> str:
+    """Confirm these records were validated against THIS frame. Returns its `data_id`.
+
+    Two checks, because one is not enough:
+
+    1. the recomputed `build_data_id` must match -- that covers the arrays the exit simulation
+       read, the declared duration, the recipe and the exit config; and
+    2. the full-content `frame_fingerprint` must match -- because `data_id` does NOT cover the
+       feature columns a rule reads, `source_row_id`, or the label columns, so a frame
+       differing only in `price_over_ema20` passes check 1.
+
+    A `ValidatedEndpoints` proves SOME frame was validated. Only these prove it was this one,
+    and both inputs are ordinary public values, so no construction gate substitutes for them.
+    Neither check can say WHICH field moved.
+    """
+    from tools.strategy_discovery.endpoint_dataset import build_data_id
+
+    validated = _require_validated(validated)
+    actual_fingerprint = frame_fingerprint(frame)
+    if actual_fingerprint != validated.frame_fingerprint:
+        raise MissingEndpoint(
+            f"frame fingerprint {actual_fingerprint} does not match the {validated.frame_fingerprint} "
+            f"these endpoints were validated against; the records were validated against a "
+            f"different frame, so selecting trades on this one would realize the other's "
+            f"outcomes (data_id alone would not catch a changed rule feature column)"
+        )
+    for column in _FRAME_COLUMNS:
+        if column not in frame.columns:
+            raise MissingEndpoint(f"frame has no {column!r} column")
+    recomputed = build_data_id(
+        product_id=product_id,
+        bar_duration_ms=int(validated.bar_duration_ms),
+        timestamps=_validated_bar_starts(frame["ts"]).tolist(),
+        closes=frame["close"].to_numpy(dtype="float64").tolist(),
+        highs=frame["high"].to_numpy(dtype="float64").tolist(),
+        lows=frame["low"].to_numpy(dtype="float64").tolist(),
+        atr_pcts=frame["atr14_pct"].to_numpy(dtype="float64").tolist(),
+        feature_recipe=validated.feature_recipe,
+        config=dict(validated.exit_config),
+    )
+    if recomputed != validated.data_id:
+        raise MissingEndpoint(
+            f"data_id recomputed from the supplied frame is {recomputed} but these endpoints "
+            f"describe {validated.data_id}; the records were validated against a different "
+            f"frame, so selecting trades on this one would realize the other's outcomes"
+        )
+    return recomputed
 
 
 def _require_validated(value: Any) -> ValidatedEndpoints:
@@ -423,6 +528,8 @@ def accounting_times(validated, *, horizon: int) -> dict:
 
 __all__ = [
     "MissingEndpoint",
+    "frame_fingerprint",
+    "verify_frame_matches",
     "ValidatedEndpoints",
     "accounting_times",
     "eligibility_boundaries",

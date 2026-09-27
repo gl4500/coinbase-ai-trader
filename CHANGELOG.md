@@ -7,6 +7,63 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### The replay reads published endpoints instead of re-deriving exits - 2026-09-26
+
+Mining and portfolio replay computed their own exit times from a wall-clock horizon while the
+producer computed a different one from the actual exit rule. Two answers to one question, and
+nothing compared them.
+
+**What this change actually wires, stated exactly:** portfolio replay and Phase 4 now read the
+published endpoints, and the horizon arithmetic is gone from that path. **The miner is NOT
+wired.** `mine_profiles.py:317` still calls the wall-clock `build_next_eligible`;
+`build_next_eligible_from_endpoints` was built and tested here but has no caller yet. Mined
+eligibility therefore still carries the error described below, and endpoint-driven mining
+remains required and pending. The distinction matters because the point of this work is that a
+claim should not outrun the code, and an earlier draft of this entry said "the consumers now
+read the published endpoints" without qualification.
+
+The error was in **both directions**, which is why neither showed up as an obvious bias:
+
+- Where the source bars have a gap, the clock's exit instant falls on a bar that does not
+  exist, so a position is released too early and its slot resold. The eligibility vector for
+  the gap fixture is `[2,3,4,5,6,6]` against the clock's `[1,2,3,4,5,6]`; run through
+  `walk_and_sum` the same candidate set totals **0.6 on the clock and 0.3 on the endpoints** -
+  the clock counted one entry twice.
+- Where an exit fires early (stop or trail), the clock holds the slot to the full horizon and
+  a real subsequent entry is suppressed.
+
+The distinction that made this tractable: an **eligibility boundary is a POSITION** in the
+working frame, and an **accounting time is an INSTANT**. The single wall-clock `exit_ts` was
+serving as both, which is exactly why its two errors pointed opposite ways. They are now
+`eligibility_boundaries()` and `accounting_times()`, and `replay_timeline.py` holds no
+decision logic at all.
+
+- `simulate_portfolio` requires `endpoints_by_pid` and `bar_duration_ms`; `horizon_ms` is
+  deleted rather than deprecated, so no caller can quietly keep the old basis. PnL comes from
+  the record's own `label_value`, not from the frame, so the exit and the amount can no longer
+  disagree.
+- A frame and a record set are bound by BOTH a recomputed `data_id` and a per-column
+  `frame_fingerprint`, because a swapped frame does not merely change prices - it fires
+  different RULES. The fingerprint hashes each column name WITH its own values; hashing names
+  and values separately let a column-name swap through undetected.
+- Checkpoint-only instants exist so a due position can be examined, and are never sampled.
+  Removing that guard moves `pct_slots_full` from 0.75 to 0.18 on an input that changed
+  nothing about the trading - the regression asserts it by injecting instants that belong to no
+  position.
+- Phase 4 loads endpoints from the same `phase2_dir` the producer wrote them to. A product with
+  **no** publication is excluded with a named reason; a publication that FAILS validation
+  raises `EndpointArtifactError`. Excluding the second case would shrink the optimisation
+  universe while still emitting a scorecard that looks successful.
+- The scorecard and the deployment payload now carry a `universe` record - products requested,
+  evaluated, and every exclusion with its reason, including frames dropped for missing or empty
+  features. A thinner universe has to be visible, not inferable from a smaller profit number.
+
+**Not addressed here, and not implied by any of it:** the unresolved ATR blocker stands, and
+nothing in this change makes a profitability claim. The endpoints are now trustworthy as a
+record of what the exit rule did; whether the strategy earns anything is a separate question
+these commits do not touch.
+
+
 ### Phase 2 publishes endpoints and their sidecar - 2026-09-26
 
 The producer computed which exit fired and then discarded it. It now publishes it, next to
@@ -122,6 +179,49 @@ cannot exist. Records now carry `exit_price_basis`, `intrabar_timing_known` and
 was `> 0`, which passes whether or not double counting occurs; it is now an exact sum.
 
 9 tests. Nothing is wired: no consumer calls this yet.
+
+### Replay timeline - 2026-09-27
+
+The pre-integration replay iterated raw bar STARTS and did closing, entry evaluation and
+occupancy sampling at each one. Three problems in one loop: entries were evaluated a bar
+early on close-derived features; an exit on the final bar was unreachable, because that
+bar's close is later than every bar start, so `exit_ts <= ts` never fired and the PnL
+silently vanished; and folding exit examination into the same loop would have changed the
+denominator of `pct_slots_full` and `mean_concurrent`.
+
+`replay_timeline` separates the three. `decision_instants` is the unique union of bar
+CLOSES across **participating** products -- the entry opportunities AND the sampling basis.
+`close_checkpoints` are unique instants at which an open position may become due; they
+SCHEDULE AN INSPECTION and nothing else, create no positions and realize no PnL, so a
+checkpoint for a candidate that never fired is a harmless no-op and the whole list can be
+precomputed. `ordered_instants` returns `(instant, is_decision)`, with a coinciding
+checkpoint collapsing into ONE decision entry so the replay closes, opens, then samples once.
+
+**It emits no per-position events, and that is the design.** An earlier draft did, and it
+would have replaced the existing `-cumulative_profit_deflated` ranking with ALPHABETICAL
+PRODUCT ORDER under a shared cap -- opening events one at a time in name order makes the name
+the tiebreaker -- and would have realized endpoints that were never entered, because seeding
+exits from every candidate creates a close for a position that never opened. Ranking, the cap
+and the per-product constraint stay where they are.
+
+Strict types, after three reproduced gaps. `_whole` originally did `int(value)` and compared
+the round trip, which is still coercion: it caught fractions but accepted integral FLOATS, so
+`bar_duration_ms=1.0` passed as 1. It rejected only Python `bool`, and `np.bool_` is not a
+`bool` subclass, so a numpy boolean converted to 1. And `ordered_instants` validated NEITHER
+input, so `ordered_instants([0.5], [True])` returned `[(0.5, True), (True, False)]` -- the
+bool being the worse half, since `True == 1` means it either vanishes into instant 1 or
+masquerades as it. The property wanted is `numbers.Integral`, checked before conversion;
+numpy integer scalars are accepted because frames hand them out. Every rejection is a
+`ValueError`, since without the explicit check the type depended on the input -- `int(nan)`
+raises `ValueError`, `int(inf)` `OverflowError`, a string `TypeError`.
+
+`bar_availability_instants` requires `row_ids` rather than enumerating. On a filtered frame a
+position is not a source row id, and an endpoint's `entry_row_id` is one, so enumerating would
+pair an instant with the wrong row the moment a caller passed a filtered sequence -- the same
+identity confusion `reset_index(drop=True)` creates downstream. The trap is removed rather
+than documented.
+
+47 tests. Pure module, nothing wired: no consumer imports it yet.
 
 ### Endpoint consumer adapter - 2026-09-26
 
