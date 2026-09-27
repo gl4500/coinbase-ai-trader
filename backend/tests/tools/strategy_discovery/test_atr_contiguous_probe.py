@@ -261,3 +261,31 @@ def test_an_out_of_range_config_value_is_refused(key, value):
     config[key] = value
     with pytest.raises(ValueError, match=key):
         scan_contiguous_windows(_frame(), product_id="A-USD", horizon=_H, config=config)
+
+
+def test_the_artifact_records_whether_its_commit_can_reproduce_it(tmp_path):
+    """Codex 35985ceb. A bare SHA is worse than none when the executed code was uncommitted.
+
+    The first artifact recorded a9e07b1 while the hex matching and these very provenance fields
+    were still working-tree changes, later committed as e94408b. Checking out a9e07b1 would give
+    different behaviour, so the artifact must say whether its own commit reproduces it.
+    """
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    pq.write_table(pa.Table.from_pandas(_frame(), preserve_index=False), frames / "AAA-USD.parquet")
+
+    payload = run_contiguous_probe(frames, tmp_path / "out", horizons=(_H,), max_entries=100)
+    provenance = payload["source_provenance"]
+
+    assert set(provenance) == {
+        "commit",
+        "tree_dirty",
+        "untracked_files",
+        "reproducible_from_commit",
+    }
+    # reproducible_from_commit must be a conjunction, never merely "a commit was found".
+    if provenance["commit"] and provenance["tree_dirty"] is False:
+        assert provenance["reproducible_from_commit"] is True
+    else:
+        assert provenance["reproducible_from_commit"] is False
+    assert any("reproducible_from_commit is False" in c for c in payload["caveats"])
