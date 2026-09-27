@@ -165,13 +165,13 @@ another.
 So neither ordering dominates the other, in either direction, and **there is no single
 "conservative path" available to publish.**
 
-### 4.2 What follows: bracketing is required, not optional
+### 4.2 What follows: bracketing, proposed as the only defensible option
 
 | option | rule | status |
 |---|---|---|
 | B1 `high_before_low` | raise peak from `high_i`, then compare `low_i` | one arbitrary branch of an ambiguity |
 | B2 `low_before_high` | compare `low_i` against the peak as of `i-1`, then raise | the other arbitrary branch; **not** a conservative one |
-| **B3 bracket both** | compute B1 and B2; agree → one label; disagree → declare it | **required policy** |
+| **B3 bracket both** | compute B1 and B2; agree → one label; disagree → declare it | **proposed**, pending operator question 1 |
 
 Proposed B3 semantics:
 
@@ -181,8 +181,12 @@ Proposed B3 semantics:
   `label_intrabar_order_ambiguous`, plus both values in the record so nothing downstream has to
   re-derive them.
 
-`min` is defensible precisely because it does **not** pretend to be a simulated path: it is an
-explicit lower bound and the record says so. Publishing either branch alone would report a number
+`min` is PROPOSED, not approved -- operator question 1 decides it, and Codex `2cc2feec` is right
+that it is a diagnostic comparison until then. It is defensible as a candidate precisely because it
+does **not** pretend to be a simulated path: it is an explicit lower bound and the record says so.
+When it is reported, the smaller-PnL branch must carry **its own** exit, timing and occupancy --
+pairing one branch's value with the other's metadata would describe a trade neither ordering
+produces. The probe enforces that with `lower_bound_ordering` and `lower_bound_result`. Publishing either branch alone would report a number
 the ordering assumption manufactured, which §4.1 shows can differ by 3.5x on a two-bar path.
 
 **But be exact about what it bounds** (Codex `c3c5acc8`): `min(B1, B2)` is a bound over the **two
