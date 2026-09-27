@@ -44,7 +44,12 @@ _PID = "AGREE-USD"
 _EARLY = 3
 # An interior unlabelled row, so retained POSITIONS and source IDS diverge. Without it, id and
 # position are the same number and a path that confused them would still pass.
-_HOLE = 11
+#
+# 12, not 11 (Codex fe422a90): on a stride of 3 the accepted rows are 0, 3, 6, 9, 12, ... so a
+# hole at 11 is never an eligible entry and the REPLAY test could not observe it being skipped.
+# At 12 the hole lands on a row that would otherwise have been accepted, so the accepted
+# sequence itself changes and the skip becomes observable.
+_HOLE = 12
 
 
 def _label_for(row: int) -> float:
@@ -238,4 +243,10 @@ def test_the_replay_accepts_the_source_rows_the_endpoints_imply(tmp_path, monkey
     assert realized_rows == expected_rows
     assert metrics.trade_count == len(expected_rows)
     # The discriminating prefix: endpoint exits give a stride of 3, the horizon clock gives 24.
-    assert realized_rows[:6] == [0, 3, 6, 9, 12, 15]
+    # And row 12 -- which a clean stride of 3 WOULD have accepted -- is absent because it carries
+    # no label, so the run steps to 13 instead. That transition is what makes the interior hole
+    # observable in the replay rather than only in the helper comparison.
+    assert realized_rows[:6] == [0, 3, 6, 9, 13, 16]
+    assert _HOLE not in realized_rows, (
+        f"row {_HOLE} has no label and no endpoint, so the replay must not have traded it"
+    )
