@@ -43,27 +43,56 @@ DEFAULT_CONFIG: Mapping[str, float] = {
 
 @dataclass(frozen=True)
 class VariantSummary:
+    """One variant against legacy.
+
+    `pnl_changed` and `result_changed` are separate on purpose (Codex c6f81f65): a variant can
+    move the exit kind or the holding period while landing on the same PnL, and counting only PnL
+    understates the change. `result_changed` is the union of pnl, exit kind and bars held.
+    """
+
     variant: str
     records: int = 0
-    changed_vs_legacy: int = 0
+    pnl_changed: int = 0
+    result_changed: int = 0
     kind_migration: Dict[str, int] = field(default_factory=dict)
     sign_flips: int = 0
     bars_held_changed: int = 0
     gapped_fills: int = 0
     pnl_delta_min: Optional[float] = None
     pnl_delta_max: Optional[float] = None
-    pnl_delta_abs_mean: Optional[float] = None
+    # Averaged over the records that CHANGED, not the population -- a conditional denominator,
+    # named so nobody reads it as a population mean.
+    pnl_delta_abs_mean_over_changed: Optional[float] = None
 
 
 @dataclass(frozen=True)
 class FrameReport:
+    """One product and horizon.
+
+    `comparable_records` counts rows the PUBLISHED frame labelled (finite stored label) whose
+    legacy recomputation is also finite -- the population is taken from the artifact, not from
+    whatever the recomputation happened to produce.
+
+    `legacy_matches_stored_label` is the anchor for that population: when it equals
+    `comparable_records`, the probe's baseline IS the published label bit for bit. Any shortfall
+    means the stored labels were produced under a different config or code, and every delta in
+    this report is then relative to a recomputation rather than to the artifact.
+
+    `enumerated_policy_agreement` counts records where the two enumerated orderings agree. It is
+    NOT evidence of path independence -- a third intrabar path could still differ, as §4.2 of the
+    proposal states. An earlier version called this `order_insensitive`, which contradicted that
+    very section (Codex c6f81f65).
+    """
+
     product_id: str
     horizon: int
     rows: int
     comparable_records: int
     variants: List[VariantSummary] = field(default_factory=list)
     ordering_ambiguous: int = 0
-    order_insensitive: int = 0
+    enumerated_policy_agreement: int = 0
+    stored_labels_finite: int = 0
+    legacy_matches_stored_label: int = 0
     skipped_reason: Optional[str] = None
 
 
@@ -96,6 +125,11 @@ def scan_frame(
             skipped_reason=f"no {label_col} column",
         )
 
+    invalid = _frame_defect(frame)
+    if invalid is not None:
+        return FrameReport(product_id, int(horizon), len(frame), 0, skipped_reason=invalid)
+
+    stored = frame[label_col].to_numpy(dtype="float64")
     opens = frame["open"].to_numpy(dtype="float64")
     closes = frame["close"].to_numpy(dtype="float64")
     highs = frame["high"].to_numpy(dtype="float64")
@@ -109,7 +143,8 @@ def scan_frame(
     per_variant: Dict[str, dict] = {
         spec.name: {
             "records": 0,
-            "changed": 0,
+            "pnl_changed": 0,
+            "result_changed": 0,
             "migration": {},
             "flips": 0,
             "bars": 0,
@@ -119,14 +154,23 @@ def scan_frame(
         for spec in variants
     }
     ambiguous = 0
-    insensitive = 0
+    agreeing = 0
     comparable = 0
 
+    stored_finite = 0
+    matches_stored = 0
     for entry_idx in entries:
+        # The PUBLISHED artifact decides who is a candidate. A row the producer left unlabelled is
+        # not part of the population, however the recomputation would have scored it.
+        if not _finite(float(stored[entry_idx])):
+            continue
+        stored_finite += 1
         base = simulate_variant(entry_idx=entry_idx, horizon=horizon, spec=LEGACY, **shared)
         if not _finite(base.pnl):
             continue
         comparable += 1
+        if base.pnl == float(stored[entry_idx]):
+            matches_stored += 1
         for spec in variants:
             other = (
                 base
@@ -139,13 +183,14 @@ def scan_frame(
                 bucket["gapped"] += 1
             if not _finite(other.pnl):
                 # A variant that cannot produce a label where legacy could is itself a finding.
-                bucket["changed"] += 1
+                bucket["pnl_changed"] += 1
+                bucket["result_changed"] += 1
                 bucket["migration"][f"{base.exit_kind}->unavailable"] = (
                     bucket["migration"].get(f"{base.exit_kind}->unavailable", 0) + 1
                 )
                 continue
             if other.pnl != base.pnl:
-                bucket["changed"] += 1
+                bucket["pnl_changed"] += 1
                 bucket["deltas"].append(other.pnl - base.pnl)
                 if (other.pnl > 0) != (base.pnl > 0):
                     bucket["flips"] += 1
@@ -154,17 +199,63 @@ def scan_frame(
             if other.exit_kind != base.exit_kind:
                 key = f"{base.exit_kind}->{other.exit_kind}"
                 bucket["migration"][key] = bucket["migration"].get(key, 0) + 1
+            if (
+                other.pnl != base.pnl
+                or other.bars_held != base.bars_held
+                or other.exit_kind != base.exit_kind
+            ):
+                bucket["result_changed"] += 1
 
         report = bracket_orderings(entry_idx=entry_idx, horizon=horizon, atr_lag_bars=1, **shared)
         if not report.agree:
             ambiguous += 1
         else:
-            insensitive += 1
+            agreeing += 1
 
     summaries = [_summarise(spec.name, per_variant[spec.name]) for spec in variants]
     return FrameReport(
-        product_id, int(horizon), rows, comparable, summaries, ambiguous, insensitive
+        product_id,
+        int(horizon),
+        rows,
+        comparable,
+        summaries,
+        ambiguous,
+        agreeing,
+        stored_finite,
+        matches_stored,
     )
+
+
+def _frame_defect(frame) -> Optional[str]:
+    """Why this frame cannot carry a row-count label, or None.
+
+    `ts` was previously required and never checked (Codex c6f81f65). The label semantics are
+    row-count based, so a gapped, reversed or duplicated clock silently turns row offsets into
+    false hourly horizons -- the exact defect class the endpoint contract exists to remove.
+    """
+    import numpy as np
+    from pandas.api.types import is_integer_dtype
+
+    if not is_integer_dtype(frame["ts"].dtype) or frame["ts"].isna().any():
+        return "ts must be non-null integer milliseconds"
+    ts = frame["ts"].to_numpy(dtype="int64")
+    if len(ts) > 1:
+        steps = np.diff(ts)
+        if (steps != _BAR_MS).any():
+            return (
+                "ts must be unique, ascending and contiguous hourly; a gapped or reordered clock "
+                "makes row-count horizons false"
+            )
+    for name in ("open", "high", "low", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if not np.isfinite(values).all() or (values <= 0.0).any():
+            return f"{name} must be finite and positive"
+    if (frame["high"].to_numpy(dtype="float64") < frame["low"].to_numpy(dtype="float64")).any():
+        return "high must not be below low"
+    return None
+
+
+_BAR_MS = 3_600_000
 
 
 def _finite(value: float) -> bool:
@@ -176,14 +267,17 @@ def _summarise(name: str, bucket: dict) -> VariantSummary:
     return VariantSummary(
         variant=name,
         records=bucket["records"],
-        changed_vs_legacy=bucket["changed"],
+        pnl_changed=bucket["pnl_changed"],
+        result_changed=bucket["result_changed"],
         kind_migration=dict(sorted(bucket["migration"].items())),
         sign_flips=bucket["flips"],
         bars_held_changed=bucket["bars"],
         gapped_fills=bucket["gapped"],
         pnl_delta_min=min(deltas) if deltas else None,
         pnl_delta_max=max(deltas) if deltas else None,
-        pnl_delta_abs_mean=(sum(abs(d) for d in deltas) / len(deltas)) if deltas else None,
+        pnl_delta_abs_mean_over_changed=(
+            (sum(abs(d) for d in deltas) / len(deltas)) if deltas else None
+        ),
     )
 
 
@@ -215,10 +309,13 @@ def run_probe(
 
     frames_dir = Path(frames_dir)
     output_dir = Path(output_dir)
-    if frames_dir.resolve() == output_dir.resolve():
+    resolved_frames = frames_dir.resolve()
+    resolved_output = output_dir.resolve()
+    if resolved_output == resolved_frames or resolved_frames in resolved_output.parents:
         raise ValueError(
-            "output_dir must not be the frames directory; the probe writes nothing next to its "
-            "read-only inputs"
+            "output_dir must not be the frames directory or inside it; the probe writes nothing "
+            "under its read-only inputs (Codex c6f81f65: an equality-only guard permitted a "
+            "subdirectory, contradicting the promise)"
         )
 
     before = _input_fingerprint(frames_dir) if frames_dir.exists() else {}
@@ -243,7 +340,11 @@ def run_probe(
                 )
             )
 
-    scanned = [r for r in reports if r.skipped_reason is None]
+    # "scanned" requires actual comparable records. A frame that is too short, entirely
+    # unlabelled or wholly invalid produced zero evidence, and reporting that as a successful
+    # scan would make an empty result look like a finding of no effect (Codex c6f81f65).
+    scanned = [r for r in reports if r.skipped_reason is None and r.comparable_records > 0]
+    empty = [r for r in reports if r.skipped_reason is None and r.comparable_records == 0]
     payload = {
         "schema_version": 1,
         "status": "ok" if scanned else "no_data",
@@ -258,6 +359,9 @@ def run_probe(
             for r in reports
             if r.skipped_reason is not None
         ],
+        "frames_without_evidence": [
+            {"product_id": r.product_id, "horizon": r.horizon, "rows": r.rows} for r in empty
+        ],
         "reports": [asdict(r) for r in reports],
         "caveats": [
             "Not a profitability measurement and not a re-measurement of any archived verdict.",
@@ -267,14 +371,27 @@ def run_probe(
             "lag-0 gap and opening-event figures are counterfactual.",
             "low_before_high is a delayed-update policy: a peak raised by a bar's high takes "
             "effect from the next bar, and the high-to-close descent is not modelled.",
+            "enumerated_policy_agreement is agreement between TWO orderings, not proof of path "
+            "independence; a third intrabar path could still differ.",
+            "pnl_delta_abs_mean_over_changed has a conditional denominator: it averages the "
+            "records that changed, not the population.",
+            "Read-only was checked by file size and mtime, which detects modification by this "
+            "run but is not a content-integrity proof of the inputs themselves.",
+            "legacy_matches_stored_label is the population anchor: below comparable_records, the "
+            "stored labels came from a different config or code and every delta here is relative "
+            "to a recomputation rather than to the published artifact.",
         ],
     }
     if not scanned:
-        payload["no_data_reason"] = (
-            f"no scannable Phase 2 frames under {frames_dir}"
-            if not candidates
-            else "every candidate frame was skipped; see frames_skipped"
-        )
+        if not candidates:
+            payload["no_data_reason"] = f"no scannable Phase 2 frames under {frames_dir}"
+        elif empty:
+            payload["no_data_reason"] = (
+                "candidate frames were readable but produced no comparable records; see "
+                "frames_without_evidence"
+            )
+        else:
+            payload["no_data_reason"] = "every candidate frame was skipped; see frames_skipped"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / "atr_causality_report.json"

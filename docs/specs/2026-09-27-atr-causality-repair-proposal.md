@@ -2,9 +2,10 @@
 
 **Date:** 2026-09-27
 **Status:** PROPOSAL for the LABEL POLICY. Nothing here is implemented.
-**Measured:** §10 carries real per-variant results from the offline probe. They show the
-repairable half moves 0.06% of records and the unrepairable half 1.25%, which inverts the
-priority this document originally implied. Read §10 before §3.
+**Measured:** §10 reports the probe's actual result, which is `no_data`: every Phase 2 frame on
+disk fails the contiguous-hourly precondition that row-count labels require (0 of 50). The ATR
+repair is therefore **unmeasured**, and an earlier version of §10 reporting it as "nearly inert"
+is withdrawn. Read §10 before §3.
 **Gate:** operator approval is required before any change to **production label semantics**
 (a v3 label version, a new blocker set, anything the producer writes). It is NOT required for
 the offline diagnostic in §5 and its tests, which preserve v2 and live semantics and are
@@ -379,72 +380,92 @@ either. They remain uninformative for the reasons already recorded in the occupa
 - It does **not** make any profitability claim, and it does not make Phase 4 deployable.
 - It does **not** establish that any archived verdict was wrong.
 
-## 10. MEASURED RESULTS, and they invert this document's priority
+## 10. WHAT THE PROBE ACTUALLY FOUND: the frames fail their own precondition
+
+**Status: the earlier numbers in this section are WITHDRAWN. See §10.1 for why.**
 
 Run on 2026-09-27 with `atr_causality_report.run_probe`, read-only over the first 8 products of
-`backend/data/phase2`, horizon 24, first 1500 entry rows each. Output went to an isolated
-scratchpad directory; the frames directory was fingerprinted before and after and was unchanged.
+`backend/data/phase2`, horizon 24. Result:
 
-**Scope of these numbers, stated before them:** 8 products, 12,000 comparable records, one
-horizon. Not the full universe. **Not a profitability measurement** and not a re-measurement of
-any archived verdict. The `legacy` self-check showed 0 changes against itself on every product,
-without which none of the rest would be worth reading.
+```
+status: no_data
+frames_found: 8   frames_scanned: 0
+every frame skipped: "ts must be unique, ascending and contiguous hourly;
+                      a gapped or reordered clock makes row-count horizons false"
+```
 
-| variant | records changed | share |
-|---|---|---|
-| `lag_only` — the ATR causality repair | **7** | **0.06%** |
-| `ordering_only` — the unrepairable ambiguity | **150** | **1.25%** |
-| `gap_only` | 8 | 0.07% |
-| `combined` | 299 | 2.49% |
+A sweep of the whole directory, read-only:
 
-Ordering ambiguity (the two enumerated orderings disagreeing at all): **547 of 12,000 = 4.56%**,
-with **51 sign flips** among the records `ordering_only` moved.
+| | count |
+|---|---|
+| Phase 2 frames present | **50** |
+| contiguous hourly | **0** |
+| with clock gaps | **50** |
 
-### 10.1 The repairable defect is nearly inert, and here is why
+Median 2 gaps per frame; worst BOBA-USD **1104 of 6665** steps (16.6%), GNO-USD 1074,
+TIME-USD 1056, BTRST-USD 718. AAVE-USD and ADA-USD have 2 each (both 6-hour holes); ABT-USD has
+277 (248 two-hour, 23 three-hour, 3 five-hour).
 
-`lag_only` changes 0.06% of records. The reason is structural, not a quirk of the sample: the
-trail threshold is `max(atr14_pct, atr_trail_floor)` with the floor at **0.06**, and the measured
-ATR almost never reaches it.
+### 10.1 Why the earlier numbers are withdrawn, not merely provisional
 
-| product | median `atr14_pct` | bars above the 0.06 floor |
-|---|---|---|
-| AAVE-USD | 0.0121 | 3 of 8714 (0.03%) |
-| ABT-USD | 0.0195 | 285 of 7628 (3.74%) |
-| ADA-USD | 0.0110 | 0 of 8714 (0.00%) |
+An earlier version of this section reported that `lag_only` moved 0.06% of records while
+`ordering_only` moved 1.25%, and concluded that this "inverts the priority" of the document. Those
+figures were produced **before the probe validated the clock**, so every one of them treated a
+24-row offset as a 24-hour horizon on frames where that does not hold. Both the legacy baseline
+and every variant were computed on a false clock. They are not a weaker version of the truth; they
+are measurements of the wrong thing, and I am removing rather than caveating them.
 
-**The floor masks the ATR.** Where `atr <= 0.06` the threshold is the constant floor, so which
-bar's ATR is used cannot matter, and lagging it by one bar is a no-op. The lookahead §1 documents
-is real in the code and almost absent in effect on this data. Only BOBA-USD showed any
-sensitivity at all (7 records).
+Two further reasons the earlier reading was unsafe, both raised in review (Codex `f455fbee`) and
+both independent of the clock:
 
-This does **not** make the repair pointless: a lookahead that is currently masked by a
-configuration value is still a lookahead, and it would become live the moment the floor were
-lowered or a more volatile universe were mined. But it does mean the repair should not be
-described, or prioritised, as materially changing the labels.
+- **`ordering_only` measures policy sensitivity, not true-path error.** It compares
+  `high_before_low` against the **delayed-update** `low_before_high`, which does not model the
+  high-to-close descent (§4.2). Calling its size "the unrepairable half" described something the
+  comparison does not measure.
+- **`combined` 299 against isolated parts summing to 165 shows the changed-result SETS are
+  non-additive. It does not establish a mechanism.** I asserted one -- that a lagged threshold
+  changes which bar triggers, changing what the other rules see -- and quantified an "~80%
+  attribution error". Counts alone support neither. Overlap and cancellation between the sets
+  would produce the same totals. Establishing a mechanism needs paired per-row cross-tabs.
 
-### 10.2 The unrepairable half is roughly twenty times larger
+The generalisation was also drawn from the first 1500 rows of 8 products, with the time range and
+config binding unexamined. That alone would have made "nearly inert" an unsafe conclusion.
 
-`ordering_only` moves 1.25% of records against `lag_only`'s 0.06%, with 51 sign flips and, on
-ABT-USD, a per-record PnL delta spanning `-0.0776` to `+0.1924`. Per-product ambiguity varies
-enormously — ADA-USD 0 of 1500, AVAX-USD and BNB-USD 1 each, ABT-USD 261, BOBA-USD 206 — so a
-single pooled figure would hide the shape.
+### 10.2 The finding that survives, and it is a bigger one
 
-So the blocker names the half that barely matters, and the half that matters cannot be fixed with
-better code. Per §4.1 and §4.2 the honest response is to keep declaring it, not to claim a repair.
+**No Phase 2 frame on disk satisfies the precondition that row-count labels require.** The labels
+in these artifacts were produced by walking `entry_idx + horizon` ROWS while the timestamps skip
+hours, so a nominal 24-hour horizon spans more wherever a hole falls inside the window. This is
+the same defect class as the occupancy correction: a row offset and a wall-clock duration treated
+as interchangeable.
 
-### 10.3 The variants interact, which is why isolating them was necessary
+It also has an immediate operational consequence worth checking before any mining run.
+`mine_profiles_for_pid_horizon` refuses a non-contiguous frame -- *"timestamps must be unique,
+ascending and contiguous hourly"* -- so on this evidence **none of these 50 frames can currently
+be mined at all**, independently of anything in this proposal.
 
-`combined` changes 299 records; the isolated variants sum to 7 + 150 + 8 = **165**. The
-combination is nearly twice the sum of its parts, so these changes are **not additive** — a lagged
-threshold alters which bar triggers, which changes what the ordering and gap rules then see. A
-single combined before/after diff would have reported 2.49% with no way to attribute it, and
-anyone estimating the parts from the whole would be wrong by ~80%.
+### 10.3 What this does to the ATR question
 
-### 10.4 What would change my recommendation
+It leaves it unmeasured. The probe is anchored bit-exactly to production and its variants are
+isolated and tested, but it has no admissible input here: every available frame is refused for a
+reason that has nothing to do with the ATR. So the honest status of §3's repair is **unknown in
+effect, not inert** -- and my earlier "nearly inert" was exactly the kind of claim this effort
+keeps catching.
 
-If the operator lowers `atr_trail_floor` or extends the universe to products whose ATR routinely
-exceeds it, `lag_only` stops being inert and §10.1 no longer applies. The probe should be re-run
-in that case rather than these numbers quoted.
+To measure it, one of these is needed, and all are operator decisions:
+
+1. Phase 2 frames regenerated on contiguous hourly input, which is a regeneration and outside my
+   authorisation;
+2. a gap-tolerant variant of the probe whose horizons are defined on the CLOCK rather than on row
+   counts -- a different labelling policy, not a diagnostic of the current one;
+3. a restriction to contiguous sub-ranges within each frame, which changes the population and
+   would need its own selection rule stated up front.
+
+I am not choosing among those. Note that the floor observation in the withdrawn text -- that
+`atr14_pct` medians run 0.011-0.020 against an `atr_trail_floor` of 0.06, so `max(atr, floor)` is
+usually the floor -- is a property of the ATR column and does not depend on the clock. It is a
+reason to EXPECT the lag to matter little, and it remains only a hypothesis until measured on
+admissible input.
 
 ---
 
@@ -457,12 +478,11 @@ in that case rather than these numbers quoted.
    document recommended a conservative single branch that does not exist, and §10.2 shows this is
    the consequential half of the change.
 
-1a. **Given §10.1, is the lag repair still worth a label version at all?** It moves 0.06% of
-   records because the 0.06 floor masks the ATR. Three coherent answers, and I do not think this
-   one is mine to pick: ship it anyway because a masked lookahead is still a lookahead and the
-   mask is a config value; defer it and spend the version on the ordering declaration alone;
-   or reconsider `atr_trail_floor` itself, which would make the lag live and is a threshold
-   change outside my current authorisation.
+1a. **WITHDRAWN.** An earlier version asked whether the lag repair was worth a label version
+   "given 0.06%", and floated deferring it or revisiting `atr_trail_floor`. That question rested
+   on the withdrawn numbers (§10.1), and a known lookahead should not be deferred on the strength
+   of a void sample. The live question is instead §10.3: which admissible input, if any, to
+   measure on.
 2. Whether the probe should run over the full universe or a named subset first.
 3. Whether v3 should be built at all before the other Phase 4 blockers are addressed, given that
    removing one of four does not change `deployment_eligible`.

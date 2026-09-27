@@ -61,10 +61,11 @@ def test_legacy_differs_from_itself_in_nothing():
     report = scan_frame(_frame(), product_id="AAA-USD", horizon=24)
     legacy = next(v for v in report.variants if v.variant == "legacy")
     assert report.comparable_records > 100, "too few records to conclude anything"
-    assert legacy.changed_vs_legacy == 0
+    assert legacy.pnl_changed == 0
+    assert legacy.result_changed == 0
     assert legacy.kind_migration == {}
     assert legacy.sign_flips == 0
-    assert legacy.pnl_delta_min is None
+    assert legacy.pnl_delta_abs_mean_over_changed is None
 
 
 def test_every_variant_is_reported_separately():
@@ -73,7 +74,9 @@ def test_every_variant_is_reported_separately():
     assert names == ["legacy", "lag_only", "ordering_only", "gap_only", "combined"], (
         "attribution needs each change reported on its own, and in a stable order"
     )
-    assert report.ordering_ambiguous + report.order_insensitive == report.comparable_records
+    assert (
+        report.ordering_ambiguous + report.enumerated_policy_agreement == report.comparable_records
+    ), "every comparable record falls in exactly one of the two enumerated-policy buckets"
 
 
 def test_a_frame_missing_columns_is_skipped_with_a_reason_not_crashed():
@@ -142,7 +145,7 @@ def test_an_end_to_end_run_reports_per_product_per_variant(tmp_path):
     for report in payload["reports"]:
         assert report["comparable_records"] > 0, "a scanned frame reporting nothing is vacuous"
         legacy = next(v for v in report["variants"] if v["variant"] == "legacy")
-        assert legacy["changed_vs_legacy"] == 0
+        assert legacy["pnl_changed"] == 0 and legacy["result_changed"] == 0
     assert payload["caveats"], "the report must carry its own limitations"
     assert any("not a profitability" in c.lower() for c in payload["caveats"])
     assert payload["config"] == dict(DEFAULT_CONFIG)
@@ -168,3 +171,82 @@ def test_the_output_is_written_atomically(tmp_path, monkeypatch):
 
     assert not destination.exists(), "no report should exist after an interrupted write"
     assert not list((tmp_path / "out").glob("*.partial")), "the temp file must be cleaned up"
+
+
+def test_the_stored_label_decides_who_is_a_candidate(tmp_path):
+    """Codex c6f81f65 item 4. The label column was checked and never read, so the population was
+    whatever the recomputation produced rather than what the producer published.
+
+    Here rows 0-9 are blanked in the STORED label while remaining perfectly recomputable. They
+    must be excluded, because a row the producer left unlabelled is not part of the published
+    population however well it would have scored.
+    """
+    frame = _frame()
+    frame.loc[0:9, "label_h24"] = float("nan")
+    report = scan_frame(frame, product_id="HOLE-USD", horizon=24)
+    baseline = scan_frame(_frame(), product_id="FULL-USD", horizon=24)
+
+    assert report.stored_labels_finite == baseline.stored_labels_finite - 10
+    assert report.comparable_records == baseline.comparable_records - 10, (
+        "the blanked rows must leave the population, not merely be recomputed anyway"
+    )
+
+
+def test_a_gapped_or_reordered_clock_is_skipped_not_silently_mislabelled():
+    """Codex c6f81f65 item 3. Row-count horizons are false on a broken clock, and `ts` was
+    required but never validated."""
+    gapped = _frame()
+    ts = gapped["ts"].to_numpy(dtype="int64").copy()
+    ts[50:] += _BAR  # a one-bar hole
+    gapped["ts"] = ts
+    assert "contiguous hourly" in (
+        scan_frame(gapped, product_id="GAP-USD", horizon=24).skipped_reason or ""
+    )
+
+    reversed_frame = _frame()
+    reversed_frame["ts"] = reversed_frame["ts"].to_numpy(dtype="int64")[::-1]
+    assert scan_frame(reversed_frame, product_id="REV-USD", horizon=24).skipped_reason is not None
+
+
+def test_a_non_positive_price_is_skipped():
+    frame = _frame()
+    frame.loc[7, "low"] = 0.0
+    assert "finite and positive" in (
+        scan_frame(frame, product_id="ZERO-USD", horizon=24).skipped_reason or ""
+    )
+
+
+def test_a_frame_with_no_comparable_records_is_no_data_not_a_successful_scan(tmp_path):
+    """Codex c6f81f65 item 2. Zero evidence reported as `ok` would read as a finding of no
+    effect."""
+    frame = _frame()
+    frame["label_h24"] = float("nan")  # readable, valid, and entirely unlabelled
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), frames / "EMPTY-USD.parquet")
+
+    payload = run_probe(frames, tmp_path / "out", horizons=(24,))
+    assert payload["status"] == "no_data"
+    assert "no comparable records" in payload["no_data_reason"]
+    assert payload["frames_without_evidence"][0]["product_id"] == "EMPTY-USD"
+    assert payload["frames_scanned"] == 0
+
+
+def test_the_output_may_not_be_written_inside_the_frames_directory(tmp_path):
+    """Codex c6f81f65 item 5. Equality alone permitted a subdirectory, contradicting the promise."""
+    frames = _write_frames(tmp_path / "frames", pids=("AAA-USD",))
+    with pytest.raises(ValueError, match="or inside it"):
+        run_probe(frames, frames / "out", horizons=(24,))
+
+
+def test_result_changed_catches_an_exit_move_that_leaves_pnl_identical():
+    """Codex c6f81f65 item 7. Counting only PnL understates the change.
+
+    `result_changed` is the union of pnl, exit kind and bars held, so a variant that moves the
+    holding period at equal PnL is still counted.
+    """
+    report = scan_frame(_frame(), product_id="AAA-USD", horizon=24)
+    for summary in report.variants:
+        assert summary.result_changed >= summary.pnl_changed, (
+            f"{summary.variant}: result_changed must be a superset of pnl_changed"
+        )
