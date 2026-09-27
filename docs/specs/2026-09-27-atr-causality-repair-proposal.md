@@ -591,13 +591,34 @@ floor or mine a more volatile universe and the lag stops being inert.
 the sensitivity of ONE enumerated policy pair, one of which defers the raised peak by a bar and
 does not model the high-to-close descent (§4.2). It is not the size of a true-path error.
 
-Artifact: `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out_v2\contiguous_window_report.json`
+Artifact: `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out_v3\contiguous_window_report.json`
 
-The artifact carries its own provenance so it can be checked independently: the git commit
-it ran from (`a9e07b1`), a sha256 per input parquet, the selection rule verbatim, nine
-caveats, and the retained source positions run-length encoded per product -- first and last
-timestamps alone could not reproduce which entries were excluded (Codex `dd462ea4`). ABT-USD's
-ranges show the gap structure directly: `[0,243] [270,1006] [1053,1082] [1107,1499]`.
+The sibling `atr_probe_out_v2` directory holds a SUPERSEDED earlier run of the same subset,
+kept for audit with a `SUPERSEDED.txt` note. Its figures are identical; it is superseded only
+because it recorded a commit that could not reproduce it (below).
+
+The artifact carries its own provenance so it can be checked independently: a sha256 per input
+parquet, the selection rule verbatim, ten caveats, and the retained source positions run-length
+encoded per product -- first and last timestamps alone could not reproduce which entries were
+excluded (Codex `dd462ea4`). ABT-USD's ranges show the gap structure directly:
+`[0,243] [270,1006] [1053,1082] [1107,1499]`.
+
+**A recorded commit that cannot reproduce the run is worse than none** (Codex `35985ceb`). The
+v2 artifact recorded `git_commit: a9e07b1` while the code that produced it -- the `float.hex`
+matching, the OHLC coherence guards, the provenance fields themselves -- was still uncommitted
+working tree, landing afterwards as `e94408b`. A reader checking out `a9e07b1` would get
+different behaviour and believe they had reproduced the numbers. The bare SHA is therefore
+replaced by a `source_provenance` block: `commit`, `tree_dirty`, `untracked_files`, and
+`reproducible_from_commit`, which is the CONJUNCTION of a commit being present AND the tree
+being clean -- not merely "a commit was found". Untracked files are counted but excluded from
+that conjunction, since an untracked file cannot change what `git checkout <sha>` yields.
+
+The v3 run records `commit: 1e73275`, `tree_dirty: false`, `untracked_files: 0`,
+`reproducible_from_commit: true`. That SHA is `e94408b` plus the commit adding the block, and
+not `e94408b` itself: the fix Codex asked for is a code change, so re-running at `e94408b`
+would have reproduced exactly the defect it was meant to close. Every figure is unchanged --
+the fix altered what the artifact records about itself, not the measurement, and so adds no
+confidence to the measurement.
 
 ---
 
