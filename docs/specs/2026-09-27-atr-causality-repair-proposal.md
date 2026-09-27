@@ -482,11 +482,10 @@ holds independently of anything in this proposal.
 
 ### 10.3 What this does to the ATR question
 
-It leaves it unmeasured. The probe is anchored bit-exactly to production and its variants are
-isolated and tested, but it has no admissible input here: every available frame is refused for a
-reason that has nothing to do with the ATR. So the honest status of §3's repair is **unknown in
-effect, not inert** -- and my earlier "nearly inert" was exactly the kind of claim this effort
-keeps catching.
+It left it unmeasured on the FULL-FRAME population, because every available frame is refused for
+a reason that has nothing to do with the ATR. §10.5 then measured it on a declared clean-window
+sub-population with an exact provenance anchor, so the status is no longer "unknown" -- but read
+§10.7 for what that measurement does and does not license.
 
 To measure it, one of these is needed, and all are operator decisions:
 
@@ -504,6 +503,73 @@ I am not choosing among those. Note that the floor observation in the withdrawn 
 usually the floor -- is a property of the ATR column and does not depend on the clock. It is a
 reason to EXPECT the lag to matter little, and it remains only a hypothesis until measured on
 admissible input.
+
+---
+
+### 10.5 An admissible measurement, on declared clean windows
+
+Codex specified a selection rule, I implemented it in `atr_contiguous_probe.py`, and this is the
+result. Run 2026-09-27: same 8 products, horizon 24, first 1500 source-entry positions.
+
+**Selection rule, outcome-independent and reported verbatim in the artifact:** retain an entry iff
+its stored label is finite, its full `[entry, entry + horizon]` window lies inside the frame, and
+every step inside that window is exactly one hour. Original positions and timestamps preserved;
+the precomputed `atr14_pct` used as-is with no feature recomputation. A test asserts that changing
+every label VALUE while preserving finiteness moves not one retained entry.
+
+| | count |
+|---|---|
+| positions considered | 12,000 |
+| retained | **11,565** |
+| excluded: window spans a gap | 435 |
+| excluded: no stored label / incomplete window | 0 |
+| **legacy == stored label** | **11,565 of 11,565 = 100.00%** |
+
+**The provenance anchor is exact.** The probe's legacy baseline reproduces the published label
+bit-for-bit on every retained entry, so every delta below is measured against the ARTIFACT rather
+than against a recomputation. That was the thing §10.1's withdrawn numbers could not claim.
+
+| variant | PnL changed | RESULT changed | sign flips |
+|---|---|---|---|
+| `lag_only` | 7 (0.06%) | 8 (0.07%) | 0 |
+| `ordering_only` | 148 (1.28%) | **530 (4.58%)** | 51 |
+| `gap_only` | 8 (0.07%) | 8 (0.07%) | 0 |
+| `combined` | 297 (2.57%) | 543 (4.70%) | 66 |
+
+Per product, retained and `ordering_only` result-changed: ADA 1500/0, AAVE 1500/2, AVAX 1500/1,
+BNB 1500/1, BCH 1500/24, ASTER 1474/52, BOBA 1187/190, ABT 1404/260.
+
+### 10.6 Two things this forces me to correct, beyond §10.1
+
+**Counting only PnL understated the ordering effect by ~3.6x.** `ordering_only` moves 1.28% of
+PnLs but **4.58% of results** -- 530 entries change exit kind or holding period, and most of those
+land on the same PnL. Every figure I quoted before splitting `pnl_changed` from `result_changed`
+(Codex `c6f81f65` item 7) was the smaller number. Occupancy is exactly what the portfolio replay
+consumes, so for that purpose 4.58% is the relevant figure, not 1.28%.
+
+**The non-additivity I claimed largely dissolves.** On result-changed, `combined` is 543 while the
+isolated variants sum to 8 + 530 + 8 = **546** -- slightly SUB-additive from overlap, not the
+near-doubling I reported. That earlier 299-vs-165 gap was substantially an artifact of PnL-only
+counting, not evidence of interaction. I had already withdrawn the mechanism and the "~80%" figure
+as unsupported by counts; this measurement shows the premise itself was mostly a measurement
+artifact.
+
+### 10.7 What may and may not be concluded
+
+**May:** on 11,565 clean-window entries whose labels the probe reproduces exactly, the lagged-ATR
+repair changes 8 results (0.07%) and flips no signs. The floor mechanism in §10.1 is the plausible
+explanation and is consistent with it.
+
+**May not:** that the repair is inert in general. This population is 8 products, the first 1500
+positions of each, and -- because gap exposure varies from 0.3% to 84% per product -- it is
+weighted towards the cleanest clocks. It is also still a single horizon. §10.4 stands: lower the
+floor or mine a more volatile universe and the lag stops being inert.
+
+**Also may not:** that the ordering ambiguity is "the unrepairable half" at 4.58%. That number is
+the sensitivity of ONE enumerated policy pair, one of which defers the raised peak by a bar and
+does not model the high-to-close descent (§4.2). It is not the size of a true-path error.
+
+Artifact: `C:\Users\gl450\AppData\Local\Temp\claude\C--Users-gl450\cd519c8d-8b5d-4a81-a505-cd69c4f96d0c\scratchpad\atr_probe_out_v2\contiguous_window_report.json`
 
 ---
 
