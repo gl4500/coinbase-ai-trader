@@ -85,6 +85,10 @@ CAVEATS = (
     "modifications at run time. In that case the recorded commit does NOT reproduce the behaviour "
     "that produced this artifact, and the run must be repeated from a clean tree before the "
     "numbers are quoted as reproducible.",
+    "source_provenance is source-tree evidence ONLY, in both directions. A True flag says the "
+    "recorded commit describes the tracked sources that ran; it says nothing about the "
+    "interpreter, the installed package versions, or any untracked importable file, each of "
+    "which can change a rerun that checks out exactly this commit.",
 )
 
 
