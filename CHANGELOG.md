@@ -7,6 +7,54 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Label endpoint publication - 2026-09-26
+
+`_simulate_one` computed which of three exit branches fired -- stop, trail, horizon --
+and then discarded it, returning only a PnL. Three downstream components each
+re-derived that fact from a different clock, and on gapped data they disagreed. The
+simulation now PUBLISHES it.
+
+- One shared `_SimResult` (pnl, exit_offset, exit_kind) feeds both the scalar labels
+  and the endpoint records, so the two cannot drift into separate algorithms -- which
+  is the defect class that produced the mismatch in the first place.
+- `simulate_dynamic_exit_labels` keeps its exact public signature and behaviour.
+- New `simulate_labels_with_endpoints` returns the labelled frame plus `LabelEndpoint`
+  records, optionally with dispositions. The frame carries `source_row_id`, so later
+  filtering has an identity to preserve rather than reconstructing positions.
+- New `endpoint_dataset.build_data_id` binds everything the exit decision reads:
+  product, DECLARED bar duration, ordered timestamps and row count, the consumed
+  close/high/low arrays AND the ATR column, the feature recipe, and the exit config.
+  Floats encode as `float.hex()` with explicit non-finite tokens, so a NaN ATR -- which
+  is legitimate input, since the simulation falls back to its floor -- hashes
+  consistently instead of aborting.
+
+**Nothing published claims more than it can.** `intrabar_timing_known` is False for
+stop and trail (an OHLC bar has four prices and no ordering) and True only for horizon,
+describing simulated within-bar timing under the declared model, never an observed
+fill. Trail records carry `intrabar_order_assumption`, since the trail raises its peak
+from a bar's high and then compares it against that bar's low. Every record declares
+the version-wide `label_atr_contemporaneous_causality` blocker, which remains
+UNRESOLVED and is untouched by this change.
+
+**Label values are preserved bit-for-bit.** 12 parity tests pin `float.hex()` outputs
+captured from the pre-refactor implementation across stop, trail, horizon, cap,
+ATR-fallback and tail cases, including NaN availability masks -- verified independently
+by the parallel Codex session loading the pre-refactor module directly. What this does
+NOT preserve is eligibility, trade counts, occupancy or replay metrics: those were
+computed from the wrong clock and will change once consumers read endpoints, which is
+the point.
+
+Nothing is wired. No consumer reads these records yet, no artifact is regenerated, and
+no ATR, fill or replay semantics change.
+
+80 tests. Findings fixed during review, each the same shape -- a value trusted where it
+should have been validated: an exit offset was taken as availability without checking
+the PnL was finite, so a NaN close published a record carrying `label_value = NaN`;
+`to_numpy(dtype="int64")` TRUNCATED a fractional timestamp into a plausible bar start
+before anything checked it; a bool horizon would have become 1 through `int()`; and a
+placeholder product identity could have become an artifact's identity.
+
+
 ### Pure label-endpoint record validator - 2026-09-26
 
 Implements the validator half of the shared label endpoint contract
