@@ -65,6 +65,9 @@ def _write_deployment_json(
             "pct_slots_full": float(card.metrics.pct_slots_full),
             "mean_concurrent": float(card.metrics.mean_concurrent),
         },
+        # The universe travels with the numbers: a reader can see what was left out rather
+        # than having to notice that a profit figure got smaller.
+        "universe": dict(card.universe),
         "gates": {
             **card.gates,
             "overall": "pass" if card.overall_pass else "fail",
@@ -121,6 +124,63 @@ def _write_telemetry_parquet(
     )
 
 
+_BAR_DURATION_MS = 3_600_000
+
+
+class EndpointArtifactError(RuntimeError):
+    """A published endpoint artifact is corrupt or does not describe its frame.
+
+    Deliberately NOT an exclusion. Dropping such a product would shrink the optimisation
+    universe while still producing a scorecard that looks successful, which is the silent
+    thinning §9.3 forbids.
+    """
+
+
+def _load_endpoints(pid_features, phase2_dir: Path):
+    """Validated endpoints per product, plus the products with no publication at all.
+
+    The two cases are treated differently on purpose (§9.3):
+
+      * NO publication -- no sidecar on disk -- is an exclusion with a named reason. One
+        unpublished product should not abort a sweep over many, and the reason is returned so
+        the caller can persist it.
+      * A publication that FAILS validation raises `EndpointArtifactError` naming the product.
+        A mismatched `data_id`, a bad checksum, incomplete coverage or a record that fails
+        semantic validation all mean the artifact and the frame are not a matched pair, and no
+        amount of per-product exclusion repairs that.
+    """
+    from tools.strategy_discovery.endpoint_consumers import load_validated_endpoints
+
+    loaded: Dict[str, object] = {}
+    unpublished: Dict[str, str] = {}
+    for pid, frame in pid_features.items():
+        sidecar_path = Path(phase2_dir) / f"{pid}.endpoints.json"
+        if not sidecar_path.exists():
+            unpublished[pid] = "endpoint_sidecar_missing"
+            continue
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as handle:
+                sidecar = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise EndpointArtifactError(
+                f"{pid}: endpoint sidecar is present but unreadable: {exc}"
+            ) from exc
+        try:
+            loaded[pid] = load_validated_endpoints(
+                Path(phase2_dir) / "endpoints" / pid,
+                frame=frame,
+                sidecar=sidecar,
+                product_id=pid,
+            )
+        except (ValueError, KeyError, OSError) as exc:
+            raise EndpointArtifactError(
+                f"{pid}: published endpoints failed validation against its own Phase 2 frame "
+                f"({exc}); excluding the product would shrink the optimisation universe while "
+                f"still producing a scorecard that looks successful"
+            ) from exc
+    return loaded, unpublished
+
+
 def build_phase4(
     *,
     phase3_dir: Path = _DEFAULT_PHASE3_DIR,
@@ -141,16 +201,44 @@ def build_phase4(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     profiles = load_all_profiles(phase3_dir=phase3_dir, horizons=horizons)
-    pid_features = {
-        pid: load_pid_features(pid, phase2_dir=phase2_dir) for pid in {p.pid for p in profiles}
+    requested_pids = sorted({p.pid for p in profiles})
+    loaded_frames = {pid: load_pid_features(pid, phase2_dir=phase2_dir) for pid in requested_pids}
+    # Frames dropped for missing or empty features were previously discarded by a bare
+    # comprehension, leaving no trace. They are classified here so the report can name them.
+    exclusions = {
+        pid: "phase2_features_missing_or_empty"
+        for pid, frame in loaded_frames.items()
+        if frame.empty
     }
-    pid_features = {k: v for k, v in pid_features.items() if not v.empty}
+    pid_features = {pid: frame for pid, frame in loaded_frames.items() if not frame.empty}
+
+    # Endpoints come from the SAME directory the producer published them to, and are validated
+    # against the very frame loaded above -- so the replay cannot be handed one product's
+    # records with another's frame. A product without a usable sidecar is excluded with a named
+    # reason rather than replayed on horizon arithmetic.
+    endpoints_by_pid, unpublished_products = _load_endpoints(pid_features, phase2_dir)
+    exclusions.update(unpublished_products)
+    if unpublished_products:
+        pid_features = {
+            pid: frame for pid, frame in pid_features.items() if pid in endpoints_by_pid
+        }
+        profiles = [p for p in profiles if p.pid in endpoints_by_pid]
+    universe = {
+        "requested_products": requested_pids,
+        "evaluated_products": sorted(pid_features),
+        "excluded_products": dict(sorted(exclusions.items())),
+        "requested_product_count": len(requested_pids),
+        "evaluated_product_count": len(pid_features),
+    }
+
     cards: Dict[int, CapScorecard] = {}
     for cap in caps:
         result = beam_search_knapsack(
             all_qualifying=profiles,
             cap=int(cap),
             pid_features=pid_features,
+            endpoints_by_pid=endpoints_by_pid,
+            bar_duration_ms=_BAR_DURATION_MS,
             beam_width=int(beam_width),
             pool_size=int(pool_size),
             bootstrap_iter=int(bootstrap_iter),
@@ -158,6 +246,7 @@ def build_phase4(
         )
         gates, overall = evaluate_cap_gates(result.best_metrics)
         card = CapScorecard(
+            universe=universe,
             cap=int(cap),
             metrics=result.best_metrics,
             k_evaluated=result.k_evaluated,

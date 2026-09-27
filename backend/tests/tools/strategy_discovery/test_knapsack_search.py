@@ -34,16 +34,37 @@ def _make_profile(pid: str, leaf_id: int, horizon: int, deflated: float) -> Load
     )
 
 
+_KBAR = 3_600_000
+
+
 def _make_pid_features(pid: str, n: int):
+    """Shaped as the producer writes it: row identity present, and the final row of each
+    horizon unlabelled, because a label needs its exit row to exist."""
     return pd.DataFrame(
         {
-            "ts": (np.arange(n, dtype="int64") * 3_600_000).tolist(),
+            "ts": (np.arange(n, dtype="int64") * _KBAR).tolist(),
+            "source_row_id": list(range(n)),
             "close": [1.0] * n,
+            "high": [1.0] * n,
+            "low": [1.0] * n,
+            "atr14_pct": [0.06] * n,
             "price_over_ema20": [1.5] * n,
             "vol_over_mc": [0.01] * n,
-            "label_h1": [0.10] * n,
+            "label_h1": [0.10 if row + 1 < n else float("nan") for row in range(n)],
         }
     )
+
+
+def _endpoints_for(pid_features, profiles):
+    """Validated endpoints per product, reusing the portfolio suite's builder so the two
+    fixtures cannot drift into different notions of a valid record set."""
+    from tests.tools.strategy_discovery.test_portfolio_sim import _legacy_endpoints
+
+    horizons = {}
+    for profile in profiles:
+        if profile.pid in pid_features:
+            horizons.setdefault(profile.pid, set()).add(int(profile.horizon))
+    return {pid: _legacy_endpoints(pid, pid_features[pid], hs) for pid, hs in horizons.items()}
 
 
 def test_returns_k_evaluated_for_deflation():
@@ -53,6 +74,8 @@ def test_returns_k_evaluated_for_deflation():
         all_qualifying=profiles,
         cap=2,
         pid_features=pid_features,
+        endpoints_by_pid=_endpoints_for(pid_features, profiles),
+        bar_duration_ms=_KBAR,
         beam_width=3,
         pool_size=5,
         bootstrap_iter=100,
@@ -75,6 +98,8 @@ def test_beam_search_finds_known_optimal_on_toy_3_profile_pool():
         all_qualifying=profiles,
         cap=2,
         pid_features=pid_features,
+        endpoints_by_pid=_endpoints_for(pid_features, profiles),
+        bar_duration_ms=_KBAR,
         beam_width=10,
         pool_size=3,
         bootstrap_iter=100,
@@ -96,6 +121,8 @@ def test_beam_width_caps_branching():
         all_qualifying=profiles,
         cap=2,
         pid_features=pid_features,
+        endpoints_by_pid=_endpoints_for(pid_features, profiles),
+        bar_duration_ms=_KBAR,
         beam_width=2,
         pool_size=5,
         bootstrap_iter=100,
