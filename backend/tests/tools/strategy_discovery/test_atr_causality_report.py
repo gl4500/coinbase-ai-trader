@@ -250,3 +250,53 @@ def test_result_changed_catches_an_exit_move_that_leaves_pnl_identical():
         assert summary.result_changed >= summary.pnl_changed, (
             f"{summary.variant}: result_changed must be a superset of pnl_changed"
         )
+
+
+def test_a_clean_frame_exposes_no_entries():
+    from tools.strategy_discovery.atr_causality_report import audit_frame_clock
+
+    audit = audit_frame_clock(_frame(), product_id="CLEAN-USD", horizon=24)
+    assert audit.bad_steps == 0
+    assert audit.stored_labels_finite > 0, "vacuous otherwise"
+    assert audit.exposed_entries == 0
+    assert audit.exposed_fraction == 0.0
+
+
+def test_only_entries_whose_own_window_spans_the_gap_are_exposed():
+    """Codex c6e41c6a. A frame failing the guard is NOT every entry being affected.
+
+    One hole after row 200 in a 400-row frame at horizon 24 exposes exactly the entries whose
+    [entry, entry+24) window contains that step -- rows 177..200 inclusive, 24 of them -- not the
+    whole frame. Asserting the exact count is what makes the distinction usable.
+    """
+    from tools.strategy_discovery.atr_causality_report import audit_frame_clock
+
+    frame = _frame()
+    ts = frame["ts"].to_numpy(dtype="int64").copy()
+    ts[201:] += _BAR  # a single one-bar hole between rows 200 and 201
+    frame["ts"] = ts
+
+    audit = audit_frame_clock(frame, product_id="ONEGAP-USD", horizon=24)
+    assert audit.bad_steps == 1
+    assert audit.exposed_entries == 24, (
+        f"expected the 24 windows covering the hole, got {audit.exposed_entries}"
+    )
+    assert audit.exposed_fraction < 0.07, (
+        "one hole must not be reported as contaminating the whole frame"
+    )
+
+
+def test_the_clock_audit_persists_and_refuses_to_write_into_the_frames_dir(tmp_path):
+    from tools.strategy_discovery.atr_causality_report import run_clock_audit
+
+    frames = _write_frames(tmp_path / "frames", pids=("AAA-USD", "BBB-USD"))
+    with pytest.raises(ValueError, match="or inside it"):
+        run_clock_audit(frames, frames / "out")
+
+    payload = run_clock_audit(frames, tmp_path / "out", horizons=(24,))
+    assert payload["frames_audited"] == 2
+    assert payload["frames_with_gaps"] == 0
+    assert payload["entries_whose_window_spans_a_gap"] == 0
+    written = json.loads((tmp_path / "out" / "clock_audit.json").read_text(encoding="utf-8"))
+    assert written["frames_audited"] == 2
+    assert any("NOT the same as every entry" in c for c in written["caveats"])
