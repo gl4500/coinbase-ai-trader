@@ -7,6 +7,17 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Requested-pair diagnostic coverage foundation - 2026-09-26
+
+- Declare the complete requested product/horizon cross-product independently of
+  surviving mining tasks; reject coerced identities and empty requests.
+- Require exactly one explicit disposition per pair, including pending, excluded
+  and failed work. Distinguish complete accounting from claimed completion counts.
+- Direct summary construction enforces count totals, completion consistency and
+  mandatory blockers; callers cannot omit the evidence-validation limitation.
+- This pure validator does not validate fold/leaf evidence, authorize deployment,
+  or collect diagnostics yet. Producer and persistence integration remain pending.
+
 ### Reject gapped hourly replay inputs - 2026-09-26
 
 - Reject gaps before hourly mining and portfolio simulation: row-count labels
