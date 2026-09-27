@@ -13,14 +13,26 @@ Mining and portfolio replay computed their own exit times from a wall-clock hori
 producer computed a different one from the actual exit rule. Two answers to one question, and
 nothing compared them.
 
-**What this change actually wires, stated exactly:** portfolio replay and Phase 4 now read the
-published endpoints, and the horizon arithmetic is gone from that path. **The miner is NOT
-wired.** `mine_profiles.py:317` still calls the wall-clock `build_next_eligible`;
-`build_next_eligible_from_endpoints` was built and tested here but has no caller yet. Mined
-eligibility therefore still carries the error described below, and endpoint-driven mining
-remains required and pending. The distinction matters because the point of this work is that a
-claim should not outrun the code, and an earlier draft of this entry said "the consumers now
-read the published endpoints" without qualification.
+**What this wires:** portfolio replay, Phase 4 **and the miner** now read the published
+endpoints, and the horizon arithmetic is gone from all three.
+
+The miner came last, in its own commit, and the history is worth keeping: the first version of
+this entry and of CLAUDE.md invariant 26 claimed mining was wired when only its helper existed
+and `mine_profiles.py:317` still called the wall clock. Review caught it, `27fd5ae` narrowed
+both documents to what was true, and the wiring then followed. The point of this work is that a
+claim should not outrun the code, so the sequence is recorded rather than tidied away.
+
+Two behaviours changed in the miner beyond the eligibility source, both deliberate:
+
+- **It no longer sorts its input.** Validation happens against the unfiltered frame in
+  published order, and a reordered parquet cannot carry a valid publication -- `build_data_id`
+  hashes the arrays in frame order. Sorting first would let a reordered frame match, silently
+  repairing a corrupted artifact. Out-of-order input is now rejected, and the test that used to
+  assert that the miner sorts reversed timestamps now asserts the stronger contract.
+- **Retention uses `isfinite`, not `dropna`.** `dropna` keeps +/-inf while the publication
+  chose its rows by `isfinite`, so an inf-labelled row was retained with no endpoint and failed
+  as a spurious missing endpoint. The regression sets `label[5] = inf` and asserts the row is
+  dropped.
 
 The error was in **both directions**, which is why neither showed up as an obvious bias:
 

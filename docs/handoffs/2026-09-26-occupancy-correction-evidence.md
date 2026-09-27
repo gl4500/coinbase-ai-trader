@@ -33,7 +33,7 @@ Two components answered the same question differently, and nothing compared them
 |---|---|
 | the label producer | the exit rule that actually fired — stop, trail, cap, or horizon |
 | the portfolio replay | `entry_ts + horizon × 3_600_000`, a wall clock |
-| the miner | `build_next_eligible(ts_ms, horizon_bars=horizon)`, row arithmetic |
+| the miner | `searchsorted(ts, ts + horizon × 3_600_000)` — a wall-clock instant resolved to a position |
 
 A single wall-clock `exit_ts` was serving two distinct roles at once:
 
@@ -46,11 +46,19 @@ on the case, so it never presented as a consistent bias either way.
 
 | case | wall clock says | truth | direction of error |
 |---|---|---|---|
-| gap in the source bars | exit lands on a bar that does not exist | exit at the last real bar | slot released **early** and resold — occupancy understated, trade count overstated |
+| gap in the source bars | the target **instant** can fall before the actual source-row exit, so `searchsorted` resolves to an **earlier row** than the true exit row | the exit row the rule reached | slot released **early** and resold — occupancy understated, trade count overstated |
 | stop or trail fires early | holds the slot to the full horizon | exit when the rule fired | a real later entry **suppressed** — occupancy overstated, trade count understated |
 
-They are now separate functions: `eligibility_boundaries()` (positions) and `accounting_times()`
-(instants), in `replay_timeline.py`, which contains no decision logic at all.
+They are now separate functions in `endpoint_consumers.py`: `eligibility_boundaries()` (positions,
+line 486) and `accounting_times()` (instants, line 520). `replay_timeline.py` is a different module
+and holds only the instant arithmetic — `decision_instants`, `close_checkpoints`,
+`ordered_instants` — with no decision logic and no per-position events.
+
+> Corrected after Codex review `5d24ca7e`, which caught three factual errors in the first draft of
+> this note: it placed both functions in the wrong module, described the miner's clock as row
+> arithmetic when it is a `searchsorted` on a wall-clock instant, and described the gap mechanism as
+> an exit landing on a nonexistent bar. Recording the corrections here rather than quietly
+> overwriting them, since a note about a claim outrunning its code should not do the same thing.
 
 ---
 
@@ -116,18 +124,36 @@ uses horizon 1 for exactly this reason.
 
 ## 4. Scope — what is wired and what is not
 
-**Wired:** `simulate_portfolio`, `knapsack_search`, `build_phase4`.
+**Wired:** `simulate_portfolio`, `knapsack_search`, `build_phase4`, and -- as of the miner
+commit -- `mine_profiles`. The miner no longer imports the wall-clock baseline at all; it
+survives only in `profit_split`, as the equivalence test's baseline.
 
-**NOT wired: the miner.** `mine_profiles.py:317` still calls the wall-clock
-`build_next_eligible`. `build_next_eligible_from_endpoints` is built and tested but has **no
-caller**. Mined eligibility therefore still carries the §2 error, and endpoint-driven mining is
-required and pending.
+The sequence is recorded rather than tidied away, because it is the clearest instance of the
+pattern this note is about. An earlier draft of the CHANGELOG and of CLAUDE.md invariant 26 said
+"mining and portfolio replay" both read endpoints. They did not: only the helper existed, and
+`mine_profiles.py:317` still called the clock. Codex review `17814674` caught it, `27fd5ae`
+narrowed both documents to what was true, and the wiring followed afterwards. That was the
+**fifth** time in this effort that prose claimed more than the code delivered -- the same defect
+class the endpoint contract exists to remove: one fact living in two places with only one of
+them checked.
 
-This is recorded plainly because an earlier draft of the CHANGELOG and of CLAUDE.md invariant 26
-claimed that "mining and portfolio replay" both read endpoints. They did not. Codex review
-`17814674` caught it and commit `27fd5ae` corrected both documents. That was the **fifth** time in
-this effort that prose claimed more than the code delivered — the same defect class the endpoint
-contract exists to remove: one fact living in two places with only one of them checked.
+Four further defects surfaced while wiring the miner, none of them found by re-reading my own
+work:
+
+- The miner kept a **dead** `build_next_eligible` import and a dead `ts_ms` tensor after the
+  switch, and my comment called the import deliberate. It was not: the baseline lives in
+  `profit_split`, where its own test imports it (Codex `26224ddf`).
+- Real record validation rejected the new publication fixture twice, correctly. A `stop` exit
+  may not claim `bar_close` as its price basis, and a horizon-1 record may not claim a 2-bar
+  hold (`bars_held <= min(horizon, cap)`). Both were fixture errors; the production guards were
+  left alone.
+- The miner used to **sort** its input. Under the frame binding it cannot: `build_data_id`
+  hashes the arrays in frame order, so a reordered parquet is not the published artifact.
+  Sorting was a silent repair, so it is gone and out-of-order input is now rejected.
+- NaN-ing the unlabelable tail silently **broke an existing test's premise**: at horizon 168 a
+  300-row fixture retains only 132 rows, so the miner returned at the `n < 200` guard and the
+  inner-fold test it was written for never ran. Caught by Codex `29950d93`, not by me, and it is
+  the same vacuity class as the empty-universe Phase 4 tests in section 6.1.
 
 ### 4.1 One direction is contained rather than exercised
 

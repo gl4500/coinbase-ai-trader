@@ -274,13 +274,25 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 24. **Chronological strategy validation.** Loaded research profile IDs include product, horizon, group ordinal and rule-content digest; simulator rule/label/holding-period lookups use that complete identity. Per-horizon archived sidecar keys retain their original format. Legacy string sidecars and missing/malformed bindings are excluded without summary fallback. Exact machine paths use finite binary64 hex thresholds and explicit left <= / else-right routing; only a validated empty path is unconditional. Missing feature columns raise. Mining verifies the actual feature tensor is float64 before fitting. Bindings retain ordered feature schema and source tree/fold/leaf independently of group ordinals. Duplicate complete identities must raise before rule maps are constructed. Row horizons must match the containing parquet/sidecar horizon without coercion; malformed or mismatched rows are excluded. Sidecar presence does not yet prove exact-threshold provenance. Strategy-discovery inner/outer folds train only on earlier rows, purged by the label horizon. Miner inputs are sorted hourly timestamps with no duplicates/subhour spacing; training slices remain prefixes to preserve label indexing. Mining requires five evaluable outer folds and three inner folds each, with minimum training rows max(horizon, twice the smallest min_leaf); insufficient history produces an explicit diagnostic and no profiles. Each root-direction group can contribute at most one passing count per distinct outer fold, regardless of qualifying leaf count. Emitted profiles record evaluated fold count and validation version. Previous chronological_v1 counts are not accepted as distinct-fold evidence. Phase 4 loading requires schema 3, exact profile_rule_binding_v1 with a verified row/sidecar digest, chronological_distinct_folds_v2, five evaluated folds and integral passing counts within four to five; exclusions are reported without relabeling archived profiles. Phase 4 passing gates are research-only: JSON always carries deployment_eligible=false and explicit blockers until independent holdout, cost/fill, accounting and prospective execution evidence is implemented and reviewed. Prior outputs from future-inclusive folds are invalid validation evidence, including ABORT verdicts.
 
 26. **Endpoint-derived replay.** Numbered 26, not 25, because 25 is the execution-path invariant
-    landing separately via PR #66; both are complete once each merges. **Scope, stated exactly:
-    portfolio replay and Phase 4 read the published endpoints; the MINER does not yet.**
-    `mine_profiles.py:317` still calls the wall-clock `build_next_eligible`, and
-    `build_next_eligible_from_endpoints` exists but has no caller. Endpoint-driven mining is
-    REQUIRED and PENDING, so mined eligibility still carries the horizon-derived error described
-    below. Within the wired path, exit times come from the published endpoints and never from a
-    wall-clock horizon: `simulate_portfolio` requires `endpoints_by_pid` and `bar_duration_ms`;
+    landing separately via PR #66; both are complete once each merges. **Scope: the miner,
+    portfolio replay and Phase 4 all read the published endpoints.** The miner was wired last;
+    an earlier version of this invariant claimed it before the call site existed, which review
+    caught. `mine_profiles` no longer imports the wall-clock baseline at all -- that survives
+    only in `profit_split`, where the equivalence test compares the two and keeps the evidence
+    that this generalises the old behaviour rather than replacing it.
+
+    The miner derives its publication from `Path(parquet_path).parent`, the layout the
+    producer itself writes, and a missing sidecar raises rather than falling back. It validates against the
+    UNFILTERED frame in PUBLISHED ORDER, before the finite-label filter, because `build_data_id`
+    hashes the arrays in frame order and `source_row_id` must still be the original `0..n-1`.
+    Consequently the miner no longer sorts its input: a reordered parquet is not the artifact
+    Phase 2 published, and reordering it to make the checks pass would repair a corrupted
+    artifact silently, so out-of-published-order input is now REJECTED. The causal purge and
+    embargo stay on the CONFIGURED horizon and are never derived from observed holding times.
+    Retention uses `isfinite`, not `dropna`, because `dropna` keeps +/-inf while the publication
+    selected its rows by `isfinite`.
+
+    Exit times come from the published endpoints and never from a wall-clock horizon: `simulate_portfolio` requires `endpoints_by_pid` and `bar_duration_ms`;
     `horizon_ms` is deleted, not deprecated. Two quantities that a single `exit_ts` used to conflate stay
     separate: an **eligibility boundary is a POSITION** in the working frame
     (`eligibility_boundaries`), an **accounting time is an INSTANT** (`accounting_times`, from
