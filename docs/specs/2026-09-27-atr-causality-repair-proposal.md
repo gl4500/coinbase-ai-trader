@@ -2,6 +2,9 @@
 
 **Date:** 2026-09-27
 **Status:** PROPOSAL for the LABEL POLICY. Nothing here is implemented.
+**Measured:** §10 carries real per-variant results from the offline probe. They show the
+repairable half moves 0.06% of records and the unrepairable half 1.25%, which inverts the
+priority this document originally implied. Read §10 before §3.
 **Gate:** operator approval is required before any change to **production label semantics**
 (a v3 label version, a new blocker set, anything the producer writes). It is NOT required for
 the offline diagnostic in §5 and its tests, which preserve v2 and live semantics and are
@@ -376,14 +379,90 @@ either. They remain uninformative for the reasons already recorded in the occupa
 - It does **not** make any profitability claim, and it does not make Phase 4 deployable.
 - It does **not** establish that any archived verdict was wrong.
 
+## 10. MEASURED RESULTS, and they invert this document's priority
+
+Run on 2026-09-27 with `atr_causality_report.run_probe`, read-only over the first 8 products of
+`backend/data/phase2`, horizon 24, first 1500 entry rows each. Output went to an isolated
+scratchpad directory; the frames directory was fingerprinted before and after and was unchanged.
+
+**Scope of these numbers, stated before them:** 8 products, 12,000 comparable records, one
+horizon. Not the full universe. **Not a profitability measurement** and not a re-measurement of
+any archived verdict. The `legacy` self-check showed 0 changes against itself on every product,
+without which none of the rest would be worth reading.
+
+| variant | records changed | share |
+|---|---|---|
+| `lag_only` — the ATR causality repair | **7** | **0.06%** |
+| `ordering_only` — the unrepairable ambiguity | **150** | **1.25%** |
+| `gap_only` | 8 | 0.07% |
+| `combined` | 299 | 2.49% |
+
+Ordering ambiguity (the two enumerated orderings disagreeing at all): **547 of 12,000 = 4.56%**,
+with **51 sign flips** among the records `ordering_only` moved.
+
+### 10.1 The repairable defect is nearly inert, and here is why
+
+`lag_only` changes 0.06% of records. The reason is structural, not a quirk of the sample: the
+trail threshold is `max(atr14_pct, atr_trail_floor)` with the floor at **0.06**, and the measured
+ATR almost never reaches it.
+
+| product | median `atr14_pct` | bars above the 0.06 floor |
+|---|---|---|
+| AAVE-USD | 0.0121 | 3 of 8714 (0.03%) |
+| ABT-USD | 0.0195 | 285 of 7628 (3.74%) |
+| ADA-USD | 0.0110 | 0 of 8714 (0.00%) |
+
+**The floor masks the ATR.** Where `atr <= 0.06` the threshold is the constant floor, so which
+bar's ATR is used cannot matter, and lagging it by one bar is a no-op. The lookahead §1 documents
+is real in the code and almost absent in effect on this data. Only BOBA-USD showed any
+sensitivity at all (7 records).
+
+This does **not** make the repair pointless: a lookahead that is currently masked by a
+configuration value is still a lookahead, and it would become live the moment the floor were
+lowered or a more volatile universe were mined. But it does mean the repair should not be
+described, or prioritised, as materially changing the labels.
+
+### 10.2 The unrepairable half is roughly twenty times larger
+
+`ordering_only` moves 1.25% of records against `lag_only`'s 0.06%, with 51 sign flips and, on
+ABT-USD, a per-record PnL delta spanning `-0.0776` to `+0.1924`. Per-product ambiguity varies
+enormously — ADA-USD 0 of 1500, AVAX-USD and BNB-USD 1 each, ABT-USD 261, BOBA-USD 206 — so a
+single pooled figure would hide the shape.
+
+So the blocker names the half that barely matters, and the half that matters cannot be fixed with
+better code. Per §4.1 and §4.2 the honest response is to keep declaring it, not to claim a repair.
+
+### 10.3 The variants interact, which is why isolating them was necessary
+
+`combined` changes 299 records; the isolated variants sum to 7 + 150 + 8 = **165**. The
+combination is nearly twice the sum of its parts, so these changes are **not additive** — a lagged
+threshold alters which bar triggers, which changes what the ordering and gap rules then see. A
+single combined before/after diff would have reported 2.49% with no way to attribute it, and
+anyone estimating the parts from the whole would be wrong by ~80%.
+
+### 10.4 What would change my recommendation
+
+If the operator lowers `atr_trail_floor` or extends the universe to products whose ATR routinely
+exceeds it, `lag_only` stops being inert and §10.1 no longer applies. The probe should be re-run
+in that case rather than these numbers quoted.
+
+---
+
 ## 9. Open questions for the operator
 
 1. **Whether `min(B1, B2)` as a declared lower bound is acceptable as the published label**
    (§4.2), given that §4.1 rules out publishing either branch as "the conservative one". The
    alternative is to keep B1 for continuity with v2 exit kinds and rely on the ambiguity blocker
-   alone. This is a modelling decision, not a correctness one, so it is yours -- but note that
-   the earlier version of this document recommended a conservative single branch that does not
-   exist.
+   alone. A modelling decision, not a correctness one -- but note the earlier version of this
+   document recommended a conservative single branch that does not exist, and §10.2 shows this is
+   the consequential half of the change.
+
+1a. **Given §10.1, is the lag repair still worth a label version at all?** It moves 0.06% of
+   records because the 0.06 floor masks the ATR. Three coherent answers, and I do not think this
+   one is mine to pick: ship it anyway because a masked lookahead is still a lookahead and the
+   mask is a config value; defer it and spend the version on the ordering declaration alone;
+   or reconsider `atr_trail_floor` itself, which would make the lag live and is a threshold
+   change outside my current authorisation.
 2. Whether the probe should run over the full universe or a named subset first.
 3. Whether v3 should be built at all before the other Phase 4 blockers are addressed, given that
    removing one of four does not change `deployment_eligible`.

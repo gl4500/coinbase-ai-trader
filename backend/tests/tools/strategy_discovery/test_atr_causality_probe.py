@@ -575,3 +575,61 @@ def test_low_before_high_is_a_delayed_update_policy_not_a_literal_path():
         "O-L-H-C model would have exited during bar 1 on the high-to-close descent."
     )
     assert result.exit_price == pytest.approx(112.8)
+
+
+def test_an_open_exactly_on_the_trail_level_triggers_and_is_not_called_a_gap():
+    """Codex 0c9ce535. Two things at once, which is why it needed its own test.
+
+    The trigger must be INCLUSIVE, matching the full-bar checks' `<= -threshold`: an open exactly
+    ON the level is a touch and the position is out. The earlier version used strict `<` for the
+    trail while the stop used `<=`, so this bar fell through to the full-bar path and reported
+    the later stop at 92 -- an exit after the position had already closed.
+
+    And `gapped` must stay STRICT: a touch fills at the level, so nothing was gapped through.
+    Reporting it as a gap would inflate the gap count with events that cost nothing.
+    """
+    # Bar 1 lifts the peak to 120, so the level in force at bar 2's open is 112.8 exactly.
+    opens = np.array([100.0, 116.0, 112.8], dtype="float64")
+    closes = np.array([100.0, 118.0, 95.0], dtype="float64")
+    highs = np.array([100.0, 120.0, 113.0], dtype="float64")
+    lows = np.array([100.0, 115.0, 90.0], dtype="float64")
+    atrs = np.array([0.06, 0.06, 0.06], dtype="float64")
+    gapped = simulate_variant(
+        entry_idx=0,
+        horizon=2,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+        spec=GAP_ONLY,
+    )
+    assert gapped.exit_kind == "trail", "an exact touch at the open must trigger, not fall through"
+    assert gapped.exit_price == pytest.approx(112.8)
+    assert gapped.gapped is False, "a touch is not a gap-through; the fill is the level itself"
+    assert gapped.bars_held == 2
+
+
+def test_an_open_exactly_on_the_stop_level_triggers_and_is_not_called_a_gap():
+    """The stop half of the same boundary, so the two cannot drift apart again."""
+    opens = np.array([100.0, 92.0], dtype="float64")
+    closes = np.array([100.0, 90.0], dtype="float64")
+    highs = np.array([100.0, 93.0], dtype="float64")
+    lows = np.array([100.0, 85.0], dtype="float64")
+    atrs = np.array([0.06, 0.06], dtype="float64")
+    gapped = simulate_variant(
+        entry_idx=0,
+        horizon=1,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+        spec=GAP_ONLY,
+    )
+    assert gapped.exit_kind == "stop"
+    assert gapped.exit_price == pytest.approx(92.0)
+    assert gapped.gapped is False
+    assert gapped.pnl == pytest.approx(-0.08)

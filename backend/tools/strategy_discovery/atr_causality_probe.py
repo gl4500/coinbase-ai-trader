@@ -169,6 +169,11 @@ def simulate_variant(
         #    Without this, a bar opening below a live trail level but later reaching the stop
         #    reported the stop -- an exit that could not have happened, because the position was
         #    already out. Stop keeps priority at the same instant, matching the live ladder.
+        #    Both use INCLUSIVE `<=`, matching the full-bar checks' `<= -threshold`. An earlier
+        #    version triggered the stop on `<=` but the trail on strict `<`, so an open exactly
+        #    ON the trail level fell through to the full-bar path and could report a later stop
+        #    (Codex 0c9ce535). `gapped` stays strict: a touch fills AT the level and is not a gap,
+        #    while an open beyond it fills at the open and is.
         if spec.gap_fill:
             if bar_open <= stop_level:
                 return VariantResult(
@@ -176,15 +181,15 @@ def simulate_variant(
                     step,
                     "stop",
                     bar_open,
-                    True,
+                    bar_open < stop_level,
                 )
-            if bar_open < trail_level_at_open:
+            if bar_open <= trail_level_at_open:
                 return VariantResult(
                     (bar_open / entry_price - 1.0) - round_trip_fee,
                     step,
                     "trail",
                     bar_open,
-                    True,
+                    bar_open < trail_level_at_open,
                 )
 
         # 1. Stop-loss first, matching the live exit ladder.
