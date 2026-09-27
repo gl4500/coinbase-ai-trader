@@ -177,9 +177,28 @@ it. **This is a causality defect in the labels themselves, which no endpoint rec
 is recorded here rather than fixed: silently altering the ATR input would change every label and every
 downstream number, which is a semantic change requiring its own contract and re-mining.
 
+**Reproduced end-to-end, not merely read.** Two synthetic bars, `ts = [0, 3_600_000]`,
+`open = [100, 100]`, `high = [100, 200]`, `low = [100, 93]`, entry close `100`. Changing **only the
+second bar's close** — every other input identical — changes the label:
+
+| second bar's close | `atr14_pct[1]` | `label_h1` |
+|---|---|---|
+| `100` | 0.076428571… | **0.835142857…** |
+| `190` | 0.040225564… (then the 6 % floor) | **0.868000000…** |
+
+No stop fires in either case (the 8 % stop sits at 92, the low is 93), so the difference is entirely the
+trail. **The supposed intrabar trail fill therefore depends on the bar's final closing price** — a
+number that does not exist at the moment the fill is claimed to occur. Verified independently by both
+sessions; reproduction retained at `.coordination/atr-current-close-reproduction.json`.
+
+This is what makes the defect unarguable: it is not an inference from how ATR is conventionally
+computed, it is an observed dependence of a label on information from after its own decision point.
+
 Consequences that must be honoured until it is resolved: `label_version` may **not** be described as
 causal; the record must name which ATR column was used; and any trail-exit label must be treated as
-conditioned on information not available at decision time.
+conditioned on information not available at decision time. Neither a lagged ATR nor a changed fill
+ordering may be introduced as part of an endpoint change — each is a separate versioned semantic
+decision requiring its own contract and re-mining.
 
 Both are stated as open because a contract that quietly assumed them away would be the same failure as
 the clock mismatch it is written to remove.
