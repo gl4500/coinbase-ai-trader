@@ -289,3 +289,9 @@ def test_the_artifact_records_whether_its_commit_can_reproduce_it(tmp_path):
     else:
         assert provenance["reproducible_from_commit"] is False
     assert any("reproducible_from_commit is False" in c for c in payload["caveats"])
+    # Codex 837b7d31: the flag attests the SOURCE TREE and nothing else. A clean checkout at that
+    # commit can still run under a different interpreter or different installed package versions,
+    # so True must not be read as a guarantee that a rerun reproduces these numbers.
+    assert any(
+        "source-tree evidence" in c and "interpreter" in c for c in payload["caveats"]
+    ), "a True flag must state that it does not cover the environment or installed dependencies"
