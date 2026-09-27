@@ -7,6 +7,68 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.89 — 2026-09-27 — Why an 8% stop realises −9.49%: latency, not gaps — but the money is ~$20
+
+Offline probe. No live change, read-only DB, no threshold touched.
+
+**Question.** 51 live CNN `STOP_LOSS` exits realise mean −9.494% against a
+configured 0.08 (invariant #3), worst −13.94%, while the tick path
+`WS_STOP_LOSS` realises −8.323% with a best of −8.01%. Two causes, opposite
+remedies: a **gap** through the level (no routing helps; the nominal stop simply
+is not achievable) versus an **intrabar crossing** (routing might).
+
+**Discriminator.** The exit bar's OPEN — the one observed quantity, since the
+within-bar path is unknowable from OHLC. Nothing in the classification depends
+on within-bar ordering.
+
+**Result, n=53 scored of 61 (8 excluded: 5 exits postdate their product's last
+stored bar, 3 products have no history file):**
+
+| | n | share | unavoidable | attributable |
+|---|---|---|---|---|
+| `GAP_AT_OPEN` | 6 | 11.3% | −1.673 pts | −0.179 pts |
+| `INTRABAR_CROSS` | 47 | 88.7% | 0 | −1.348 pts |
+| `LEVEL_NOT_REACHED` | 0 | — | — | — |
+
+Of the mean overshoot past the stop, **−0.189 pts is unavoidable and −1.215 pts
+is attributable to the path** — so the overshoot is a latency phenomenon, not a
+gap phenomenon. Split by path: scan loop −1.365 pts attributable, tick path
+−0.229 pts. That 1.14-point difference independently reproduces the 1.17-point
+gap between the two paths' realised means, which is the main internal
+consistency check here. Zero `LEVEL_NOT_REACHED` means every scored exit's own
+bar did reach the stop, so the exits are consistent with firing in the bar where
+they were recorded.
+
+**And the magnitude kills it as a lever.** In dollars the attributable column is
+an upper bound of **−$19.98 against −$191.63 realised (10%)** — −$18.02 on the
+scan path, −$1.96 on the tick path. The trades with the largest percentage
+overshoots were small positions. The mechanism is real and identified; the prize
+is about twenty dollars, so this does not justify routing work on PnL grounds.
+
+**Files:**
+- `backend/tools/stop_overshoot_probe.py` — pure classifier, no DB/file/clock.
+  Imports `_CNN_STOP_LOSS_PCT` from production rather than restating 0.08, with
+  a test asserting they match: a probe holding its own copy of a threshold keeps
+  agreeing with itself after production moves.
+- `backend/tests/tools/test_stop_overshoot_probe.py` — 9 tests, including that
+  `unavoidable + attributable` reconstructs the whole overshoot exactly (so the
+  split cannot lose or invent points) and that an open exactly ON the level
+  counts as a gap, not a miss.
+
+**Limits, so no one over-reads it.** `attributable` assumes a fill AT the level:
+it ignores slippage and available size and is therefore an UPPER bound, not an
+expectation. Bars are hourly while the live tick path is far finer. The two
+paths are **not comparable cohorts** — the WS path may act on different assets,
+regimes or faster moves — so the 1.14-point difference is suggestive of
+recoverability, not a causal estimate of it, and n=7 on that side is small. The
+method does not transfer to the ATR trail, whose level moves with the peak.
+Artifact (per-trade, both columns, exclusion reasons) is in the session
+scratchpad as `stop_overshoot_report.json`; the report layer that produced it is
+NOT committed — only the pure classifier is.
+
+---
+
+
 ### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
 
 Completed Tasks 5–8 of the Phase-1 plan (Tasks 1–4 landed 2026-07-05/09). The
