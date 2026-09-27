@@ -7,6 +7,46 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
+
+`tools/session_bridge` only. No backend, agent, threshold or model change.
+
+**The defect.** `Store.inbox()` read
+`... WHERE recipient=? AND acknowledged IS NULL ORDER BY created LIMIT 50` — the
+**oldest** fifty unacknowledged. Once fifty accumulated (the live count reached
+65), every later arrival fell outside the window. The reader then saw a frozen
+snapshot of old mail and concluded the peer had gone quiet. Measured before the
+fix: `pending_total 65, window 50, truncated 15`. Fifteen peer messages were
+unreadable, one of which answered a question I had reported to the operator as
+unanswered.
+
+`wait()` reads through `inbox()`, so the long-poll added the same day could not
+wake on a message it was unable to see — a backlog silently disabled it.
+
+**Files:**
+- `tools/session_bridge/src/session_bridge/store.py` — `inbox(limit=None)` now
+  selects the newest `INBOX_WINDOW` (50) and returns them oldest-first, so
+  reading order is unchanged but the bound keeps the recent end. New
+  `pending_count()`; `wait()` gained `pending_total` and `truncated`.
+- `tools/session_bridge/tests/test_inbox_visibility.py` — 8 tests. The headline
+  one fails on the old code with the exact live symptom (`msg-064` absent from a
+  window of `msg-000..msg-049`).
+
+**The generalisable part.** A bounded window is fine; a bound that hides its own
+effect is not. This is the same defect `wait()` already avoids by reporting a
+timeout AS a timeout rather than as an empty list — a partial answer has to be
+distinguishable from a complete one. Newest-bias also trades one blind spot for a
+self-correcting one: old mail leaves the window, but acknowledging what you can
+see brings it back, whereas the old direction got worse the longer it ran.
+
+Commit `e01a7ca` on `fix/session-bridge-inbox-visibility` (off `main`). Full
+hook: 1373 passed / 65 skipped / 1 deselected / 1 xfailed / 2 xpassed in 415.82s.
+Bridge suite 35 passed in its own runtime (`.coordination-runtime`, which needed
+`pytest` installed to run `test_mcp` at all).
+
+---
+
+
 ### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
 
 Completed Tasks 5–8 of the Phase-1 plan (Tasks 1–4 landed 2026-07-05/09). The
