@@ -152,8 +152,9 @@ def simulate_variant(
 
         # 1. Stop-loss first, matching the live exit ladder.
         if bar_low / entry_price - 1.0 <= -stop_loss_pct:
+            # The stop level is a constant of the entry, so it was in force at the open.
             level = entry_price * (1.0 - stop_loss_pct)
-            price, gapped = _fill(level, bar_open, spec.gap_fill)
+            price, gapped = _fill(level, level, bar_open, spec.gap_fill)
             return VariantResult(
                 (price / entry_price - 1.0) - round_trip_fee, step, "stop", price, gapped
             )
@@ -162,6 +163,8 @@ def simulate_variant(
         #    low is tested against it -- which changes both whether an exit fires and, through
         #    the peak, at what level.
         threshold = _threshold(atr_pcts, index, spec.atr_lag_bars, atr_trail_floor)
+        # The level in force when this bar opened, before its own high can lift the peak.
+        level_at_open = peak * (1.0 - threshold)
         if spec.ordering == "high_before_low":
             if bar_high > peak:
                 peak = bar_high
@@ -170,7 +173,7 @@ def simulate_variant(
             triggered = bar_low / peak - 1.0 <= -threshold
         if triggered:
             level = peak * (1.0 - threshold)
-            price, gapped = _fill(level, bar_open, spec.gap_fill)
+            price, gapped = _fill(level, level_at_open, bar_open, spec.gap_fill)
             return VariantResult(
                 (price / entry_price - 1.0) - round_trip_fee, step, "trail", price, gapped
             )
@@ -184,11 +187,22 @@ def simulate_variant(
     )
 
 
-def _fill(level: float, bar_open: float, gap_fill: bool) -> tuple:
-    """The fill price, and whether the bar had already gapped through the level at its open."""
+def _fill(level: float, level_at_open: float, bar_open: float, gap_fill: bool) -> tuple:
+    """The fill price, and whether the bar had already gapped through its level at the open.
+
+    `level_at_open` is the exit level that EXISTED when the bar opened; `level` is the one that
+    actually triggered. They differ on the trail branch under `high_before_low`, where this bar's
+    own high raises the peak and so lifts the level mid-bar.
+
+    A gap means the price was already beyond a level that was in force at the open. Testing the
+    open against a level created later in the same bar is not a gap (Codex cb898726): with prior
+    peak 100, open 100, high 120, low 95 and a 6% floor, the level at the open was 94 -- the open
+    never gapped through it -- yet the triggering level of 112.8 is above the open, and the
+    earlier version reported a fabricated fill at 100.0 (pnl 0.0000) instead of 112.8 (+0.1280).
+    """
     if not gap_fill:
         return level, False
-    if bar_open < level:
+    if bar_open < level_at_open:
         return bar_open, True
     return level, False
 
