@@ -7,6 +7,44 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Phase 2 publishes endpoints and their sidecar - 2026-09-26
+
+The producer computed which exit fired and then discarded it. It now publishes it, next to
+the labels it already wrote, and **the labels do not move**: both paths share one
+`_SimResult`, and the parity test compares `float.hex()` rather than a tolerance, because a
+relative tolerance would hide a real change.
+
+- The parquet carries `source_row_id` as exact ordinals. Downstream,
+  `dropna(...).reset_index(drop=True)` destroys row identity, and this column is the only
+  bridge from a filtered frame back to the rows the endpoints reference.
+- `{pid}.endpoints.json` is the **sidecar**, schema version 1: manifest digest, `data_id`,
+  product, horizons, bar duration, feature recipe, label and cost versions, the declared
+  `exit_config`, and per-record digests keyed `"{horizon}:{entry_row_id}"`. A consumer reads
+  the digest and the config from here, so it verifies the dataset against values it did not
+  compute. Per-record digests are captured AT PUBLICATION; one recomputed later from the
+  record under test would attest nothing.
+- `exit_config` carries the **configured** cap. Worth stating because it nearly hid a bug:
+  the default cap 168 EQUALS the longest default horizon, so a consumer that wrongly rebuilt
+  the cap from a record's own horizon would still validate horizon-168 records. Only a
+  shorter horizon exposes it, which is why the adapter regression uses horizon 1.
+- A rebuild that produces no endpoints now REMOVES any earlier run's sidecar, rather than
+  leaving it to describe a dataset that no longer corresponds to the parquet beside it.
+  `write_dataset` already refused to publish an empty set so that nothing-survived could not
+  look like nothing-was-attempted; this closes the other half.
+
+**The loop is closed by test, not by assertion.** The producer's own output is loaded through
+`load_validated_endpoints` with no fixture in between, so the recomputed `data_id`, complete
+coverage across every declared horizon, the configured cap and per-record semantics are all
+checked against what the producer actually writes. If the producer and the adapter ever
+disagree about the sidecar schema or the identity recompute, that test fails.
+
+Publication is per-file, not pair-atomic, and the containment is stated honestly: an
+interrupted rebuild can leave a NEW parquet beside an OLD sidecar, and what catches it is the
+adapter recomputing `data_id` from the frame -- not atomicity. Tested.
+
+10 tests. Still nothing wired: no consumer reads the sidecar in production, and
+`label_atr_contemporaneous_causality` remains UNRESOLVED.
+
 ### Endpoint-derived mining eligibility - 2026-09-26
 
 `build_next_eligible` measures the horizon in WALL-CLOCK milliseconds while `walk_and_sum`

@@ -26,13 +26,21 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+from tools.strategy_discovery.endpoint_dataset import write_dataset  # noqa: E402
+from tools.strategy_discovery.endpoint_records import endpoint_digest  # noqa: E402
 from tools.strategy_discovery.features import (  # noqa: E402
     add_trend_features,
     first_valid_index,
 )
 from tools.strategy_discovery.labels import (  # noqa: E402
+    _DEFAULT_ATR_TRAIL_FLOOR,
     _DEFAULT_HORIZONS,
-    simulate_dynamic_exit_labels,
+    _DEFAULT_MAX_HOLD_BARS,
+    _DEFAULT_ROUND_TRIP_FEE,
+    _DEFAULT_STOP_LOSS_PCT,
+    COST_VERSION,
+    LABEL_VERSION,
+    simulate_labels_with_endpoints,
 )
 from tools.strategy_discovery.tokenomic_stamp import (  # noqa: E402
     SupplySnapshot,
@@ -46,6 +54,12 @@ _DEFAULT_SUPPLY_PATH = Path(BACKEND) / "data" / "supply" / "snapshot.parquet"
 _DEFAULT_OUTPUT_DIR = Path(BACKEND) / "data" / "phase2"
 
 
+# The sidecar schema a consumer reads; bump together with any field change.
+_SIDECAR_VERSION = 1
+# Names the recipe that produced atr14_pct, so a consumer can recompute the frame identity.
+_FEATURE_RECIPE = "atr14_pct_wilder_v1"
+
+
 @dataclass
 class BuildResult:
     pid: str
@@ -53,6 +67,10 @@ class BuildResult:
     rows_dropped_missing_volume: int = 0
     nan_label_counts: Dict[str, int] = field(default_factory=dict)
     error: Optional[str] = None
+    # The digest a consumer must retain to verify the published endpoints against
+    # something it did not compute. None when the frame produced no endpoints at all.
+    endpoint_manifest_digest: Optional[str] = None
+    endpoint_dispositions: Dict[str, int] = field(default_factory=dict)
 
 
 def _load_supply_snapshot(supply_path: Path, pid: str) -> Optional[SupplySnapshot]:
@@ -119,7 +137,15 @@ def build_phase2_for_pid(
     rows_pre_drop = len(df_feat)
     df_stamped = stamp_tokenomic(df_feat, df_daily, supply, drop_on_missing_volume=True)
     rows_dropped = rows_pre_drop - len(df_stamped)
-    df_labeled = simulate_dynamic_exit_labels(df_stamped, horizons=list(_DEFAULT_HORIZONS))
+    # Publishes the exit the simulation already chose, instead of discarding it and
+    # leaving three consumers to re-derive it from different clocks. Label values are
+    # unchanged: both paths share one _SimResult.
+    df_labeled, endpoints, dispositions = simulate_labels_with_endpoints(
+        df_stamped,
+        horizons=list(_DEFAULT_HORIZONS),
+        product_id=pid,
+        with_dispositions=True,
+    )
 
     df_labeled["pid"] = pid
     df_labeled["schema_version"] = _SCHEMA_VERSION
@@ -130,12 +156,67 @@ def build_phase2_for_pid(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     out_path = Path(output_dir) / f"{pid}.parquet"
     df_labeled.to_parquet(out_path, compression="snappy", index=False)
+
+    endpoint_digest_value = _publish_endpoints(Path(output_dir), pid, endpoints)
     return BuildResult(
         pid=pid,
         rows_written=len(df_labeled),
         rows_dropped_missing_volume=rows_dropped,
         nan_label_counts=nan_counts,
+        endpoint_manifest_digest=endpoint_digest_value,
+        endpoint_dispositions=dict(dispositions),
     )
+
+
+def _publish_endpoints(output_dir: Path, pid: str, endpoints: List) -> Optional[str]:
+    """Write the endpoint dataset and the sidecar a consumer verifies it against.
+
+    Returns the manifest digest, or None when the frame produced no endpoints -- which is
+    normal for a frame too short to carry any label, and must not be confused with a
+    failure. `write_dataset` refuses to publish an empty set precisely so that
+    nothing-survived cannot look like nothing-was-attempted.
+
+    The SIDECAR is the point. A consumer reads the manifest digest and the declared exit
+    config from here, so it checks the dataset against values it did not compute. Per-record
+    digests are captured now, at publication: one recomputed later from the record under
+    test would attest nothing. Contract section 9.2 also states the limit -- this is an
+    anchor, not a root of trust, since replacing frame, dataset and sidecar together is
+    coherent and undetectable.
+    """
+    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    if not endpoints:
+        # Remove any earlier run's sidecar rather than leaving it to describe a dataset
+        # that no longer corresponds to the parquet beside it. `write_dataset` already
+        # refuses to publish an empty set; this closes the other half.
+        sidecar_path.unlink(missing_ok=True)
+        return None
+
+    endpoint_dir = output_dir / "endpoints" / pid
+    data_id = endpoints[0].data_id
+    manifest_digest = write_dataset(endpoint_dir, endpoints=endpoints, data_id=data_id)
+
+    sidecar = {
+        "sidecar_version": _SIDECAR_VERSION,
+        "manifest_digest": manifest_digest,
+        "data_id": data_id,
+        "product_id": pid,
+        "horizons": sorted({int(e.horizon) for e in endpoints}),
+        "bar_duration_ms": int(endpoints[0].bar_duration_ms),
+        "feature_recipe": _FEATURE_RECIPE,
+        "label_version": LABEL_VERSION,
+        "cost_version": COST_VERSION,
+        # The CONFIGURED cap, which is not a horizon. A consumer that rebuilt it from a
+        # record's own horizon would reject every valid short-horizon record.
+        "exit_config": {
+            "stop_loss_pct": _DEFAULT_STOP_LOSS_PCT,
+            "atr_trail_floor": _DEFAULT_ATR_TRAIL_FLOOR,
+            "max_hold_bars": _DEFAULT_MAX_HOLD_BARS,
+            "round_trip_fee": _DEFAULT_ROUND_TRIP_FEE,
+        },
+        "record_digests": {f"{e.horizon}:{e.entry_row_id}": endpoint_digest(e) for e in endpoints},
+    }
+    sidecar_path.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
+    return manifest_digest
 
 
 def _pids_from_universe_json(universe_path: Path) -> List[str]:
