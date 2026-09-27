@@ -7,6 +7,14 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Reject gapped hourly replay inputs - 2026-09-26
+
+- Reject gaps before hourly mining and portfolio simulation: row-count labels
+  can extend beyond clock-hour eligibility, causing overlapping admissions and
+  premature profit realization. Synthetic two-hour gaps reproduced both paths.
+- This is containment, not reconstructed exit provenance. Exact stop/exit timing,
+  funded capital, and legacy label validation remain unresolved. No archive rewrite.
+
 ### Exact rule reporting - 2026-09-26
 
 - Version Phase 4 JSON reports as schema 2 and include the exact machine rule,
