@@ -33,7 +33,7 @@ Two components answered the same question differently, and nothing compared them
 |---|---|
 | the label producer | the exit rule that actually fired — stop, trail, cap, or horizon |
 | the portfolio replay | `entry_ts + horizon × 3_600_000`, a wall clock |
-| the miner | `build_next_eligible(ts_ms, horizon_bars=horizon)`, row arithmetic |
+| the miner | `searchsorted(ts, ts + horizon × 3_600_000)` — a wall-clock instant resolved to a position |
 
 A single wall-clock `exit_ts` was serving two distinct roles at once:
 
@@ -46,11 +46,19 @@ on the case, so it never presented as a consistent bias either way.
 
 | case | wall clock says | truth | direction of error |
 |---|---|---|---|
-| gap in the source bars | exit lands on a bar that does not exist | exit at the last real bar | slot released **early** and resold — occupancy understated, trade count overstated |
+| gap in the source bars | the target **instant** can fall before the actual source-row exit, so `searchsorted` resolves to an **earlier row** than the true exit row | the exit row the rule reached | slot released **early** and resold — occupancy understated, trade count overstated |
 | stop or trail fires early | holds the slot to the full horizon | exit when the rule fired | a real later entry **suppressed** — occupancy overstated, trade count understated |
 
-They are now separate functions: `eligibility_boundaries()` (positions) and `accounting_times()`
-(instants), in `replay_timeline.py`, which contains no decision logic at all.
+They are now separate functions in `endpoint_consumers.py`: `eligibility_boundaries()` (positions,
+line 486) and `accounting_times()` (instants, line 520). `replay_timeline.py` is a different module
+and holds only the instant arithmetic — `decision_instants`, `close_checkpoints`,
+`ordered_instants` — with no decision logic and no per-position events.
+
+> Corrected after Codex review `5d24ca7e`, which caught three factual errors in the first draft of
+> this note: it placed both functions in the wrong module, described the miner's clock as row
+> arithmetic when it is a `searchsorted` on a wall-clock instant, and described the gap mechanism as
+> an exit landing on a nonexistent bar. Recording the corrections here rather than quietly
+> overwriting them, since a note about a claim outrunning its code should not do the same thing.
 
 ---
 
