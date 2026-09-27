@@ -176,10 +176,13 @@ How to apply:
 Review from the peer Codex session arrives through `tools/session_bridge`. Two rules belong
 here because breaking them silently corrupts what this session believes:
 
-1. **`inbox()` returns the newest 50 unacknowledged messages, not all of them.** Call
-   `pending_count()` for the true total; `wait()` reports `pending_total` and `truncated`.
-   Acking what you read is what keeps the window inert — an unacknowledged backlog is the
-   only thing that pushes mail out of it.
+1. **`inbox()` returns a WINDOW, not the mailbox.** Bounded twice — at most
+   `Store.INBOX_WINDOW` (50) messages and at most `Store.INBOX_MAX_BYTES` (16000) of body,
+   because a count alone bounds the wrong quantity: real bodies run median 614 bytes but p90
+   3.6KB, so fifty of them is ~7.7k tokens of context and 57k in the worst case measured.
+   Call `pending_count()` for the true total; `wait()` reports `pending_total` and
+   `truncated`. Acking what you read is what keeps the window inert — an unacknowledged
+   backlog is the only thing that pushes mail out of it.
 2. **Silence is a reading, not an observation.** Before reporting that the peer has not
    replied, verify your own reader, then the transport, then the peer. On 2026-09-27 that
    order was reversed and this session reported a question as unanswered for hours while the

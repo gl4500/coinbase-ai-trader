@@ -85,6 +85,14 @@ class Store:
             return dict(db.execute('SELECT * FROM messages WHERE id=?', (mid,)).fetchone())
 
     INBOX_WINDOW = 50
+    # What a reader can actually afford is BYTES, not messages. Measured over 535 real
+    # messages on 2026-09-27: median 614 bytes, p90 3,577, max 6,669 -- so fifty messages is
+    # ~7.7k tokens of context typically and 57k in the worst case observed, for one read.
+    # 16000 keeps a normal read near 4k tokens while staying under send()'s own 20000-char
+    # cap, so a message that exceeds the whole budget remains constructible and therefore
+    # has to be handled rather than assumed away. The count cap only stops pathological
+    # row counts now; the budget is what usually binds on heavy traffic.
+    INBOX_MAX_BYTES = 16000
 
     def pending_count(self):
         """How many unacknowledged messages this role actually has, window or no window.
@@ -97,7 +105,7 @@ class Store:
                 'SELECT COUNT(*) FROM messages WHERE recipient=? AND acknowledged IS NULL',
                 (self.role,)).fetchone()[0]
 
-    def inbox(self, limit=None):
+    def inbox(self, limit=None, max_bytes=None):
         """The NEWEST unacknowledged messages, returned oldest-first.
 
         Newest, not oldest, and the distinction is the whole point. This read `ORDER BY
@@ -110,19 +118,36 @@ class Store:
         Newest-bias trades one blind spot for a smaller one: old mail leaves the window
         instead. That direction is self-correcting, because acknowledging what you can see
         brings the rest back, whereas the old direction got worse the longer it ran.
+        Bounded twice, because a count alone bounds the wrong quantity: at most `limit`
+        messages AND at most `max_bytes` of body. The newest message is always delivered
+        even when it exceeds the whole budget by itself -- otherwise a legitimate message
+        becomes permanently unreadable and the link wedges, which is worse than the defect
+        above. Trimming for the budget therefore comes off the OLD end only.
+
         Callers that need to know the window bit should ask `pending_count()`.
         """
         window = self.INBOX_WINDOW if limit is None else int(limit)
+        budget = self.INBOX_MAX_BYTES if max_bytes is None else int(max_bytes)
         if window < 1:
             raise ValueError('limit must be at least 1')
+        if budget < 1:
+            raise ValueError('max_bytes must be at least 1')
         with self.connect() as db:
             newest = [dict(r) for r in db.execute(
                 'SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL '
                 'ORDER BY created DESC, id DESC LIMIT ?',
                 (self.role, window))]
-        # Selected newest-first so the bound keeps the right end; presented oldest-first
+        kept = []
+        billed = 0
+        for row in newest:
+            cost = len(row['body'].encode('utf-8'))
+            if kept and billed + cost > budget:
+                break
+            kept.append(row)
+            billed += cost
+        # Selected newest-first so both bounds keep the right end; presented oldest-first
         # because reading order carries the thread of the conversation.
-        return list(reversed(newest))
+        return list(reversed(kept))
 
     MAX_WAIT_SECS = 900.0
     MAX_POLL_SECS = 30.0

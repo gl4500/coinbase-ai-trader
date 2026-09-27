@@ -23,10 +23,21 @@ unanswered.
 `wait()` reads through `inbox()`, so the long-poll added the same day could not
 wake on a message it was unable to see — a backlog silently disabled it.
 
+**The size was also wrong, not just the direction.** Asked why the limit was
+50, the honest answer was that 50 was inherited from the original query and
+never interrogated — and it bounds the wrong quantity. Over 535 real messages
+the median body is 614 bytes but p90 is 3,577 and the max 6,669, so a
+fifty-message read is ~7.7k tokens of context typically and **57k in the worst
+case measured**. `inbox()` is now bounded by bytes as well as count, and the
+newest message is delivered even when it alone exceeds the budget — otherwise a
+legitimate message becomes permanently unreadable and the link wedges, a worse
+failure than the original.
+
 **Files:**
-- `tools/session_bridge/src/session_bridge/store.py` — `inbox(limit=None)` now
-  selects the newest `INBOX_WINDOW` (50) and returns them oldest-first, so
-  reading order is unchanged but the bound keeps the recent end. New
+- `tools/session_bridge/src/session_bridge/store.py` — `inbox(limit=None,
+  max_bytes=None)` now selects the newest messages under both
+  `INBOX_WINDOW` (50) and `INBOX_MAX_BYTES` (16000), returned oldest-first, so
+  reading order is unchanged but both bounds keep the recent end. New
   `pending_count()`; `wait()` gained `pending_total` and `truncated`.
 - `tools/session_bridge/tests/test_inbox_visibility.py` — 8 tests. The headline
   one fails on the old code with the exact live symptom (`msg-064` absent from a

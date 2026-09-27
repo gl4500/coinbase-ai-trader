@@ -16,9 +16,18 @@ mail, and 15 newer peer messages were unreadable for hours while I reported the 
 silent. `wait()` reads through `inbox()`, so the long-poll could not wake on a message it
 could not see: a backlog silently disabled it.
 
-- **`inbox()` is a WINDOW, not the mailbox.** It returns the newest `Store.INBOX_WINDOW`
-  (50) unacknowledged messages, presented oldest-first so reading order still carries the
-  thread. `inbox(limit=N)` widens it deliberately.
+- **`inbox()` is a WINDOW, not the mailbox.** It returns the newest unacknowledged messages
+  under BOTH bounds -- `Store.INBOX_WINDOW` (50) messages and `Store.INBOX_MAX_BYTES` (16000)
+  of body -- presented oldest-first so reading order still carries the thread.
+  `inbox(limit=N, max_bytes=M)` widens either deliberately, e.g. when draining a backlog.
+- **The byte bound is the one that matters, and it was the afterthought.** 50 was inherited
+  from the original query; over 535 real messages the median body is 614 bytes but p90 is
+  3,577, so a count-only bound admits ~7.7k tokens typically and 57k in the worst case
+  measured. A count cap only stops pathological row counts.
+- **A message bigger than the whole budget is still delivered.** Trimming comes off the OLD
+  end only. The alternative makes a legitimate message permanently unreadable and wedges the
+  link -- worse than the defect being fixed -- and `send()` caps bodies at 20000 characters,
+  so such a message is constructible by design rather than hypothetical.
 - **Ask for the total before concluding anything about volume.** `pending_count()` gives the
   true count; `wait()` returns `pending_total` and `truncated` alongside its messages.
 - **Ack what you read.** An unacknowledged backlog is not harmless -- it is the only thing
