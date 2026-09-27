@@ -68,20 +68,36 @@ catching.
 **Therefore the blocker should be SPLIT, not cleared.** Proposed replacement:
 
 - `label_atr_contemporaneous_causality` — repaired by §3, absent from v3 records.
-- `label_intrabar_order_assumption` — **permanent, and only for `stop` and `trail` records.**
-  §4.1 shows it is not a technicality: on a two-bar path the two orderings differ by 3.5x.
+- `label_intrabar_order_assumption` — **permanent, and for EVERY record kind including
+  `horizon`**, because survival to the horizon is itself ordering-dependent (see below). §4.1 shows
+  it is not a technicality: on a two-bar path the two orderings differ by 3.5x.
 
-**A `horizon` record carries neither blocker under v3.** Its exit is the close of a known bar:
-there is no threshold lookahead once the ATR is lagged, and no intrabar ordering question at all,
-which is exactly why `intrabar_timing_known` is already `True` for that kind and `False` for the
-others. An earlier draft of this document said the intrabar blocker was "present on both", which
-read as *every* record and contradicted §2's own stop/trail wording and §7's test — three sections
-disagreeing about one fact, which is the defect class this effort exists to remove (Codex
-`c3c5acc8`).
+**Correction: a `horizon` record needs the ordering blocker too** (Codex `df49b175`). I first
+wrote that it carries neither, reasoning that its exit is the close of a known bar so there is no
+ordering question. That is wrong, and my own §4.1 counterexample disproves it: under B1 the trade
+trails out at bar 1, under B2 it **survives to the horizon**. So whether a record is a horizon
+record *at all* depends on the ordering.
 
-So under v3: `horizon` records are unblocked, `stop`/`trail` records carry the ordering blocker,
-and ambiguous ones carry a second. A triggered-exit record therefore still carries a blocker, and
-anyone reading a "causality fixed" headline should be pointed at this paragraph.
+The distinction I had collapsed:
+
+- `intrabar_timing_known` is about the exit **instant**. It is legitimately `True` for a horizon
+  exit — the close of a known bar.
+- Ordering dependence is about **which exit fired**. It reaches horizon records as well, because
+  survival to the horizon means no trail or stop triggered first, and whether one triggered is
+  exactly the ordering question.
+
+This is the second error I made in this section from the same root: treating the ordering as if it
+only affected the exit price or instant, when it also decides which exit occurs. §4.1 was the first.
+
+So under v3 **every** `stop`, `trail` and `horizon` record carries `label_intrabar_order_assumption`,
+and ambiguous ones carry a second blocker. The only records genuinely free of the question are
+those where both orderings agree *and* no bar in the holding window came within either threshold —
+which is **checkable, not assumable**, so it belongs in the §5 probe as a measured
+order-insensitive fraction rather than as a blocker exemption.
+
+An earlier draft also said the blocker was "present on both", which read as every record and
+contradicted §2's own stop/trail wording and §7's test — three sections disagreeing about one fact
+(Codex `c3c5acc8`). The resolution is the strict one: all records, no exemption by exit kind.
 
 ---
 
@@ -248,7 +264,11 @@ For each variant against v2 it computes, per product and horizon:
 4. **Bars-held deltas**: distribution of `v3.bars_held - v2.bars_held`.
 5. **Floor-fallback set change**: rows whose threshold came from the floor in one version only.
 6. **B3 ambiguity rate**: fraction of records where `high_before_low` and `low_before_high` give
-   different exits.
+   different exits, broken down by the v2 exit kind -- horizon records included, since §4.2 shows
+   they are not exempt.
+7. **Order-insensitive fraction**: records where both orderings agree AND no bar in the holding
+   window came within either threshold. These are the only records the ordering provably does not
+   touch, and the number is worth knowing precisely because it cannot be assumed.
 
 Reported per product, never pooled into a single headline. **This is a measurement of a label
 change, not an evaluation of a strategy**: it says nothing about profitability, and the report
@@ -315,11 +335,12 @@ either. They remain uninformative for the reasons already recorded in the occupa
    is known at the entry instant. Assert the exact value used, not merely that it ran.
 4. **Warm-up.** Rows inside the first 14 bars fall back to the floor in v3, and the set differs
    from v2 by exactly one row's shift.
-5. **Blocker split, per record kind.** A v3 `stop`/`trail` record carries
-   `label_intrabar_order_assumption` and NOT `label_atr_contemporaneous_causality`; a v3
-   `horizon` record carries neither; a v3 `stop` record missing the ordering blocker is rejected;
-   and a **v2** record missing the ATR blocker is still rejected, proving the version dispatch did
-   not weaken the v2 path. The last of those is the one that would silently rot.
+5. **Blocker split.** Every v3 record -- `stop`, `trail` AND `horizon` -- carries
+   `label_intrabar_order_assumption` and NOT `label_atr_contemporaneous_causality`. A v3 record of
+   ANY kind missing the ordering blocker is rejected, horizon included: pin §4.1's fixture, whose
+   B2 branch produces a horizon record whose very existence is ordering-dependent. And a **v2**
+   record missing the ATR blocker is still rejected, proving the version dispatch did not weaken
+   the v2 path -- that last one is what would silently rot.
 6. **Version isolation.** A dataset mixing v2 and v3 records fails to load. A v3 dataset fails to
    validate against a v2 frame binding.
 7. **Neither ordering dominates, and the bound holds.** Pin §4.1's counterexample exactly as a
