@@ -9,10 +9,20 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from tools.strategy_discovery.build_phase2 import (
     build_phase2_for_pid,
     build_phase2_for_universe,
+)
+from tools.strategy_discovery.endpoint_consumers import (  # noqa: E402
+    MissingEndpoint,
+    load_validated_endpoints,
+)
+from tools.strategy_discovery.endpoint_records import CAUSALITY_BLOCKER  # noqa: E402
+from tools.strategy_discovery.labels import (  # noqa: E402
+    _DEFAULT_HORIZONS,
+    _DEFAULT_MAX_HOLD_BARS,
 )
 
 _HOUR_S = 3_600
@@ -227,3 +237,306 @@ def test_build_result_reports_drop_counts(tmp_path: Path):
         "label_h72",
         "label_h168",
     }
+
+
+# ── the producer publishes endpoints alongside the labels it already wrote ────
+#
+# Contract §9.2. The sidecar is what a consumer reads the manifest digest and the declared
+# exit config from, so it verifies the dataset against values it did not compute. The
+# schema is fixed here and consumed by the adapter.
+
+
+def _build_with_endpoints(tmp_path: Path, pid: str = "FOO-USD"):
+    history_dir = tmp_path / "history"
+    marketcap_dir = tmp_path / "marketcap"
+    supply_path = tmp_path / "supply" / "snapshot.parquet"
+    output_dir = tmp_path / "phase2"
+    _write_history_parquet(history_dir / f"{pid}.parquet", n_hours=400)
+    _write_marketcap_parquet(marketcap_dir / f"{pid}.parquet", n_days=20)
+    _write_supply_snapshot(supply_path, pid=pid)
+    result = build_phase2_for_pid(pid, history_dir, marketcap_dir, supply_path, output_dir)
+    assert result.error is None, f"unexpected error: {result.error}"
+    return result, output_dir, pid
+
+
+def test_the_parquet_carries_source_row_id_as_exact_ordinals(tmp_path: Path):
+    """`dropna(...).reset_index(drop=True)` downstream destroys row identity. This column
+    is the only bridge from a filtered frame back to the rows the endpoints reference."""
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+    assert frame["source_row_id"].tolist() == list(range(len(frame)))
+
+
+def test_publishing_endpoints_does_not_move_a_single_label(tmp_path: Path):
+    """The producer swaps one function for another. The only acceptable outcome is labels
+    that are identical bit-for-bit, compared by float.hex() rather than by tolerance -- a
+    relative tolerance would hide a real move."""
+    from tools.strategy_discovery.labels import simulate_dynamic_exit_labels
+
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+
+    # recompute from the published frame's own inputs, independently of the endpoint path
+    recomputed = simulate_dynamic_exit_labels(
+        frame[["ts", "open", "high", "low", "close", "atr14_pct"]].copy(),
+        horizons=list(_DEFAULT_HORIZONS),
+    )
+    for horizon in _DEFAULT_HORIZONS:
+        column = f"label_h{horizon}"
+        published = [None if pd.isna(v) else float(v).hex() for v in frame[column]]
+        expected = [None if pd.isna(v) else float(v).hex() for v in recomputed[column]]
+        assert published == expected, f"{column} moved"
+
+
+def test_the_sidecar_declares_everything_a_consumer_needs(tmp_path: Path):
+    result, output_dir, pid = _build_with_endpoints(tmp_path)
+    sidecar = json.loads((output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8"))
+
+    assert sidecar["sidecar_version"] == 1
+    assert sidecar["manifest_digest"] == result.endpoint_manifest_digest
+    assert sidecar["manifest_digest"].startswith("sha256:")
+    assert sidecar["product_id"] == pid
+    assert sorted(sidecar["horizons"]) == sorted(_DEFAULT_HORIZONS)
+    assert sidecar["bar_duration_ms"] == 3_600_000
+    assert sidecar["feature_recipe"] == "atr14_pct_wilder_v1"
+
+    # The CAP, not a horizon. A consumer rebuilding this from record.horizon would reject
+    # every valid short-horizon record.
+    assert sidecar["exit_config"]["max_hold_bars"] == _DEFAULT_MAX_HOLD_BARS
+    # Worth stating because it nearly hid the bug: the default cap 168 EQUALS the longest
+    # default horizon, so a consumer that wrongly rebuilt the cap from record.horizon would
+    # still validate horizon-168 records. Only a shorter horizon exposes it -- which is why
+    # the adapter regression uses horizon 1.
+    assert _DEFAULT_MAX_HOLD_BARS in _DEFAULT_HORIZONS
+    assert any(h != _DEFAULT_MAX_HOLD_BARS for h in _DEFAULT_HORIZONS)
+    assert set(sidecar["exit_config"]) == {
+        "stop_loss_pct",
+        "atr_trail_floor",
+        "max_hold_bars",
+        "round_trip_fee",
+    }
+    assert (output_dir / "endpoints" / pid / "endpoints.jsonl").exists()
+
+
+def test_per_record_digests_are_stored_at_publication(tmp_path: Path):
+    """A digest recomputed from the record under test attests nothing. These are captured
+    while the record is being written, so a later validation compares against a value it
+    did not derive from the thing it is checking."""
+    from tools.strategy_discovery.endpoint_records import endpoint_digest
+
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    sidecar = json.loads((output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8"))
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+
+    validated = load_validated_endpoints(
+        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
+    )
+    assert validated.records, "the fixture must produce endpoints"
+    for record in validated.records:
+        key = f"{record.horizon}:{record.entry_row_id}"
+        assert sidecar["record_digests"][key] == endpoint_digest(record)
+
+
+def test_the_producers_own_output_passes_the_consumer_adapter(tmp_path: Path):
+    """The loop closed. Everything the adapter checks -- recomputed data_id, complete
+    coverage across every declared horizon, the configured cap, per-record semantics --
+    is satisfied by what the producer actually writes, with no fixture in between.
+
+    If the producer and the adapter ever disagree about the sidecar schema or the identity
+    recompute, this is the test that fails.
+    """
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    sidecar = json.loads((output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8"))
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+
+    validated = load_validated_endpoints(
+        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
+    )
+    assert validated.semantic_validation_performed is True
+    assert validated.data_id == sidecar["data_id"]
+    # the version-wide blocker survives publication and validation
+    for record in validated.records:
+        assert CAUSALITY_BLOCKER in record.blockers
+
+
+def test_a_stale_sidecar_from_an_earlier_run_cannot_validate_a_new_frame(tmp_path: Path):
+    """Publication is per-file, so an interrupted rebuild can leave a NEW parquet beside an
+    OLD sidecar and dataset. Nothing silently validates: the adapter recomputes `data_id`
+    from the frame, and the retained sidecar describes different content.
+
+    This is containment by the identity recompute, not by atomicity, and the distinction is
+    worth a test rather than a claim.
+    """
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    stale_sidecar = json.loads((output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8"))
+
+    # a different frame lands in place, as an interrupted regeneration would leave it
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+    frame.loc[0, "close"] = float(frame.loc[0, "close"]) + 1.0
+
+    with pytest.raises(MissingEndpoint, match="data_id"):
+        load_validated_endpoints(
+            output_dir / "endpoints" / pid,
+            frame=frame,
+            sidecar=stale_sidecar,
+            product_id=pid,
+        )
+
+
+def test_a_frame_with_no_endpoints_leaves_no_stale_sidecar_behind(tmp_path: Path):
+    """A rebuild that produces no endpoints must not leave an earlier run's sidecar in
+    place, where it would describe a dataset that no longer corresponds to the parquet.
+
+    `write_dataset` already refuses to publish an empty set, so nothing-survived cannot look
+    like nothing-was-attempted; this closes the other half, where the previous run's
+    description survives its own data.
+    """
+    result, output_dir, pid = _build_with_endpoints(tmp_path)
+    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    assert sidecar_path.exists() and result.endpoint_manifest_digest is not None
+
+    from tools.strategy_discovery.build_phase2 import _publish_endpoints
+
+    assert _publish_endpoints(output_dir, pid, [], _DEFAULT_HORIZONS) is None
+    assert not sidecar_path.exists(), "an earlier run's sidecar outlived its data"
+
+
+def _write_short_history(path: Path, n_hours: int):
+    _write_history_parquet(path, n_hours=n_hours)
+
+
+def test_the_sidecar_declares_requested_horizons_not_surviving_ones(tmp_path: Path):
+    """The survivor-set hole, reproduced before fixing.
+
+    A frame too short for the long horizons emits no endpoints for them, so
+    `sorted({e.horizon for e in endpoints})` silently omits those horizons from the sidecar.
+    A consumer then builds expectations only for the horizons that happen to have survived,
+    and complete coverage passes because the missing horizon was never expected -- coverage
+    derived from the thing under test, which is exactly the defect class the dataset loader
+    already refuses.
+
+    Executed on a 30-row frame: declared [1, 4, 24, 72, 168], surviving [1, 4, 24].
+    """
+    pid = "FOO-USD"
+    history_dir = tmp_path / "history"
+    marketcap_dir = tmp_path / "marketcap"
+    supply_path = tmp_path / "supply" / "snapshot.parquet"
+    output_dir = tmp_path / "phase2"
+    # long enough to pass the 200-bar warmup and produce SHORT-horizon endpoints, but not
+    # long enough for every declared horizon
+    _write_short_history(history_dir / f"{pid}.parquet", n_hours=260)
+    _write_marketcap_parquet(marketcap_dir / f"{pid}.parquet", n_days=20)
+    _write_supply_snapshot(supply_path, pid=pid)
+
+    result = build_phase2_for_pid(pid, history_dir, marketcap_dir, supply_path, output_dir)
+    assert result.error is None, f"unexpected error: {result.error}"
+
+    sidecar = json.loads((output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8"))
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+
+    published = {int(h) for h in sidecar["horizons"]}
+    assert published == set(_DEFAULT_HORIZONS), (
+        "the sidecar must declare the REQUESTED horizons; a survivor-derived set lets a "
+        "horizon disappear from its own expectation"
+    )
+
+    # and the round trip still holds with the full declared set
+    validated = load_validated_endpoints(
+        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
+    )
+    assert validated.semantic_validation_performed is True
+    surviving = {r.horizon for r in validated.records}
+    assert surviving, "short horizons must still produce endpoints"
+    assert surviving < set(_DEFAULT_HORIZONS), (
+        "this fixture is only meaningful if some declared horizon produced nothing"
+    )
+
+
+def test_the_sidecar_is_replaced_atomically(tmp_path: Path):
+    """A half-written sidecar would be a JSON parse error at best and a plausible-looking
+    partial document at worst. Written to a temp name in the same directory and renamed, so
+    no reader observes a partial file."""
+    import os
+    from unittest.mock import patch
+
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    before = (output_dir / f"{pid}.endpoints.json").read_text(encoding="utf-8")
+
+    real_replace = os.replace
+    seen = {}
+
+    def _capture(src, dst):
+        if str(dst).endswith(".endpoints.json"):
+            seen["src"] = str(src)
+            seen["dst"] = str(dst)
+        return real_replace(src, dst)
+
+    with patch("tools.strategy_discovery.build_phase2.os.replace", side_effect=_capture):
+        _, output_dir2, pid2 = _build_with_endpoints(tmp_path / "again")
+
+    assert seen, "the sidecar must land via os.replace, not a direct write"
+    assert Path(seen["src"]).parent == Path(seen["dst"]).parent, (
+        "the temp file must sit in the same directory, or replace is not atomic"
+    )
+    assert json.loads(before)  # the earlier sidecar was complete and parseable
+
+
+def test_a_failed_replacement_leaves_the_previous_sidecar_byte_for_byte(tmp_path: Path):
+    """The behaviour the temp-and-rename exists for, rather than the fact that it is used.
+
+    Injects a failure at the replacement step while an EXISTING sidecar is in place, and
+    asserts the old file survives with its exact original bytes. A direct `write_text` would
+    have truncated it before failing, leaving a partial document that could parse as
+    plausible. The leftover temp file is also asserted gone, so a later reader cannot mistake
+    it for a published artifact.
+    """
+    from unittest.mock import patch
+
+    result, output_dir, pid = _build_with_endpoints(tmp_path)
+    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    original_bytes = sidecar_path.read_bytes()
+    assert original_bytes and json.loads(original_bytes)
+
+    from tools.strategy_discovery.build_phase2 import _publish_endpoints
+    from tools.strategy_discovery.endpoint_dataset import DATASET_FILENAME
+    from tools.strategy_discovery.endpoint_records import LabelEndpoint  # noqa: F401
+
+    # a second generation's records, so the write would genuinely change the file
+    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
+    sidecar = json.loads(original_bytes)
+    validated = load_validated_endpoints(
+        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
+    )
+
+    # The second publication must produce DIFFERENT bytes, or "preserved" and "overwritten
+    # with the same content" are indistinguishable and the test proves nothing. Verified by
+    # reverting the implementation to a direct write: with identical content the test passed
+    # against the broken variant.
+    changed_horizons = [1, 4]
+    assert sorted(changed_horizons) != sorted(_DEFAULT_HORIZONS)
+
+    # Fail ONLY the sidecar rename. Patching `build_phase2.os.replace` patches the SHARED
+    # os module attribute, so a blanket side_effect also breaks write_dataset's atomic write
+    # and the failure happens before the sidecar is ever touched -- which made an earlier
+    # version of this test pass against a deliberately broken direct write.
+    import os as _os
+
+    real_replace = _os.replace
+
+    def _fail_only_the_sidecar(src, dst):
+        if str(dst).endswith(".endpoints.json"):
+            raise OSError("interrupted before the rename")
+        return real_replace(src, dst)
+
+    with patch("tools.strategy_discovery.build_phase2.os.replace", new=_fail_only_the_sidecar):
+        with pytest.raises(OSError, match="interrupted"):
+            _publish_endpoints(output_dir, pid, list(validated.records), changed_horizons)
+
+    assert sidecar_path.read_bytes() == original_bytes, (
+        "the previous sidecar was damaged by a failed replacement"
+    )
+    assert json.loads(sidecar_path.read_bytes())["horizons"] == sorted(_DEFAULT_HORIZONS)
+    assert not list(output_dir.glob(f"{pid}.endpoints.json.partial")), (
+        "a leftover temp file could be mistaken for a published artifact"
+    )
+    assert (output_dir / "endpoints" / pid / DATASET_FILENAME).exists()
