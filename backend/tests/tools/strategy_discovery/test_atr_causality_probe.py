@@ -418,3 +418,64 @@ def test_both_branches_are_preserved_even_when_they_agree():
     assert report.high_first is not None and report.low_first is not None
     assert report.lower_bound_result in (report.high_first, report.low_first)
     assert report.high_first.pnl == report.low_first.pnl
+
+
+def test_a_level_created_mid_bar_is_not_a_gap_through():
+    """Codex cb898726, a real defect in the first version of the probe.
+
+    With prior peak 100, open 100, high 120, low 95 and a 6% floor, the level in force at the
+    open was 94 and the open never gapped through it. The triggering level of 112.8 only came
+    into being once this bar's high raised the peak. The earlier version compared the open
+    against that later level and reported a fabricated fill at 100.0 (pnl 0.0000) instead of
+    112.8 (+0.1280) -- WORSE than either honest reading, which is its own kind of wrong.
+    """
+    opens, closes, highs, lows, atrs = _arrays([(120.0, 95.0, 115.0)])
+    opens[1] = 100.0
+    args = dict(
+        entry_idx=0,
+        horizon=1,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+    )
+    legacy = simulate_variant(spec=LEGACY, **args)
+    gapped = simulate_variant(spec=GAP_ONLY, **args)
+
+    assert legacy.exit_kind == "trail" and legacy.exit_price == pytest.approx(112.8)
+    assert gapped.gapped is False, "no level in force at the open was breached"
+    assert gapped.exit_price == pytest.approx(112.8)
+    assert gapped.pnl.hex() == legacy.pnl.hex(), (
+        "the gap variant must be bit-identical here; it differed only because it treated a "
+        "mid-bar level as if it had existed at the open"
+    )
+
+
+def test_a_trail_level_in_force_at_the_open_still_registers_a_gap():
+    """The other half: when the level DID exist at the open and the bar opened below it, the gap
+    is real and the fill is the open. Without this the fix above could have disabled the
+    diagnostic entirely and still passed."""
+    # Bar 1 lifts the peak to 120 (level 112.8) and survives. Bar 2 opens at 105, already below
+    # that pre-existing level, so it is a genuine gap-through.
+    opens, closes, highs, lows, atrs = _arrays([(120.0, 115.0, 118.0), (118.0, 100.0, 104.0)])
+    opens[1] = 116.0
+    opens[2] = 105.0
+    args = dict(
+        entry_idx=0,
+        horizon=2,
+        opens=opens,
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        atr_pcts=atrs,
+        config=_NO_FEE,
+    )
+    legacy = simulate_variant(spec=LEGACY, **args)
+    gapped = simulate_variant(spec=GAP_ONLY, **args)
+
+    assert legacy.exit_kind == "trail" and legacy.exit_price == pytest.approx(112.8)
+    assert gapped.gapped is True, "the 112.8 level was in force at bar 2's open of 105"
+    assert gapped.exit_price == pytest.approx(105.0)
+    assert gapped.pnl < legacy.pnl
