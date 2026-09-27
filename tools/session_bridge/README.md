@@ -100,8 +100,32 @@ lands, so waiting costs wall clock rather than tokens.
 * It checks before sleeping, so a message already waiting returns immediately.
 * It holds no write transaction while waiting, so the other side can always send.
 * Like `inbox`, it does not acknowledge. You still owe an `ack`.
-* Prefer a LONG timeout. Process startup is several seconds, so many short waits reintroduce
-  the cost this exists to remove. One 600s wait beats sixty 10s waits.
+* Timeout length is now a free choice. That advice existed only to amortise a 4.3s CrewAI
+  import per call, which no longer happens on this path: `inbox` went 6607ms -> 325ms and
+  `wait` costs ~440ms. Pick the timeout that suits the work, not the transport.
+
+### Two routes, and why
+
+Message operations (`send`, `inbox`, `wait`, `ack`) go straight to SQLite. Everything else
+(`status`, `claim`, `update_task`) goes through the CrewAI Flow, which is built on first use
+rather than at import.
+
+Measured per CLI call: bare python 232ms, +sqlite3 251ms, +`crewai.flow` **4270ms**, full
+call 6741ms. The Flow contributed one allow-list check and one `getattr`, so for a mailbox
+read it was the entire cost.
+
+CrewAI is NOT removed and its instrumentation is NOT disabled -- `AGENTS.md` is explicit that
+this is the operator's decision and never a performance fix. The Flow stays, stays the default
+for non-message operations, and `--route flow` forces it for any operation:
+
+```powershell
+& $python $bridge --role claude call inbox --route flow   # instrumented path
+& $python $bridge --role claude call inbox --route fast   # direct path
+& $python $bridge --role claude call inbox                # auto (default)
+```
+
+Both routes read ONE allow-list and a test probes them for identical behaviour, so an
+operation cannot become reachable by one route and refused by the other.
 
 Reuse a request_key only when retrying the same message. Inbox reads are not
 acknowledgments. Task scope claims are atomic and prevent another role claiming
