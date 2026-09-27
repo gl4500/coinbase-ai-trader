@@ -30,12 +30,15 @@ _H = 24
 def _frame(rows: int = 400, *, seed: int = 3, atr: float = 0.05, label: float = 0.05):
     rng = np.random.default_rng(seed)
     close = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.02, size=rows))
-    high = close * (1.0 + np.abs(rng.normal(0.0, 0.015, size=rows)))
-    low = close * (1.0 - np.abs(rng.normal(0.0, 0.015, size=rows)))
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    span = np.abs(rng.normal(0.0, 0.015, size=rows))
+    # A real bar always contains its own open AND close, so derive the extremes from both.
+    high = np.maximum(open_, close) * (1.0 + span)
+    low = np.minimum(open_, close) * (1.0 - span)
     return pd.DataFrame(
         {
             "ts": np.arange(rows, dtype="int64") * _BAR,
-            "open": np.concatenate([[close[0]], close[:-1]]),
+            "open": open_,
             "high": high,
             "low": low,
             "close": close,
@@ -194,3 +197,67 @@ def test_no_data_when_nothing_satisfies_the_rule(tmp_path):
     assert payload["status"] == "no_data"
     assert "satisfied the selection rule" in payload["no_data_reason"]
     assert payload["retained_entries_total"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        (lambda f: f.__setitem__("low", f["high"].to_numpy() * 1.5), "low must not exceed high"),
+        (lambda f: f.__setitem__("close", f["high"].to_numpy() * 1.5), "close must lie within"),
+        (lambda f: f.__setitem__("open", f["low"].to_numpy() * 0.5), "open must lie within"),
+    ],
+)
+def test_an_incoherent_bar_is_refused_not_traversed(mutate, expected):
+    """Codex dd462ea4. Positivity and finiteness were checked; the RELATIONS were not.
+
+    A bar whose low exceeds its high, or whose open or close sits outside [low, high], describes no
+    traversable path -- but the simulation would still produce an exit from it, so the frame must be
+    refused rather than yielding a number derived from an impossible bar. Verified separately that
+    the real 8-frame run has 0 incoherent bars, so this closes a gap without changing any result.
+    """
+    frame = _frame()
+    mutate(frame)
+    scan = scan_contiguous_windows(frame, product_id="BAD-USD", horizon=_H)
+    assert scan.skipped_reason is not None and expected in scan.skipped_reason
+    assert scan.retained_entries == 0
+
+
+@pytest.mark.parametrize("bad", [0, -1, 24.0, True, "24"])
+def test_a_non_positive_or_coerced_horizon_is_refused(bad):
+    """int(horizon) accepted 24.9 and True; a negative max_entries produced an empty range that
+    would read as a clean no-evidence run rather than as bad input."""
+    with pytest.raises(ValueError, match="horizon"):
+        scan_contiguous_windows(_frame(), product_id="A-USD", horizon=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -5, 1.5, True])
+def test_a_non_positive_or_coerced_max_entries_is_refused(bad):
+    with pytest.raises(ValueError, match="max_entries"):
+        scan_contiguous_windows(_frame(), product_id="A-USD", horizon=_H, max_entries=bad)
+
+
+def test_a_config_missing_a_threshold_is_refused_rather_than_defaulted():
+    from tools.strategy_discovery.atr_contiguous_probe import DEFAULT_CONFIG
+
+    partial = {k: v for k, v in DEFAULT_CONFIG.items() if k != "atr_trail_floor"}
+    with pytest.raises(ValueError, match="atr_trail_floor"):
+        scan_contiguous_windows(_frame(), product_id="A-USD", horizon=_H, config=partial)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("stop_loss_pct", 0.0),
+        ("stop_loss_pct", 1.0),
+        ("atr_trail_floor", -0.1),
+        ("round_trip_fee", -0.001),
+        ("max_hold_bars", 0),
+    ],
+)
+def test_an_out_of_range_config_value_is_refused(key, value):
+    from tools.strategy_discovery.atr_contiguous_probe import DEFAULT_CONFIG
+
+    config = dict(DEFAULT_CONFIG)
+    config[key] = value
+    with pytest.raises(ValueError, match=key):
+        scan_contiguous_windows(_frame(), product_id="A-USD", horizon=_H, config=config)
