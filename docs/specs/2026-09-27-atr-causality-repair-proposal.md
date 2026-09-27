@@ -1,7 +1,12 @@
 # Proposal: repairing the ATR causality defect in dynamic-exit labels
 
 **Date:** 2026-09-27
-**Status:** PROPOSAL. Nothing here is implemented. Requires operator approval before any code change.
+**Status:** PROPOSAL for the LABEL POLICY. Nothing here is implemented.
+**Gate:** operator approval is required before any change to **production label semantics**
+(a v3 label version, a new blocker set, anything the producer writes). It is NOT required for
+the offline diagnostic in §5 and its tests, which preserve v2 and live semantics and are
+already within the standing authorisation — an earlier header gated those too, which was
+over-broad (Codex `c3c5acc8`).
 **Blocker addressed:** `label_atr_contemporaneous_causality` (`endpoint_records.py:41`)
 **Related:** `docs/specs/2026-09-26-label-endpoint-contract.md`,
 `docs/handoffs/2026-09-26-occupancy-correction-evidence.md`
@@ -63,12 +68,20 @@ catching.
 **Therefore the blocker should be SPLIT, not cleared.** Proposed replacement:
 
 - `label_atr_contemporaneous_causality` — repaired by §3, absent from v3 records.
-- `label_intrabar_order_assumption` — **permanent** for `stop`/`trail` records under bar data,
-  present on v3 records too, and it must remain a blocker on any deployment claim. §4.1 shows the
-  assumption is not merely a technicality: on a two-bar path the two orderings differ by 3.5x.
+- `label_intrabar_order_assumption` — **permanent, and only for `stop` and `trail` records.**
+  §4.1 shows it is not a technicality: on a two-bar path the two orderings differ by 3.5x.
 
-A v3 record therefore still carries a blocker. That is the correct outcome, and anyone reading a
-"causality fixed" headline should be pointed at this paragraph.
+**A `horizon` record carries neither blocker under v3.** Its exit is the close of a known bar:
+there is no threshold lookahead once the ATR is lagged, and no intrabar ordering question at all,
+which is exactly why `intrabar_timing_known` is already `True` for that kind and `False` for the
+others. An earlier draft of this document said the intrabar blocker was "present on both", which
+read as *every* record and contradicted §2's own stop/trail wording and §7's test — three sections
+disagreeing about one fact, which is the defect class this effort exists to remove (Codex
+`c3c5acc8`).
+
+So under v3: `horizon` records are unblocked, `stop`/`trail` records carry the ordering blocker,
+and ambiguous ones carry a second. A triggered-exit record therefore still carries a blocker, and
+anyone reading a "causality fixed" headline should be pointed at this paragraph.
 
 ---
 
@@ -153,14 +166,52 @@ Proposed B3 semantics:
   re-derive them.
 
 `min` is defensible precisely because it does **not** pretend to be a simulated path: it is an
-explicit **lower bound** over the orderings the data cannot distinguish, and the record says so.
-Publishing either branch alone would report a number the ordering assumption manufactured, which
-§4.1 shows can differ by 3.5x on a two-bar path.
+explicit lower bound and the record says so. Publishing either branch alone would report a number
+the ordering assumption manufactured, which §4.1 shows can differ by 3.5x on a two-bar path.
+
+**But be exact about what it bounds** (Codex `c3c5acc8`): `min(B1, B2)` is a bound over the **two
+enumerated orderings only**. It is **not** a bound over all intrabar price paths. A real bar may
+visit its low, recover, set its high and fall back, touching a trail level that neither B1 nor B2
+triggers; within-bar paths are unbounded in number and hourly OHLC constrains only the extremes.
+So the honest claim is:
+
+> `min(B1, B2)` bounds the two orderings this simulation can distinguish. The true worst case over
+> all paths consistent with the bar is not computed, and is not claimed to be.
+
+Anyone wanting a genuine worst-case bound needs sub-hourly data, which is a different project. The
+record must therefore carry the ordering blocker even when B1 and B2 agree — agreement between two
+scenarios is not proof that a third would agree.
 
 The ambiguity rate therefore becomes a **headline figure of the §5 probe, not a footnote**. If it
 is small, that is the strongest available statement about the assumption's materiality. If it is
 large, the honest conclusion is that hourly OHLC is too coarse to label a trail-stop strategy at
 all — a finding worth having explicitly rather than hidden inside a single published branch.
+
+### 4.3 Gap-through fills must be stated, because the current rule is optimistic
+
+Codex `c3c5acc8` asks for this explicitly and it is a real gap in both the code and the earlier
+draft. Today:
+
+```python
+if bar_low / entry_price - 1.0 <= -stop_loss_pct:
+    exit_price = entry_price * (1.0 - stop_loss_pct)     # fills AT the stop level
+```
+
+The fill is assumed to occur exactly at the stop level. When a bar **gaps through** the level —
+its open is already below it — a real order fills at or near the open, which is worse. The same
+applies to the trail branch, which fills at `peak * (1 - atr_pct)`.
+
+The current code therefore reports a better price than the data supports whenever a gap occurs.
+Proposed v3 rule, and note it needs the `open` column which the frame already carries:
+
+- `stop`: `exit_price = min(stop_level, open_i)`.
+- `trail`: `exit_price = min(trail_level, open_i)`.
+- Record a distinct `exit_price_basis` when the gap branch is taken (e.g. `gapped_open`), so a
+  consumer can count them rather than having to infer them.
+
+This is a **separate correction from the ATR lag** and should be measured separately in §5, not
+folded into the lag's effect. It is included here because a proposal that fixed the threshold
+while leaving an optimistic fill would still publish numbers the data does not support.
 
 Stop-versus-trail priority is unchanged: stop-loss is checked first, matching
 `cnn_agent._check_risk_exits`. That correspondence with the live exit ladder is deliberate and is
@@ -170,9 +221,24 @@ not part of this repair.
 
 A new script, `backend/tools/strategy_discovery/atr_causality_probe.py`, run on existing Phase 2
 frames, writing to a **new output path**. It must not touch `phase2/`, any published endpoint
-directory, any model artifact, or the live database.
+directory, any model artifact, or the live database. Building it needs no operator gate: it is
+offline, additive, and changes no label the producer writes.
 
-It computes, per product and horizon, for v2 (current) against v3 (lagged + B2):
+**Each change is measured in isolation, then combined** (Codex `c3c5acc8`), because a single
+combined diff cannot attribute an effect to a cause:
+
+| variant | lag-1 ATR | ordering | gap fill |
+|---|---|---|---|
+| v2 baseline | no | B1 | at-level |
+| L | **yes** | B1 | at-level |
+| O | no | **B3 bracket** | at-level |
+| G | no | B1 | **min(level, open)** |
+| v3 combined | yes | B3 | min(level, open) |
+
+Reporting L, O and G separately is what makes "the lag changed N records" a statement about the
+lag. It also guards against the variants interacting in a way a combined run would hide.
+
+For each variant against v2 it computes, per product and horizon:
 
 1. **Coverage**: records emitted by each version, and the rows where only one version emits.
 2. **Exit-kind migration**: a 3x3 matrix of `stop`/`trail`/`horizon` v2 → v3. The interesting cell
@@ -199,11 +265,40 @@ already governs outcome-label v1 versus v2 (invariant 22), and for the same reas
 |---|---|
 | `LABEL_VERSION` | new value, e.g. `label_endpoint_v3`; v2 stays valid for existing records |
 | `exit_config` | gains `atr_lag_bars: 1` and `intrabar_order: "low_before_high"` |
-| `config_id` / `data_id` | change automatically — `build_data_id` covers the config, so a v3 dataset cannot validate against a v2 frame binding, and vice versa. The existing anchor does this work; no new mechanism needed. |
+| `config_id` / `data_id` | change automatically — `build_data_id` covers the config, so a v3 dataset cannot validate against a v2 frame binding, and vice versa. This part genuinely is free. |
 | blockers | `label_atr_contemporaneous_causality` absent on v3; `label_intrabar_order_assumption` present on both; `label_intrabar_order_ambiguous` on v3 records where the two orderings disagree (§4.2) |
 | loader | must **reject a mixed-version dataset** (already rejects heterogeneous `label_version` via `_HEADER_FIELDS`) |
+| **validator — REQUIRED CODE CHANGE** | `_validate_blockers` must gain **version dispatch**. See §6.1: it currently rejects every v3 record. |
 | consumers | no signature change; they read whatever version the sidecar declares |
 | Phase 4 | `deployment_eligible` stays `false`. v3 removes one blocker; the others (independent holdout, cost/fill, accounting, prospective execution) are untouched. |
+
+### 6.1 Correction: versioning does NOT come free
+
+An earlier draft of this section said the existing `data_id` anchor did all the versioning work
+and no new mechanism was needed. That was wrong for the blockers, and I verified it by execution
+rather than reading:
+
+```
+_validate_blockers(("label_intrabar_order_assumption",))
+  -> ValueError: every record of this simulation version must carry the
+     label_atr_contemporaneous_causality blocker
+inspect.getsource(_validate_blockers): "label_version" in source -> False
+```
+
+`_validate_blockers` requires `CAUSALITY_BLOCKER` **unconditionally, with no version dispatch**.
+Every v3 record would be rejected by the validator that exists today. The required change:
+
+- `_validate_blockers` takes the record's `label_version` and enforces a **per-version required
+  set**: v2 → `{label_atr_contemporaneous_causality}`; v3 → `{label_intrabar_order_assumption}`
+  for `stop`/`trail`, `{}` for `horizon`.
+- A v2 record that drops its blocker must still be rejected, so the v2 path cannot be weakened by
+  the addition. That is a test, not a comment.
+- The mandatory-set table lives in one place, keyed by version, so a future version cannot acquire
+  a silently empty requirement.
+
+`_EXIT_BASIS` also needs the `gapped_open` basis from §4.3, and `_validate_exit_semantics` pairs
+`exit_kind` with basis, so that mapping becomes version-dependent too. Both are why §7 test 5 and
+test 6 exist.
 
 Archived v2-based verdicts are **not** invalidated by this change and **not** validated by it
 either. They remain uninformative for the reasons already recorded in the occupancy note §5.
@@ -220,8 +315,11 @@ either. They remain uninformative for the reasons already recorded in the occupa
    is known at the entry instant. Assert the exact value used, not merely that it ran.
 4. **Warm-up.** Rows inside the first 14 bars fall back to the floor in v3, and the set differs
    from v2 by exactly one row's shift.
-5. **Blocker split.** v3 records carry `label_intrabar_order_assumption` and NOT
-   `label_atr_contemporaneous_causality`; a v3 record missing the intrabar blocker is rejected.
+5. **Blocker split, per record kind.** A v3 `stop`/`trail` record carries
+   `label_intrabar_order_assumption` and NOT `label_atr_contemporaneous_causality`; a v3
+   `horizon` record carries neither; a v3 `stop` record missing the ordering blocker is rejected;
+   and a **v2** record missing the ATR blocker is still rejected, proving the version dispatch did
+   not weaken the v2 path. The last of those is the one that would silently rot.
 6. **Version isolation.** A dataset mixing v2 and v3 records fails to load. A v3 dataset fails to
    validate against a v2 frame binding.
 7. **Neither ordering dominates, and the bound holds.** Pin §4.1's counterexample exactly as a
@@ -233,9 +331,14 @@ either. They remain uninformative for the reasons already recorded in the occupa
    assert any dominance between B1 and B2 in either direction -- that is the false claim.
 8. **No silent regeneration.** The probe writes only under its own output directory; assert the
    Phase 2 directory's contents are unchanged after a run.
-9. **Equivalence where it should hold.** On a frame with no trail exits at all, v2 and v3 labels
-   are bit-identical. This is the non-vacuity guard: if it fails, the change is broader than
-   claimed; if the suite has no such case, the other tests cannot localise the change.
+9. **Equivalence where it should hold.** On a frame with no trail exits and no gaps, v2 and v3
+   labels are bit-identical. The non-vacuity guard: if it fails, the change is broader than
+   claimed; without such a case the other tests cannot localise the change.
+10. **Gap fills.** A bar whose open is already below the stop level fills at the open, not the
+   level, and records the `gapped_open` basis. Falsify by reverting to the at-level fill.
+11. **Variant isolation.** The probe's L, O and G variants each differ from v2 in exactly the
+   records their own change can touch: L only where the lagged and contemporaneous ATR straddle a
+   trigger, G only where a gap occurs, O only where the two orderings disagree.
 
 ---
 
