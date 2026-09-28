@@ -7,6 +7,37 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.92 — 2026-09-28 — Operator-visible incident: I stopped the live backend, and two data-provenance facts it exposed
+
+**Incident.** Asked to kill what I had reported as a duplicate backend, I terminated
+PID 11484 with `Stop-Process -Force`. It was **not** a duplicate: the live
+backend runs as a **two-process tree** — a parent launcher and the child that
+binds 8001 — so killing the parent took down the live process. Port 8001 was down
+from **10:41Z to 11:09Z (~28 minutes)**.
+
+My diagnosis failed on one specific omission: I verified the two PIDs were
+distinct processes holding distinct ports, and never checked the **parent/child
+relationship**, which is the only fact that determines whether killing one kills
+the other. Separating "verify" from "act" — which had just been written into
+`CLAUDE.md` — does not help when the verification omits the relevant fact.
+
+Restarted on operator authorisation; 8001 listening, scan loop running, ~3,100
+scans in the following ten minutes, models and HMM regime reloaded.
+
+**Data-provenance consequence, recorded because it will otherwise silently
+corrupt later analysis:** `cnn_scans` has a **hole from 2026-09-28T10:41:02Z to
+11:09:40Z**. Any windowed statistic spanning it is computed over missing bars.
+
+**And a pre-existing fact this exposed.** `trades` holds **52 rows with
+`closed_at IS NULL`, ALL belonging to TECH**, the agent retired 2026-05-17; the
+newest opened 2026-05-16. They are four-month-old orphans, not live exposure. The
+CNN book correctly restores `positions=0`. Any query counting "open positions"
+without filtering by agent will report 52 phantom positions — the same
+agent-scoping defect that invalidated this session's first PnL attribution.
+
+---
+
+
 ### Session 58.91 — 2026-09-28 — Closed-bar filtering for historical replay (opt-in)
 
 Found by the peer session; verified here. `services/tiered_history.py` filtered
