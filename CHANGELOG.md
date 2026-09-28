@@ -65,9 +65,15 @@ replay.*
   passing `False`, so the opt-in claim is non-vacuous; one pins the boundary — a
   bar closing *exactly* at `now_ts` was fully observed and must stay usable.
 
-**Deliberately opt-in.** Flipping the default would change what the replay
-callsite (`xgb_signal.py:325`) computes. That is an operator decision, not a lint
-repair. No live path moves: 20 tiered-history tests and 45 caller tests green.
+**Deliberately opt-in — and therefore NOT YET A FIX.** Corrected 2026-09-28
+after peer review: **no caller passes `closed_only=True`.** `xgb_signal.py:325`
+is the only production site supplying `now_ts` — the only replay path — and it
+does not opt in. What landed is a *tested capability*, not a closed leak. Calling
+it "fixed" claimed more than the code delivers, which is the defect class this
+session exists to catalogue. Flipping the default changes what that callsite
+computes and remains an operator decision. *Grep hazard: `closed_only` is also an
+unrelated parameter of `database.get_trades`, so searching the name gives false
+comfort.* No live path moves: 20 tiered-history tests and 45 caller tests green.
 
 ---
 
