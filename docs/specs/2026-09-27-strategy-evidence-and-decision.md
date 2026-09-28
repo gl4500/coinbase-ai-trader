@@ -110,9 +110,10 @@ the boundary and no interim tuning.
 - A different signal family.
 - A short or market-neutral construction, which is architecturally unavailable on spot.
 
-**Recommendation: the next work is measurement infrastructure, not strategy search.** Five
-conclusions inverted in one session, each time because a measurement tier was assumed rather
-than established.
+**Recommendation: the next work is measurement infrastructure, not strategy search.** Eight
+conclusions inverted in one session -- endpoint target, deduplication, fee framing, a scenario
+stated as a measurement, spread, timer artifacts, instrument selection, and the exit-versus-
+entry attribution -- each time because a measurement tier was assumed rather than established.
 
 ---
 
