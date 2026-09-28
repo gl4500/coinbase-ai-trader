@@ -223,3 +223,140 @@ class TestNowTsFilter:
         for tier in ("micro", "meso", "macro"):
             for c in result[tier]:
                 assert c["start"] < cutoff, f"{tier} contains future bar"
+
+
+# ---------------------------------------------------------------------------------------
+# Closed-bar replay safety (2026-09-28)
+#
+# `_read_parquet`/`_read_sqlite` filter `start < now_ts` -- on the bar's START only. A bar
+# that began before `now_ts` but had not yet CLOSED is therefore included.
+#
+# Live that is correct and harmless: the store only holds data up to now, so the newest bar
+# is genuinely partial. In REPLAY from a completed parquet that same bar carries its final
+# high/low/close/volume, so up to 59 minutes of future information enters the features -- at
+# a 15-minute scan cadence. Every retrospective re-score built this way is invalid.
+#
+# `closed_only=True` makes the as-of semantics explicit. It is OPT-IN: the default is
+# unchanged, so no live path moves. Flipping the default would change what the replay path
+# computes and is a separate, operator-owned decision.
+
+_BAR = 3600.0
+
+
+def _write_hourly_parquet(tmp_path, pid, n=400, first_start=0.0):
+    import pandas as pd
+
+    rows = [
+        {
+            "start": first_start + i * _BAR,
+            "open": 10.0 + i,
+            "high": 11.0 + i,
+            "low": 9.0 + i,
+            "close": 10.5 + i,
+            "volume": 100.0 + i,
+        }
+        for i in range(n)
+    ]
+    d = tmp_path / "hist"
+    d.mkdir(exist_ok=True)
+    pd.DataFrame(rows).to_parquet(d / f"{pid}.parquet")
+    return str(d)
+
+
+def _write_hourly_sqlite(tmp_path, pid, n=400, first_start=0.0):
+    import sqlite3
+
+    p = tmp_path / "candles.db"
+    c = sqlite3.connect(str(p))
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS candles (product_id TEXT, start_time REAL, "
+        "open REAL, high REAL, low REAL, close REAL, volume REAL)"
+    )
+    c.executemany(
+        "INSERT INTO candles VALUES (?,?,?,?,?,?,?)",
+        [
+            (pid, first_start + i * _BAR, 10.0 + i, 11.0 + i, 9.0 + i, 10.5 + i, 100.0 + i)
+            for i in range(n)
+        ],
+    )
+    c.commit()
+    c.close()
+    return str(p)
+
+
+def test_default_still_admits_the_unclosed_bar(tmp_path):
+    """Characterisation of the defect, so the behaviour is pinned rather than assumed.
+    now_ts lands 10 minutes into the bar starting at 399*3600; that bar is still returned."""
+    from services.tiered_history import fetch_tiered
+
+    pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
+    forming_start = 399 * _BAR
+    now = forming_start + 600.0
+    tiers = fetch_tiered("AAA-USD", source="parquet", now_ts=now, parquet_dir=pdir)
+    assert tiers["micro"][-1]["start"] == forming_start
+
+
+def test_closed_only_excludes_the_bar_that_had_not_closed(tmp_path):
+    from services.tiered_history import fetch_tiered
+
+    pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
+    forming_start = 399 * _BAR
+    now = forming_start + 600.0
+    tiers = fetch_tiered(
+        "AAA-USD", source="parquet", now_ts=now, parquet_dir=pdir, closed_only=True
+    )
+    assert tiers["micro"][-1]["start"] == forming_start - _BAR
+
+
+def test_a_bar_closing_exactly_at_now_is_still_usable(tmp_path):
+    """Boundary: a bar that ended precisely at the decision instant WAS fully observed.
+    Excluding it would discard real information and quietly shorten every window."""
+    from services.tiered_history import fetch_tiered
+
+    pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
+    last_closed = 398 * _BAR
+    now = last_closed + _BAR
+    tiers = fetch_tiered(
+        "AAA-USD", source="parquet", now_ts=now, parquet_dir=pdir, closed_only=True
+    )
+    assert tiers["micro"][-1]["start"] == last_closed
+
+
+def test_the_default_is_byte_identical_to_passing_false(tmp_path):
+    """Non-vacuity for the opt-in claim: no live path can move because the default changed."""
+    from services.tiered_history import fetch_tiered
+
+    pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
+    now = 399 * _BAR + 600.0
+    implicit = fetch_tiered("AAA-USD", source="parquet", now_ts=now, parquet_dir=pdir)
+    explicit = fetch_tiered(
+        "AAA-USD", source="parquet", now_ts=now, parquet_dir=pdir, closed_only=False
+    )
+    assert implicit == explicit
+
+
+def test_closed_only_applies_to_the_sqlite_source_too(tmp_path):
+    """The live source reads SQLite; a fix that only covered parquet would leave the leak
+    reachable through the other reader."""
+    from services.tiered_history import fetch_tiered
+
+    db = _write_hourly_sqlite(tmp_path, "AAA-USD")
+    pdir = _write_hourly_parquet(tmp_path, "BBB-USD")  # unrelated, keeps the fallback empty
+    forming_start = 399 * _BAR
+    now = forming_start + 600.0
+    leaky = fetch_tiered("AAA-USD", source="live", now_ts=now, db_path=db, parquet_dir=pdir)
+    safe = fetch_tiered(
+        "AAA-USD", source="live", now_ts=now, db_path=db, parquet_dir=pdir, closed_only=True
+    )
+    assert leaky["micro"][-1]["start"] == forming_start
+    assert safe["micro"][-1]["start"] == forming_start - _BAR
+
+
+def test_closed_only_without_an_as_of_instant_is_refused(tmp_path):
+    """With no now_ts there is no decision instant, so "closed" has no referent. Silently
+    doing nothing would hand the caller a false guarantee."""
+    from services.tiered_history import fetch_tiered
+
+    pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
+    with pytest.raises(ValueError):
+        fetch_tiered("AAA-USD", source="parquet", now_ts=None, parquet_dir=pdir, closed_only=True)
