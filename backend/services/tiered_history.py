@@ -15,6 +15,10 @@ import pandas as pd
 
 _TIER_WINDOWS: Dict[str, int] = {"micro": 60, "meso": 168, "macro": 336}
 
+# Tier windows are counted in HOURLY bars, so a bar spans this many seconds. Used only to
+# decide whether a bar had CLOSED by a given instant; see `closed_only` on fetch_tiered.
+_BAR_SECONDS = 3600.0
+
 _DEFAULT_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_PARQUET_DIR = os.path.join(_DEFAULT_BACKEND_DIR, "data", "history")
 _DEFAULT_DB_PATH = os.path.join(_DEFAULT_BACKEND_DIR, "coinbase.db")
@@ -38,18 +42,25 @@ def _candle_dict(row) -> Dict:
     }
 
 
-def _read_parquet(pid: str, parquet_dir: str, now_ts: Optional[float]) -> List[Dict]:
+def _read_parquet(
+    pid: str, parquet_dir: str, now_ts: Optional[float], closed_only: bool = False
+) -> List[Dict]:
     path = os.path.join(parquet_dir, f"{pid}.parquet")
     if not os.path.exists(path):
         return []
     df = pd.read_parquet(path)
     df = df.sort_values("start", kind="mergesort")
     if now_ts is not None:
-        df = df[df["start"] < now_ts]
+        if closed_only:
+            df = df[df["start"] + _BAR_SECONDS <= now_ts]
+        else:
+            df = df[df["start"] < now_ts]
     return [_candle_dict(r) for _, r in df.iterrows()]
 
 
-def _read_sqlite(pid: str, db_path: str, now_ts: Optional[float], limit: int = 400) -> List[Dict]:
+def _read_sqlite(
+    pid: str, db_path: str, now_ts: Optional[float], limit: int = 400, closed_only: bool = False
+) -> List[Dict]:
     """Read candle rows from SQLite. Production schema has 'start_time'
     (not 'start'); we alias to 'start' on the way out so callers and the
     parquet reader produce identical dicts. Test fixtures may use either
@@ -67,7 +78,7 @@ def _read_sqlite(pid: str, db_path: str, now_ts: Optional[float], limit: int = 4
         )
         args: list = [pid]
         if now_ts is not None:
-            sql += f" AND {ts_col} < ?"
+            sql += f" AND {ts_col} + {_BAR_SECONDS!r} <= ?" if closed_only else f" AND {ts_col} < ?"
             args.append(now_ts)
         sql += f" ORDER BY {ts_col} ASC"
         rows = c.execute(sql, args).fetchall()
@@ -83,24 +94,42 @@ def fetch_tiered(
     now_ts: Optional[float] = None,
     parquet_dir: Optional[str] = None,
     db_path: Optional[str] = None,
+    closed_only: bool = False,
 ) -> Dict[str, List[Dict]]:
     """Return {"micro", "meso", "macro"} candle slices for `pid`.
 
     Each tier slice is the LAST N bars (n=60/168/336) in ascending order.
     Returns [] for any tier whose underlying series has fewer than N bars.
+
+    `closed_only` decides what "as of `now_ts`" means, and the distinction is only visible
+    in REPLAY. The default filter keeps bars whose START precedes `now_ts`, which admits the
+    bar that had begun but not yet CLOSED. Live that is correct and harmless: the store holds
+    nothing beyond now, so that bar is genuinely partial. Replaying from a completed parquet,
+    the same bar carries its final high/low/close/volume -- so up to one bar of future
+    information enters the features, which at a 15-minute scan cadence is most of an hour.
+
+    Pass `closed_only=True` for any historical reconstruction. It is opt-in precisely so that
+    no live path moves: flipping the default changes what the replay callsite computes, which
+    is an operator decision, not a lint repair.
     """
     if source not in ("parquet", "live"):
         raise ValueError(f"unknown source={source!r}; expected 'parquet' or 'live'")
+    if closed_only and now_ts is None:
+        # Without a decision instant, "closed" has no referent. Quietly ignoring the flag
+        # would hand the caller a guarantee that was never applied.
+        raise ValueError("closed_only=True requires now_ts")
 
     pdir = parquet_dir or _DEFAULT_PARQUET_DIR
     dpath = db_path or _DEFAULT_DB_PATH
 
     if source == "parquet":
-        all_candles = _read_parquet(pid, pdir, now_ts)
+        all_candles = _read_parquet(pid, pdir, now_ts, closed_only)
     else:  # live
-        all_candles = _read_sqlite(pid, dpath, now_ts, limit=max(_TIER_WINDOWS.values()))
+        all_candles = _read_sqlite(
+            pid, dpath, now_ts, limit=max(_TIER_WINDOWS.values()), closed_only=closed_only
+        )
         if len(all_candles) < _TIER_WINDOWS["macro"]:
-            parquet_prefix = _read_parquet(pid, pdir, now_ts)
+            parquet_prefix = _read_parquet(pid, pdir, now_ts, closed_only)
             if parquet_prefix:
                 seen = {c["start"] for c in all_candles}
                 merged = parquet_prefix + [c for c in all_candles if c["start"] not in seen]

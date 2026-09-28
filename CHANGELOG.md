@@ -7,6 +7,40 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.91 — 2026-09-28 — Closed-bar filtering for historical replay (opt-in)
+
+Found by the peer session; verified here. `services/tiered_history.py` filtered
+`df["start"] < now_ts` — on the bar's **start** only — so a bar that had begun
+but not yet **closed** was included.
+
+**Live this is correct and harmless:** the store holds nothing beyond now, so the
+newest bar is genuinely partial. **In replay it is a look-ahead:** the same bar
+in a completed parquet carries its final high/low/close/volume, so up to one bar
+of future information enters the features — at a 15-minute scan cadence, most of
+an hour. Every retrospective re-score built this way is invalid, which is why the
+defect survived: *the production code reads correctly and only misbehaves in
+replay.*
+
+**Files:**
+- `backend/services/tiered_history.py` — `fetch_tiered(..., closed_only=False)`.
+  When true, a bar is kept only if `start + 3600 <= now_ts`. Plumbed through both
+  the parquet and SQLite readers, because a fix covering only one leaves the leak
+  reachable through the other. `closed_only=True` without `now_ts` raises rather
+  than silently no-opping — with no decision instant, "closed" has no referent,
+  and quietly ignoring the flag hands the caller a guarantee never applied.
+- `backend/tests/test_tiered_history.py` — 6 tests. One **characterises the
+  defect** (the unclosed bar is still admitted by default) so the behaviour is
+  pinned rather than assumed; one asserts the default is byte-identical to
+  passing `False`, so the opt-in claim is non-vacuous; one pins the boundary — a
+  bar closing *exactly* at `now_ts` was fully observed and must stay usable.
+
+**Deliberately opt-in.** Flipping the default would change what the replay
+callsite (`xgb_signal.py:325`) computes. That is an operator decision, not a lint
+repair. No live path moves: 20 tiered-history tests and 45 caller tests green.
+
+---
+
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
