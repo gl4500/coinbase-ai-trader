@@ -82,11 +82,17 @@ picks badly; it is that it trades at all.
   `USE_MAKER_EXECUTION` is default-off. Against the best measured gross edge (~1.4% per round
   trip over 7 days) total frictions are 1.43–2.27%. **This is a sensitivity scenario, not the
   historical sign** — the spread reading is a current snapshot and no fills exist.
-- **What did survive every correction [P]:** the score separates *decline*. Rejected candidates
-  returned −5.2% to −7.5% at 168h against ~0% to +0.8% for gated ones, consistently across
-  configurations, with controls far from zero. The model knows what falls, not what rises. That
-  asymmetry is real and is still not monetisable long-only: harvesting it needs a short leg the
-  spot architecture does not have.
+- **The one effect that survived every correction — and it is a HYPOTHESIS, not a finding.**
+  The score appears to separate *decline*: rejected candidates returned −5.2% to −7.5% at 168h
+  against ~0% to +0.8% for gated ones, consistently across configurations, with controls far
+  from zero. I had labelled this [P]. Codex downgraded it and I accept the downgrade: the
+  comparison is **not** adjusted for product and regime composition, ATR/volatility, repeated
+  overlapping windows, scan availability, or the inference-cache ties — and a product×time
+  bootstrap **does not cure selection or target leakage**, only dependence. Establishing it
+  requires testing within product and contemporaneous week, stratifying on causally-computed
+  ATR%, using independent signal episodes with an overlap embargo, and reporting coverage and
+  missingness. None of that has been done. Even if it held, it is not monetisable long-only:
+  harvesting it needs a short leg the spot architecture does not have.
 
 ### Multiplicity, stated so it cannot be laundered
 
@@ -94,6 +100,28 @@ Over 120 configurations were evaluated against one sample. **That sample is disc
 permanently** — no multiplicity correction converts a selected winner into a confirmation.
 Confirmation requires chronologically later, uninspected data with at least a 168h purge at
 the boundary and no interim tuning.
+
+### Methodology resolutions agreed with the peer session, 2026-09-28
+
+These answer the questions this document previously left open, and they are binding on any
+follow-up work:
+
+- **ATR is admissible as a scale variable only if computed exactly as production computes it,
+  from fully closed bars, with formula, version and warm-up frozen.** Wilder ATR is recursive
+  smoothing, not a clean 14-bar window; do not imply the latter.
+- **ATR does not supply an eligibility floor, and no cutoff should be chosen from this
+  dataset.** The stablecoin problem was discovered in these residuals, so any threshold picked
+  now and evaluated here is post-hoc. Eligibility must instead come from **independent venue
+  and product constraints** — the exchange's own product classification — declared before a new
+  forward period is collected. This supersedes the ATR%-floor proposal made earlier in this
+  document's drafting.
+- **Further search on this sample is not confirmatory.** With >120 configurations tried and
+  known target/data defects, the options are: freeze the current universe and stop, or freeze
+  one fully specified policy and test it **once** on untouched forward data, always against a
+  **no-trade comparator**.
+- **Closed-bar filtering is mandatory for historical feature replay.** Restated here because it
+  is the defect most likely to be reintroduced silently: the production filter reads correctly
+  and only misbehaves in replay.
 
 ### The four blockers — no future result is trustworthy until these are fixed
 
