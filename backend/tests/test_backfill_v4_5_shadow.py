@@ -34,10 +34,11 @@ class TestXgbProbV45NowTs:
 
         captured = {}
 
-        def _fake_fetch(pid, source="live", now_ts=None):
+        def _fake_fetch(pid, source="live", now_ts=None, closed_only=False):
             captured["pid"] = pid
             captured["source"] = source
             captured["now_ts"] = now_ts
+            captured["closed_only"] = closed_only
             return {"micro": [], "meso": [], "macro": []}
 
         monkeypatch.setattr(
@@ -70,7 +71,7 @@ class TestXgbProbV45NowTs:
 
         captured = {}
 
-        def _fake_fetch(pid, source="live", now_ts=None):
+        def _fake_fetch(pid, source="live", now_ts=None, closed_only=False):
             captured["now_ts"] = now_ts
             return {"micro": [], "meso": [], "macro": []}
 
@@ -231,3 +232,62 @@ class TestBackfillTool:
         row = conn.execute("SELECT xgb_prob_v4_5_down FROM cnn_scans WHERE id=1").fetchone()
         conn.close()
         assert row[0] is None
+
+
+class TestReplayAsksForClosedBarsOnly:
+    """A historical re-score must not consume a candle that had not closed.
+
+    `fetch_tiered`'s default filter keeps bars whose START precedes `now_ts`, which admits the
+    bar that had begun but not finished. Replaying from a completed parquet, that bar carries
+    its final high/low/close/volume, so up to an hour of future information enters the
+    features at a 15-minute scan cadence -- and every metric computed that way is invalid.
+
+    The opt-in is tied to `now_ts` rather than exposed as a separate switch, which makes the
+    live path byte-identical BY CONSTRUCTION rather than by discipline: live callers
+    (`cnn_agent` via `xgb_prob_shadow_v4_5`) pass no `now_ts`, so they cannot accidentally
+    acquire the replay semantics, and the only caller that does pass one is
+    `tools/backfill_v4_5_shadow.py`, which is a replay by definition.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch):
+        from agents import xgb_signal as xs
+
+        monkeypatch.setattr(xs, "_try_load_v4_5", lambda: True)
+        monkeypatch.setattr(xs, "_booster_v45", _FakeBooster(), raising=False)
+        # unique names: duplicates make DMatrix raise, so the call would only be observable
+        # through the function's own except branch -- a weaker test than the real path.
+        monkeypatch.setattr(xs, "_feature_names_v45", [f"f{i}" for i in range(210)], raising=False)
+
+        seen = {}
+
+        def _fake_fetch(pid, source="live", now_ts=None, closed_only=False):
+            seen["now_ts"] = now_ts
+            seen["closed_only"] = closed_only
+            return {"micro": [], "meso": [], "macro": []}
+
+        monkeypatch.setattr("services.tiered_history.fetch_tiered", _fake_fetch)
+
+        def _fake_extract(tiers):
+            import numpy as np
+
+            return (np.zeros((1, 210)), [])
+
+        monkeypatch.setattr("tools.xgb_v4_5_features.extract_v4_5", _fake_extract)
+        return xs, seen
+
+    def test_supplying_now_ts_requests_closed_bars_only(self, monkeypatch):
+        xs, seen = self._spy(monkeypatch)
+        xs.xgb_prob_v4_5(channels=None, pid="BTC-USD", now_ts=1700000000.0)
+        assert seen, "fetch_tiered was never called -- assertion would be vacuous"
+        assert seen["now_ts"] == 1700000000.0
+        assert seen["closed_only"] is True
+
+    def test_the_live_path_is_unchanged(self, monkeypatch):
+        """Non-vacuity for the safety claim. Without an as-of instant there is nothing to be
+        "as of", so the live filter must stay exactly as it was."""
+        xs, seen = self._spy(monkeypatch)
+        xs.xgb_prob_v4_5(channels=None, pid="BTC-USD")
+        assert seen, "fetch_tiered was never called -- assertion would be vacuous"
+        assert seen["now_ts"] is None
+        assert seen["closed_only"] is False

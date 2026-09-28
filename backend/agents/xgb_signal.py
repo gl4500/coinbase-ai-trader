@@ -300,9 +300,18 @@ def xgb_prob_v4_5(
 ) -> Tuple[float, float, float]:
     """v4.5 3-class probabilities (p_down, p_neutral, p_up).
 
-    When `now_ts` is provided, fetch_tiered uses it to look up the tier
-    slices as they would have been at that historical timestamp (drops
-    candles with start >= now_ts). Default None = live (current behavior).
+    When `now_ts` is provided this is a HISTORICAL reconstruction, so the tier
+    slices are taken as of that instant using CLOSED bars only -- a bar counts
+    only once `start + 3600 <= now_ts`. Filtering on bar start alone (the older
+    behaviour) admitted the bar that had begun but not finished; replayed from a
+    completed parquet that bar carries its final high/low/close/volume, leaking
+    up to an hour of future information into the features at a 15-minute scan
+    cadence, which invalidates any metric computed from it.
+
+    Default None = live, byte-identical to before. The opt-in is derived from
+    `now_ts` rather than exposed separately so the live path cannot acquire
+    replay semantics by accident: live callers pass no instant, and the only
+    caller that does is `tools/backfill_v4_5_shadow.py`.
 
     Each clipped to [0.01, 0.99] then renormalized to sum to 1.0. Returns
     neutral fallback (0.33, 0.34, 0.33) if artifacts missing, pid is None,
@@ -322,7 +331,7 @@ def xgb_prob_v4_5(
         from services.tiered_history import fetch_tiered
         from tools.xgb_v4_5_features import extract_v4_5
 
-        tiers = fetch_tiered(pid, source="live", now_ts=now_ts)
+        tiers = fetch_tiered(pid, source="live", now_ts=now_ts, closed_only=now_ts is not None)
         features, _ = extract_v4_5(tiers)
         dmat = xgb.DMatrix(features, feature_names=_feature_names_v45)
         raw = _booster_v45.predict(dmat)

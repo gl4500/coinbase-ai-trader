@@ -7,6 +7,40 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.93 — 2026-09-28 — The replay caller now opts in, so the leak is actually closed
+
+Completes 58.91, which landed a closed-bar *capability* that nothing called. The
+peer session's test for whether a leak is fixed — does a replay caller pass the
+flag? — was failing.
+
+`xgb_prob_v4_5` now calls `fetch_tiered(..., closed_only=now_ts is not None)`.
+
+**Deriving the opt-in from `now_ts` rather than exposing a second switch makes the
+live path byte-identical by construction rather than by discipline.** Live callers
+(`cnn_agent` via `xgb_prob_shadow_v4_5`) pass no instant, so they cannot acquire
+replay semantics by accident; the only caller that passes one is
+`tools/backfill_v4_5_shadow.py`, which is a replay by definition. There is no
+configuration in which the live scan loop changes behaviour.
+
+**Files:**
+- `backend/agents/xgb_signal.py` — the call, plus a docstring that had described
+  the leak as intended behaviour ("drops candles with start >= now_ts").
+- `backend/tests/test_backfill_v4_5_shadow.py` — 2 tests: supplying `now_ts`
+  requests closed bars; the live path still does not. Both assert the spy was
+  actually invoked first, so neither can pass vacuously. Three pre-existing fake
+  `fetch_tiered` signatures were widened to accept the kwarg — without that they
+  raise `TypeError` inside the function's own `except`, which would have hidden
+  the change behind a fallback rather than surfacing it.
+
+**Consequence worth stating:** any previously stored v4.5 shadow metric was
+computed with the leak and is not reproducible under the corrected path. Those
+figures were already invalid; this makes the invalidity explicit rather than
+silent. 217 tests green across the replay path, xgb_signal, tiered_history and
+cnn_agent.
+
+---
+
+
 ### Session 58.92 — 2026-09-28 — Operator-visible incident: I stopped the live backend, and two data-provenance facts it exposed
 
 **Incident.** Asked to kill what I had reported as a duplicate backend, I terminated
