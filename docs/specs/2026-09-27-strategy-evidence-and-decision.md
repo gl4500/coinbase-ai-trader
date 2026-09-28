@@ -21,20 +21,37 @@ single largest source of error in this session was treating one tier as another:
 
 ### The conclusion
 
-**On this universe, in this period, at these frictions, the correct action is to not trade.**
-Every strategy family testable with existing data converges on that:
+**No candidate has established positive net expected value. Default to no deployment, pending
+forward evidence.**
+
+That wording is deliberate and replaces an earlier draft of this section which said "the
+correct action is to not trade." The peer session flagged the overstatement and is right:
+with **zero orders**, no verified net expectancy, and spread/fee figures that are *scenarios*,
+the statement "the lower confidence bound on net EV is never positive" **is not literally
+measured**. Declining to deploy is a prudent risk gate under missing E/X evidence; it is not a
+demonstration that trading is intrinsically worse, nor that abstention is an optimal
+predictive policy. Inferring *evidence of negative EV* from *absence of evidence for positive
+EV* is the same tier confusion this document exists to catalogue — committed here, in its own
+conclusion.
+
+The tested candidates **fail or are inconclusive** — not "every family converges", which also
+overstates, since an invalid harness converges on nothing:
 
 | family | result |
 |---|---|
-| entry picking on the score | no edge — 45.0% up at +4h vs 43.9% for rejected candidates [P] |
-| bracket exits, 111 configurations | best +0.210% before spread; negative after [P] |
-| horizon variation 24/72/168/336/720h | apparent gains were 47–80% **timer** exits, not price exits [M] |
-| liquidity restriction | selected stablecoins; one product carried 49 clusters [M] |
-| veto / state filter on holdings | degenerates to cash — median time held **0.0%** [P] |
+| family | status | why |
+|---|---|---|
+| entry picking on the score | **fails** [P] | 45.0% up at +4h vs 43.9% for rejected candidates |
+| bracket exits, 111 configurations | **inconclusive** [P] | best +0.210% before spread, negative under a spread *scenario*; every CI spans zero |
+| horizon variation 24/72/168/336/720h | **invalid as run** [M] | 47–80% of exits were the timer, not a price condition |
+| liquidity restriction | **invalid as run** [M] | selected stablecoins; one product carried 49 clusters |
+| veto / state filter | **untested** [M] | never entered — median time held 0.0%, so it was not exercised |
+| Phase 4 mining | **uninformative** [M] | leaking fold splitter; converges on nothing |
 
-This is Codex's abstain-first rule reached empirically: when the lower confidence bound on net
-expected value is never positive, HOLD *is* the answer. The system's defect is not that it
-picks badly; it is that it trades at all.
+This is the abstain-first rule applied as a **gate**, not as a measured optimum: absent E/X
+evidence, the default is no deployment. **It does not establish that no signal exists** — only
+that none has been shown to pay for itself under conditions that were themselves never
+measured.
 
 ### Corrections to the numbers below
 
@@ -63,7 +80,14 @@ picks badly; it is that it trades at all.
 - **The max-hold cap is the primary exit, not a safety net.** Under an 8% stop / 12% trail it
   ended 80.2% of positions at 24h and 49.2% at 168h. Invariant #4 describes it as a safety net;
   that does not match its behaviour.
-- **Retrospective feature reconstruction leaks.** `backend/services/tiered_history.py:48`
+- **Retrospective feature reconstruction leaks — and is STILL LEAKING.** A closed-bar
+  capability was added (`fetch_tiered(..., closed_only=True)`, 6 tests, commit `0f4a3db`) but
+  **no caller passes it.** `xgb_signal.py:325` is the only production site that supplies
+  `now_ts`, i.e. the only replay path, and it does not opt in. The capability exists; the leak
+  is not closed. An earlier changelog entry called this "fixed", which claimed more than the
+  code delivers — the defect class this document is about. *Grep hazard: `closed_only` is also
+  an unrelated parameter of `database.get_trades`, so searching the name gives false comfort.*
+  `backend/services/tiered_history.py:48`
   filters `df["start"] < now_ts` — on bar **start** only — so a still-forming candle is
   admitted. Harmless live (the partial bar holds only past data); in replay from parquet the
   candle is complete, so up to 59 minutes of future high/low/close enters the features at a
