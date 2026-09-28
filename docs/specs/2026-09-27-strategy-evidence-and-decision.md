@@ -4,6 +4,118 @@
 **Status:** decision input, not a decision. No recommendation to stop or continue is made here.
 **Scope:** polymarket_app, the live paper-trading backend on port 8001. Not `trading_app`.
 
+## SUPERSEDING SECTION — added 2026-09-28 after eight measured reversals
+
+Everything below this section was written before the corrections here. Where they conflict,
+**this section controls.** Evidence is labelled with the tier Codex proposed, because the
+single largest source of error in this session was treating one tier as another:
+
+| tier | meaning |
+|---|---|
+| **M** mechanism verified | the code does what it is said to do |
+| **P** predictive evidence | a statistical association measured out of sample |
+| **E** economic evidence | positive net expectancy after realistic costs |
+| **X** execution verified | attainable with recorded fills and fees |
+
+**Nothing in this repository reaches tier E. Nothing reaches tier X.** `orders` has 0 rows.
+
+### The conclusion
+
+**On this universe, in this period, at these frictions, the correct action is to not trade.**
+Every strategy family testable with existing data converges on that:
+
+| family | result |
+|---|---|
+| entry picking on the score | no edge — 45.0% up at +4h vs 43.9% for rejected candidates [P] |
+| bracket exits, 111 configurations | best +0.210% before spread; negative after [P] |
+| horizon variation 24/72/168/336/720h | apparent gains were 47–80% **timer** exits, not price exits [M] |
+| liquidity restriction | selected stablecoins; one product carried 49 clusters [M] |
+| veto / state filter on holdings | degenerates to cash — median time held **0.0%** [P] |
+
+This is Codex's abstain-first rule reached empirically: when the lower confidence bound on net
+expected value is never positive, HOLD *is* the answer. The system's defect is not that it
+picks badly; it is that it trades at all.
+
+### Corrections to the numbers below
+
+1. **"−$95.77" is GROSS and PAPER.** `cnn_agent.py:322` computes `pnl = proceeds − size ×
+   avg_price` with no fee term, and `orders` is empty, so no cash was lost and net expectancy
+   is **unmeasurable**, not merely unmeasured. An earlier draft of this session stated a
+   "net −$958.34"; that was a fee *scenario* presented as a measurement and is withdrawn.
+2. **Agent tag is not model provenance.** The 1,582-trade figure mixes model eras. Codex's
+   v3-provenance cohort (319 closed trades since 2026-05-23 with `xgb_prob == model_prob`) is
+   **−$5.54 gross** — effectively flat.
+3. **Criterion 1 below is mis-framed.** It centres the mining harness. The binding constraints
+   are frictions and instrument scaling, neither of which is model work.
+
+### Findings established 2026-09-28, all [M] unless noted
+
+- **Levels were never scaled to instruments.** ATR as a share of price ranges from 0.0096%
+  (USDT-USD) to 11.95% (WAXL-USD) — a **1,244× spread**. The fixed 8% stop used throughout
+  this session was a **0.7-ATR** stop on one instrument and an **833-ATR** stop on another.
+  Any fixed-percentage rule measures which products happen to match the chosen number.
+  *Diagnostic worth keeping: express every parameter in ATR units; if p5→p95 spans more than
+  ~3×, it is not a parameter.*
+- **The universe contains stablecoins.** USDT-USD, USD1-USD, DAI-USD, USDS-USD are scanned and
+  scored above threshold. An 8% move in USDT is 833 ATR, so those positions can only ever exit
+  on a timer — and because stablecoins have the tightest spreads, a "restrict to tight spread"
+  filter selects *toward* them.
+- **The max-hold cap is the primary exit, not a safety net.** Under an 8% stop / 12% trail it
+  ended 80.2% of positions at 24h and 49.2% at 168h. Invariant #4 describes it as a safety net;
+  that does not match its behaviour.
+- **Retrospective feature reconstruction leaks.** `backend/services/tiered_history.py:48`
+  filters `df["start"] < now_ts` — on bar **start** only — so a still-forming candle is
+  admitted. Harmless live (the partial bar holds only past data); in replay from parquet the
+  candle is complete, so up to 59 minutes of future high/low/close enters the features at a
+  15-minute scan cadence. Every retrospective re-score built this way is invalid. Filter on
+  bar **end**.
+- **Scan scores are not independent observations.** `cnn_scans` holds 3,668 distinct
+  `model_prob` values across 64,662 BUY rows; one value covers 9.5%. These are cache hits from
+  `_cnn_prob`, so any per-scan n is inflated, and percentile slicing on the score selects by
+  recency within ties.
+- **Scanning is bursty.** Median product: 287 scans over only **6 distinct days** within a
+  1,003-hour span, median signal coverage 34.9% at a 4h staleness limit. Scan volume fell from
+  388k rows in May to 9k in September. A continuous state-filter policy is implementable on
+  only ~48 of 351 products.
+- **Frictions, measured as a scenario [P]:** spread/price across the 225 scanned products is
+  median 0.1158%, mean 0.5366%, p90 1.1976%. A taker round trip crosses it twice and
+  `USE_MAKER_EXECUTION` is default-off. Against the best measured gross edge (~1.4% per round
+  trip over 7 days) total frictions are 1.43–2.27%. **This is a sensitivity scenario, not the
+  historical sign** — the spread reading is a current snapshot and no fills exist.
+- **What did survive every correction [P]:** the score separates *decline*. Rejected candidates
+  returned −5.2% to −7.5% at 168h against ~0% to +0.8% for gated ones, consistently across
+  configurations, with controls far from zero. The model knows what falls, not what rises. That
+  asymmetry is real and is still not monetisable long-only: harvesting it needs a short leg the
+  spot architecture does not have.
+
+### Multiplicity, stated so it cannot be laundered
+
+Over 120 configurations were evaluated against one sample. **That sample is discovery data
+permanently** — no multiplicity correction converts a selected winner into a confirmation.
+Confirmation requires chronologically later, uninspected data with at least a 168h purge at
+the boundary and no interim tuning.
+
+### The four blockers — no future result is trustworthy until these are fixed
+
+1. No model hash, config, or `scan_id` on trade rows, so no number is attributable to a version.
+2. The `tiered_history` bar-start filter above.
+3. `purged_wf` places post-test rows in TRAIN, making every mining verdict uninformative.
+4. Mining sidecars store rounded rule summaries, so no exact rule is reproducible.
+
+### What remains genuinely untested, none of it model work
+
+- **Maker execution measured rather than assumed** — the only lever with a large enough
+  coefficient (breakeven hit rate 65.1% → 51.3%), unmeasurable today because no fills exist.
+- Point-in-time quotes, so frictions become facts instead of snapshots.
+- A different signal family.
+- A short or market-neutral construction, which is architecturally unavailable on spot.
+
+**Recommendation: the next work is measurement infrastructure, not strategy search.** Five
+conclusions inverted in one session, each time because a measurement tier was assumed rather
+than established.
+
+---
+
 ## Why this document exists
 
 Six investigations over this session and the ones before it went looking for an edge in a
@@ -22,7 +134,7 @@ Agent-scoped and closed-only, from `trades` in `backend/coinbase.db` (read-only)
 
 | agent | n | PnL | win % | first close | last close |
 |---|---|---|---|---|---|
-| CNN | 1,582 | **−95.77** | 39.0 | 2026-04-12 | 2026-09-27 |
+| CNN | 1,582 | **−95.77** *(gross, paper; see superseding section)* | 39.0 | 2026-04-12 | 2026-09-27 |
 | TECH | 517 | −82.54 | 53.97 | 2026-04-12 | 2026-05-17 |
 
 **Both separations are load-bearing.** TECH was retired 2026-05-17; pooling the two agents
