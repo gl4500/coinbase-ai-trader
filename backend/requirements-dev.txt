@@ -13,7 +13,7 @@ pip-audit==2.8.0
 detect-secrets==1.5.0
 
 # Linting / formatting
-ruff==0.9.0
+ruff==0.16.1
 
 # Pre-commit
 pre-commit==4.0.1
