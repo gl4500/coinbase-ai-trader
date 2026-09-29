@@ -79,6 +79,27 @@ model **transportability** is interpreted; it does **not** establish that the
 model loses because of the partial bar, and it does not rehabilitate the
 historical rescores.
 
+**Two audit guards added from the peer's suggested scope (4 tests):**
+
+- *As-of correctness at the real cadence.* Scans run every 15 minutes against
+  hourly bars, so the common case is a decision taken mid-bar. Parametrised at
+  :15/:30/:45, asserting **both** that each tier returns its full bar count
+  (60/168/336) **and** that the newest bar closed before the decision instant.
+  Either assertion alone is insufficient: count-only passes if a future bar is
+  admitted, recency-only passes if the window silently shortens.
+- *Isolation must not become silence.* Invariants 16/17 require a v4.5 failure to
+  degrade to a neutral 3-tuple and never reach the driver — but the same broad
+  `except` also catches programming errors, so a signature mismatch could turn
+  every call neutral. The guard pins that such a failure is logged at ERROR **with
+  a traceback**, so a later refactor cannot downgrade it to a debug line. This is
+  the exact shape hit during this session: an unexpected kwarg raised `TypeError`
+  inside the `try`, and the neutral fallback made the call look successful.
+
+**Both were falsified before being trusted.** Reverting `closed_only` to filter on
+bar start fails all three offsets; replacing `logger.exception` with `pass` fails
+the observability assertion while its non-vacuity partner still passes. Sources
+restored; 33 tests green.
+
 Settling it requires matching training to serving — a closed-hour model evaluated
 only at hour boundaries versus a model *trained* on as-of partial snapshots at the
 real scan cadence — on preregistered forward data. And the sharp corollary: if
