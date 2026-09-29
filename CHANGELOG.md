@@ -7,6 +7,51 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.95 — 2026-09-29 — Provenance, part 1: the pure fingerprint
+
+Blocker 1 of the controlling document. `cnn_scans` and `trades` carry **no model
+or config identity**, so no stored number can be attributed to a version — which
+is why a 1,582-trade PnL figure silently mixed model eras, and why the peer
+session's rule "agent tag is not model provenance" has to be enforced by data
+rather than by memory.
+
+This is the **pure half only**: `backend/services/provenance.py` turns "what was
+loaded" into one stable, diagnosable string. No database, no schema, no clock.
+Persisting it comes next, because a migration carries a different kind of risk
+than a hash function.
+
+**Design stance — refuse rather than guess.** A wrong fingerprint is worse than
+none, because it invites attribution that cannot be justified. A missing file, an
+empty artifact set, or a directory **raises**.
+
+**Files:** `backend/services/provenance.py`, `backend/tests/test_provenance.py`
+(9 tests).
+
+Properties pinned: deterministic; sensitive to one changed byte; sensitive to a
+changed config value; **independent of the order paths are supplied** (so a
+refactor does not look like a model change); per-file digests and sizes returned
+so a mismatch can be *localised*, not merely detected; and **typed config
+encoding**, so `1`, `True`, `1.0`, `"1"`, `None` and `"True"` cannot collide —
+`True == 1` in Python, and the peer session found that exact aliasing in another
+artifact path.
+
+Verified on the real live artifacts: `xgb_model.json` (438,752 B) plus
+`xgb_features.json` (7,490 B) fingerprint in **3.0 ms**, cheap enough to compute
+once at load.
+
+**A limitation found by running it, recorded in the module docstring because it
+is the more important half.** This identifies what was **configured**, not what
+**ran**. The live config reports `MC_FILTERS=ci`, yet `589b571` deleted the import
+that registered that filter — so for two months `ci` was requested and never
+executed, and a config fingerprint would have stamped "ci requested" on every one
+of those runs while looking perfectly consistent. **Provenance by configuration is
+necessary and not sufficient**; pair it with an effective-behaviour attestation
+such as `agents.mc.registry.chain_health()`, which reports what resolved rather
+than what was asked for.
+
+---
+
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
