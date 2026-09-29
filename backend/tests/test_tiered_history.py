@@ -360,3 +360,36 @@ def test_closed_only_without_an_as_of_instant_is_refused(tmp_path):
     pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
     with pytest.raises(ValueError):
         fetch_tiered("AAA-USD", source="parquet", now_ts=None, parquet_dir=pdir, closed_only=True)
+
+
+@pytest.mark.parametrize("offset_min", [15, 30, 45])
+def test_a_scan_mid_hour_yields_the_full_window_and_no_future_fields(tmp_path, offset_min):
+    """Peer-requested audit guard: a scan at :15/:30/:45 must produce the intended bar count
+    and no field from a bar that had not closed.
+
+    The scan cadence is 15 minutes while bars are hourly, so the common case is a decision
+    taken partway through a bar. Asserting only "the newest bar is older" would pass even if
+    the window silently shortened; asserting only the count would pass even if a future bar
+    were included. Both have to hold at once.
+    """
+    from services.tiered_history import fetch_tiered
+
+    pdir = _write_hourly_parquet(tmp_path, "AAA-USD")
+    forming_start = 399 * _BAR
+    now = forming_start + offset_min * 60.0
+
+    tiers = fetch_tiered(
+        "AAA-USD", source="parquet", now_ts=now, parquet_dir=pdir, closed_only=True
+    )
+
+    assert len(tiers["micro"]) == 60, "window shortened -- count must not depend on the offset"
+    assert len(tiers["meso"]) == 168
+    assert len(tiers["macro"]) == 336
+
+    for tier, bars in tiers.items():
+        newest = bars[-1]["start"]
+        assert newest + _BAR <= now, (
+            "%s newest bar starts %.0f and closes after the decision instant %.0f"
+            % (tier, newest, now)
+        )
+        assert newest == forming_start - _BAR, "the forming bar leaked into %s" % tier
