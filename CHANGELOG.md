@@ -7,6 +7,54 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.94 — 2026-09-28/29 — Train and serve slice history by different mechanisms; 73% of the live feature vector differs
+
+Found while auditing whether the closed-bar defect had siblings. **It does, on the
+live side, where `closed_only` does not reach.**
+
+**The asymmetry.** `tools/train_xgb.py` builds features by **row position** —
+`records[t - 60 : t]`, exclusive of `t` — so every training sample's newest bar is
+**complete**. Live inference calls `fetch_tiered(source="live")` with no as-of
+filter, so its newest bar is the **current, still-forming hour**. Verified against
+the live store: **79 rows existed for the incomplete current hour**, the newest
+14.8 minutes into a 60-minute bar.
+
+**Measured, 23 products, v3 feature_set (350 features):** comparing the live
+vector against the same fetch taken as of the top of the hour —
+
+| | |
+|---|---|
+| features that differ | median **256 of 350 (73%)** |
+| median relative difference | **1.2%** |
+
+Two figures are deliberately **not** quoted as headline numbers: the p90 (86.5%)
+and max (188×) relative differences are dominated by features whose denominator is
+near zero, where any absolute change explodes the ratio. They are not evidence of
+large effects.
+
+**A second limitation, stated because it bounds the claim.** The comparison
+differs by *two* things — the partial bar's presence **and** the window shifting
+by one bar — so the magnitude conflates them. The *existence* of the skew is
+solid; the decomposition is not. Isolating truncation alone requires sub-hourly
+candles, to synthesise a partial version of a bar whose completion is already
+known (`tools/backfill_1m_candles.py` suggests 1m data is obtainable).
+
+**This is NOT filed as a bug, and deliberately not fixed.** Two readings are
+defensible: the live vector is drawn from a different distribution than training
+(invariant 11 exists because this codebase treats train/serve skew as serious);
+or the partial bar's close **is the current price**, which a trading decision
+wants, and waiting for bar close means acting on data up to 59 minutes stale.
+**The finding is that nobody has measured which is better** — and that the two
+paths were built by different mechanisms, positional versus timestamp, without
+being reconciled. Changing live feature construction is live behaviour and an
+operator decision.
+
+Probe: `partial_bar_skew.py` in the session scratchpad. Read-only; no production
+change.
+
+---
+
+
 ### Session 58.93 — 2026-09-28 — The replay caller now opts in, so the leak is actually closed
 
 Completes 58.91, which landed a closed-bar *capability* that nothing called. The
