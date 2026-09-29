@@ -52,6 +52,41 @@ operator decision.
 Probe: `partial_bar_skew.py` in the session scratchpad. Read-only; no production
 change.
 
+**Peer review, 2026-09-29 — three corrections and one scope extension:**
+
+1. **I overclaimed the reach.** I wrote that *every* historical `model_prob` was
+   computed on a partial final bar. Not provable: `trades`/`cnn_scans` carry no
+   immutable model+feature provenance, so which path produced any given stored
+   score cannot be established. The source supports the *mismatch*; it does not
+   support the *attribution*.
+2. **Scope is wider than v3.** The v4 and v4.5 sample builders also slice ending
+   before index `i`, while live `xgb_prob` and `xgb_prob_v4` call
+   `fetch_tiered(source="live")` with no as-of instant and the v4.5 shadow uses
+   the default `now_ts=None`. **All three XGB live paths are affected**, not just
+   the one measured here.
+3. **The corrected replay is a different policy, not a reconstruction of live.**
+   `closed_only=True` makes a backfill internally valid, but a closed-bar replay
+   score is **not** a substitute for the historical partial-bar score the live
+   system actually produced. Those cohorts must stay separate: v4.5 backfills made
+   with final in-progress bars are look-ahead contaminated; the corrected path is
+   safer but measures something else.
+
+Framing accepted: **train/serve distribution mismatch and unvalidated design
+choice — not a quantified performance bug.** High/low/volume are *censored* until
+bar close, and the extractor consumes extrema, distribution and slopes, so a
+completed-bar model is served a different covariate process. This changes how
+model **transportability** is interpreted; it does **not** establish that the
+model loses because of the partial bar, and it does not rehabilitate the
+historical rescores.
+
+Settling it requires matching training to serving — a closed-hour model evaluated
+only at hour boundaries versus a model *trained* on as-of partial snapshots at the
+real scan cadence — on preregistered forward data. And the sharp corollary: if
+waiting an hour is too stale for the product goal, that argues for **training on
+partial snapshots**, not for feeding them to a completed-bar model by assumption.
+
+---
+
 ---
 
 
