@@ -104,6 +104,37 @@ lands, so waiting costs wall clock rather than tokens.
   import per call, which no longer happens on this path: `inbox` went 6607ms -> 325ms and
   `wait` costs ~440ms. Pick the timeout that suits the work, not the transport.
 
+### Event-driven task coordinator
+
+`task_coordinator.py` watches new mailbox rows with a small local SQLite poll; it does not
+send periodic model prompts. It acknowledges only the exact Claude watcher liveness notice
+after verifying its sender, recipient, request key, and no-action-needed body; it never
+acknowledges substantive peer messages or creates assistant sessions. On first start it skips old mailbox history unless
+`--include-existing` is specified, avoiding a burst of stale pings/tasks. Dispatches are
+recorded in `.coordination/task-coordinator.sqlite3` so restarts do not blindly re-queue a
+message after an ambiguous CLI timeout.
+
+Codex messages can be queued into an explicitly named **existing** Codex thread. Claude
+messages remain in the shared inbox for Claude's installed hook to surface on its next turn;
+the coordinator deliberately does not run `claude --resume`, because that can start a parallel
+copy when the target session is active. Thus the coordinator can wake Codex and route mail to
+Claude, but it cannot force an idle Claude conversation to resume.
+
+```powershell
+$python = '.coordination-runtime/Scripts/python.exe'
+$coordinator = 'tools/session_bridge/task_coordinator.py'
+# Observe/route new mail; supply the UUID or exact name of the existing Codex thread.
+& $python $coordinator run --codex-thread '<existing-codex-thread>'
+# Check dispatch history or stop the running service.
+& $python $coordinator status
+& $python $coordinator stop
+```
+
+The service is single-instance and stoppable. A failed or timed-out delivery is marked
+`delivery_uncertain` and is not retried automatically; inspect the target thread before
+manually resetting that event. The coordinator is a message/task dispatcher, not an autonomous
+coding agent: it does not choose work, alter task ownership, or modify application files.
+
 ### Two routes, and why
 
 Message operations (`send`, `inbox`, `wait`, `ack`) go straight to SQLite. Everything else
