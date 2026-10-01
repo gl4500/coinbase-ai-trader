@@ -50,3 +50,28 @@ def test_no_shadow_instance_is_noop(monkeypatch):
     agent = ca.CoinbaseCNNAgent(ws_subscriber=ws)
     assert agent.maker_shadow is None
     agent._shadow_register("ABC-USD")  # must not raise
+
+
+def test_attach_wires_epoch_handler_and_sweeper():
+    import asyncio
+
+    from services import maker_shadow as ms
+
+    ws = MagicMock()
+    ws.connect_count = 3
+    agent = MagicMock()
+
+    async def sink(row):
+        pass
+
+    async def go():
+        shadow = ms.attach(ws, agent, sink=sink, sweep_interval_s=3600)
+        assert agent.maker_shadow is shadow
+        ws.register_price_handler.assert_called_once_with(shadow.on_tick)
+        assert shadow._feed_epoch() == 3
+        ws.connect_count = 4
+        assert shadow._feed_epoch() == 4
+        assert shadow._sweeper is not None and not shadow._sweeper.done()
+        shadow._sweeper.cancel()
+
+    asyncio.new_event_loop().run_until_complete(go())

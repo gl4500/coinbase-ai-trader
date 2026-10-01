@@ -290,20 +290,24 @@ async def init_db() -> None:
             -- Paper maker-fill shadow (services/maker_shadow.py). Measurement
             -- only: one row per resolved virtual post-only BUY intent.
             CREATE TABLE IF NOT EXISTS maker_shadow (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_id      TEXT NOT NULL,
-                status          TEXT NOT NULL,
-                touched         INTEGER NOT NULL,
-                limit_price     REAL,
-                ask             REAL,
-                spread_bps      REAL,
-                created_ts      REAL NOT NULL,
-                fill_ts         REAL,
-                time_to_fill_s  REAL,
-                last_price      REAL,
-                drift_bps       REAL,
-                window_s        REAL NOT NULL,
-                detail          TEXT
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id          TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                touched             INTEGER NOT NULL,
+                limit_price         REAL,
+                ask                 REAL,
+                spread_bps          REAL,
+                created_ts          REAL NOT NULL,
+                cross_ts            REAL,
+                time_to_cross_s     REAL,
+                window_close_price  REAL,
+                markout_s           REAL NOT NULL,
+                markout_bps         REAL,
+                mark_age_s          REAL,
+                finalised_late_s    REAL,
+                feed_gap            INTEGER,
+                window_s            REAL NOT NULL,
+                detail              TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_maker_shadow_created ON maker_shadow(created_ts);
         """)
@@ -1237,10 +1241,14 @@ _MAKER_SHADOW_COLS = (
     "ask",
     "spread_bps",
     "created_ts",
-    "fill_ts",
-    "time_to_fill_s",
-    "last_price",
-    "drift_bps",
+    "cross_ts",
+    "time_to_cross_s",
+    "window_close_price",
+    "markout_s",
+    "markout_bps",
+    "mark_age_s",
+    "finalised_late_s",
+    "feed_gap",
     "window_s",
     "detail",
 )
@@ -1249,7 +1257,9 @@ _MAKER_SHADOW_COLS = (
 async def save_maker_shadow(row: Dict) -> None:
     """Persist one resolved maker-shadow intent (measurement only)."""
     values = [row[c] for c in _MAKER_SHADOW_COLS]
-    values[2] = 1 if row["touched"] else 0
+    values[_MAKER_SHADOW_COLS.index("touched")] = 1 if row["touched"] else 0
+    gap = row["feed_gap"]
+    values[_MAKER_SHADOW_COLS.index("feed_gap")] = None if gap is None else int(bool(gap))
     async with _db() as db:
         await db.execute(
             f"INSERT INTO maker_shadow ({','.join(_MAKER_SHADOW_COLS)}) "
@@ -1274,5 +1284,6 @@ async def get_maker_shadow_rows(since_ts: Optional[float] = None) -> List[Dict]:
     for r in rows:
         d = dict(zip(_MAKER_SHADOW_COLS, r, strict=True))
         d["touched"] = bool(d["touched"])
+        d["feed_gap"] = None if d["feed_gap"] is None else bool(d["feed_gap"])
         out.append(d)
     return out
