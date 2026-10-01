@@ -286,6 +286,26 @@ async def init_db() -> None:
                 components      TEXT,
                 computed_at     TEXT DEFAULT (datetime('now'))
             );
+
+            -- Paper maker-fill shadow (services/maker_shadow.py). Measurement
+            -- only: one row per resolved virtual post-only BUY intent.
+            CREATE TABLE IF NOT EXISTS maker_shadow (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id      TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                touched         INTEGER NOT NULL,
+                limit_price     REAL,
+                ask             REAL,
+                spread_bps      REAL,
+                created_ts      REAL NOT NULL,
+                fill_ts         REAL,
+                time_to_fill_s  REAL,
+                last_price      REAL,
+                drift_bps       REAL,
+                window_s        REAL NOT NULL,
+                detail          TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_maker_shadow_created ON maker_shadow(created_ts);
         """)
         await db.commit()
 
@@ -1207,3 +1227,52 @@ async def get_regime_series(start: str, end: str) -> List[Dict]:
             (start, end),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+
+_MAKER_SHADOW_COLS = (
+    "product_id",
+    "status",
+    "touched",
+    "limit_price",
+    "ask",
+    "spread_bps",
+    "created_ts",
+    "fill_ts",
+    "time_to_fill_s",
+    "last_price",
+    "drift_bps",
+    "window_s",
+    "detail",
+)
+
+
+async def save_maker_shadow(row: Dict) -> None:
+    """Persist one resolved maker-shadow intent (measurement only)."""
+    values = [row[c] for c in _MAKER_SHADOW_COLS]
+    values[2] = 1 if row["touched"] else 0
+    async with _db() as db:
+        await db.execute(
+            f"INSERT INTO maker_shadow ({','.join(_MAKER_SHADOW_COLS)}) "
+            f"VALUES ({','.join('?' * len(_MAKER_SHADOW_COLS))})",
+            values,
+        )
+        await db.commit()
+
+
+async def get_maker_shadow_rows(since_ts: Optional[float] = None) -> List[Dict]:
+    """Return maker-shadow rows oldest first, optionally from since_ts onward."""
+    sql = f"SELECT {','.join(_MAKER_SHADOW_COLS)} FROM maker_shadow"
+    args: tuple = ()
+    if since_ts is not None:
+        sql += " WHERE created_ts >= ?"
+        args = (since_ts,)
+    sql += " ORDER BY created_ts, id"
+    async with _db() as db:
+        async with db.execute(sql, args) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(_MAKER_SHADOW_COLS, r, strict=True))
+        d["touched"] = bool(d["touched"])
+        out.append(d)
+    return out

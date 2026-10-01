@@ -7,6 +7,49 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.96 — 2026-09-30 — Paper maker-fill shadow (measurement only)
+
+The controlling document names maker execution as the only untested lever with a
+large enough coefficient (breakeven hit rate 65.1% taker → 51.3% maker) and calls it
+**unmeasurable today because no fills exist** (`orders` has 0 rows). This adds the
+measurement without placing a single order.
+
+After every successful paper BUY, `services/maker_shadow.MakerShadow` snapshots the
+WS best bid/ask and rests a **virtual** post-only BUY at the bid for 30 s (the same
+window `execute_maker_signal` polls). It is resolved from the ticker last-trade stream
+through `register_price_handler`, the hook `exit_watcher` already uses. Two bounds are
+recorded on every intent:
+
+- **`filled`** (headline, conservative): a trade printed strictly BELOW the bid inside
+  the window — the level was traded through, so queue position cannot matter.
+- **`touched`** (optimistic upper bound): a trade printed AT or below the bid.
+
+Also recorded: `time_to_fill_s`, `spread_bps` (what a maker entry saves vs crossing),
+and `drift_bps` = last price at window end vs the limit on filled intents — the
+adverse-selection signal that must be read alongside the fill rate. Intents that
+cannot be measured are **recorded, not dropped** (`no_quote`: missing / non-positive /
+crossed quote; `duplicate`: second BUY while one is open), because dropping them
+would inflate the fill rate.
+
+**Files:** `services/maker_shadow.py` (pure, clock-injected), `database.py` (additive
+`maker_shadow` table + `save_maker_shadow` / `get_maker_shadow_rows`), `config.py`
+(`MAKER_SHADOW`, default false), `agents/cnn_agent.py` (`_shadow_register` after a
+successful paper buy), `main.py` (attach when the flag is on),
+`tools/maker_shadow_report.py` (read-only summary). Tests: `test_maker_shadow.py` (10),
+`test_database_maker_shadow.py` (3), `test_maker_shadow_wiring.py` (5),
+`test_maker_shadow_report.py` (2).
+
+**Run it** on the 8002 dev backend per port discipline:
+`MAKER_SHADOW=true PORT=8002 python main.py`, then
+`python -m tools.maker_shadow_report --since-hours 24`.
+
+**Limits, stated so they are not mistaken for findings:** the ticker channel reports
+the last trade per update, not every print, so a brief trade-through can be missed —
+`filled` is a lower bound and `touched` an upper bound. `ws_subscriber.state` has no
+quote timestamp, so a stale bid cannot be detected. Entry leg only; exit-leg maker
+fills are a follow-up. A fill rate alone decides nothing: a high fill rate with
+negative drift is adverse selection, not savings.
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
