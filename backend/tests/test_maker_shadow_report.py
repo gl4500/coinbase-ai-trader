@@ -17,6 +17,7 @@ def _r(status, touched=False, ttc=None, spread=None, markout=None, gap=False, la
         "markout_bps": markout,
         "feed_gap": gap,
         "finalised_late_s": late,
+        "mark_age_s": None if markout is None else 0.0,
     }
 
 
@@ -61,3 +62,27 @@ def test_empty_is_none_not_zero():
 
 def test_no_rows_has_no_coverage():
     assert summarize([])["coverage"] is None
+
+
+def _c(markout, age):
+    r = _r("crossed", True, 1.0, 10.0, markout)
+    r["mark_age_s"] = age
+    return r
+
+
+def test_stale_marks_are_excluded_from_markout_and_counted():
+    rows = [_c(-10.0, 2.0), _c(-20.0, 14.0), _c(+50.0, 59.0), _c(None, None)]
+    s = summarize(rows)
+    assert s["max_mark_age_s"] == 15.0
+    assert s["n_mark_fresh"] == 2
+    assert s["n_mark_stale"] == 1
+    assert s["n_mark_missing"] == 1
+    assert s["median_markout_bps_crossed"] == pytest.approx(-15.0)
+    assert s["mark_age_s_p50"] == pytest.approx(14.0)
+    assert s["mark_age_s_p90"] == pytest.approx(59.0)
+
+
+def test_no_crossed_rows_gives_no_mark_age_stats():
+    s = summarize([_r("not_crossed")])
+    assert s["n_mark_fresh"] == 0
+    assert s["mark_age_s_p50"] is None and s["mark_age_s_p90"] is None

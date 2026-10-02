@@ -52,6 +52,17 @@ that "fill" over-claimed, that feed gaps were invisible, and that my note about 
 ticker was wrong: the `ticker` channel reports on every match (`ticker_batch` is the
 5 s one). All addressed here.
 
+**Second review (Codex, on `266d7d6`).** The markout price is the last own-product
+trade *as of* the 60 s horizon, so in a quiet market it can be the crossing print
+itself. The report now applies a pre-fixed `MAX_MARK_AGE_S = 15` and reports
+`n_mark_fresh` / `n_mark_stale` / `n_mark_missing` and mark-age p50/p90; the markout
+median uses fresh marks only. `feed_gap` detects reconnects only — a silent stall is
+not detected — so rates are conditional on no *observed* reconnect. Codex accepted
+local receipt time for this exploratory run with one condition, recorded here: **these
+measurements are not decision-grade evidence for live maker execution without
+timestamped-event validation.** Results describe the 8002 copy's own paper
+trajectory after its snapshot, not later 8001 entries.
+
 **Files:** `services/maker_shadow.py`, `services/ws_subscriber.py` (`connect_count`),
 `database.py` (additive `maker_shadow` table + `save_maker_shadow` /
 `get_maker_shadow_rows`), `config.py` (`MAKER_SHADOW`, default false),
