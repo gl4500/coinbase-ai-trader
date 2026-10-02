@@ -47,6 +47,19 @@ def _reset_chain_cache() -> None:
     _chain_built = False
 
 
+def effective_filter_names() -> List[str]:
+    """Names of the filters that actually RESOLVED into the chain, in order.
+
+    `MC_FILTERS` is what was requested; a name with no registered class is skipped
+    by `_build_chain`, so the two can differ silently. Provenance records this list.
+    """
+    global _chain, _chain_built
+    if not _chain_built:
+        _chain = _build_chain()
+        _chain_built = True
+    return [getattr(f, "name", "") or type(f).__name__ for f in _chain]
+
+
 def apply_buy_filters(
     side: str,
     model_prob: float,

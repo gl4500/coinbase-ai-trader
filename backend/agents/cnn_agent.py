@@ -263,7 +263,12 @@ class _CNNBook:
         return self.win_rate * avg_win - (1 - self.win_rate) * avg_loss
 
     async def buy(
-        self, pid: str, price: float, frac: float, trigger: str = "SCAN"
+        self,
+        pid: str,
+        price: float,
+        frac: float,
+        trigger: str = "SCAN",
+        model_provenance: Optional[str] = None,
     ) -> Tuple[float, float]:
         # #125a: tiered blacklist gating. Active (or no row) → full frac.
         # Probation → half size (real money, reduced risk). Suspended →
@@ -307,6 +312,7 @@ class _CNNBook:
             usd_open=spend,
             trigger_open=trigger,
             balance_after=self.balance,
+            model_provenance=model_provenance,
         )
         return spend, size
 
@@ -1668,6 +1674,7 @@ class CoinbaseCNNAgent:
         self._cache: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
         self.model: Optional[Any] = None
         self.book = _CNNBook()  # dry-run portfolio — tracks positions + trades table
+        self._recorded_provenance: Optional[str] = None  # last digest written to the registry
         # ── Runtime stats ──────────────────────────────────────────────────
         self.last_scan_at: Optional[float] = None
         self.next_scan_at: Optional[float] = None
@@ -2248,8 +2255,10 @@ class CoinbaseCNNAgent:
         passes = side != "HOLD"
 
         # ── Save every scan result for the confidence table ───────────────────
+        provenance = await self._current_provenance()
         await database.save_cnn_scan(
             {
+                "model_provenance": provenance,
                 "product_id": pid,
                 "price": round(price, 6),
                 "cnn_prob": round(cnn_prob, 4),
@@ -2352,7 +2361,9 @@ class CoinbaseCNNAgent:
                 # strength = (model_prob - 0.5)*2 is NOT a probability — passing
                 # it to Kelly gave frac=0 for all signals below model_prob=0.75.
                 frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
-                spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
+                spent, _ = await self.book.buy(
+                    pid, price, frac, trigger="SCAN", model_provenance=provenance
+                )
                 if spent > 0:
                     self.signals_executed += 1
                     signal["execution"] = {"success": True, "spent": round(spent, 2)}
@@ -2399,6 +2410,58 @@ class CoinbaseCNNAgent:
                 signal["live_execution"] = result
 
         return signal
+
+    def _decision_config(self) -> Dict[str, Any]:
+        """Settings that change what this agent decides or how it sizes and exits.
+
+        Fingerprinted by provenance part 2. The MC chain is the one that RESOLVED, not
+        `MC_FILTERS` — a requested-but-unregistered filter must not look like it ran.
+        """
+        from agents import exit_thresholds as _et
+        from agents.mc import registry as _mc_registry
+
+        return {
+            "model_backend": config.model_backend,
+            "cnn_buy_threshold": config.cnn_buy_threshold,
+            "cnn_sell_threshold": config.cnn_sell_threshold,
+            "xgb_v45_thresh_up": config.xgb_v45_thresh_up,
+            "xgb_v45_thresh_down": config.xgb_v45_thresh_down,
+            "mc_filters_effective": ",".join(_mc_registry.effective_filter_names()),
+            "max_frac": _CNN_MAX_FRAC,
+            "stop_loss_pct": _CNN_STOP_LOSS_PCT,
+            "atr_trail_mult": _CNN_ATR_TRAIL_MULT,
+            "atr_trail_min": _CNN_ATR_TRAIL_MIN,
+            "atr_trail_max": _CNN_ATR_TRAIL_MAX,
+            "max_hold_secs": _CNN_MAX_HOLD_SECS,
+            "p_down_exit_threshold": _P_DOWN_EXIT_THRESHOLD,
+            "p_down_stale_ms": _P_DOWN_STALE_MS,
+            "fee_rate": _et.FEE_RATE,
+            "giveback_frac": _et.GIVEBACK_FRAC,
+            "large_position_frac": _et.LARGE_POSITION_FRAC,
+            "large_position_floor": _et.LARGE_POSITION_FLOOR,
+            "max_dollar_giveback_frac": _et.MAX_DOLLAR_GIVEBACK_FRAC,
+            "max_loss_frac_of_capital": _et.MAX_LOSS_FRAC_OF_CAPITAL,
+        }
+
+    async def _current_provenance(self) -> Optional[str]:
+        """Digest of the loaded model + decision config, or None (unattributed).
+
+        Never raises into the scan loop: any failure saves the row unattributed.
+        """
+        try:
+            from agents import xgb_signal
+            from services.provenance import decision_provenance
+
+            prov = decision_provenance(xgb_signal.loaded_fingerprints(), self._decision_config())
+            if prov is None:
+                return None
+            if prov["digest"] != self._recorded_provenance:
+                await database.record_provenance(prov)
+                self._recorded_provenance = prov["digest"]
+            return prov["digest"]
+        except Exception:
+            logger.exception("provenance unavailable — saving scan unattributed")
+            return None
 
     async def _execute_live_order(self, order_executor, signal: Dict) -> Dict:
         """Route a live order through the maker (post-only) or taker path.

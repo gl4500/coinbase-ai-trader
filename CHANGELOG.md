@@ -7,6 +7,52 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.97 — 2026-10-01 — Provenance, part 2: identity persisted on new rows
+
+Blocker 1 of the controlling document, completed for NEW rows. Every new `cnn_scans`
+row and every new `trades` entry row now carries `model_provenance`, a `sha256:` digest
+of the model artifacts that were actually loaded plus the decision config. Historical
+rows stay NULL — **unattributed, never guessed** — and an `UNKNOWN` close-insert stays
+NULL too. Part 1 (58.95) is cherry-picked onto this branch from
+`fix/replay-closed-bar-filter` so part 2 does not depend on that unmerged chain.
+
+**Four loosely coupled layers:**
+
+- `agents/xgb_signal.py` fingerprints exactly what each loader ADOPTED — v3 model and
+  features, plus the calibrator only when it was accepted (a calibrator rejected for a
+  feature-set mismatch is not part of the identity). The fingerprint is cleared at the
+  start of every load attempt, so `force_reload` after a model swap mints a new identity
+  and a failed reload leaves none rather than a stale one. The v4.5 shadow gets its own,
+  because it drives the `MODEL_DOWN` exit. `loaded_fingerprints()` reports both.
+- `agents/mc/registry.effective_filter_names()` reports the filters that RESOLVED. With
+  `MC_FILTERS=ci` and `ci` never registered, the identity records an empty chain — the
+  configured-vs-ran gap part 1 warned about.
+- `services/provenance.decision_provenance(fingerprints, config)` (pure) combines driver
+  digest, shadow digest (or "none") and the typed decision config into one digest, and
+  returns `None` when no driver is loaded. `validate_digest` accepts only
+  `sha256:<64 lowercase hex>`.
+- `database.py`: additive `model_provenance TEXT` on `cnn_scans` and `trades` (ALTER
+  migration), a `model_provenance` registry table (digest → detail, first write wins),
+  `record_provenance` / `get_model_provenance`, and `save_cnn_scan` / `open_trade`
+  **reject a malformed digest** instead of storing something that looks attributed.
+
+`cnn_agent` stamps the digest on each scan and passes it through
+`book.buy(..., model_provenance=)` to `open_trade`. `_current_provenance()` writes the
+registry once per new digest and never raises into the scan loop — a failure saves the
+row unattributed. Decision config fingerprinted: model backend, buy/sell thresholds,
+v4.5 thresholds, effective MC chain, max position fraction, stop / ATR-trail / max-hold
+constants, MODEL_DOWN threshold and staleness, and the `exit_thresholds` constants.
+
+**Files:** `services/provenance.py`, `agents/xgb_signal.py`, `agents/mc/registry.py`,
+`database.py`, `agents/cnn_agent.py`. Tests: `test_xgb_signal.py` (+6),
+`tests/agents/mc/test_registry.py` (+3), `test_provenance.py` (+13),
+`test_provenance_persistence.py` (11), `test_cnn_agent.py` (+7).
+
+**Limits:** file bytes are hashed right after load, so a swap inside that window could
+mismatch (a later reload re-fingerprints). It identifies what was configured and loaded,
+not every code path — code identity is git's job. Not deployed: the live 8001 backend
+picks this up only after a merge and restart, which is an operator decision.
+
 ### Session 58.95 — 2026-09-29 — Provenance, part 1: the pure fingerprint
 
 Blocker 1 of the controlling document. `cnn_scans` and `trades` carry **no model

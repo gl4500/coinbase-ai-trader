@@ -4582,3 +4582,106 @@ class TestMakerExecutionRouting:
         executor.execute_maker_signal.assert_awaited_once_with(signal)
         executor.execute_signal.assert_not_called()
         assert result == {"success": True, "fill_mode": "MAKER"}
+
+
+# ── Provenance part 2: identity stamped on new scans and entries ─────────────
+
+_PROV_DIGEST = "sha256:" + "e" * 64
+_FP = {"digest": "sha256:" + "a" * 64, "artifacts": [], "config": {}}
+
+
+class TestProvenanceWiring:
+    def _patches(self, agent, saved):
+        candles = _make_candles(80)
+
+        async def _save(scan):
+            saved.append(scan)
+
+        return (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=_save),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+            patch.object(agent, "_current_provenance", new=AsyncMock(return_value=_PROV_DIGEST)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_row_carries_provenance(self, agent, product):
+        saved = []
+        p = self._patches(agent, saved)
+        with p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]:
+            await agent.generate_signal(product)
+        assert saved and saved[0]["model_provenance"] == _PROV_DIGEST
+
+    @pytest.mark.asyncio
+    async def test_executed_buy_passes_provenance_to_book(self, agent, product):
+        saved = []
+        p = self._patches(agent, saved)
+        buy = AsyncMock(return_value=(10.0, 1.0))
+        with (
+            p[0],
+            p[1],
+            p[2],
+            p[3],
+            p[4],
+            p[5],
+            p[6],
+            p[7],
+            patch.object(agent.book, "buy", new=buy),
+        ):
+            await agent.generate_signal(product, execute=True)
+        assert buy.await_args.kwargs["model_provenance"] == _PROV_DIGEST
+
+    @pytest.mark.asyncio
+    async def test_book_buy_passes_provenance_to_open_trade(self, agent):
+        open_trade = AsyncMock(return_value=1)
+        with (
+            patch("agents.cnn_agent.database.get_product_status", new=AsyncMock(return_value=None)),
+            patch("agents.cnn_agent.database.open_trade", new=open_trade),
+            patch.object(agent.book, "_save", new=AsyncMock()),
+        ):
+            await agent.book.buy("ABC-USD", 1.0, 0.1, trigger="SCAN", model_provenance=_PROV_DIGEST)
+        assert open_trade.await_args.kwargs["model_provenance"] == _PROV_DIGEST
+
+    @pytest.mark.asyncio
+    async def test_nothing_loaded_is_unattributed(self, agent):
+        from agents import xgb_signal
+
+        with patch.object(
+            xgb_signal, "loaded_fingerprints", return_value={"v3": None, "v4_5": None}
+        ):
+            assert await agent._current_provenance() is None
+
+    @pytest.mark.asyncio
+    async def test_new_digest_recorded_once(self, agent):
+        from agents import xgb_signal
+
+        record = AsyncMock()
+        with (
+            patch.object(xgb_signal, "loaded_fingerprints", return_value={"v3": _FP, "v4_5": None}),
+            patch("agents.cnn_agent.database.record_provenance", new=record),
+        ):
+            first = await agent._current_provenance()
+            second = await agent._current_provenance()
+        assert first == second and first.startswith("sha256:")
+        assert record.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_provenance_failure_is_unattributed_not_raised(self, agent):
+        from agents import xgb_signal
+
+        with patch.object(xgb_signal, "loaded_fingerprints", side_effect=RuntimeError("boom")):
+            assert await agent._current_provenance() is None
+
+    def test_decision_config_uses_effective_mc_chain(self, agent):
+        with patch("agents.mc.registry.effective_filter_names", return_value=[]):
+            cfg = agent._decision_config()
+        assert cfg["mc_filters_effective"] == ""
+        for key in ("model_backend", "cnn_buy_threshold", "stop_loss_pct", "fee_rate", "max_frac"):
+            assert key in cfg

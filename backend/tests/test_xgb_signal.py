@@ -632,3 +632,86 @@ class TestXgbProbShadowV4_5:
         monkeypatch.setattr(xs, "xgb_prob_v4_5", lambda channels, pid=None: (0.3, 0.3, 0.4))
         with pytest.raises(RuntimeError, match="v3 boom"):
             xs.xgb_prob_shadow_v4_5(channels=None, pid="BTC-USD")
+
+
+# ── Provenance part 2: fingerprint exactly what was loaded ───────────────────
+
+
+class TestLoadedFingerprints:
+    def _point_at(self, xs, monkeypatch, tmp_path, model_path, features_path):
+        monkeypatch.setattr(xs, "_MODEL_PATH", model_path)
+        monkeypatch.setattr(xs, "_FEATURES_PATH", features_path)
+        monkeypatch.setattr(xs, "_CALIBRATION_PATH", str(tmp_path / "no_calibration.pkl"))
+        monkeypatch.setattr(xs, "_MODEL_PATH_V45", str(tmp_path / "no_v45.json"))
+        monkeypatch.setattr(xs, "_FEATURES_PATH_V45", str(tmp_path / "no_v45_features.json"))
+
+    def test_nothing_loaded_means_no_fingerprint(self, tmp_path, fresh_xgb_module, monkeypatch):
+        xs = fresh_xgb_module
+        self._point_at(
+            xs, monkeypatch, tmp_path, str(tmp_path / "m.json"), str(tmp_path / "f.json")
+        )
+        xs.xgb_prob(_synthetic_channels())
+        assert xs.loaded_fingerprints() == {"v3": None, "v4_5": None}
+
+    def test_successful_load_fingerprints_the_loaded_files(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        xs = fresh_xgb_module
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        self._point_at(xs, monkeypatch, tmp_path, model_path, features_path)
+        xs.xgb_prob(_synthetic_channels())
+        fp = xs.loaded_fingerprints()["v3"]
+        assert fp["digest"].startswith("sha256:")
+        assert sorted(a["path"] for a in fp["artifacts"]) == [
+            "xgb_features.json",
+            "xgb_model.json",
+        ]
+        assert fp["config"] == {"feature_set": "v1", "calibrated": False}
+
+    def test_rejected_calibrator_not_fingerprinted(self, tmp_path, fresh_xgb_module, monkeypatch):
+        xs = fresh_xgb_module
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        self._point_at(xs, monkeypatch, tmp_path, model_path, features_path)
+        cal = tmp_path / "xgb_calibration.pkl"
+        with open(cal, "wb") as f:
+            pickle.dump({"calibrator": object(), "feature_set": "v3"}, f)  # mismatch: booster v1
+        monkeypatch.setattr(xs, "_CALIBRATION_PATH", str(cal))
+        xs.xgb_prob(_synthetic_channels())
+        fp = xs.loaded_fingerprints()["v3"]
+        assert "xgb_calibration.pkl" not in [a["path"] for a in fp["artifacts"]]
+        assert fp["config"]["calibrated"] is False
+
+    def test_force_reload_mints_new_fingerprint(self, tmp_path, fresh_xgb_module, monkeypatch):
+        xs = fresh_xgb_module
+        model_path, features_path = _train_tiny_xgb(str(tmp_path), n_samples=64)
+        self._point_at(xs, monkeypatch, tmp_path, model_path, features_path)
+        xs.xgb_prob(_synthetic_channels())
+        before = xs.loaded_fingerprints()["v3"]["digest"]
+        _train_tiny_xgb(str(tmp_path), n_samples=200)  # overwrite with a different model
+        assert xs.force_reload() is True
+        after = xs.loaded_fingerprints()["v3"]["digest"]
+        assert after != before
+
+    def test_failed_reload_clears_stale_fingerprint(self, tmp_path, fresh_xgb_module, monkeypatch):
+        xs = fresh_xgb_module
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        self._point_at(xs, monkeypatch, tmp_path, model_path, features_path)
+        xs.xgb_prob(_synthetic_channels())
+        os.remove(model_path)
+        assert xs.force_reload() is False
+        assert xs.loaded_fingerprints()["v3"] is None
+
+    def test_v45_has_its_own_fingerprint(self, tmp_path, fresh_xgb_module, monkeypatch):
+        xs = fresh_xgb_module
+        v45_dir = tmp_path / "v45"
+        v45_dir.mkdir()
+        m45, f45 = _train_tiny_xgb(str(v45_dir))
+        self._point_at(
+            xs, monkeypatch, tmp_path, str(tmp_path / "m.json"), str(tmp_path / "f.json")
+        )
+        monkeypatch.setattr(xs, "_MODEL_PATH_V45", m45)
+        monkeypatch.setattr(xs, "_FEATURES_PATH_V45", f45)
+        assert xs._try_load_v4_5() is True
+        fps = xs.loaded_fingerprints()
+        assert fps["v3"] is None
+        assert fps["v4_5"]["digest"].startswith("sha256:")

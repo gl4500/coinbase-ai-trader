@@ -28,7 +28,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Mapping
+import re
+from typing import Any, Dict, List, Mapping, Optional
 
 _READ_CHUNK = 1 << 20
 
@@ -92,4 +93,52 @@ def artifact_fingerprint(paths: List[str], config: Mapping[str, Any]) -> Dict[st
         "digest": "sha256:" + h.hexdigest(),
         "artifacts": artifacts,
         "config": dict(config),
+    }
+
+
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def validate_digest(value: Any) -> str:
+    """Return `value` if it is a full `sha256:<64 lowercase hex>` digest, else raise.
+
+    Writers call this so a placeholder such as "unknown" can never be stored looking
+    attributed — an unattributed row must be NULL, not a plausible string.
+    """
+    if not isinstance(value, str) or not _DIGEST_RE.match(value):
+        raise ValueError("model_provenance must be sha256:<64 hex>, got %r" % (value,))
+    return value
+
+
+def decision_provenance(
+    fingerprints: Mapping[str, Optional[Mapping[str, Any]]], config: Mapping[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """One identity for "what decided": the driver and shadow artifact fingerprints plus
+    the typed decision config. `None` when no driver is loaded — unattributed, never a guess.
+
+    `fingerprints` is `{"v3": fp_or_None, "v4_5": fp_or_None}` as reported by the loader;
+    the shadow is part of the identity because it drives the MODEL_DOWN exit.
+    """
+    driver = fingerprints.get("v3")
+    if driver is None:
+        return None
+    shadow = fingerprints.get("v4_5")
+    components = {
+        "v3": validate_digest(driver["digest"]),
+        "v4_5": validate_digest(shadow["digest"]) if shadow is not None else None,
+    }
+    config_pairs = sorted((str(k), _typed(v)) for k, v in dict(config).items())
+    h = hashlib.sha256()
+    h.update(b"v3\x00" + components["v3"].encode("ascii") + b"\x00")
+    h.update(b"v4_5\x00" + (components["v4_5"] or "none").encode("ascii") + b"\x00")
+    h.update(b"\x01")
+    h.update(json.dumps(config_pairs, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return {
+        "digest": "sha256:" + h.hexdigest(),
+        "components": components,
+        "artifacts": {
+            "v3": list(driver.get("artifacts", [])),
+            "v4_5": list(shadow.get("artifacts", [])) if shadow is not None else None,
+        },
+        "config": {str(k): _typed(v) for k, v in dict(config).items()},
     }
