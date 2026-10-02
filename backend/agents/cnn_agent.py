@@ -43,6 +43,7 @@ Install PyTorch (CUDA 12.x):
 import asyncio
 import bisect
 import datetime as _dt
+import inspect
 import json
 import logging
 import math
@@ -1255,6 +1256,7 @@ _HEARTBEAT_EVERY = 1  # #106: every epoch — under GPU contention 5+ min epochs
 # OLLAMA_URL deleted #311-refactor-f — Ollama LLM blend was CNN-backend-only
 # and is now removed; cnn_agent makes no HTTP calls to Ollama.
 _CACHE_TTL = 300
+_ANY_MODEL = object()  # sentinel: _current_provenance without a scan-start snapshot
 _EARLY_STOP_PATIENCE = 15  # stop if val_loss doesn't improve for this many epochs
 
 
@@ -1675,6 +1677,10 @@ class CoinbaseCNNAgent:
         self.model: Optional[Any] = None
         self.book = _CNNBook()  # dry-run portfolio — tracks positions + trades table
         self._recorded_provenance: Optional[str] = None  # last digest written to the registry
+        # v3 identity that produced every entry currently in _cache. A model swap
+        # (xgb_signal.force_reload) clears the cache so an old prediction can never be
+        # stamped with the new model's digest.
+        self._cache_model_digest: Optional[str] = None
         # ── Runtime stats ──────────────────────────────────────────────────
         self.last_scan_at: Optional[float] = None
         self.next_scan_at: Optional[float] = None
@@ -2001,6 +2007,10 @@ class CoinbaseCNNAgent:
         xgb_shadow: Optional[float] = None
         xgb_shadow_v45: Optional[Tuple[float, float, float]] = None
         channels = None  # initialized to None for cache-hit path; MC chain accepts None
+        scan_model = self._model_identity()
+        if scan_model != self._cache_model_digest:
+            self._cache.clear()
+            self._cache_model_digest = scan_model
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob, _, _cached_ind = cached
@@ -2255,7 +2265,7 @@ class CoinbaseCNNAgent:
         passes = side != "HOLD"
 
         # ── Save every scan result for the confidence table ───────────────────
-        provenance = await self._current_provenance()
+        provenance = await self._current_provenance(expected_model=scan_model)
         await database.save_cnn_scan(
             {
                 "model_provenance": provenance,
@@ -2427,6 +2437,12 @@ class CoinbaseCNNAgent:
             "xgb_v45_thresh_up": config.xgb_v45_thresh_up,
             "xgb_v45_thresh_down": config.xgb_v45_thresh_down,
             "mc_filters_effective": ",".join(_mc_registry.effective_filter_names()),
+            "mc_filter_params": json.dumps(
+                _mc_registry.effective_filter_params(), sort_keys=True, default=str
+            ),
+            "max_position_usd": config.max_position_usd,
+            "min_price": MIN_PRICE,
+            "kelly_max_frac": inspect.signature(_kelly_fraction).parameters["max_frac"].default,
             "max_frac": _CNN_MAX_FRAC,
             "stop_loss_pct": _CNN_STOP_LOSS_PCT,
             "atr_trail_mult": _CNN_ATR_TRAIL_MULT,
@@ -2443,9 +2459,24 @@ class CoinbaseCNNAgent:
             "max_loss_frac_of_capital": _et.MAX_LOSS_FRAC_OF_CAPITAL,
         }
 
-    async def _current_provenance(self) -> Optional[str]:
+    @staticmethod
+    def _model_identity() -> Optional[str]:
+        """Digest of the currently loaded v3 driver, or None. Never raises."""
+        try:
+            from agents import xgb_signal
+
+            fp = xgb_signal.loaded_fingerprints()["v3"]
+            return fp["digest"] if fp else None
+        except Exception:
+            logger.exception("could not read the loaded model identity")
+            return None
+
+    async def _current_provenance(self, expected_model: Any = _ANY_MODEL) -> Optional[str]:
         """Digest of the loaded model + decision config, or None (unattributed).
 
+        `expected_model` is the v3 identity snapshotted when the scan started; if the
+        driver changed since (a reload mid-scan), the row is left unattributed rather
+        than stamped with a model that may not have produced its score.
         Never raises into the scan loop: any failure saves the row unattributed.
         """
         try:
@@ -2454,6 +2485,9 @@ class CoinbaseCNNAgent:
 
             prov = decision_provenance(xgb_signal.loaded_fingerprints(), self._decision_config())
             if prov is None:
+                return None
+            if expected_model is not _ANY_MODEL and prov["components"]["v3"] != expected_model:
+                logger.info("model changed during scan — saving row unattributed")
                 return None
             if prov["digest"] != self._recorded_provenance:
                 await database.record_provenance(prov)

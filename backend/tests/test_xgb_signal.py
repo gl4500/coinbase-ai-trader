@@ -715,3 +715,23 @@ class TestLoadedFingerprints:
         fps = xs.loaded_fingerprints()
         assert fps["v3"] is None
         assert fps["v4_5"]["digest"].startswith("sha256:")
+
+    def test_file_swapped_during_load_leaves_no_fingerprint(
+        self, tmp_path, fresh_xgb_module, monkeypatch
+    ):
+        import xgboost as xgb
+
+        xs = fresh_xgb_module
+        model_path, features_path = _train_tiny_xgb(str(tmp_path))
+        self._point_at(xs, monkeypatch, tmp_path, model_path, features_path)
+        original = xgb.Booster.load_model
+
+        def load_then_swap(self, fname):
+            original(self, fname)
+            with open(features_path, "a") as f:  # features were already read and adopted
+                f.write(" ")
+
+        monkeypatch.setattr(xgb.Booster, "load_model", load_then_swap)
+        xs.xgb_prob(_synthetic_channels())
+        assert xs._load_succeeded is True
+        assert xs.loaded_fingerprints()["v3"] is None

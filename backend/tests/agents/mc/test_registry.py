@@ -246,3 +246,23 @@ class TestEffectiveFilterNames:
         monkeypatch.setitem(registry._FILTER_CLASSES, "b", _B)
         registry._reset_chain_cache()
         assert registry.effective_filter_names() == ["b", "a"]
+
+
+class TestEffectiveFilterParams:
+    def test_params_keyed_by_name_and_defaulted(self, fresh_registry, monkeypatch):
+        monkeypatch.setenv("MC_FILTERS", "p,q")
+        from agents.mc import registry
+
+        class _P:
+            name = "p"
+
+            def params(self):
+                return {"K": 1.5}
+
+        class _Q:  # legacy filter without params()
+            name = "q"
+
+        monkeypatch.setitem(registry._FILTER_CLASSES, "p", _P)
+        monkeypatch.setitem(registry._FILTER_CLASSES, "q", _Q)
+        registry._reset_chain_cache()
+        assert registry.effective_filter_params() == {"p": {"K": 1.5}, "q": {}}

@@ -60,6 +60,16 @@ def effective_filter_names() -> List[str]:
     return [getattr(f, "name", "") or type(f).__name__ for f in _chain]
 
 
+def effective_filter_params() -> Dict[str, Dict[str, Any]]:
+    """`{name: params}` for the resolved chain; filters without `params()` report `{}`."""
+    names = effective_filter_names()
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, f in zip(names, _chain, strict=True):
+        getter = getattr(f, "params", None)
+        out[name] = dict(getter()) if callable(getter) else {}
+    return out
+
+
 def apply_buy_filters(
     side: str,
     model_prob: float,

@@ -75,11 +75,41 @@ _fingerprint_v3: Optional[Dict[str, Any]] = None
 _fingerprint_v45: Optional[Dict[str, Any]] = None
 
 
-def _fingerprint(paths: List[str], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _file_digests(paths: List[str]) -> Dict[str, str]:
+    """`{basename: sha256}` for the paths that exist, taken BEFORE the loader reads them."""
+    from services.provenance import artifact_fingerprint
+
+    out: Dict[str, str] = {}
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                entry = artifact_fingerprint([path], {})["artifacts"][0]
+                out[entry["path"]] = entry["sha256"]
+        except Exception:
+            logger.exception("xgb_signal: could not pre-digest %s", path)
+    return out
+
+
+def _fingerprint(
+    paths: List[str], config: Dict[str, Any], expected: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """Fingerprint the adopted files, or None if any changed since `expected` was taken.
+
+    Hashing happens after loading, so a file replaced in between would otherwise be
+    identified by bytes that were never loaded — a wrong identity is worse than none.
+    """
     try:
         from services.provenance import artifact_fingerprint
 
-        return artifact_fingerprint(paths, config)
+        fp = artifact_fingerprint(paths, config)
+        for entry in fp["artifacts"]:
+            if expected.get(entry["path"]) != entry["sha256"]:
+                logger.warning(
+                    "xgb_signal: %s changed during load — leaving model unattributed",
+                    entry["path"],
+                )
+                return None
+        return fp
     except Exception:
         logger.exception("xgb_signal: could not fingerprint %s", paths)
         return None
@@ -110,6 +140,7 @@ def _try_load() -> bool:
                 _NEUTRAL,
             )
             return False
+        pre_read = _file_digests([_MODEL_PATH, _FEATURES_PATH, _CALIBRATION_PATH])
         try:
             import xgboost as xgb
 
@@ -180,7 +211,9 @@ def _try_load() -> bool:
             if _calibration is not None:
                 adopted.append(_CALIBRATION_PATH)
             _fingerprint_v3 = _fingerprint(
-                adopted, {"feature_set": _feature_set, "calibrated": _calibration is not None}
+                adopted,
+                {"feature_set": _feature_set, "calibrated": _calibration is not None},
+                pre_read,
             )
             return True
         except Exception as exc:
@@ -271,6 +304,7 @@ def _try_load_v4_5() -> bool:
                 _FEATURES_PATH_V45,
             )
             return False
+        pre_read_v45 = _file_digests([_MODEL_PATH_V45, _FEATURES_PATH_V45])
         try:
             import xgboost as xgb
 
@@ -286,7 +320,7 @@ def _try_load_v4_5() -> bool:
             _feature_names_v45 = names
             _load_succeeded_v45 = True
             logger.info("xgb_signal: loaded v4.5 booster (%d features)", len(names))
-            _fingerprint_v45 = _fingerprint([_MODEL_PATH_V45, _FEATURES_PATH_V45], {})
+            _fingerprint_v45 = _fingerprint([_MODEL_PATH_V45, _FEATURES_PATH_V45], {}, pre_read_v45)
             return True
         except Exception as exc:
             logger.exception("xgb_signal: v4.5 load failed: %s", exc)

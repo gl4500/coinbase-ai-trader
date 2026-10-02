@@ -43,13 +43,33 @@ row unattributed. Decision config fingerprinted: model backend, buy/sell thresho
 v4.5 thresholds, effective MC chain, max position fraction, stop / ATR-trail / max-hold
 constants, MODEL_DOWN threshold and staleness, and the `exit_thresholds` constants.
 
+**Review round (Codex + an independent reviewer, both on `9089fac`) — three real defects,
+all fixed here:**
+
+- **A reload could stamp an OLD prediction with the NEW model's digest.** The agent reuses
+  each product's probability for 300 s; `force_reload` did not clear that cache. Now the
+  scan snapshots the v3 identity at its start, clears the cache when it differs from the
+  identity that filled it (the cache stays a 3-tuple, invariant 2), and stamps a row only
+  if the identity at save time still matches the snapshot — a reload mid-scan leaves the
+  row NULL.
+- **Decision settings missing from the identity:** the MC filters' own parameters
+  (`MC_CI_K` changes what `ci` blocks) via new `BuyFilter.params()` /
+  `registry.effective_filter_params()`, plus `max_position_usd`, `MIN_PRICE` and
+  `_kelly_fraction`'s `max_frac` cap.
+- **Load-vs-hash race:** each artifact is digested BEFORE it is read; the fingerprint is
+  kept only if every adopted file still has that digest, otherwise the model is left
+  unattributed.
+
+Recorded, not fixed: exits are not attributed. A `MODEL_DOWN` exit is decided by
+whichever v4.5 model is loaded at exit time while the row keeps the opening identity;
+v4.5 has no in-process reload, so this matters only across a restart with swapped files.
+
 **Files:** `services/provenance.py`, `agents/xgb_signal.py`, `agents/mc/registry.py`,
 `database.py`, `agents/cnn_agent.py`. Tests: `test_xgb_signal.py` (+6),
 `tests/agents/mc/test_registry.py` (+3), `test_provenance.py` (+13),
 `test_provenance_persistence.py` (11), `test_cnn_agent.py` (+7).
 
-**Limits:** file bytes are hashed right after load, so a swap inside that window could
-mismatch (a later reload re-fingerprints). It identifies what was configured and loaded,
+**Limits:** it identifies what was configured and loaded,
 not every code path — code identity is git's job. Not deployed: the live 8001 backend
 picks this up only after a merge and restart, which is an operator decision.
 

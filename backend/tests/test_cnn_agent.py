@@ -9,6 +9,7 @@ import asyncio
 import math
 import os
 import sys
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -4685,3 +4686,86 @@ class TestProvenanceWiring:
         assert cfg["mc_filters_effective"] == ""
         for key in ("model_backend", "cnn_buy_threshold", "stop_loss_pct", "fee_rate", "max_frac"):
             assert key in cfg
+
+
+class TestProvenanceAcrossReload:
+    """A cached prediction must never be stamped with a different model's digest."""
+
+    _A = {"digest": "sha256:" + "a" * 64, "artifacts": [], "config": {}}
+    _B = {"digest": "sha256:" + "b" * 64, "artifacts": [], "config": {}}
+
+    async def _run_scan(self, agent, product, saved, fingerprints):
+        from agents import xgb_signal
+
+        candles = _make_candles(80)
+
+        async def _save(scan):
+            saved.append(scan)
+
+        with (
+            patch("agents.cnn_agent.database.get_candles", new=AsyncMock(return_value=candles)),
+            patch("agents.cnn_agent.database.get_agent_decisions", new=AsyncMock(return_value=[])),
+            patch("agents.cnn_agent.database.save_cnn_scan", new=_save),
+            patch("agents.cnn_agent.database.get_recent_lessons", new=AsyncMock(return_value=[])),
+            patch(
+                "agents.cnn_agent.coinbase_client.get_orderbook",
+                new=AsyncMock(return_value={"bids": [], "asks": []}),
+            ),
+            patch("agents.cnn_agent.database.save_signal", new=AsyncMock(return_value=1)),
+            patch("agents.cnn_agent.database.record_provenance", new=AsyncMock()),
+            patch.object(agent, "_cnn_prob", return_value=0.82),
+            patch.object(xgb_signal, "loaded_fingerprints", side_effect=fingerprints),
+        ):
+            return await agent.generate_signal(product)
+
+    def _prime_cache(self, agent, product, digest):
+        agent._cache[product["product_id"]] = (0.30, time.time(), {})
+        agent._cache_model_digest = digest
+
+    @pytest.mark.asyncio
+    async def test_model_change_clears_cache_and_recomputes(self, agent, product):
+        self._prime_cache(agent, product, self._A["digest"])
+        saved = []
+        await self._run_scan(agent, product, saved, lambda: {"v3": self._B, "v4_5": None})
+        assert saved[0]["cnn_prob"] == pytest.approx(0.82)  # recomputed, not the cached 0.30
+
+    @pytest.mark.asyncio
+    async def test_same_model_reuses_cache(self, agent, product):
+        self._prime_cache(agent, product, self._A["digest"])
+        saved = []
+        await self._run_scan(agent, product, saved, lambda: {"v3": self._A, "v4_5": None})
+        assert saved[0]["cnn_prob"] == pytest.approx(0.30)
+        assert saved[0]["model_provenance"] is not None
+
+    @pytest.mark.asyncio
+    async def test_reload_mid_scan_leaves_row_unattributed(self, agent, product):
+        calls = iter([{"v3": self._A, "v4_5": None}] + [{"v3": self._B, "v4_5": None}] * 10)
+        saved = []
+        await self._run_scan(agent, product, saved, lambda: next(calls))
+        assert saved[0]["model_provenance"] is None
+
+
+class TestDecisionConfigCoverage:
+    def _digest(self, agent, params):
+        from services.provenance import decision_provenance
+
+        with (
+            patch("agents.mc.registry.effective_filter_names", return_value=list(params)),
+            patch("agents.mc.registry.effective_filter_params", return_value=params),
+        ):
+            cfg = agent._decision_config()
+        fp = {"digest": "sha256:" + "a" * 64, "artifacts": [], "config": {}}
+        return decision_provenance({"v3": fp, "v4_5": None}, cfg)["digest"]
+
+    def test_changing_a_filter_parameter_changes_the_digest(self, agent):
+        assert self._digest(agent, {"ci": {"K": 1.0}}) != self._digest(agent, {"ci": {"K": 2.0}})
+
+    def test_live_order_sizing_is_covered(self, agent):
+        with (
+            patch("agents.mc.registry.effective_filter_names", return_value=[]),
+            patch("agents.mc.registry.effective_filter_params", return_value={}),
+        ):
+            cfg = agent._decision_config()
+        assert "max_position_usd" in cfg
+        assert cfg["min_price"] == 0.01
+        assert cfg["kelly_max_frac"] == 0.25
