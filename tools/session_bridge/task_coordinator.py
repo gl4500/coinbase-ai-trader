@@ -49,11 +49,24 @@ def _state_connection(path: Path, timeout: float = 5):
         db.close()
 
 
+# (sender, recipient, request-key prefix, body prefix). A message is a watcher ping
+# only when ALL four match one shape; anything weaker lets a real message that merely
+# looks like a ping advance the cursor without ever being routed.
+_WATCHER_SHAPES = (
+    ("claude", "codex", "claude-watcher-ping-", "PING from the Claude watcher:"),
+    ("codex", "claude", "codex-watcher-ping-", "PING from the Codex watcher:"),
+)
+
+
 def _is_watcher_ping(row: sqlite3.Row) -> bool:
     key = row["request_key"] or ""
     body = row["body"] or ""
-    return key.startswith(("claude-watcher-ping-", "codex-watcher-ping-")) or body.startswith(
-        "PING from the "
+    return any(
+        row["sender"] == sender
+        and row["recipient"] == recipient
+        and key.startswith(key_prefix)
+        and body.startswith(body_prefix)
+        for sender, recipient, key_prefix, body_prefix in _WATCHER_SHAPES
     )
 
 

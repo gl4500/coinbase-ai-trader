@@ -138,5 +138,54 @@ class TaskCoordinatorTests(unittest.TestCase):
         self.assertEqual(record["state"], "delivery_uncertain")
 
 
+    def _route_codex(self):
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox,
+            self.state,
+            codex_thread="existing-thread",
+            queue=lambda thread, prompt: queued.append((thread, prompt)) or (0, "queued"),
+            include_existing=True,
+        )
+        return coordinator, queued
+
+    def test_real_message_with_ping_like_body_is_still_routed(self):
+        message = self.claude.send(
+            "codex", "PING from the review: P1 stop-loss bug, please look", "review-ping-like"
+        )
+        coordinator, queued = self._route_codex()
+        coordinator.process_once()
+        self.assertEqual(len(queued), 1)
+        self.assertIn(message["id"], queued[0][1])
+
+    def test_watcher_key_on_substantive_body_is_still_routed(self):
+        message = self.claude.send(
+            "codex", "Real finding: the exit ladder skips MAX_HOLD", "claude-watcher-ping-misused"
+        )
+        coordinator, queued = self._route_codex()
+        coordinator.process_once()
+        self.assertEqual(len(queued), 1)
+        self.assertIn(message["id"], queued[0][1])
+
+    def test_watcher_shaped_message_in_wrong_direction_is_not_swallowed(self):
+        self.codex.send(
+            "claude",
+            "PING from the Claude watcher: no traffic. Silence-triggered liveness "
+            "check, not a scheduled heartbeat. No action needed beyond an ack if you are alive.",
+            "claude-watcher-ping-reversed",
+        )
+        events = []
+        coordinator = TaskCoordinator(
+            self.mailbox,
+            self.state,
+            codex_thread="existing-thread",
+            queue=lambda *args: (0, "queued"),
+            on_event=events.append,
+            include_existing=True,
+        )
+        result = coordinator.process_once()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["state"], "mailbox_notice")
+
 if __name__ == "__main__":
     unittest.main()
