@@ -5,8 +5,8 @@ import pytest
 
 from tools.recorder.health import apply_disk_guard, disk_ok, run_health, status_snapshot
 from tools.recorder.lock import WriterLock
-from tools.recorder.run import expected_streams, package_digest
-from tools.recorder.store import SegmentStore, envelope, read_records
+from tools.recorder.run import expected_streams, finish, package_digest, run_flusher
+from tools.recorder.store import SegmentStore, StoreError, envelope, read_records
 
 T0 = 1_791_000_000 * 10**9
 GB = 1024**3
@@ -102,3 +102,37 @@ def test_stop_file_requests_graceful_shutdown(tmp_path):
     asyncio.run(go())
     store.close()
     assert stop.is_set() and not (tmp_path / "STOP").exists()
+
+
+class _FailingClose(SegmentStore):
+    def close(self):
+        raise StoreError("close: sidecar write failed")
+
+
+def test_finish_propagates_finalisation_failure_and_releases_lock(tmp_path):
+    lock = WriterLock(tmp_path).acquire()
+    with pytest.raises(StoreError, match="sidecar"):
+        finish(_FailingClose(tmp_path, "r"), lock, primary=None)
+    WriterLock(tmp_path).acquire().release()  # lock was released despite the failure
+
+
+def test_finish_does_not_mask_an_earlier_error(tmp_path, capsys):
+    lock = WriterLock(tmp_path).acquire()
+    finish(_FailingClose(tmp_path, "r"), lock, primary=RuntimeError("earlier"))
+    assert "sidecar" in capsys.readouterr().err
+    WriterLock(tmp_path).acquire().release()
+
+
+def test_run_flusher_flushes_on_its_own_timer(tmp_path):
+    calls = []
+
+    class S:
+        def flush_due(self):
+            calls.append(1)
+            if len(calls) >= 3:
+                stop.set()
+            return 0
+
+    stop = asyncio.Event()
+    asyncio.run(asyncio.wait_for(run_flusher(S(), stop, interval_s=0.01), timeout=2))
+    assert len(calls) >= 3

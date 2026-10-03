@@ -182,3 +182,11 @@ def test_storage_failure_is_fatal_not_a_disconnect(tmp_path):
         _run(store, FakeConnect([FakeWS([_msg("l2_data", 0)])]))
     store.close()
     assert "disconnect" not in [e.get("event") for e in _events(tmp_path)]
+
+
+def test_non_object_json_is_kept_as_unparsed_not_a_disconnect(tmp_path):
+    store = SegmentStore(tmp_path, "r")
+    _run(store, FakeConnect([FakeWS(["[]", "null", _msg("l2_data", 0)])]))
+    store.close()
+    assert [r["payload"] for r in _stream(tmp_path, "unparsed")] == ["[]", "null"]
+    assert "disconnect" not in [e.get("event") for e in _events(tmp_path)]

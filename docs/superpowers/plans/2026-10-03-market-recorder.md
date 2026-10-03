@@ -970,3 +970,19 @@ the tests carry the contract.
 | Added: no graceful stop on Windows | `STOP` file in the output root → `stop_requested` → clean finalise (live: exit 0, 28/28 segments sealed) | `test_stop_file_requests_graceful_shutdown` |
 
 Mutation-checked: reverting B1, the gap reconnect, B4 or B3 each turns its test red.
+
+## Code-review round 2 (Codex `7a1244c5`)
+
+| Finding | Fix / ruling | Test |
+|---|---|---|
+| B1: the 5 s crash-loss bound did not hold for quiet streams | Per-stream dirty flag. `flush_due()` flushes any stream whose unflushed data waited ≥ `flush_s`, driven by an independent `run_flusher` task (1 s tick) as well as on write. The stated bound is now about flush_s + 1 s, plus event-loop delay; not a power-loss guarantee. | `test_timer_flush_makes_a_quiet_stream_durable_within_the_bound`, `test_run_flusher_flushes_on_its_own_timer` (mutation-checked) |
+| B2: a finalisation failure was swallowed and exited 0 | `close()` is best-effort over ALL segments, then raises; a failed segment stays `.part`. `finish()` propagates `StoreError` when nothing earlier is in flight (CLI exit 2), prints it otherwise, and always releases the lock. | `test_close_tries_every_segment_then_raises`, `test_finish_propagates_finalisation_failure_and_releases_lock`, `test_finish_does_not_mask_an_earlier_error` (mutation-checked) |
+| N3: a backward clock step could reuse a segment name | Per-run segment ordinal `_s0001`; open with exclusive create (`xt`); finalise refuses to overwrite | `test_clock_returning_to_an_earlier_hour_never_reuses_a_segment` |
+| N4: a non-object JSON frame was dropped as a "disconnect" | Kept in `coinbase_ws/unparsed` | `test_non_object_json_is_kept_as_unparsed_not_a_disconnect` |
+
+**N1** (per-product snapshot readiness, subscription ack/reject, last-valid poll time) and **N2**
+(proof of catalogue completeness): **deferred, documented.** They do not affect raw-capture
+correctness: every subscription and error frame and the full raw catalogue body are archived.
+Downstream work must not treat `never_seen == []` as per-product readiness, nor the catalogue as
+complete, until these are implemented. This is a ruling; the cost if wrong is a misleading health
+signal, not lost data.

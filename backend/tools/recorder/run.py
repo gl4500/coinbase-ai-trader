@@ -44,6 +44,7 @@ async def main(out: Path, products: list) -> None:
     lock = WriterLock(out).acquire()
     stop = asyncio.Event()
     store = SegmentStore(out, uuid.uuid4().hex[:12])
+    primary = None
     try:
         salvaged = recover_incomplete(out)
         store.write(
@@ -72,18 +73,41 @@ async def main(out: Path, products: list) -> None:
                 run_health(store, out, stop, expected=expected_streams()),
             ]
             tasks += [run_poller(p, store, get, stop) for p in default_polls()]
+            tasks.append(run_flusher(store, stop))
             await asyncio.gather(*tasks)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
         stop.set()
-        try:
-            store.write(
-                "recorder/events",
-                envelope("recorder", "event", time.time_ns(), meta={"event": "stop"}),
-            )
-            store.close()
-        except StoreError as exc:
-            print(f"recorder: could not finalise segments: {exc}", file=sys.stderr)
+        finish(store, lock, primary=primary)
+
+
+def finish(store, lock, primary) -> None:
+    """Finalise and release. A finalisation failure is FATAL when nothing else already failed;
+    if an earlier error is propagating, report this one on stderr instead of masking it."""
+    try:
+        store.write(
+            "recorder/events",
+            envelope("recorder", "event", time.time_ns(), meta={"event": "stop"}),
+        )
+        store.close()
+    except StoreError as exc:
+        print(f"recorder: could not finalise segments: {exc}", file=sys.stderr)
+        if primary is None:
+            raise
+    finally:
         lock.release()
+
+
+async def run_flusher(store, stop: asyncio.Event, interval_s: float = 1.0) -> None:
+    """Independent timer so a quiet stream is still flushed within the declared bound."""
+    while not stop.is_set():
+        store.flush_due()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
 
 
 def cli(argv=None) -> int:

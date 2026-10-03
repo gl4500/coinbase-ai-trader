@@ -6,8 +6,12 @@ renamed with a sha256 sidecar only when cleanly finalised. A run never appends t
 file, so an unclean exit can damage only its own `.part` files. `recover_incomplete` keeps those
 bytes, salvages the readable prefix and marks them `.incomplete` — never complete.
 
-Durability: data is flushed (gzip Z_SYNC_FLUSH) at most every `flush_s` seconds, so a process
-crash loses at most that window. Flush is not a power-loss (fsync) guarantee.
+Durability: a stream with unflushed data is flushed (gzip Z_SYNC_FLUSH) once `flush_s` seconds
+have passed since its last flush, both on write and by the independent `run_flusher` timer
+(1 s tick). A process crash therefore loses at most about flush_s + 1 s (plus event-loop delay),
+even for a stream that is never written again. Flush is not a power-loss (fsync) guarantee.
+Segment names carry a per-run ordinal: a wall clock stepping back into an earlier hour opens a
+NEW segment and can never overwrite a finalised one.
 """
 
 from __future__ import annotations
@@ -106,7 +110,8 @@ class SegmentStore:
         self.stats: Dict[str, Dict[str, Any]] = {}
         self._flush_ns = int(flush_s * 1e9)
         self._mono = mono
-        self._open: Dict[str, tuple] = {}  # stream -> (key, part_path, handle, last_flush_mono)
+        self._open: Dict[str, list] = {}  # stream -> [key, part, handle, last_flush, dirty]
+        self._seq = 0
 
     def write(self, stream: str, record: dict) -> None:
         ns = record["received_at_ns"]
@@ -117,16 +122,16 @@ class SegmentStore:
                 self._finalise(stream)
                 cur = None
             if cur is None:
-                part = self.root / stream / key[0] / f"{key[1]}00_{self.run_id}.jsonl.gz.part"
+                self._seq += 1
+                name = f"{key[1]}00_{self.run_id}_s{self._seq:04d}.jsonl.gz.part"
+                part = self.root / stream / key[0] / name
                 part.parent.mkdir(parents=True, exist_ok=True)
-                cur = (key, part, gzip.open(part, "wt", encoding="utf-8"), self._mono())
+                cur = [key, part, gzip.open(part, "xt", encoding="utf-8"), self._mono(), False]
                 self._open[stream] = cur
             stamped = {**record, "run_id": self.run_id, "written_mono_ns": self._mono()}
             cur[2].write(json.dumps(stamped, separators=(",", ":")) + "\n")
-            now = self._mono()
-            if now - cur[3] >= self._flush_ns:
-                cur[2].flush()
-                self._open[stream] = (cur[0], cur[1], cur[2], now)
+            cur[4] = True
+            self._flush_if_due(cur, self._mono())
         except StoreError:
             raise
         except Exception as exc:
@@ -135,24 +140,46 @@ class SegmentStore:
         st["count"] += 1
         st["last_received_ns"] = ns
 
+    def _flush_if_due(self, cur: list, now: int, force: bool = False) -> bool:
+        if cur[4] and (force or now - cur[3] >= self._flush_ns):
+            cur[2].flush()
+            cur[3], cur[4] = now, False
+            return True
+        return False
+
+    def flush_due(self) -> int:
+        """Flush every stream whose unflushed data has waited >= flush_s. Returns the count."""
+        try:
+            now = self._mono()
+            return sum(self._flush_if_due(cur, now) for cur in self._open.values())
+        except Exception as exc:
+            raise StoreError(f"flush: {exc!r}") from exc
+
     def flush_all(self) -> None:
         try:
-            for stream, (key, part, handle, _) in list(self._open.items()):
-                handle.flush()
-                self._open[stream] = (key, part, handle, self._mono())
+            now = self._mono()
+            for cur in self._open.values():
+                self._flush_if_due(cur, now, force=True)
         except Exception as exc:
             raise StoreError(f"flush: {exc!r}") from exc
 
     def _finalise(self, stream: str) -> None:
-        _, part, handle, _ = self._open.pop(stream)
+        _, part, handle, _, _ = self._open.pop(stream)
         handle.close()
         final = part.with_name(part.name.removesuffix(".part"))
+        if final.exists():
+            raise FileExistsError(f"refusing to overwrite finalised segment {final}")
         part.rename(final)
         final.with_name(final.name + ".sha256").write_text(_sha256(final) + "\n")
 
     def close(self) -> None:
-        try:
-            for stream in list(self._open):
+        """Best effort: try to finalise EVERY open segment, then raise if any failed. A failed
+        segment stays `.part` (salvaged as incomplete at the next start), never claimed complete."""
+        errors = []
+        for stream in list(self._open):
+            try:
                 self._finalise(stream)
-        except Exception as exc:
-            raise StoreError(f"close: {exc!r}") from exc
+            except Exception as exc:
+                errors.append(f"{stream}: {exc!r}")
+        if errors:
+            raise StoreError("close: " + "; ".join(errors))

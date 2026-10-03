@@ -96,8 +96,11 @@ async def run_coinbase_ws(
                     received = clock()
                     try:
                         head = json.loads(msg)
-                        channel, seq = str(head.get("channel", "unknown")), head.get("sequence_num")
                     except ValueError:
+                        head = None
+                    if isinstance(head, dict):
+                        channel, seq = str(head.get("channel", "unknown")), head.get("sequence_num")
+                    else:  # non-JSON or non-object JSON: keep the raw frame as evidence
                         channel, seq = "unparsed", None
                     gap = tracker.observe(seq) if isinstance(seq, int) else None
                     if channel != "heartbeats" and not store.raw_enabled:

@@ -57,7 +57,7 @@ def test_hourly_segments_are_finalised_with_sha256(tmp_path):
     s.write("ws/l2", envelope("cb", "message", T0 + HOUR_NS, payload="h05"))
     s.close()
     segs = _segments(tmp_path, "ws/l2")
-    assert [p.name for p in segs] == ["0400_run1.jsonl.gz", "0500_run1.jsonl.gz"]
+    assert [p.name for p in segs] == ["0400_run1_s0001.jsonl.gz", "0500_run1_s0002.jsonl.gz"]
     assert all(p.parent.name == "2026-10-03" for p in segs)
     for p in segs:
         assert p.with_name(p.name + ".sha256").exists()
@@ -115,3 +115,49 @@ def test_write_failure_raises_store_error_and_does_not_count(tmp_path):
     with pytest.raises(StoreError, match="poll/x"):
         s.write("poll/x", envelope("okx", "poll", T0))
     assert "poll/x" not in s.stats
+
+
+def test_clock_returning_to_an_earlier_hour_never_reuses_a_segment(tmp_path):
+    s = SegmentStore(tmp_path, "r")
+    for t, tag in ((T0, "A1"), (T0 + HOUR_NS, "B"), (T0 + 60 * 10**9, "A2")):  # A -> B -> A
+        s.write("ws/l2", envelope("cb", "message", t, payload=tag))
+    s.close()
+    segs = _segments(tmp_path, "ws/l2")
+    assert [p.name for p in segs] == [
+        "0400_r_s0001.jsonl.gz",
+        "0400_r_s0003.jsonl.gz",
+        "0500_r_s0002.jsonl.gz",
+    ]
+    assert sorted(r["payload"] for p in segs for r in read_records(p)) == ["A1", "A2", "B"]
+
+
+def test_timer_flush_makes_a_quiet_stream_durable_within_the_bound(tmp_path):
+    now = [0]
+    s = SegmentStore(tmp_path, "r", flush_s=5.0, mono=lambda: now[0])
+    s.write("poll/x", envelope("okx", "poll", T0, payload="only"))  # no later write ever comes
+    (part,) = list(tmp_path.rglob("*.part"))
+    now[0] = 4 * 10**9
+    assert s.flush_due() == 0
+    now[0] = 5 * 10**9
+    assert s.flush_due() == 1
+    recs, _ = read_records(part, tolerant=True)
+    assert [r["payload"] for r in recs] == ["only"]
+    s.close()
+
+
+def test_close_tries_every_segment_then_raises(tmp_path):
+    s = SegmentStore(tmp_path, "r")
+    s.write("poll/a", envelope("okx", "poll", T0, payload="a"))
+    s.write("poll/b", envelope("okx", "poll", T0, payload="b"))
+    real = s._finalise
+
+    def flaky(stream):
+        if stream == "poll/a":
+            raise OSError("rename failed")
+        return real(stream)
+
+    s._finalise = flaky
+    with pytest.raises(StoreError, match="rename failed"):
+        s.close()
+    assert len(_segments(tmp_path, "poll/b")) == 1  # b still finalised
+    assert list((tmp_path / "poll" / "a").rglob("*.part"))  # a left incomplete, not claimed done
