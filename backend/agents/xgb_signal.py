@@ -26,7 +26,7 @@ import logging
 import os
 import pickle
 import threading
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -69,6 +69,56 @@ _feature_names_v45: List[str] = []
 _load_attempted_v45: bool = False
 _load_succeeded_v45: bool = False
 
+# Provenance (part 2): identity of exactly what each loader adopted. Cleared at the start
+# of every load attempt so a failed or swapped reload can never leave a stale identity.
+_fingerprint_v3: Optional[Dict[str, Any]] = None
+_fingerprint_v45: Optional[Dict[str, Any]] = None
+
+
+def _file_digests(paths: List[str]) -> Dict[str, str]:
+    """`{basename: sha256}` for the paths that exist, taken BEFORE the loader reads them."""
+    from services.provenance import artifact_fingerprint
+
+    out: Dict[str, str] = {}
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                entry = artifact_fingerprint([path], {})["artifacts"][0]
+                out[entry["path"]] = entry["sha256"]
+        except Exception:
+            logger.exception("xgb_signal: could not pre-digest %s", path)
+    return out
+
+
+def _fingerprint(
+    paths: List[str], config: Dict[str, Any], expected: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """Fingerprint the adopted files, or None if any changed since `expected` was taken.
+
+    Hashing happens after loading, so a file replaced in between would otherwise be
+    identified by bytes that were never loaded — a wrong identity is worse than none.
+    """
+    try:
+        from services.provenance import artifact_fingerprint
+
+        fp = artifact_fingerprint(paths, config)
+        for entry in fp["artifacts"]:
+            if expected.get(entry["path"]) != entry["sha256"]:
+                logger.warning(
+                    "xgb_signal: %s changed during load — leaving model unattributed",
+                    entry["path"],
+                )
+                return None
+        return fp
+    except Exception:
+        logger.exception("xgb_signal: could not fingerprint %s", paths)
+        return None
+
+
+def loaded_fingerprints() -> Dict[str, Optional[Dict[str, Any]]]:
+    """Fingerprints of the currently loaded driver (v3) and v4.5 shadow; None = not loaded."""
+    return {"v3": _fingerprint_v3, "v4_5": _fingerprint_v45}
+
 
 ChannelsLike = Union[np.ndarray, Sequence[Sequence[float]]]
 
@@ -76,10 +126,12 @@ ChannelsLike = Union[np.ndarray, Sequence[Sequence[float]]]
 def _try_load() -> bool:
     """Load Booster + feature_names + optional calibrator from disk once. Idempotent."""
     global _booster, _feature_names, _feature_set, _calibration, _load_attempted, _load_succeeded
+    global _fingerprint_v3
     with _lock:
         if _load_attempted:
             return _load_succeeded
         _load_attempted = True
+        _fingerprint_v3 = None
         if not (os.path.exists(_MODEL_PATH) and os.path.exists(_FEATURES_PATH)):
             logger.info(
                 "xgb_signal: artifacts missing (model=%s features=%s) — fallback to %.2f",
@@ -88,6 +140,7 @@ def _try_load() -> bool:
                 _NEUTRAL,
             )
             return False
+        pre_read = _file_digests([_MODEL_PATH, _FEATURES_PATH, _CALIBRATION_PATH])
         try:
             import xgboost as xgb
 
@@ -154,6 +207,14 @@ def _try_load() -> bool:
                     "xgb_signal: no calibrator at %s — raw passthrough",
                     _CALIBRATION_PATH,
                 )
+            adopted = [_MODEL_PATH, _FEATURES_PATH]
+            if _calibration is not None:
+                adopted.append(_CALIBRATION_PATH)
+            _fingerprint_v3 = _fingerprint(
+                adopted,
+                {"feature_set": _feature_set, "calibrated": _calibration is not None},
+                pre_read,
+            )
             return True
         except Exception as exc:
             logger.exception("xgb_signal: failed to load artifacts: %s", exc)
@@ -230,11 +291,12 @@ def _try_load_v4_5() -> bool:
     No calibrator in v4.5 (raw softmax used directly).
     """
     global _booster_v45, _feature_names_v45
-    global _load_attempted_v45, _load_succeeded_v45
+    global _load_attempted_v45, _load_succeeded_v45, _fingerprint_v45
     with _lock:
         if _load_attempted_v45:
             return _load_succeeded_v45
         _load_attempted_v45 = True
+        _fingerprint_v45 = None
         if not (os.path.exists(_MODEL_PATH_V45) and os.path.exists(_FEATURES_PATH_V45)):
             logger.info(
                 "xgb_signal: v4.5 artifacts missing (model=%s features=%s) — shadow disabled",
@@ -242,6 +304,7 @@ def _try_load_v4_5() -> bool:
                 _FEATURES_PATH_V45,
             )
             return False
+        pre_read_v45 = _file_digests([_MODEL_PATH_V45, _FEATURES_PATH_V45])
         try:
             import xgboost as xgb
 
@@ -257,6 +320,7 @@ def _try_load_v4_5() -> bool:
             _feature_names_v45 = names
             _load_succeeded_v45 = True
             logger.info("xgb_signal: loaded v4.5 booster (%d features)", len(names))
+            _fingerprint_v45 = _fingerprint([_MODEL_PATH_V45, _FEATURES_PATH_V45], {}, pre_read_v45)
             return True
         except Exception as exc:
             logger.exception("xgb_signal: v4.5 load failed: %s", exc)

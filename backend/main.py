@@ -465,6 +465,14 @@ async def lifespan(app: FastAPI):
     )
     logger.info("WS exit watcher attached")
 
+    if config.maker_shadow:
+        from services.maker_shadow import attach as attach_maker_shadow
+
+        attach_maker_shadow(
+            app_state.ws_subscriber, app_state.cnn_agent, sink=database.save_maker_shadow
+        )
+        logger.info("Maker entry shadow attached (measurement only, no orders)")
+
     # Background scan — refreshes product list without blocking startup
     async def _background_scan():
         try:

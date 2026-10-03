@@ -47,6 +47,29 @@ def _reset_chain_cache() -> None:
     _chain_built = False
 
 
+def effective_filter_names() -> List[str]:
+    """Names of the filters that actually RESOLVED into the chain, in order.
+
+    `MC_FILTERS` is what was requested; a name with no registered class is skipped
+    by `_build_chain`, so the two can differ silently. Provenance records this list.
+    """
+    global _chain, _chain_built
+    if not _chain_built:
+        _chain = _build_chain()
+        _chain_built = True
+    return [getattr(f, "name", "") or type(f).__name__ for f in _chain]
+
+
+def effective_filter_params() -> Dict[str, Dict[str, Any]]:
+    """`{name: params}` for the resolved chain; filters without `params()` report `{}`."""
+    names = effective_filter_names()
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, f in zip(names, _chain, strict=True):
+        getter = getattr(f, "params", None)
+        out[name] = dict(getter()) if callable(getter) else {}
+    return out
+
+
 def apply_buy_filters(
     side: str,
     model_prob: float,

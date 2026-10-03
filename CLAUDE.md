@@ -152,6 +152,53 @@ Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b)
 
 ---
 
+## Run isolation & data retention
+
+Agreed in the Claude/Codex consensus, 2026-10-03. See `docs/KNOWN_LIMITATIONS.md`.
+
+**Run isolation.**
+- Every parallel experiment, shadow backend or research run uses its OWN database copy, its own
+  output root and an explicit run id.
+- Never point a second **state-writing** backend or trading experiment at `backend/coinbase.db`.
+  The shared `agent_state` row is keyed only by agent, so a second backend overwrites the 8001
+  paper book. The 8002 shadow runs from a DB copy for exactly this reason.
+- Read-only diagnostics, and online backups through a read-only connection, ARE permitted.
+- Data-only screens and the recorder never open the app DB, so they need no database of their
+  own.
+- The market recorder (`backend/tools/recorder`) defaults to `C:\Users\gl450\market_recorder_data`
+  (`--out` overrides it) and imports nothing from the app.
+
+**Data retention.**
+- Historical data (hourly, 5m, 1m and auxiliary Parquet, and the DB) is never deleted or
+  collapsed.
+- Retained originals, snapshots and corrected dataset versions are immutable. A correction gets a
+  new dataset identity.
+- Routine collection and top-ups still publish to the mutable working files, but only after the
+  required prior version is preserved.
+- Any migration runs on a copy first, validates the replacement, keeps the originals until
+  validation completes, and has a rollback path.
+
+**Backups.** Pass explicit paths; the defaults resolve inside the current checkout, which in a
+worktree is NOT the 8001 runtime DB:
+
+```
+python -m tools.data_snapshot.snapshot --data-dir C:\Users\gl450\polymarket_app\backend\data --db C:\Users\gl450\polymarket_app\backend\coinbase.db
+```
+
+This writes a verified snapshot to `C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`.
+Missing inputs and an output inside the source tree are refused before anything is written.
+Snapshot details:
+- files are copied stable-per-file (stat check plus source re-read hash);
+- Parquet copies are fully read;
+- the DB is copied with the SQLite online backup and then integrity-checked;
+- a `manifest.json` records the capture interval.
+
+It is not a globally consistent as-of snapshot, and it covers only `included_roots`: worktree
+research outputs, model weights and caches, and the recorder archive are NOT included. A non-zero
+exit means a file was unstable, failed or invalid, or the DB integrity check failed.
+
+---
+
 ## Session hygiene — compact periodically
 
 Long Claude Code sessions burn context fast — especially subagent-driven implementation runs, multi-file refactors, and brainstorm → spec → plan → execute cycles. The assistant should **suggest `/compact`** at natural breakpoints rather than let context grow unbounded.
@@ -289,6 +336,9 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 19. **PnL-anchored trail exit.** `_compute_exit_threshold` in `agents/exit_thresholds.py` is the single source of truth for the trail / step-up profit-floor exit. Both `_check_risk_exits` (scan loop) and `exit_watcher.on_price_tick` (WS path) compute `exit_threshold` from `peak_pnl_pct + atr_pct + position_dollars + total_capital`, then fire `TRAIL_STOP` / `WS_TRAIL_STOP` when `pct_entry < exit_threshold`. Do not bypass to the raw `pct_from_peak <= -trail_pct` check that this replaced. `peak_pnl_pct` ratchets upward only and is seeded on `_CNNBook.load()` via `_migrate_position_state` for legacy positions that pre-date the field. `position_dollars` is owned by the scan loop (refreshed each scan); the WS path reads it but does not write, to avoid per-tick mutation contention.
 20. **v4.5 MODEL_DOWN exit.** When the v4.5 shadow indicates `p_down > _P_DOWN_EXIT_THRESHOLD` (0.55 in `cnn_agent`) for a held position, fire `MODEL_DOWN` (scan loop) or `WS_MODEL_DOWN` (WS path). `generate_signal` caches `p_down` AND `p_down_ts_ms` on `book.positions[pid]` after a successful shadow call, so both exit paths read the same value without re-running inference. The trigger sits between `STOP_LOSS` (capital protection) and `TRAIL_STOP` (profit protection) in the exit ladder. **Staleness gate (task #80):** cached `p_down` is only honored when `p_down_ts_ms` is within `_P_DOWN_STALE_MS` (90s) of `now`. Missing or expired `p_down_ts_ms` is treated as 0.0 (no fire). This prevents spurious MODEL_DOWN/WS_MODEL_DOWN exits from a cached high p_down on a position whose underlying market reversed between scans (WS ticks fire ~5-10/sec/pid; scans are 60s apart). Failures must be isolated per invariant #16 — a missing/None v4.5 result must NEVER re-raise into the scan loop or WS handler; absent `p_down` defaults to 0.0 (no MODEL_DOWN fire).
 21. **Maker-execution routing is opt-in + default-off.** `config.use_maker_execution` (env `USE_MAKER_EXECUTION`, default false) gates `cnn_agent._execute_live_order`. When false, live BUYs route through the taker `order_executor.execute_signal` exactly as before — no bid/ask fetch, byte-for-byte unchanged (mirrors the `MC_FILTERS=""` default-off contract, invariant #14). When true, the agent fetches best bid/ask via `coinbase_client.get_best_bid_ask`, attaches `bid`/`ask` to the signal (the maker path **aborts** without them — `order_executor.py:308`), and routes to `execute_maker_signal` (which owns the 30s fill poll + market fallback). Intended for the **8002 shadow** per port discipline; promote to 8001 only after the shadow confirms real maker fill rates. **Exit leg (Session 58.73):** the entire exit live-order path is gated behind the same flag — exits place NO live order today, so flag-off MUST stay paper-only (`book.sell` only, no bid/ask fetch). `agents/exit_execution.execute_live_exit` is the single source of truth for exit routing: maker (post-only) for `TRAIL_STOP`/`WS_TRAIL_STOP`/`MODEL_DOWN`/`WS_MODEL_DOWN`, taker for `STOP_LOSS`/`WS_STOP_LOSS`/`MAX_HOLD`/`LEGACY_EXIT`. Both exit paths (`_check_risk_exits` scan loop, `exit_watcher.on_price_tick` WS) close the paper book first, then call `execute_live_exit`, which no-ops unless the flag is on AND the executor is live (not dry-run). Sizing: SELL signal carries no `atr` key, so `order_executor` sizes from `quote_size = size*ask` (maker) / `size*price` (taker), recovering the held size via `base_size = quote_size/fill_price`. A live-exit failure is caught + logged, never re-raised (invariants #16/#18). Has zero effect on tracked paper PnL (paper book models no fees); purely a live-execution-path change for the 8002 shadow.
+
+23. **The paper maker-entry shadow is measurement-only and default-off.** `services/maker_shadow.MakerShadow` (enabled by `MAKER_SHADOW`, default false; wired only through `maker_shadow.attach`) must never place, cancel or simulate orders in `order_executor`, never write any table other than `maker_shadow`, and never change the paper book. Flag off ⇒ `cnn_agent._shadow_register` returns before touching the shadow. `register`, `on_tick` and `sweep` must never raise into the scan loop or the WS receive loop (invariants #14/#18). Its output is a **price-path proxy** (`crossed` = own-product trade strictly below the resting bid), never a fill rate; every reported rate is conditional and excludes `feed_gap` rows. Unmeasurable intents are recorded as `no_quote` / `duplicate`, never dropped. Intents finalise at their own deadline; no endpoint may be chosen by another product's tick.
+24. **Model provenance is recorded, never guessed.** New `cnn_scans` rows and new `trades` entry rows carry `model_provenance` = `services/provenance.decision_provenance(xgb_signal.loaded_fingerprints(), agent._decision_config())`, a `sha256:` digest registered in the `model_provenance` table. Rules: fingerprints are taken from what the loader ADOPTED, cleared at the start of every load attempt (so `force_reload` can never leave a stale identity), and dropped if any file changed between pre-read digest and adoption; a scan snapshots the v3 identity at its start, clears `_cache` when it differs from the identity that filled it, and stamps NULL if the identity changed before save; the MC component is `registry.effective_filter_names()` plus `effective_filter_params()`, never `MC_FILTERS`; no driver loaded ⇒ NULL; historical rows are never backfilled; writers reject anything that is not `sha256:<64 hex>`; computing provenance must never raise into the scan loop. Adding a setting that changes decisions, sizing or exits means adding it to `_decision_config`.
 
 ---
 

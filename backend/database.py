@@ -3,6 +3,7 @@ Async SQLite database layer — Coinbase crypto trading app.
 All timestamps stored as UTC ISO strings.
 """
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from typing import Dict, List, Optional
 import aiosqlite
 
 from config import config
+from services.provenance import validate_digest
 
 logger = logging.getLogger(__name__)
 DB_PATH = config.database_url
@@ -286,7 +288,42 @@ async def init_db() -> None:
                 components      TEXT,
                 computed_at     TEXT DEFAULT (datetime('now'))
             );
+
+            -- Paper maker-fill shadow (services/maker_shadow.py). Measurement
+            -- only: one row per resolved virtual post-only BUY intent.
+            CREATE TABLE IF NOT EXISTS maker_shadow (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id          TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                touched             INTEGER NOT NULL,
+                limit_price         REAL,
+                ask                 REAL,
+                spread_bps          REAL,
+                created_ts          REAL NOT NULL,
+                cross_ts            REAL,
+                time_to_cross_s     REAL,
+                window_close_price  REAL,
+                markout_s           REAL NOT NULL,
+                markout_bps         REAL,
+                mark_age_s          REAL,
+                finalised_late_s    REAL,
+                feed_gap            INTEGER,
+                window_s            REAL NOT NULL,
+                detail              TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_maker_shadow_created ON maker_shadow(created_ts);
         """)
+        await db.commit()
+
+        # Provenance registry: digest -> what it identifies (services/provenance.py).
+        # First write wins; rows reference it by the digest stored in model_provenance.
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS model_provenance (
+                digest      TEXT PRIMARY KEY,
+                detail      TEXT NOT NULL,
+                first_seen  TEXT NOT NULL
+            )"""
+        )
         await db.commit()
 
         # ── Migrations: add columns to existing tables ────────────────────────
@@ -302,6 +339,8 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_down REAL",
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_neutral REAL",
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_up REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN model_provenance TEXT",
+            "ALTER TABLE trades ADD COLUMN model_provenance TEXT",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
@@ -429,11 +468,16 @@ async def update_product_price(product_id: str, price: float, pct_change: float 
 
 
 async def save_candles(product_id: str, candles: List[Dict]) -> None:
+    # Upsert, not INSERT OR IGNORE: Coinbase returns the in-progress hour, and ignoring later
+    # fetches froze that first partial version forever (KNOWN_LIMITATIONS #6 / inventory P1).
     async with _db() as db:
         await db.executemany(
-            """INSERT OR IGNORE INTO candles
+            """INSERT INTO candles
                (product_id, start_time, open, high, low, close, volume)
-               VALUES (?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(product_id, start_time) DO UPDATE SET
+                 open=excluded.open, high=excluded.high, low=excluded.low,
+                 close=excluded.close, volume=excluded.volume""",
             [
                 (product_id, c["start"], c["open"], c["high"], c["low"], c["close"], c["volume"])
                 for c in candles
@@ -612,6 +656,9 @@ async def delete_position(product_id: str) -> None:
 
 
 async def save_cnn_scan(scan: Dict) -> None:
+    provenance = scan.get("model_provenance")
+    if provenance is not None:
+        validate_digest(provenance)
     async with _db() as db:
         await db.execute(
             """INSERT INTO cnn_scans
@@ -620,8 +667,9 @@ async def save_cnn_scan(scan: Dict) -> None:
                 regime, adx, rsi, macd, mfi, stoch_k, atr, vwap_dist,
                 fast_rsi, velocity, vol_z, xgb_prob, scanned_at,
                 xgb_prob_stdev, mc_telemetry, xgb_prob_v4,
-                xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up,
+                model_provenance)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan["product_id"],
                 scan["price"],
@@ -652,6 +700,7 @@ async def save_cnn_scan(scan: Dict) -> None:
                 scan.get("xgb_prob_v4_5_down"),
                 scan.get("xgb_prob_v4_5_neutral"),
                 scan.get("xgb_prob_v4_5_up"),
+                provenance,
             ),
         )
         await db.commit()
@@ -787,15 +836,32 @@ async def open_trade(
     usd_open: float,
     trigger_open: str,
     balance_after: float,
+    model_provenance: Optional[str] = None,
 ) -> int:
-    """Insert an open trade row. Returns the new trade id."""
+    """Insert an open trade row. Returns the new trade id.
+
+    `model_provenance` identifies the model+config that opened the position; NULL means
+    unattributed. A malformed value is rejected rather than stored.
+    """
+    if model_provenance is not None:
+        validate_digest(model_provenance)
     async with _db() as db:
         cursor = await db.execute(
             """INSERT INTO trades
                (agent, product_id, entry_price, size, usd_open,
-                trigger_open, balance_after, opened_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (agent, product_id, entry_price, size, usd_open, trigger_open, balance_after, _now()),
+                trigger_open, balance_after, opened_at, model_provenance)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                agent,
+                product_id,
+                entry_price,
+                size,
+                usd_open,
+                trigger_open,
+                balance_after,
+                _now(),
+                model_provenance,
+            ),
         )
         await db.commit()
         return cursor.lastrowid
@@ -1207,3 +1273,81 @@ async def get_regime_series(start: str, end: str) -> List[Dict]:
             (start, end),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+
+async def record_provenance(provenance: Dict) -> None:
+    """Register what a digest identifies. First write wins (INSERT OR IGNORE)."""
+    digest = validate_digest(provenance.get("digest"))
+    async with _db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO model_provenance (digest, detail, first_seen) VALUES (?,?,?)",
+            (digest, json.dumps(provenance, sort_keys=True, default=str), _now()),
+        )
+        await db.commit()
+
+
+_MAKER_SHADOW_COLS = (
+    "product_id",
+    "status",
+    "touched",
+    "limit_price",
+    "ask",
+    "spread_bps",
+    "created_ts",
+    "cross_ts",
+    "time_to_cross_s",
+    "window_close_price",
+    "markout_s",
+    "markout_bps",
+    "mark_age_s",
+    "finalised_late_s",
+    "feed_gap",
+    "window_s",
+    "detail",
+)
+
+
+async def save_maker_shadow(row: Dict) -> None:
+    """Persist one resolved maker-shadow intent (measurement only)."""
+    values = [row[c] for c in _MAKER_SHADOW_COLS]
+    values[_MAKER_SHADOW_COLS.index("touched")] = 1 if row["touched"] else 0
+    gap = row["feed_gap"]
+    values[_MAKER_SHADOW_COLS.index("feed_gap")] = None if gap is None else int(bool(gap))
+    async with _db() as db:
+        await db.execute(
+            f"INSERT INTO maker_shadow ({','.join(_MAKER_SHADOW_COLS)}) "
+            f"VALUES ({','.join('?' * len(_MAKER_SHADOW_COLS))})",
+            values,
+        )
+        await db.commit()
+
+
+async def get_model_provenance(digest: str) -> Optional[Dict]:
+    async with _db() as db:
+        async with db.execute(
+            "SELECT detail, first_seen FROM model_provenance WHERE digest=?", (digest,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {"detail": json.loads(row[0]), "first_seen": row[1]}
+
+
+async def get_maker_shadow_rows(since_ts: Optional[float] = None) -> List[Dict]:
+    """Return maker-shadow rows oldest first, optionally from since_ts onward."""
+    sql = f"SELECT {','.join(_MAKER_SHADOW_COLS)} FROM maker_shadow"
+    args: tuple = ()
+    if since_ts is not None:
+        sql += " WHERE created_ts >= ?"
+        args = (since_ts,)
+    sql += " ORDER BY created_ts, id"
+    async with _db() as db:
+        async with db.execute(sql, args) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(_MAKER_SHADOW_COLS, r, strict=True))
+        d["touched"] = bool(d["touched"])
+        d["feed_gap"] = None if d["feed_gap"] is None else bool(d["feed_gap"])
+        out.append(d)
+    return out

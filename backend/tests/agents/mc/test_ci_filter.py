@@ -192,3 +192,10 @@ class TestCIFilterCore:
         )
         assert side == "BUY"
         assert tele["ci"]["skipped"] == "predict-error"
+
+
+def test_params_report_effective_k(monkeypatch):
+    monkeypatch.setenv("MC_CI_K", "2.5")
+    from agents.mc.ci_filter import CIFilter
+
+    assert CIFilter().params() == {"K": 2.5}
