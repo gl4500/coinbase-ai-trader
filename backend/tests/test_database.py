@@ -869,3 +869,45 @@ class TestSaveCnnScanV4_5Cols:
         assert row[0] is None
         assert row[1] is None
         assert row[2] is None
+
+
+class TestCandleUpsert:
+    """P1 regression (Codex D3): the upsert replaces all five OHLCV fields at the same key and
+    nothing else."""
+
+    @staticmethod
+    def _bar(start, v):
+        return {
+            "start": start,
+            "open": v,
+            "high": v + 2,
+            "low": v - 2,
+            "close": v + 1,
+            "volume": v * 10,
+        }
+
+    def test_upsert_replaces_every_field_and_leaves_other_rows(self, db, run):
+        for pid in ("XRP-USD", "DOT-USD"):
+            run(
+                db.upsert_product(
+                    {"product_id": pid, "base_currency": pid[:3], "quote_currency": "USD"}
+                )
+            )
+        run(
+            db.save_candles(
+                "XRP-USD", [self._bar(1_700_000_000, 1.0), self._bar(1_700_003_600, 5.0)]
+            )
+        )
+        run(db.save_candles("DOT-USD", [self._bar(1_700_000_000, 7.0)]))
+        run(db.save_candles("XRP-USD", [self._bar(1_700_000_000, 3.0)]))
+        run(db.save_candles("XRP-USD", []))  # empty input is a no-op
+        xrp = {c["start_time"]: c for c in run(db.get_candles("XRP-USD"))}
+        assert [xrp[1_700_000_000][k] for k in ("open", "high", "low", "close", "volume")] == [
+            3.0,
+            5.0,
+            1.0,
+            4.0,
+            30.0,
+        ]
+        assert xrp[1_700_003_600]["open"] == 5.0  # other timestamp untouched
+        assert run(db.get_candles("DOT-USD"))[0]["open"] == 7.0  # other product untouched

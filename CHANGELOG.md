@@ -21,18 +21,42 @@ version permanently:
 
 **Fixes:**
 - **P1, `database.save_candles`:** `INSERT OR IGNORE` became an upsert on
-  `(product_id, start_time)`. The scanner refetches 100 bars every scan, so a provisional hour
-  is final one scan after it closes.
+  `(product_id, start_time)`. A provisional bar is corrected on the next SUCCESSFUL scanner
+  refetch that contains it. The scanner requests 100 bars per tracked product each scan.
+  - This is not a hard time bound. Scan duration, sleeps, and per-product fetch or DB failures
+    all delay the correction.
   - Live features still include the open hour, now refreshed instead of frozen.
-  - Residual: a just-closed bar is stale for up to one scan interval.
-  - Rows older than 100 bars are not refetched by the scanner and keep their frozen values.
+  - **Not repaired:** rows outside the 100-bar window, and rows of untracked products. During
+    the transition, a 336-bar consumer sees a mix of corrected and frozen rows.
+  - The change does not create point-in-time replay history.
+  - Regression test: all five OHLCV fields are replaced at the same key; other products and
+    timestamps are untouched; empty input is a no-op.
 - **P2, `history_backfill._backfill_to_path`** (hourly, 5m and 1m): only bars with
-  `start + bar_secs <= now` are persisted. The next run fetches from the newest stored bar, so
-  the bar is stored final once it closes.
-  - Existing frozen Parquet rows (about 3%) are NOT rewritten here. Repairing them on a copy is
-    a separate step.
+  `start + bar_secs <= cutoff` are persisted (equality accepted).
+  - The cutoff is fixed once per operation, and the filter runs before a start is counted as
+    known.
+  - The next run fetches from the newest stored bar, so the closed version is stored.
+  - There is **no deliberate historical OHLCV repair**: existing stored OHLCV is untouched,
+    though the save helper may still stamp missing metadata on rewrite.
+  - Coverage and gap repair (P3) is out of scope.
 
-**Originals preserved** in snapshot `C:\Users\gl450\polymarket_data_snapshots\20261003T195004Z`.
+**Rollout gates** (Codex D3), before 8001 restarts on this code:
+1. Take a fresh baseline snapshot of the actual DB and history paths. The 19:50 snapshot misses
+   rows the old writer has written since.
+2. Keep that baseline and all originals immutable.
+3. Rollback = redeploy the previous commit. No retained evidence is overwritten.
+
+**Historical Parquet repair stays deferred.** Codex's review blocks the proposed criterion
+`ingest_ts < start+bar_secs`. It is neither proof of a provisional row nor a complete detector,
+because the save path stamps `ingest_ts` at file-save time and can keep an early stamp through
+a replacement. The repair must therefore:
+- run on a COPY;
+- compare against newly captured provider data;
+- record originals and replacements with their provenance;
+- publish a new dataset identity;
+- never reuse the old `ingest_ts` as the availability time of corrected values.
+
+No strategy-edge claim or research verdict follows from this fix.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 

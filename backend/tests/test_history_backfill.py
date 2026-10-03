@@ -240,3 +240,28 @@ async def test_open_bar_is_not_frozen_and_final_version_is_stored_next_run(
     assert stored[base + 10 * bar_secs]["close"] == 110.0
     assert stored[base + 10 * bar_secs]["volume"] == 50.0
     assert base + 11 * bar_secs not in stored
+
+
+@pytest.mark.asyncio
+async def test_closed_filter_keeps_legacy_rows_and_does_not_mark_open_starts_known(
+    tmp_path, monkeypatch
+):
+    """Codex D2: an open bar repeated in a later page of the same run is still excluded (one
+    fixed cutoff for the whole operation), and previously stored OHLCV is not rewritten. Whether
+    the excluded start enters known_set is not observable within a run: the cutoff excludes it
+    either way."""
+    monkeypatch.setattr(hb, "_HISTORY_DIR", str(tmp_path))
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    legacy = dict(_make_5m_candle(base, close=1.0), volume=2.0)
+    hb._save_to_path(hb._parquet_path("ETH-USD"), [legacy])
+    now = base + 3 * 3600 + 600  # bar 3 is in progress
+    monkeypatch.setattr(hb.time, "time", lambda: now)
+    revised_legacy = dict(_make_5m_candle(base, close=9.0), volume=99.0)
+    open_bar = _make_5m_candle(base + 3 * 3600)
+    pages = [[revised_legacy, _make_5m_candle(base + 3600), open_bar], [open_bar], []]
+    with patch.object(hb, "_fetch_range", AsyncMock(side_effect=pages)):
+        result = await hb.backfill_product("ETH-USD", days=1)
+    stored = {c["start"]: c for c in hb._load_from_path(hb._parquet_path("ETH-USD"))}
+    assert base + 3 * 3600 not in stored
+    assert (stored[base]["close"], stored[base]["volume"]) == (1.0, 2.0)  # legacy untouched
+    assert result["new_bars"] == 1
