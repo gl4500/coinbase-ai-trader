@@ -15,9 +15,10 @@ def _bars(opens, closes):
     return pd.DataFrame({"open": opens, "close": closes}, index=IDX[: len(opens)], dtype=float)
 
 
-def _sched(*rows):  # (decision_day_index, execute_day_index, target)
+def _sched(*rows, close=100.0):  # (decision_day_index, execute_day_index, target)
     return pd.DataFrame(
-        [(IDX[d], IDX[e], t) for d, e, t in rows], columns=["decision", "execute", "target"]
+        [(IDX[d], IDX[e], t, close) for d, e, t in rows],
+        columns=["decision", "execute", "target", "decision_close"],
     ).set_index("decision")
 
 
@@ -68,7 +69,8 @@ def test_overnight_gap_solves_quantity_at_the_monday_open():
 def test_d1_executes_the_frozen_sunday_target_on_tuesday():
     r = run_weight_sleeve(_bars([100] * 4, [100] * 4), _sched((0, 2, 0.6)), 500.0, FREE, FINE, 0.10)
     assert r.equity.index[2] == IDX[2] and r.buys == 1
-    assert r.requested == [0.6] and r.executed_weights[0] == pytest.approx(0.6, abs=1e-6)
+    assert r.decision_log[0]["target"] == 0.6 and r.decision_log[0]["execution"] == "executed"
+    assert r.executed_weights[0] == pytest.approx(0.6, abs=1e-6)
 
 
 def test_missing_execution_open_expires_without_retry():
@@ -108,7 +110,7 @@ def test_weights_are_recomputed_from_executed_rounded_holdings():
     r = run_weight_sleeve(
         _bars([100] * 3, [100] * 3), _sched((0, 1, 0.55)), 1000.0, FREE, coarse, 0.10
     )
-    assert r.requested == [0.55] and r.executed_weights == [pytest.approx(0.5)]
+    assert r.decision_log[0]["target"] == 0.55 and r.executed_weights == [pytest.approx(0.5)]
 
 
 def test_terminal_dust_is_unliquidatable_and_never_cash():
@@ -146,3 +148,62 @@ def test_partial_sell_residual_below_base_min_is_unliquidatable_even_above_quote
     assert (r.buys, r.sells) == (1, 1)
     assert r.unliquidatable and r.residual_units == pytest.approx(0.1)
     assert r.terminal_value == pytest.approx(490.0)
+
+
+# -- Codex plan-review N4-N6 -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target,held,expected",
+    [
+        (0.4, 0.3, False),
+        (0.3, 0.4, False),
+        (0.6, 0.5, False),
+        (0.5, 0.6, False),
+        (0.41, 0.3, True),
+        (0.19, 0.3, True),
+    ],
+)
+def test_deadband_boundary_is_frozen_at_12_decimals_in_both_directions(target, held, expected):
+    from tools.vol_target.fsim import eligible
+
+    assert 0.4 - 0.3 > 0.10  # the binary-float trap this rule exists for
+    assert eligible(target, held, 0.10) is expected
+
+
+def test_missing_initialisation_sunday_close_suppresses_even_a_fixed_target():
+    # pre-period Sunday (index 0 is before bars start at index 1) with a NaN close
+    bars = _bars([100] * 3, [100] * 3).iloc[1:]
+    r = run_weight_sleeve(bars, _sched((0, 1, 0.5), close=float("nan")), 500.0, FREE, FINE, 0.10)
+    assert (r.buys, r.invalid_decisions) == (0, 1)
+    ok = run_weight_sleeve(bars, _sched((0, 1, 0.5)), 500.0, FREE, FINE, 0.10)
+    assert ok.buys == 1
+
+
+def test_decision_log_records_every_decision_at_decision_time():
+    s = _sched((0, 1, 0.05), (7, 8, 0.9))
+    r = run_weight_sleeve(_bars([100] * 8 + [np.nan, 100], [100] * 10), s, 500.0, FREE, FINE, 0.10)
+    log = r.decision_log
+    assert [e["outcome"] for e in log] == ["within_deadband", "eligible"]
+    assert log[0]["target"] == 0.05 and log[0]["held"] == 0.0
+    assert log[1]["execution"] == "missed_open" and r.executed_weights == []
+
+
+def test_sell_side_fee_and_slip_hit_the_target_weight():
+    c = Costs(0.009, 0.009, 0.0025)
+    cash, units, px, w = 100.0, 4.0, 100.0, 0.3
+    u = solve_units(cash, units, px, w, c)
+    sold = units - u
+    new_cash = cash + sold * px * (1 - 0.0025) * (1 - 0.009)
+    assert sold > 0 and _marked_weight(new_cash, u, px) == pytest.approx(w, abs=1e-9)
+
+
+def test_overnight_gap_reverses_the_trade_direction_from_existing_holdings():
+    # hold 0.5 bought at 100; Sunday close 100 asks for 0.7 (a buy), but Monday opens at 300:
+    # marked at the open the sleeve is already 0.75, so the frozen 0.7 target is a SELL
+    s = _sched((0, 1, 0.5), (7, 8, 0.7))
+    r = run_weight_sleeve(
+        _bars([100] * 8 + [300, 300], [100] * 8 + [300, 300]), s, 500.0, FREE, FINE, 0.10
+    )
+    assert (r.buys, r.sells) == (1, 1)
+    assert r.executed_weights[-1] == pytest.approx(0.7, abs=1e-6)

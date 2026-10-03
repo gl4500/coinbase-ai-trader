@@ -38,6 +38,6 @@ def schedule(close: pd.Series, start: str, end: str, delay: int) -> pd.DataFrame
     for d in close.index[close.index.weekday == P.DECISION_WEEKDAY]:
         ex = d + pd.Timedelta(days=1 + delay)
         if d >= lo - pd.Timedelta(days=1) and lo <= ex <= hi:
-            rows.append((d, ex, float(w.loc[d])))
-    out = pd.DataFrame(rows, columns=["decision", "execute", "target"])
+            rows.append((d, ex, float(w.loc[d]), float(close.loc[d])))
+    out = pd.DataFrame(rows, columns=["decision", "execute", "target", "decision_close"])
     return out.set_index("decision")

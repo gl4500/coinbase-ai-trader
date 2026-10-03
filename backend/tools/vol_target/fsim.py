@@ -17,6 +17,13 @@ import pandas as pd
 from tools.slow_trend.sim import Costs, Product
 
 _EPS = 1e-9
+_DEADBAND_DECIMALS = 12  # frozen: a difference equal to the deadband within 1e-12 does not trade
+
+
+def eligible(target: float, held: float, deadband: float) -> bool:
+    """Strict |target - held| > deadband, with binary-float noise removed (0.4 - 0.3 is not
+    > 0.10 here)."""
+    return round(abs(target - held), _DEADBAND_DECIMALS) > deadband
 
 
 def solve_units(cash: float, units: float, open_px: float, w: float, costs: Costs) -> float:
@@ -50,7 +57,7 @@ class WeightResult:
     invalid_decisions: int
     valid_decisions: int
     executed: int
-    requested: list = field(default_factory=list)
+    decision_log: list = field(default_factory=list)
     executed_weights: list = field(default_factory=list)
     capped: int = 0
     exposure: float = 0.0
@@ -118,7 +125,7 @@ def run_weight_sleeve(
     book = _Book(cash, costs, product)
     pending: dict = {}
     n = dict(missed=0, within=0, invalid=0, valid=0, executed=0, capped=0)
-    requested, executed_w, values, fractions = [], [], [], []
+    log, executed_w, values, fractions = [], [], [], []
     last_close, stale = float("nan"), [0, 0, 0]  # count, run, max_run
 
     def decide(day, held_weight):
@@ -126,30 +133,41 @@ def run_weight_sleeve(
             return
         row = sched.loc[day]
         tgt = row["target"]
+        entry = {"decision": str(day.date()), "execute": str(row["execute"].date())}
+        log.append(entry)
         if not (math.isfinite(tgt) and math.isfinite(held_weight)):  # missing Sunday close too
             n["invalid"] += 1
+            entry.update(target=None, held=None, outcome="invalid")
             return
         n["valid"] += 1
         n["capped"] += tgt >= 1.0
-        if abs(tgt - held_weight) > deadband:
-            pending[row["execute"]] = tgt
+        entry.update(target=tgt, held=held_weight)
+        if eligible(tgt, held_weight, deadband):
+            pending[row["execute"]] = (tgt, entry)
+            entry["outcome"] = "eligible"
         else:
             n["within"] += 1
+            entry["outcome"] = "within_deadband"
 
     first = bars.index[0]
     for d in sched.index[sched.index < first]:  # initialisation Sunday before the period
-        decide(d, 0.0)
+        decide(d, 0.0 if math.isfinite(sched.loc[d, "decision_close"]) else float("nan"))
     for day, row in bars.iterrows():
         px = row["open"]
         if day in pending:
-            tgt = pending.pop(day)
+            tgt, entry = pending.pop(day)
             if math.isnan(px):
                 n["missed"] += 1
+                entry["execution"] = "missed_open"
             else:
-                requested.append(tgt)
+                skipped = book.size_skipped
                 if book.rebalance(px, tgt):
                     n["executed"] += 1
                     executed_w.append(book.weight(px))
+                    entry.update(execution="executed", executed_weight=executed_w[-1])
+                else:
+                    gone = book.size_skipped > skipped
+                    entry["execution"] = "size_skipped" if gone else "no_change"
         if math.isnan(row["close"]):
             stale[0] += 1
             stale[1] += 1
@@ -163,10 +181,10 @@ def run_weight_sleeve(
         fractions.append(book.weight(mark) if book.ticks > 0 else 0.0)
         close = row["close"]
         decide(day, float("nan") if math.isnan(close) else book.weight(close))
-    return _finish(book, bars, cash, values, fractions, n, requested, executed_w, stale)
+    return _finish(book, bars, cash, values, fractions, n, log, executed_w, stale)
 
 
-def _finish(book, bars, cash, values, fractions, n, requested, executed_w, stale) -> WeightResult:
+def _finish(book, bars, cash, values, fractions, n, log, executed_w, stale) -> WeightResult:
     last = bars["close"].iloc[-1]
     if math.isnan(last):
         raise ValueError("terminal close missing: endpoint is never moved")
@@ -198,7 +216,7 @@ def _finish(book, bars, cash, values, fractions, n, requested, executed_w, stale
         invalid_decisions=n["invalid"],
         valid_decisions=n["valid"],
         executed=n["executed"],
-        requested=requested,
+        decision_log=log,
         executed_weights=executed_w,
         capped=int(n["capped"]),
         exposure=float(sum(fractions) / len(fractions)),

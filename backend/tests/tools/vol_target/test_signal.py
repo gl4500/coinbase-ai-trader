@@ -7,11 +7,11 @@ import pytest
 from tools.vol_target import prereg as P
 from tools.vol_target.signal import annualised_sigma, schedule, target_weight
 
-IDX = pd.date_range("2024-01-01", periods=60, freq="D")  # 2024-01-01 is a Monday
+IDX = pd.date_range("2024-01-01", periods=90, freq="D")  # 2024-01-01 is a Monday
 
 
 def _close(vals=None):
-    vals = vals if vals is not None else 100 * np.exp(0.01 * np.sin(np.arange(60)))
+    vals = vals if vals is not None else 100 * np.exp(0.01 * np.sin(np.arange(90)))
     return pd.Series(vals, index=IDX[: len(vals)], dtype=float)
 
 
@@ -27,13 +27,14 @@ def test_sigma_needs_21_consecutive_valid_closes():
     assert s.iloc[:20].isna().all() and np.isfinite(s.iloc[20])
 
 
-@pytest.mark.parametrize("bad", [np.nan, 0.0, -1.0])
-def test_any_invalid_close_in_the_window_invalidates_sigma(bad):
+@pytest.mark.parametrize("bad", [np.nan, 0.0, -1.0, np.inf, -np.inf])
+def test_any_invalid_close_in_the_window_invalidates_sigma_then_recovers(bad):
     v = _close().to_numpy().copy()
     v[40] = bad
     s = annualised_sigma(_close(v))
-    assert s.iloc[40:61].isna().all()  # every window containing day 40 (through day 60)
+    assert s.iloc[40:61].isna().all()  # every window whose 21 closes include day 40
     assert np.isfinite(s.iloc[39])
+    assert np.isfinite(s.iloc[61])  # first fully clean 21-close window (days 41..61)
 
 
 def test_target_weight_caps_at_one_and_scales_down():
@@ -82,3 +83,9 @@ def test_prereg_freezes_the_agreed_values():
     )
     assert P.MIN_BLOCK_VALID_DECISIONS == 4
     assert P.SOURCE_SNAPSHOT_LOCK.startswith("sha256:5215b520ba2d25b7")
+
+
+def test_schedule_carries_the_decision_sunday_close():
+    c = _close()
+    sch = schedule(c, "2024-01-29", "2024-02-28", delay=0)
+    assert (sch["decision_close"] == c.loc[sch.index]).all()

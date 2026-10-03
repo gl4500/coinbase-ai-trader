@@ -95,3 +95,47 @@ def test_import_verifies_every_raw_file_and_copies_bytes(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="ETH-USD"):
         V.import_snapshot(src, out)
     assert not (out / "manifest.json").exists()  # nothing published on failure
+
+
+# -- Codex plan-review N1-N3, N5 --------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["malformed", "conflicting"])
+def test_warmup_rows_before_dev_start_are_audited(kind):
+    raws = {p: _raw(seed=i) for i, p in enumerate(P.PRODUCTS)}
+    r = raws["ETH-USD"]
+    i = int(np.flatnonzero(r["start"] == int(pd.Timestamp("2016-08-20").timestamp()))[0])
+    if kind == "malformed":
+        r.loc[i, "high"] = r.loc[i, "low"] / 2  # high < low
+    else:
+        dup = r.loc[[i]].assign(close=r.loc[i, "close"] * 1.5)
+        raws["ETH-USD"] = pd.concat([r, dup], ignore_index=True)
+    out = V.evaluate(raws, CONS)
+    assert out["verdict"]["reason"] == "data"
+    assert out["data_checks"]["inadequate_because"] == "audit"
+    assert out["family"]["candidate_ordinal"] == 2  # recorded even when inadequate
+
+
+def test_inherited_prereg_is_part_of_the_experiment_identity(tmp_path):
+    vt, st = tmp_path / "vt.py", tmp_path / "st.py"
+    vt.write_text("SIGMA_TARGET = 0.5\n")
+    st.write_text("TAKER_FEE = 0.009\n")
+    before = V.prereg_digest([vt, st], tmp_path)
+    st.write_text("TAKER_FEE = 0.006\n")
+    assert V.prereg_digest([vt, st], tmp_path) != before
+    names = {p.name for p in V.PREREG_FILES}
+    assert {"prereg.py"} == names and len(V.PREREG_FILES) == 2
+
+
+def test_family_sequence_names_the_prior_sma_kill(report):
+    fam = report["family"]
+    assert fam["candidate_ordinal"] == 2
+    assert fam["prior"]["verdict"] == "KILL"
+    assert fam["prior"]["report"] == "report_2252e434a40e11f6_a1_first.json"
+
+
+def test_diagnostic_labels_say_what_they_measure(report):
+    vt = report["results"]["block"]["scenarios"]["P0"]["vol_target"]
+    assert "rebalance_turnover_excl_terminal" in vt
+    sleeve = vt["per_sleeve"]["BTC-USD"]
+    assert "capped_fraction_of_valid_decisions" in sleeve and "decision_log" in sleeve

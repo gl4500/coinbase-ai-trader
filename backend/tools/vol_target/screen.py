@@ -31,6 +31,25 @@ OUT = BACKEND / "data" / "research" / "vol_target"
 LOCK = Path(__file__).with_name("snapshot.lock")
 BLOCKS = (P.BOOT_BLOCK_WEEKS, *P.BOOT_SENS_WEEKS)
 RAW = tuple(f"{p}.raw.parquet" for p in P.PRODUCTS)
+# The experiment identity covers the INHERITED preregistration too (Codex N2): a committed change
+# to a shared fee/gate/date constant must not silently reuse this experiment's identity.
+PREREG_FILES = (Path(P.__file__), BACKEND / "tools" / "slow_trend" / "prereg.py")
+# Family record (Codex N3): the second candidate evaluated on the same snapshot and block.
+FAMILY = {
+    "candidate_ordinal": 2,
+    "prior": {
+        "candidate": "slow_trend SMA100",
+        "experiment_id": "2252e434a40e11f6",
+        "report": "report_2252e434a40e11f6_a1_first.json",
+        "verdict": "KILL",
+        "reason": "primary_failed",
+    },
+    "block_status": "previously observed retrospective evaluation, reused for a second candidate",
+}
+
+
+def prereg_digest(paths: list, root: Path) -> str:
+    return S.source_digest(list(paths), root)
 
 
 def _realised_vol(equity: pd.Series) -> float:
@@ -50,7 +69,7 @@ def _summ_w(results: list) -> dict:
         "slippage_cost": sum(r.slippage_cost for r in results),
         "unliquidatable": [r.unliquidatable for r in results],
         "residual_marked_value": sum(r.residual_marked_value for r in results),
-        "executed_turnover": sum(r.traded_notional for r in results) / P.INITIAL_USD,
+        "rebalance_turnover_excl_terminal": sum(r.traded_notional for r in results) / P.INITIAL_USD,
         "realised_vol": _realised_vol(eq),
         "boundary_returns": M.boundary_returns(eq, P.INITIAL_USD),
         "per_sleeve": {
@@ -68,8 +87,10 @@ def _summ_w(results: list) -> dict:
                 "valid_decisions": r.valid_decisions,
                 "invalid_decisions": r.invalid_decisions,
                 "executed": r.executed,
-                "capped_fraction": r.capped / r.valid_decisions if r.valid_decisions else None,
-                "requested_weights": r.requested,
+                "capped_fraction_of_valid_decisions": (
+                    r.capped / r.valid_decisions if r.valid_decisions else None
+                ),
+                "decision_log": r.decision_log,
                 "executed_weights": r.executed_weights,
                 "stale_mark_days": r.stale_mark_days,
                 "max_stale_run": r.max_stale_run,
@@ -127,7 +148,7 @@ def _inadequate(report: dict, why: str) -> dict:
 
 
 def evaluate(raw: dict, constraints: dict) -> dict:
-    report = {"data_checks": {"terminal": {}}, "results": None}
+    report = {"family": FAMILY, "data_checks": {"terminal": {}}, "results": None}
     firsts = {p: D.first_day(raw[p]) for p in P.PRODUCTS}
     report["data_checks"]["first_day"] = firsts
     if any(f is None for f in firsts.values()):
@@ -137,9 +158,12 @@ def evaluate(raw: dict, constraints: dict) -> dict:
     if common_first > P.DEV_START:
         return _inadequate(report, "no_development_coverage")
     windows = {"dev": (P.DEV_START, P.DEV_END), "block": (P.BLOCK_START, P.BLOCK_END)}
+    # "input" audits everything the signal CONSUMES (warmup from common_first), not only the
+    # scored dates (Codex N1); conflicting duplicates are rejected here, before normalise.
+    audited = {"input": (common_first, P.DEV_END), **windows}
     audits = {
         w: {p: D.audit(raw[p], a, b, P.MAX_MISSING_DAYS) for p in P.PRODUCTS}
-        for w, (a, b) in windows.items()
+        for w, (a, b) in audited.items()
     }
     report["data_checks"]["audits"] = audits
     if not all(v["adequate"] for w in audits.values() for v in w.values()):
@@ -166,9 +190,6 @@ def evaluate(raw: dict, constraints: dict) -> dict:
         results=res,
         block_valid_decisions=coverage,
         verdict=verdict(True, passes, coverage),
-        prior_in_family=[
-            "slow_trend SMA100: KILL primary_failed (report_2252e434a40e11f6_a1_first)"
-        ],
     )
     return report
 
@@ -217,7 +238,7 @@ def _run(replay: bool, new_prereg: bool) -> None:
     if not LOCK.exists() or LOCK.read_text().strip() != manifest_sha:
         sys.exit("snapshot.lock missing or does not match the manifest")
     manifest = json.loads((OUT / "manifest.json").read_text())
-    head, prereg_sha = S._git("rev-parse", "HEAD"), S.text_digest(Path(P.__file__))
+    head, prereg_sha = S._git("rev-parse", "HEAD"), prereg_digest(PREREG_FILES, S.REPO)
     exp_id = S.experiment_identity(prereg_sha, manifest_sha)
     ledger = OUT / "runs.jsonl"
     entries = (
@@ -238,6 +259,7 @@ def _run(replay: bool, new_prereg: bool) -> None:
         "mode": mode,
         "source_sha256": src,
         "replays_attempt": corrects,
+        "family": FAMILY,
     }
     S._append(
         ledger,

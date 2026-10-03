@@ -1253,3 +1253,20 @@ if __name__ == "__main__":
   - the status caveats (a previously observed block; the second candidate in this family).
 
   Send the report to Codex for an independent read. Commit and push.
+
+## Plan review dispositions (Codex `80e87472`, review of `0f698f7`: no BLOCKING)
+
+All six NON-BLOCKING items were applied under TDD before any import, lock or run. Each new test
+was RED first.
+
+| # | Finding | Disposition |
+|---|---|---|
+| N1 | Warm-up rows before DEV_START were consumed but not audited | Fixed. An `input` audit now covers common_first..DEV_END; the scored windows are unchanged. RED had shown a malformed warm-up candle passing silently to a `primary_failed` verdict. Tests cover malformed and conflicting-duplicate warm-up rows. |
+| N2 | Inherited slow_trend prereg values were outside the experiment identity | Fixed. `prereg_digest(PREREG_FILES)` hashes vol_target AND slow_trend `prereg.py`. A test shows a changed inherited fee changes the digest. |
+| N3 | The family sequence was missing from the ledger and from inadequate reports | Fixed. `FAMILY` (candidate ordinal 2, prior SMA KILL experiment/report/verdict, block status) is in every report, including inadequate ones, and in every ledger record. |
+| N4 | fixed50 could trade after a missing initialisation-Sunday close | Fixed. `schedule` carries `decision_close`; an initialisation decision with a non-finite Sunday close is invalid for every target. |
+| N5 | Requested weights were recorded at execution; labels were ambiguous | Fixed. A per-decision `decision_log` records target, held weight and outcome, plus the execution result (`executed` / `missed_open` / `size_skipped` / `no_change`). Labels are now `capped_fraction_of_valid_decisions` and `rebalance_turnover_excl_terminal`. |
+| N6a | The terminal-dust test did not cover base_min | Fixed. A partial-sell residual of 0.1 units < base_min 1.0, with proceeds above quote_min, is unliquidatable. Mutation-checked. |
+| N6b | Deadband float boundary | Frozen at 12 decimals by `eligible()`. Tests cover both directions at nonzero weights (0.4/0.3, 0.6/0.5) and assert the binary-float trap exists. |
+| N6c | The invalid-close test missed day 60 and recovery | The series was extended to 90 days, ±inf was added, and the first clean 21-close window is asserted finite. |
+| N6d | Sell-side fee+slip; a gap that reverses direction | Added. These pin existing correct behaviour (green at first run, stated as such). |
