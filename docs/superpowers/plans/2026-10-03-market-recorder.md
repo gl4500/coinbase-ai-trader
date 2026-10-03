@@ -945,6 +945,3 @@ if __name__ == "__main__":
 - [ ] **Step 3:** Launch detached into `C:\Users\gl450\market_recorder_data` with
   `Start-Process pythonw -ArgumentList '-m','tools.recorder.run' -WorkingDirectory <worktree>\backend -WindowStyle Hidden`.
   Record the PID from `status.json`. Autostart at logon is left as an operator decision.
-</content>
-</invoke>
-<parameter name="file_path">C:\Users\gl450\polymarket_app\.claude\worktrees\market-recorder\docs\superpowers\plans\2026-10-03-market-recorder.md
