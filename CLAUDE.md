@@ -152,6 +152,41 @@ Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b)
 
 ---
 
+## Run isolation & data retention
+
+Agreed in the Claude/Codex consensus, 2026-10-03. See `docs/KNOWN_LIMITATIONS.md`.
+
+**Run isolation.**
+- Every parallel experiment, shadow backend or research run uses its OWN database copy, its own
+  output root and an explicit run id.
+- Never point a second process at `backend/coinbase.db`. The shared `agent_state` row is keyed
+  only by agent, so a second backend overwrites the 8001 paper book. The 8002 shadow runs from a
+  DB copy for exactly this reason.
+- The market recorder (`backend/tools/recorder`) writes only to
+  `C:\Users\gl450\market_recorder_data` and imports nothing from the app.
+
+**Data retention.**
+- Historical data (hourly, 5m, 1m and auxiliary Parquet, and the DB) is never deleted or
+  collapsed.
+- Retained originals, snapshots and corrected dataset versions are immutable. A correction gets a
+  new dataset identity.
+- Routine collection and top-ups still publish to the mutable working files, but only after the
+  required prior version is preserved.
+- Any migration runs on a copy first, validates the replacement, keeps the originals until
+  validation completes, and has a rollback path.
+
+**Backups.** `python -m tools.data_snapshot.snapshot` (from `backend/`) writes a verified snapshot
+to `C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`:
+- files are copied stable-per-file (stat check plus source re-read hash);
+- Parquet copies are fully read;
+- the DB is copied with the SQLite online backup and then integrity-checked;
+- a `manifest.json` records the capture interval.
+
+It is not a globally consistent as-of snapshot. A non-zero exit means some file was unstable or
+invalid.
+
+---
+
 ## Session hygiene — compact periodically
 
 Long Claude Code sessions burn context fast — especially subagent-driven implementation runs, multi-file refactors, and brainstorm → spec → plan → execute cycles. The assistant should **suggest `/compact`** at natural breakpoints rather than let context grow unbounded.
