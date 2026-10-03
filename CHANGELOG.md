@@ -7,6 +7,57 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.102 — 2026-10-03 — Preregistered volatility-target screen: KILL (primary_failed)
+
+New offline research package `backend/tools/vol_target/`, stacked on the frozen
+`tools/slow_trend`. No backend, agent or 8001 change.
+
+**Preregistration and plan.** The preregistration was debated with Codex before any code: my
+proposal `c4c6827b` plus Codex's amendments `52c7e2ee`, archived at
+`C:\Users\gl450\analysis_archive\vol_target_prereg_2026-10-03\`. The plan was
+`docs/superpowers/plans/2026-10-03-vol-target-screen.md`.
+
+**The rule:**
+- each USD 500 BTC and ETH sleeve targets `min(1, 50% / σ̂)`;
+- σ̂ comes from the 20 daily log returns of 21 consecutive valid closes;
+- decisions are made weekly on Sunday and executed at Monday's open (D1: Tuesday's);
+- the order is a target-weight instruction with a strict 0.10 deadband;
+- the simulator is fractional and self-financing, with Intro-tier fees.
+
+**Plan review.** Codex review `80e87472` found no blocking items. All six non-blocking items
+were applied under TDD before import (see the plan's dispositions). One of them, N1, was a real
+gap: a malformed warm-up candle before the dev start went unaudited. Each Review Focus behaviour
+was checked by breaking the code on purpose.
+
+**The run.** The slow-trend snapshot was imported, not refetched, and verified against its lock
+`5215b520`. One run: experiment `97a4c7f2336008ab`, attempt 1, mode `first`, report
+`backend/data/research/vol_target/report_97a4c7f2336008ab_a1_first.json`.
+
+| Period, P0 | Vol-target return / max DD | Buy-and-hold | Fixed 50% (non-gating) | DCA-52 |
+|---|---|---|---|---|
+| dev 2016-08-30..2025-04-13 | +3,208% / 74.3% | +14,236% / 91.3% | +3,180% / 63.5% | +7,982% / 91.5% |
+| block 2025-04-14..2026-10-02 | +30.0% / 57.6% | +31.6% / 62.2% | +19.4% / 36.4% | −7.9% / 50.4% |
+
+**Verdict: KILL, primary_failed.**
+- G1 (beat cash) passes in both periods.
+- G2 fails in both: the return is below buy-and-hold, and the drawdown ratio is 0.81 (dev) and
+  0.93 (block) against the 2/3 bar.
+- The same holds under S10, S25, D1 and SM. Coverage is 77/77 valid block decisions per sleeve,
+  and nothing was affected.
+
+**Diagnostics, never gates:**
+- **Mostly invested:** block exposure was BTC 0.97 and ETH 0.79. BTC was capped at weight 1 in
+  84% of its decisions, because realised volatility mostly sits below 50%.
+- **Fees:** dev fees were $4,276 on a compounding bankroll.
+- **Fixed 50/50 vs vol timing:** the fixed 50/50 mix matched vol-target's dev return with a
+  lower drawdown. Volatility *timing* added little over simply holding less crypto.
+- **Fixed 50/50 is not a candidate.** It would also fail dev G2 (ratio 0.70) and is
+  non-gating. Promoting it after seeing results is exactly what the preregistration forbids.
+
+**Status.** This is the second candidate on the same previously observed block (the first was
+the SMA100 KILL), and the ledger and report record that sequence. A KILL abandons THIS candidate
+only. Two systematic BTC/ETH timing rules have now failed this utility gate under real fees.
+
 ### Session 58.98 — 2026-10-03 — Preregistered BTC/ETH slow-trend falsification screen
 
 New offline research package `backend/tools/slow_trend/` only. No backend, agent,
