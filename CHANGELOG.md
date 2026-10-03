@@ -40,9 +40,37 @@ Codex review rounds; 10 blocking defects were found and fixed before any code.
   run ledger keyed by a stable experiment id, with retry / replay /
   corrected-replay / new-preregistration modes.
 
-**Tests:** 77 in `backend/tests/tools/slow_trend/`. Mutation-checked: reintroducing
-the carry-in bug, dropping the affected-gate check, and forward-filling the
-terminal close each turned a test red.
+**Tests:** 82 in `backend/tests/tools/slow_trend/` (77, plus 5 from the final-review
+fix pass: public market endpoints, one-day page overlap, request counting, and
+line-ending-independent digests). Mutation-checked: reintroducing the carry-in
+bug, dropping the affected-gate check, and forward-filling the terminal close
+each turned a test red.
+
+**RESULT — `KILL` (`primary_failed`).** Single run, experiment `2252e434a40e11f6`
+attempt 1, HEAD `55c9323`, snapshot lock `sha256:5215b520…`. Data was adequate:
+ETH had 2 missing days in development, within the 3-day allowance. The
+development period was 2016-08-30 → 2025-04-13 (first common valid SMA day).
+
+| P0 (taker 0.90%/0.90%) | Trend SMA100 | Buy-and-hold | DCA-52 |
+|---|---|---|---|
+| Development: net return | +6,890% | +14,236% | +7,982% |
+| Development: max drawdown | 70.5% | 91.3% | 91.5% |
+| Development: round trips / fees | 122 / $48.6k | 0 / — | — |
+| Validation block 2025-04-14 → 2026-10-02: net return | +34.5% | +31.6% | −7.9% |
+| Validation block: max drawdown | 40.9% | 62.2% | 50.4% |
+
+- **Development fails G2.** The trend earned less than buy-and-hold, and its
+  drawdown was 0.77× buy-and-hold's, not ≤ 0.67×. The validation block passed
+  P0, though under S25 it failed G2 by a hair.
+- **Weekly excess vs buy-and-hold (development):** −0.44%/week, block-bootstrap
+  CI [−1.09, +0.17]. Versus cash: +1.36%/week, CI [+0.30, +2.64] (exploratory).
+- **Plain reading.** At retail taker fees, the 100-day-average timing rule cut
+  the worst BTC/ETH crash from ~91% to ~70% but gave up about half the
+  long-run gain. That misses the preregistered bar, so this candidate is
+  abandoned. KILL is not a verdict on trend following in general, and
+  buy-and-hold is a comparator, not a proven edge.
+- **The hourly overlap diagnostic** was `absent` (the worktree has no
+  gitignored `data/history`). It is informational only.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
