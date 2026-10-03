@@ -43,6 +43,7 @@ Install PyTorch (CUDA 12.x):
 import asyncio
 import bisect
 import datetime as _dt
+import inspect
 import json
 import logging
 import math
@@ -263,7 +264,12 @@ class _CNNBook:
         return self.win_rate * avg_win - (1 - self.win_rate) * avg_loss
 
     async def buy(
-        self, pid: str, price: float, frac: float, trigger: str = "SCAN"
+        self,
+        pid: str,
+        price: float,
+        frac: float,
+        trigger: str = "SCAN",
+        model_provenance: Optional[str] = None,
     ) -> Tuple[float, float]:
         # #125a: tiered blacklist gating. Active (or no row) → full frac.
         # Probation → half size (real money, reduced risk). Suspended →
@@ -307,6 +313,7 @@ class _CNNBook:
             usd_open=spend,
             trigger_open=trigger,
             balance_after=self.balance,
+            model_provenance=model_provenance,
         )
         return spend, size
 
@@ -1249,6 +1256,7 @@ _HEARTBEAT_EVERY = 1  # #106: every epoch — under GPU contention 5+ min epochs
 # OLLAMA_URL deleted #311-refactor-f — Ollama LLM blend was CNN-backend-only
 # and is now removed; cnn_agent makes no HTTP calls to Ollama.
 _CACHE_TTL = 300
+_ANY_MODEL = object()  # sentinel: _current_provenance without a scan-start snapshot
 _EARLY_STOP_PATIENCE = 15  # stop if val_loss doesn't improve for this many epochs
 
 
@@ -1668,6 +1676,11 @@ class CoinbaseCNNAgent:
         self._cache: Dict[str, Tuple[float, float, Dict[str, float]]] = {}
         self.model: Optional[Any] = None
         self.book = _CNNBook()  # dry-run portfolio — tracks positions + trades table
+        self._recorded_provenance: Optional[str] = None  # last digest written to the registry
+        # v3 identity that produced every entry currently in _cache. A model swap
+        # (xgb_signal.force_reload) clears the cache so an old prediction can never be
+        # stamped with the new model's digest.
+        self._cache_model_digest: Optional[str] = None
         # ── Runtime stats ──────────────────────────────────────────────────
         self.last_scan_at: Optional[float] = None
         self.next_scan_at: Optional[float] = None
@@ -1994,6 +2007,10 @@ class CoinbaseCNNAgent:
         xgb_shadow: Optional[float] = None
         xgb_shadow_v45: Optional[Tuple[float, float, float]] = None
         channels = None  # initialized to None for cache-hit path; MC chain accepts None
+        scan_model = self._model_identity()
+        if scan_model != self._cache_model_digest:
+            self._cache.clear()
+            self._cache_model_digest = scan_model
         cached = self._cache.get(pid)
         if cached and time.time() - cached[1] < _CACHE_TTL:
             cnn_prob, _, _cached_ind = cached
@@ -2248,8 +2265,10 @@ class CoinbaseCNNAgent:
         passes = side != "HOLD"
 
         # ── Save every scan result for the confidence table ───────────────────
+        provenance = await self._current_provenance(expected_model=scan_model)
         await database.save_cnn_scan(
             {
+                "model_provenance": provenance,
                 "product_id": pid,
                 "price": round(price, 6),
                 "cnn_prob": round(cnn_prob, 4),
@@ -2352,7 +2371,9 @@ class CoinbaseCNNAgent:
                 # strength = (model_prob - 0.5)*2 is NOT a probability — passing
                 # it to Kelly gave frac=0 for all signals below model_prob=0.75.
                 frac = min(_kelly_fraction(model_prob), _CNN_MAX_FRAC)
-                spent, _ = await self.book.buy(pid, price, frac, trigger="SCAN")
+                spent, _ = await self.book.buy(
+                    pid, price, frac, trigger="SCAN", model_provenance=provenance
+                )
                 if spent > 0:
                     self.signals_executed += 1
                     signal["execution"] = {"success": True, "spent": round(spent, 2)}
@@ -2399,6 +2420,82 @@ class CoinbaseCNNAgent:
                 signal["live_execution"] = result
 
         return signal
+
+    def _decision_config(self) -> Dict[str, Any]:
+        """Settings that change what this agent decides or how it sizes and exits.
+
+        Fingerprinted by provenance part 2. The MC chain is the one that RESOLVED, not
+        `MC_FILTERS` — a requested-but-unregistered filter must not look like it ran.
+        """
+        from agents import exit_thresholds as _et
+        from agents.mc import registry as _mc_registry
+
+        return {
+            "model_backend": config.model_backend,
+            "cnn_buy_threshold": config.cnn_buy_threshold,
+            "cnn_sell_threshold": config.cnn_sell_threshold,
+            "xgb_v45_thresh_up": config.xgb_v45_thresh_up,
+            "xgb_v45_thresh_down": config.xgb_v45_thresh_down,
+            "mc_filters_effective": ",".join(_mc_registry.effective_filter_names()),
+            "mc_filter_params": json.dumps(
+                _mc_registry.effective_filter_params(), sort_keys=True, default=str
+            ),
+            "max_position_usd": config.max_position_usd,
+            "min_price": MIN_PRICE,
+            "kelly_max_frac": inspect.signature(_kelly_fraction).parameters["max_frac"].default,
+            "max_frac": _CNN_MAX_FRAC,
+            "stop_loss_pct": _CNN_STOP_LOSS_PCT,
+            "atr_trail_mult": _CNN_ATR_TRAIL_MULT,
+            "atr_trail_min": _CNN_ATR_TRAIL_MIN,
+            "atr_trail_max": _CNN_ATR_TRAIL_MAX,
+            "max_hold_secs": _CNN_MAX_HOLD_SECS,
+            "p_down_exit_threshold": _P_DOWN_EXIT_THRESHOLD,
+            "p_down_stale_ms": _P_DOWN_STALE_MS,
+            "fee_rate": _et.FEE_RATE,
+            "giveback_frac": _et.GIVEBACK_FRAC,
+            "large_position_frac": _et.LARGE_POSITION_FRAC,
+            "large_position_floor": _et.LARGE_POSITION_FLOOR,
+            "max_dollar_giveback_frac": _et.MAX_DOLLAR_GIVEBACK_FRAC,
+            "max_loss_frac_of_capital": _et.MAX_LOSS_FRAC_OF_CAPITAL,
+        }
+
+    @staticmethod
+    def _model_identity() -> Optional[str]:
+        """Digest of the currently loaded v3 driver, or None. Never raises."""
+        try:
+            from agents import xgb_signal
+
+            fp = xgb_signal.loaded_fingerprints()["v3"]
+            return fp["digest"] if fp else None
+        except Exception:
+            logger.exception("could not read the loaded model identity")
+            return None
+
+    async def _current_provenance(self, expected_model: Any = _ANY_MODEL) -> Optional[str]:
+        """Digest of the loaded model + decision config, or None (unattributed).
+
+        `expected_model` is the v3 identity snapshotted when the scan started; if the
+        driver changed since (a reload mid-scan), the row is left unattributed rather
+        than stamped with a model that may not have produced its score.
+        Never raises into the scan loop: any failure saves the row unattributed.
+        """
+        try:
+            from agents import xgb_signal
+            from services.provenance import decision_provenance
+
+            prov = decision_provenance(xgb_signal.loaded_fingerprints(), self._decision_config())
+            if prov is None:
+                return None
+            if expected_model is not _ANY_MODEL and prov["components"]["v3"] != expected_model:
+                logger.info("model changed during scan — saving row unattributed")
+                return None
+            if prov["digest"] != self._recorded_provenance:
+                await database.record_provenance(prov)
+                self._recorded_provenance = prov["digest"]
+            return prov["digest"]
+        except Exception:
+            logger.exception("provenance unavailable — saving scan unattributed")
+            return None
 
     async def _execute_live_order(self, order_executor, signal: Dict) -> Dict:
         """Route a live order through the maker (post-only) or taker path.

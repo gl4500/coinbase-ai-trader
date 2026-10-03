@@ -290,6 +290,116 @@ development period was 2016-08-30 → 2025-04-13 (first common valid SMA day).
   buy-and-hold is a comparator, not a proven edge.
 - **The hourly overlap diagnostic** was `absent` (the worktree has no
   gitignored `data/history`). It is informational only.
+### Session 58.97 — 2026-10-01 — Provenance, part 2: identity persisted on new rows
+
+Blocker 1 of the controlling document, completed for NEW rows. Every new `cnn_scans`
+row and every new `trades` entry row now carries `model_provenance`, a `sha256:` digest
+of the model artifacts that were actually loaded plus the decision config. Historical
+rows stay NULL — **unattributed, never guessed** — and an `UNKNOWN` close-insert stays
+NULL too. Part 1 (58.95) is cherry-picked onto this branch from
+`fix/replay-closed-bar-filter` so part 2 does not depend on that unmerged chain.
+
+**Four loosely coupled layers:**
+
+- `agents/xgb_signal.py` fingerprints exactly what each loader ADOPTED — v3 model and
+  features, plus the calibrator only when it was accepted (a calibrator rejected for a
+  feature-set mismatch is not part of the identity). The fingerprint is cleared at the
+  start of every load attempt, so `force_reload` after a model swap mints a new identity
+  and a failed reload leaves none rather than a stale one. The v4.5 shadow gets its own,
+  because it drives the `MODEL_DOWN` exit. `loaded_fingerprints()` reports both.
+- `agents/mc/registry.effective_filter_names()` reports the filters that RESOLVED. With
+  `MC_FILTERS=ci` and `ci` never registered, the identity records an empty chain — the
+  configured-vs-ran gap part 1 warned about.
+- `services/provenance.decision_provenance(fingerprints, config)` (pure) combines driver
+  digest, shadow digest (or "none") and the typed decision config into one digest, and
+  returns `None` when no driver is loaded. `validate_digest` accepts only
+  `sha256:<64 lowercase hex>`.
+- `database.py`: additive `model_provenance TEXT` on `cnn_scans` and `trades` (ALTER
+  migration), a `model_provenance` registry table (digest → detail, first write wins),
+  `record_provenance` / `get_model_provenance`, and `save_cnn_scan` / `open_trade`
+  **reject a malformed digest** instead of storing something that looks attributed.
+
+`cnn_agent` stamps the digest on each scan and passes it through
+`book.buy(..., model_provenance=)` to `open_trade`. `_current_provenance()` writes the
+registry once per new digest and never raises into the scan loop — a failure saves the
+row unattributed. Decision config fingerprinted: model backend, buy/sell thresholds,
+v4.5 thresholds, effective MC chain, max position fraction, stop / ATR-trail / max-hold
+constants, MODEL_DOWN threshold and staleness, and the `exit_thresholds` constants.
+
+**Review round (Codex + an independent reviewer, both on `9089fac`) — three real defects,
+all fixed here:**
+
+- **A reload could stamp an OLD prediction with the NEW model's digest.** The agent reuses
+  each product's probability for 300 s; `force_reload` did not clear that cache. Now the
+  scan snapshots the v3 identity at its start, clears the cache when it differs from the
+  identity that filled it (the cache stays a 3-tuple, invariant 2), and stamps a row only
+  if the identity at save time still matches the snapshot — a reload mid-scan leaves the
+  row NULL.
+- **Decision settings missing from the identity:** the MC filters' own parameters
+  (`MC_CI_K` changes what `ci` blocks) via new `BuyFilter.params()` /
+  `registry.effective_filter_params()`, plus `max_position_usd`, `MIN_PRICE` and
+  `_kelly_fraction`'s `max_frac` cap.
+- **Load-vs-hash race:** each artifact is digested BEFORE it is read; the fingerprint is
+  kept only if every adopted file still has that digest, otherwise the model is left
+  unattributed.
+
+Recorded, not fixed: exits are not attributed. A `MODEL_DOWN` exit is decided by
+whichever v4.5 model is loaded at exit time while the row keeps the opening identity;
+v4.5 has no in-process reload, so this matters only across a restart with swapped files.
+
+**Files:** `services/provenance.py`, `agents/xgb_signal.py`, `agents/mc/registry.py`,
+`database.py`, `agents/cnn_agent.py`. Tests: `test_xgb_signal.py` (+6),
+`tests/agents/mc/test_registry.py` (+3), `test_provenance.py` (+13),
+`test_provenance_persistence.py` (11), `test_cnn_agent.py` (+7).
+
+**Limits:** it identifies what was configured and loaded,
+not every code path — code identity is git's job. Not deployed: the live 8001 backend
+picks this up only after a merge and restart, which is an operator decision.
+
+### Session 58.95 — 2026-09-29 — Provenance, part 1: the pure fingerprint
+
+Blocker 1 of the controlling document. `cnn_scans` and `trades` carry **no model
+or config identity**, so no stored number can be attributed to a version — which
+is why a 1,582-trade PnL figure silently mixed model eras, and why the peer
+session's rule "agent tag is not model provenance" has to be enforced by data
+rather than by memory.
+
+This is the **pure half only**: `backend/services/provenance.py` turns "what was
+loaded" into one stable, diagnosable string. No database, no schema, no clock.
+Persisting it comes next, because a migration carries a different kind of risk
+than a hash function.
+
+**Design stance — refuse rather than guess.** A wrong fingerprint is worse than
+none, because it invites attribution that cannot be justified. A missing file, an
+empty artifact set, or a directory **raises**.
+
+**Files:** `backend/services/provenance.py`, `backend/tests/test_provenance.py`
+(9 tests).
+
+Properties pinned: deterministic; sensitive to one changed byte; sensitive to a
+changed config value; **independent of the order paths are supplied** (so a
+refactor does not look like a model change); per-file digests and sizes returned
+so a mismatch can be *localised*, not merely detected; and **typed config
+encoding**, so `1`, `True`, `1.0`, `"1"`, `None` and `"True"` cannot collide —
+`True == 1` in Python, and the peer session found that exact aliasing in another
+artifact path.
+
+Verified on the real live artifacts: `xgb_model.json` (438,752 B) plus
+`xgb_features.json` (7,490 B) fingerprint in **3.0 ms**, cheap enough to compute
+once at load.
+
+**A limitation found by running it, recorded in the module docstring because it
+is the more important half.** This identifies what was **configured**, not what
+**ran**. The live config reports `MC_FILTERS=ci`, yet `589b571` deleted the import
+that registered that filter — so for two months `ci` was requested and never
+executed, and a config fingerprint would have stamped "ci requested" on every one
+of those runs while looking perfectly consistent. **Provenance by configuration is
+necessary and not sufficient**; pair it with an effective-behaviour attestation
+such as `agents.mc.registry.chain_health()`, which reports what resolved rather
+than what was asked for.
+
+---
+
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 

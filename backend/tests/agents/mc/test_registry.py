@@ -212,3 +212,57 @@ class TestRegistryDispatch:
         assert side == "HOLD"
         assert tele == {}
         assert called["hit"] is False
+
+
+class TestEffectiveFilterNames:
+    """Provenance part 2 records the chain that RESOLVED, not the one requested."""
+
+    def test_empty_env_is_empty_chain(self, fresh_registry, monkeypatch):
+        monkeypatch.setenv("MC_FILTERS", "")
+        from agents.mc import registry
+
+        assert registry.effective_filter_names() == []
+
+    def test_unregistered_names_are_excluded(self, fresh_registry, monkeypatch):
+        # Mirrors live: MC_FILTERS=ci while nothing imports ci_filter.
+        monkeypatch.setenv("MC_FILTERS", "ci,bogus")
+        from agents.mc import registry
+
+        registry._FILTER_CLASSES.pop("ci", None)
+        registry._reset_chain_cache()
+        assert registry.effective_filter_names() == []
+
+    def test_registered_filters_reported_in_order(self, fresh_registry, monkeypatch):
+        monkeypatch.setenv("MC_FILTERS", "b,a")
+        from agents.mc import registry
+
+        class _A:
+            name = "a"
+
+        class _B:
+            name = "b"
+
+        monkeypatch.setitem(registry._FILTER_CLASSES, "a", _A)
+        monkeypatch.setitem(registry._FILTER_CLASSES, "b", _B)
+        registry._reset_chain_cache()
+        assert registry.effective_filter_names() == ["b", "a"]
+
+
+class TestEffectiveFilterParams:
+    def test_params_keyed_by_name_and_defaulted(self, fresh_registry, monkeypatch):
+        monkeypatch.setenv("MC_FILTERS", "p,q")
+        from agents.mc import registry
+
+        class _P:
+            name = "p"
+
+            def params(self):
+                return {"K": 1.5}
+
+        class _Q:  # legacy filter without params()
+            name = "q"
+
+        monkeypatch.setitem(registry._FILTER_CLASSES, "p", _P)
+        monkeypatch.setitem(registry._FILTER_CLASSES, "q", _Q)
+        registry._reset_chain_cache()
+        assert registry.effective_filter_params() == {"p": {"K": 1.5}, "q": {}}

@@ -3,6 +3,7 @@ Async SQLite database layer — Coinbase crypto trading app.
 All timestamps stored as UTC ISO strings.
 """
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from typing import Dict, List, Optional
 import aiosqlite
 
 from config import config
+from services.provenance import validate_digest
 
 logger = logging.getLogger(__name__)
 DB_PATH = config.database_url
@@ -289,6 +291,17 @@ async def init_db() -> None:
         """)
         await db.commit()
 
+        # Provenance registry: digest -> what it identifies (services/provenance.py).
+        # First write wins; rows reference it by the digest stored in model_provenance.
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS model_provenance (
+                digest      TEXT PRIMARY KEY,
+                detail      TEXT NOT NULL,
+                first_seen  TEXT NOT NULL
+            )"""
+        )
+        await db.commit()
+
         # ── Migrations: add columns to existing tables ────────────────────────
         for sql in [
             "ALTER TABLE cnn_scans ADD COLUMN vwap_dist REAL",
@@ -302,6 +315,8 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_down REAL",
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_neutral REAL",
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_up REAL",
+            "ALTER TABLE cnn_scans ADD COLUMN model_provenance TEXT",
+            "ALTER TABLE trades ADD COLUMN model_provenance TEXT",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
@@ -617,6 +632,9 @@ async def delete_position(product_id: str) -> None:
 
 
 async def save_cnn_scan(scan: Dict) -> None:
+    provenance = scan.get("model_provenance")
+    if provenance is not None:
+        validate_digest(provenance)
     async with _db() as db:
         await db.execute(
             """INSERT INTO cnn_scans
@@ -625,8 +643,9 @@ async def save_cnn_scan(scan: Dict) -> None:
                 regime, adx, rsi, macd, mfi, stoch_k, atr, vwap_dist,
                 fast_rsi, velocity, vol_z, xgb_prob, scanned_at,
                 xgb_prob_stdev, mc_telemetry, xgb_prob_v4,
-                xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                xgb_prob_v4_5_down, xgb_prob_v4_5_neutral, xgb_prob_v4_5_up,
+                model_provenance)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan["product_id"],
                 scan["price"],
@@ -657,6 +676,7 @@ async def save_cnn_scan(scan: Dict) -> None:
                 scan.get("xgb_prob_v4_5_down"),
                 scan.get("xgb_prob_v4_5_neutral"),
                 scan.get("xgb_prob_v4_5_up"),
+                provenance,
             ),
         )
         await db.commit()
@@ -792,15 +812,32 @@ async def open_trade(
     usd_open: float,
     trigger_open: str,
     balance_after: float,
+    model_provenance: Optional[str] = None,
 ) -> int:
-    """Insert an open trade row. Returns the new trade id."""
+    """Insert an open trade row. Returns the new trade id.
+
+    `model_provenance` identifies the model+config that opened the position; NULL means
+    unattributed. A malformed value is rejected rather than stored.
+    """
+    if model_provenance is not None:
+        validate_digest(model_provenance)
     async with _db() as db:
         cursor = await db.execute(
             """INSERT INTO trades
                (agent, product_id, entry_price, size, usd_open,
-                trigger_open, balance_after, opened_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (agent, product_id, entry_price, size, usd_open, trigger_open, balance_after, _now()),
+                trigger_open, balance_after, opened_at, model_provenance)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                agent,
+                product_id,
+                entry_price,
+                size,
+                usd_open,
+                trigger_open,
+                balance_after,
+                _now(),
+                model_provenance,
+            ),
         )
         await db.commit()
         return cursor.lastrowid
@@ -1212,3 +1249,25 @@ async def get_regime_series(start: str, end: str) -> List[Dict]:
             (start, end),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+
+async def record_provenance(provenance: Dict) -> None:
+    """Register what a digest identifies. First write wins (INSERT OR IGNORE)."""
+    digest = validate_digest(provenance.get("digest"))
+    async with _db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO model_provenance (digest, detail, first_seen) VALUES (?,?,?)",
+            (digest, json.dumps(provenance, sort_keys=True, default=str), _now()),
+        )
+        await db.commit()
+
+
+async def get_model_provenance(digest: str) -> Optional[Dict]:
+    async with _db() as db:
+        async with db.execute(
+            "SELECT detail, first_seen FROM model_provenance WHERE digest=?", (digest,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {"detail": json.loads(row[0]), "first_seen": row[1]}
