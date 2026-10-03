@@ -57,6 +57,60 @@ a replacement. The repair must therefore:
 - never reuse the old `ingest_ts` as the availability time of corrected values.
 
 No strategy-edge claim or research verdict follows from this fix.
+### Session 58.99 — 2026-10-03 — Standalone read-only market data recorder
+
+New package `backend/tools/recorder/` only. It runs as its own process, imports nothing from the
+app (AST-tested), and never touches `coinbase.db`, 8001 or 8002.
+
+**Why.** The Claude/Codex indicator comparison ranked missing DATA above models. The top
+missing items were execution truth (order book, trades) and clean derivatives crowding data.
+Neither can be backfilled, so collection has to start now.
+
+**What it records,** each as raw verbatim payloads in an as-of envelope (`received_at_ns`,
+status, error, `run_id`, `written_mono_ns`):
+- Coinbase public WS `level2`, `market_trades` and `heartbeats` for BTC-USD and ETH-USD;
+- OKX funding, funding history, OI, mark and index;
+- Coinbase International perp quotes;
+- Deribit futures and options summaries;
+- daily instrument definitions and the Coinbase spot and all-futures catalogues.
+
+Output goes to `C:\Users\gl450\market_recorder_data`, about 0.36 GB/day.
+
+**Probe findings:** Binance futures (HTTP 451) and Bybit (HTTP 403) are geo-blocked here.
+`services/macro_signals.py` calls Binance and has the defects Codex found: raw OI labelled USD,
+futures-volume share labelled dominance, and failures defaulted while `fetch_ok=True`. A source
+search of this branch and `origin/main` found **no consumer outside its own tests**, so it does
+not feed the live bot. An earlier draft of this entry wrongly said it likely did.
+
+**Integrity:**
+- immutable hourly per-run segments with sha256; crash salvage to `.incomplete` (never sealed);
+- sequence-gap and pause resubscribe for fresh snapshots;
+- storage failure is fatal (never disguised as a disconnect);
+- a single-writer lock and a STOP-file graceful stop.
+
+The plan was reviewed by Codex (4 blocking + 6 non-blocking), all applied under TDD; see the
+plan's dispositions table. 31 tests. Live pilot: all 28 streams, every poll `ok`, no gaps.
+Real-crash salvage recovered 10,114 records; clean STOP exit 0 with 28/28 segments sealed.
+
+**Acceptance round 3 (Codex review of `e985012`): 2 blocking + 1 non-blocking, all fixed under
+TDD; each fix was broken on purpose and its test went red.**
+- **B1 — Ctrl+C could report a failed finalisation as exit 0.** A cancellation is not a genuine
+  earlier error, so a storage failure during an operator stop now raises and the CLI exits 2.
+  Tested with a REAL in-process SIGINT through `cli`, not a stub.
+- **B2 — a seal failure left final-named data with no checksum, outside recovery.**
+  - Finalisation now publishes the seal first (temp + rename) and only then the data, so
+    final-named data never exists without its complete seal.
+  - Startup recovery also marks final data with a missing or malformed seal `.incomplete`
+    (bytes kept, reason recorded), and sets stray seals and seal temp files aside as `.orphan`.
+  - The startup seal check is structural (64 hex characters) and does not re-hash the data.
+    A consumer still verifies content against the seal.
+- **N1 —** the stop-event write and the store close are now independent steps. Errors are
+  aggregated, and the lock is always released.
+- **Codex accepted `cd24fcd`.** The non-blocking follow-up: a seal with non-text bytes crashed
+  startup instead of being quarantined. Seals are now read as ASCII bytes, and a decode failure
+  counts as malformed. Reading bytes exposed that text-mode seals on Windows end in CRLF, so
+  the pattern accepts an optional ``. All 109 real seals on disk were checked: none would be
+  quarantined.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
