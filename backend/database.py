@@ -429,11 +429,16 @@ async def update_product_price(product_id: str, price: float, pct_change: float 
 
 
 async def save_candles(product_id: str, candles: List[Dict]) -> None:
+    # Upsert, not INSERT OR IGNORE: Coinbase returns the in-progress hour, and ignoring later
+    # fetches froze that first partial version forever (KNOWN_LIMITATIONS #6 / inventory P1).
     async with _db() as db:
         await db.executemany(
-            """INSERT OR IGNORE INTO candles
+            """INSERT INTO candles
                (product_id, start_time, open, high, low, close, volume)
-               VALUES (?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(product_id, start_time) DO UPDATE SET
+                 open=excluded.open, high=excluded.high, low=excluded.low,
+                 close=excluded.close, volume=excluded.volume""",
             [
                 (product_id, c["start"], c["open"], c["high"], c["low"], c["close"], c["volume"])
                 for c in candles
