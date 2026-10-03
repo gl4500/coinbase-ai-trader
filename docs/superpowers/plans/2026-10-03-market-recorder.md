@@ -945,3 +945,28 @@ if __name__ == "__main__":
 - [ ] **Step 3:** Launch detached into `C:\Users\gl450\market_recorder_data` with
   `Start-Process pythonw -ArgumentList '-m','tools.recorder.run' -WorkingDirectory <worktree>\backend -WindowStyle Hidden`.
   Record the PID from `status.json`. Autostart at logon is left as an operator decision.
+
+---
+
+## Review dispositions (Codex `080c99f8`, applied in code under TDD)
+
+**Ruling:** the code was implemented directly from the review findings, with a failing test first
+for each one. The plan's code blocks above are superseded by `backend/tools/recorder/` where they
+differ, so this section is the authoritative map. Cost if wrong: the plan text lags the code;
+the tests carry the contract.
+
+| Finding | Fix | Test |
+|---|---|---|
+| B1: poll stamped at request start | `received_at_ns` taken after the response or exception; `meta.request_started_at_ns` kept | `test_received_at_is_after_the_response_not_the_request` (midnight crossing) |
+| B2: same-day restart after a crash poisons the daily gzip | **Immutable hourly segments per run** (`<day>/<HH>00_<run_id>.jsonl.gz`), written as `.part`; on clean finalise, rename plus sha256. At startup `recover_incomplete` salvages the readable prefix, renames to `.incomplete` and writes `.salvage.json`; it is never sealed. Max process-crash loss is `flush_s` = 5 s (not a power-loss guarantee). | `test_interrupted_segment_is_salvaged_not_marked_complete` (real subprocess `os._exit`); live: 28 crashed segments → 10,114 records salvaged |
+| B3: resume after a raw pause continues deltas with no snapshot | First discard → `raw_discard_start`. On resume → `resubscribe_after_pause` and reconnect for a fresh snapshot. The discarded delta is never written. | `test_raw_pause_keeps_heartbeats_and_resume_forces_resubscribe` |
+| B4: a store failure was swallowed as a disconnect | `StoreError` is fatal (re-raised past the network handler); the CLI exits 2 with stderr. Counters advance only after a successful write. | `test_storage_failure_is_fatal_not_a_disconnect`, `test_write_failure_raises_store_error_and_does_not_count` |
+| N1: stream health | `status.json` has `never_seen` expected streams and `last_app_status` per poll. `app_status` separates transport, HTTP, application (OKX `code!=0`, JSON-RPC `error`) and unparseable. | `test_app_status_classifies_transport_and_application_errors`, `test_status_reports_age_app_status_and_never_seen_streams` |
+| N2: sequence scope | A real capture (`fixtures/coinbase_ws_sequence_sample.jsonl`, 473 msgs, 2 products, 4 channels) shows one +1 sequence per connection. Gap → event with `conn_id` and channel, then reconnect. | `test_real_capture_has_one_sequence_per_connection_across_channels_and_products`, `test_gap_is_recorded_with_connection_and_forces_resnapshot` |
+| N3: realised funding completeness | `okx_funding_history_{BTC,ETH}` every 8 h plus at start (100 settlements); first-observed receive time is kept | `test_default_polls_cover_every_source_and_both_coins` |
+| N4: catalogue and definitions | `coinbase_futures_catalogue_all` (`get_all_products=true`), plus daily `okx_instruments_swap`, `intx_instruments` and `deribit_instruments_*` | same |
+| N5: provenance and clock | Every record carries `run_id` and `written_mono_ns`. The start event carries the package sha256, Python version, the full poll list, `mono_ns` and the salvage report. | `test_write_stamps_run_and_monotonic_and_counts_after_success`, `test_package_digest_is_stable_and_hex` |
+| N6: interpreter and concurrent writers | `WriterLock` (OS lock released on process death) on the output root. Launch uses the explicit venv interpreter, with logs outside the repo. | `test_second_writer_is_refused_and_lock_is_released` |
+| Added: no graceful stop on Windows | `STOP` file in the output root → `stop_requested` → clean finalise (live: exit 0, 28/28 segments sealed) | `test_stop_file_requests_graceful_shutdown` |
+
+Mutation-checked: reverting B1, the gap reconnect, B4 or B3 each turns its test red.

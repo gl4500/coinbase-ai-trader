@@ -7,6 +7,39 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.99 — 2026-10-03 — Standalone read-only market data recorder
+
+New package `backend/tools/recorder/` only. It runs as its own process, imports nothing from the
+app (AST-tested), and never touches `coinbase.db`, 8001 or 8002.
+
+**Why.** The Claude/Codex indicator comparison ranked missing DATA above models. The top
+missing items were execution truth (order book, trades) and clean derivatives crowding data.
+Neither can be backfilled, so collection has to start now.
+
+**What it records,** each as raw verbatim payloads in an as-of envelope (`received_at_ns`,
+status, error, `run_id`, `written_mono_ns`):
+- Coinbase public WS `level2`, `market_trades` and `heartbeats` for BTC-USD and ETH-USD;
+- OKX funding, funding history, OI, mark and index;
+- Coinbase International perp quotes;
+- Deribit futures and options summaries;
+- daily instrument definitions and the Coinbase spot and all-futures catalogues.
+
+Output goes to `C:\Users\gl450\market_recorder_data`, about 0.36 GB/day.
+
+**Probe findings:** Binance futures (HTTP 451) and Bybit (HTTP 403) are geo-blocked here. The
+live `services/macro_signals.py` reads Binance, so with its error-to-default fallbacks it has
+likely been feeding the bot fallback values. Not changed here; this is an operator decision.
+
+**Integrity:**
+- immutable hourly per-run segments with sha256; crash salvage to `.incomplete` (never sealed);
+- sequence-gap and pause resubscribe for fresh snapshots;
+- storage failure is fatal (never disguised as a disconnect);
+- a single-writer lock and a STOP-file graceful stop.
+
+The plan was reviewed by Codex (4 blocking + 6 non-blocking), all applied under TDD; see the
+plan's dispositions table. 31 tests. Live pilot: all 28 streams, every poll `ok`, no gaps.
+Real-crash salvage recovered 10,114 records; clean STOP exit 0 with 28/28 segments sealed.
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
