@@ -26,9 +26,11 @@ status, error, `run_id`, `written_mono_ns`):
 
 Output goes to `C:\Users\gl450\market_recorder_data`, about 0.36 GB/day.
 
-**Probe findings:** Binance futures (HTTP 451) and Bybit (HTTP 403) are geo-blocked here. The
-live `services/macro_signals.py` reads Binance, so with its error-to-default fallbacks it has
-likely been feeding the bot fallback values. Not changed here; this is an operator decision.
+**Probe findings:** Binance futures (HTTP 451) and Bybit (HTTP 403) are geo-blocked here.
+`services/macro_signals.py` calls Binance and has the defects Codex found: raw OI labelled USD,
+futures-volume share labelled dominance, and failures defaulted while `fetch_ok=True`. A source
+search of this branch and `origin/main` found **no consumer outside its own tests**, so it does
+not feed the live bot. An earlier draft of this entry wrongly said it likely did.
 
 **Integrity:**
 - immutable hourly per-run segments with sha256; crash salvage to `.incomplete` (never sealed);
