@@ -202,3 +202,41 @@ async def test_backfill_product_1m_delegates_with_one_minute_params(monkeypatch)
     assert captured["bar_secs"] == 60
     assert captured["days"] == 3
     assert captured["path"].endswith(os.path.join("1m", "BTC-USD.parquet"))
+
+
+# -- P2: never persist a bar that has not closed --------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runner,bar_secs,sub",
+    [
+        ("backfill_product", 3600, None),
+        ("backfill_product_5m", 300, "5m"),
+        ("backfill_product_1m", 60, "1m"),
+    ],
+)
+async def test_open_bar_is_not_frozen_and_final_version_is_stored_next_run(
+    tmp_path, monkeypatch, runner, bar_secs, sub
+):
+    monkeypatch.setattr(hb, "_HISTORY_DIR", str(tmp_path))
+    base = 1_700_000_000 - (1_700_000_000 % 3600)
+    clock = {"now": base + 10 * bar_secs + bar_secs // 6}  # bar 10 is in progress
+    monkeypatch.setattr(hb.time, "time", lambda: clock["now"])
+    bars = [_make_5m_candle(base + i * bar_secs) for i in range(10)]
+    provisional = dict(_make_5m_candle(base + 10 * bar_secs, close=100.0), volume=1.0)
+    fetch = AsyncMock(side_effect=[bars + [provisional], []])
+    with patch.object(hb, "_fetch_range", fetch):
+        first = await getattr(hb, runner)("BTC-USD", days=1)
+    assert first["new_bars"] == 10  # the open bar is not persisted
+
+    clock["now"] = base + 11 * bar_secs + 5  # bar 10 has closed, bar 11 is open
+    final = dict(_make_5m_candle(base + 10 * bar_secs, close=110.0), volume=50.0)
+    fetch = AsyncMock(side_effect=[[final, _make_5m_candle(base + 11 * bar_secs)], []])
+    with patch.object(hb, "_fetch_range", fetch):
+        await getattr(hb, runner)("BTC-USD", days=1)
+    path = {None: hb._parquet_path, "5m": hb._parquet_path_5m, "1m": hb._parquet_path_1m}[sub]
+    stored = {c["start"]: c for c in hb._load_from_path(path("BTC-USD"))}
+    assert stored[base + 10 * bar_secs]["close"] == 110.0
+    assert stored[base + 10 * bar_secs]["volume"] == 50.0
+    assert base + 11 * bar_secs not in stored

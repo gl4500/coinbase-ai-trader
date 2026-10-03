@@ -234,6 +234,37 @@ class TestCandles:
         candles = run(db.get_candles("SOL-USD"))
         assert len(candles) == 3
 
+    def test_later_save_replaces_a_provisional_candle(self, db, run):
+        """P1: Coinbase returns the in-progress hour; the first (partial) version must not be
+        frozen. A later fetch of the same start carries the more complete bar and replaces it."""
+        run(
+            db.upsert_product(
+                {"product_id": "ADA-USD", "base_currency": "ADA", "quote_currency": "USD"}
+            )
+        )
+        partial = {
+            "start": 1_700_000_000,
+            "open": 1.0,
+            "high": 1.0,
+            "low": 1.0,
+            "close": 1.0,
+            "volume": 10.0,
+        }
+        final = {
+            "start": 1_700_000_000,
+            "open": 1.0,
+            "high": 1.3,
+            "low": 0.9,
+            "close": 1.1,
+            "volume": 50.0,
+        }
+        run(db.save_candles("ADA-USD", [partial]))
+        run(db.save_candles("ADA-USD", [final]))
+        candles = run(db.get_candles("ADA-USD"))
+        assert len(candles) == 1
+        c = candles[0]
+        assert (c["high"], c["low"], c["close"], c["volume"]) == (1.3, 0.9, 1.1, 50.0)
+
 
 # ── Signals CRUD ──────────────────────────────────────────────────────────────
 

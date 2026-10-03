@@ -7,6 +7,33 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.101 — 2026-10-03 — Stop freezing in-progress candles (writer inventory P1/P2)
+
+The operator approved this change to 8001's behaviour. It takes effect only after this branch is
+merged AND 8001 is restarted.
+
+**Measured defect (read-only, last 48 h, 288 closed hours, 6 products).** Coinbase's hourly
+candles include the in-progress hour, and both canonical writers kept that first partial
+version permanently:
+- stored SQLite volume was a **median 3.4%** of the final;
+- close was off by a median 26.5 bps (max 501 bps);
+- high/low was too narrow in **100%** of bars.
+
+**Fixes:**
+- **P1, `database.save_candles`:** `INSERT OR IGNORE` became an upsert on
+  `(product_id, start_time)`. The scanner refetches 100 bars every scan, so a provisional hour
+  is final one scan after it closes.
+  - Live features still include the open hour, now refreshed instead of frozen.
+  - Residual: a just-closed bar is stale for up to one scan interval.
+  - Rows older than 100 bars are not refetched by the scanner and keep their frozen values.
+- **P2, `history_backfill._backfill_to_path`** (hourly, 5m and 1m): only bars with
+  `start + bar_secs <= now` are persisted. The next run fetches from the newest stored bar, so
+  the bar is stored final once it closes.
+  - Existing frozen Parquet rows (about 3%) are NOT rewritten here. Repairing them on a copy is
+    a separate step.
+
+**Originals preserved** in snapshot `C:\Users\gl450\polymarket_data_snapshots\20261003T195004Z`.
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
