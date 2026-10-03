@@ -161,3 +161,70 @@ def test_close_tries_every_segment_then_raises(tmp_path):
         s.close()
     assert len(_segments(tmp_path, "poll/b")) == 1  # b still finalised
     assert list((tmp_path / "poll" / "a").rglob("*.part"))  # a left incomplete, not claimed done
+
+
+def _fail_after_sidecar(monkeypatch):
+    """Inject a failure at the real stage between checksum and data publication."""
+    import tools.recorder.store as st
+
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if str(self).endswith(".jsonl.gz.part"):
+            raise OSError("interrupted before data rename")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(st.Path, "rename", rename)
+
+
+def test_failed_finalisation_never_leaves_final_data_without_its_seal(tmp_path, monkeypatch):
+    """Codex B2: completion means a verified data/checksum pair, never data alone."""
+    s = SegmentStore(tmp_path, "r")
+    s.write("poll/a", envelope("okx", "poll", T0, payload="a"))
+    _fail_after_sidecar(monkeypatch)
+    with pytest.raises(StoreError, match="interrupted"):
+        s.close()
+    monkeypatch.undo()
+    for seg in tmp_path.rglob("*.jsonl.gz"):  # any final-named data must carry a valid seal
+        assert seg.with_name(seg.name + ".sha256").exists()
+    report = recover_incomplete(tmp_path)
+    assert [r["records_recovered"] for r in report] == [1]
+    assert not list(tmp_path.rglob("*.jsonl.gz"))
+    assert not list(tmp_path.rglob("*.sha256"))  # stale seal moved aside, not left claiming data
+    assert list(tmp_path.rglob("*.sha256.orphan"))
+
+
+def test_recovery_marks_final_data_with_missing_or_bad_seal_incomplete(tmp_path):
+    """Segments finalised by older code may lack a seal or carry a partial one."""
+    s = SegmentStore(tmp_path, "r")
+    s.write("poll/a", envelope("okx", "poll", T0, payload="a"))
+    s.write("poll/b", envelope("okx", "poll", T0, payload="b"))
+    s.write("poll/c", envelope("okx", "poll", T0, payload="c"))
+    s.close()
+    a, b, c = (_segments(tmp_path, f"poll/{x}")[0] for x in "abc")
+    a.with_name(a.name + ".sha256").unlink()  # missing seal
+    b.with_name(b.name + ".sha256").write_text("deadbe")  # partial seal
+    report = recover_incomplete(tmp_path)
+    assert sorted(Path(r["path"]).parent.parent.name for r in report) == ["a", "b"]
+    assert all(r["reason"] for r in report)
+    assert _segments(tmp_path, "poll/c") == [c]  # a sealed segment is untouched
+    assert len(list(tmp_path.rglob("*.incomplete"))) == 2
+
+
+def test_failed_seal_write_leaves_no_final_looking_segment(tmp_path, monkeypatch):
+    """Codex B2, the exact stage: the checksum write itself fails."""
+    import tools.recorder.store as st
+
+    def failing_open(path, *a, **k):
+        if ".sha256" in str(path):
+            raise OSError("sidecar write failed")
+        return open(path, *a, **k)
+
+    s = SegmentStore(tmp_path, "r")
+    s.write("poll/a", envelope("okx", "poll", T0, payload="a"))
+    monkeypatch.setattr(st, "open", failing_open, raising=False)
+    with pytest.raises(StoreError, match="sidecar"):
+        s.close()
+    monkeypatch.undo()
+    assert not list(tmp_path.rglob("*.jsonl.gz"))  # nothing claims to be complete
+    assert [r["records_recovered"] for r in recover_incomplete(tmp_path)] == [1]

@@ -1,10 +1,12 @@
 """Append-only, crash-safe segment store.
 
 Each run writes its own immutable hourly segments:
-`<root>/<stream>/<UTC-day>/<HH>00_<run_id>.jsonl.gz`. A segment is written as `.part` and
-renamed with a sha256 sidecar only when cleanly finalised. A run never appends to another run's
-file, so an unclean exit can damage only its own `.part` files. `recover_incomplete` keeps those
-bytes, salvages the readable prefix and marks them `.incomplete` — never complete.
+`<root>/<stream>/<UTC-day>/<HH>00_<run_id>_s<NNNN>.jsonl.gz`. A segment is written as `.part`.
+Finalisation publishes the `.sha256` seal first (temp file + rename) and only then renames the
+data, so final-named data never exists without its complete seal: a COMPLETE segment is a data
+file plus a well-formed seal, nothing less. A run never appends to another run's file.
+`recover_incomplete` (startup, under the writer lock) keeps every byte and marks anything short
+of that pair `.incomplete` (or sets a stray seal aside as `.orphan`) — never complete.
 
 Durability: a stream with unflushed data is flushed (gzip Z_SYNC_FLUSH) once `flush_s` seconds
 have passed since its last flush, both on write and by the independent `run_flusher` timer
@@ -19,6 +21,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,20 +81,65 @@ def read_records(path: Path, tolerant: bool = False):
     return (records, error) if tolerant else records
 
 
+_SEAL = re.compile(r"[0-9a-f]{64}\n?")
+
+
+def _seal_ok(seal: Path) -> bool:
+    """Structural check only (cheap at startup): a complete 64-hex digest. Content is verified
+    against the data by consumers, not re-hashed here on every start."""
+    try:
+        return _SEAL.fullmatch(seal.read_text()) is not None
+    except OSError:
+        return False
+
+
+def _mark_incomplete(data: Path, target: Path, reason: str) -> dict:
+    if target.exists():
+        raise StoreError(f"recovery: refusing to overwrite {target}")
+    records, error = read_records(data, tolerant=True)
+    data.rename(target)
+    info = {
+        "path": str(target),
+        "reason": reason,
+        "records_recovered": len(records),
+        "error": error,
+        "bytes": target.stat().st_size,
+    }
+    target.with_name(target.name + ".salvage.json").write_text(json.dumps(info, indent=1))
+    return info
+
+
+def _set_aside(path: Path, suffix: str) -> None:
+    target = path.with_name(path.name + suffix)
+    if target.exists():
+        raise StoreError(f"recovery: refusing to overwrite {target}")
+    path.rename(target)
+
+
 def recover_incomplete(root: Path) -> list:
-    report = []
-    for part in sorted(Path(root).rglob("*.jsonl.gz.part")):
-        records, error = read_records(part, tolerant=True)
+    """Run at startup under the writer lock. A segment is complete only as a data file plus a
+    well-formed `.sha256` seal. Anything else is kept byte-for-byte and reported, never deleted:
+    - `.part` data (unclean exit)            -> `.incomplete` + salvage report
+    - final data with a missing/partial seal -> `.incomplete` (+ the bad seal set aside)
+    - a seal whose data never got its name   -> `.sha256.orphan`
+    - a seal temp file                       -> `.sha256.tmp.orphan`"""
+    root, report = Path(root), []
+    for part in sorted(root.rglob("*.jsonl.gz.part")):
         target = part.with_name(part.name.removesuffix(".part") + ".incomplete")
-        part.rename(target)
-        info = {
-            "path": str(target),
-            "records_recovered": len(records),
-            "error": error,
-            "bytes": target.stat().st_size,
-        }
-        target.with_name(target.name + ".salvage.json").write_text(json.dumps(info, indent=1))
-        report.append(info)
+        report.append(_mark_incomplete(part, target, "unfinalised .part"))
+    for data in sorted(root.rglob("*.jsonl.gz")):
+        seal = data.with_name(data.name + ".sha256")
+        if seal.exists() and _seal_ok(seal):
+            continue
+        reason = "seal malformed" if seal.exists() else "seal missing"
+        if seal.exists():
+            _set_aside(seal, ".orphan")
+        report.append(_mark_incomplete(data, data.with_name(data.name + ".incomplete"), reason))
+    for seal in sorted(root.rglob("*.jsonl.gz.sha256")):
+        if not seal.with_name(seal.name.removesuffix(".sha256")).exists():
+            _set_aside(seal, ".orphan")
+    for tmp in sorted(root.rglob("*.jsonl.gz.sha256.tmp")):
+        _set_aside(tmp, ".orphan")
     return report
 
 
@@ -164,13 +212,21 @@ class SegmentStore:
             raise StoreError(f"flush: {exc!r}") from exc
 
     def _finalise(self, stream: str) -> None:
+        """Publish the seal FIRST (temp file + rename), then the data. An interruption at any
+        point leaves either `.part` data (recovered as incomplete) or no final-named data at all:
+        final-named data never exists without its complete seal."""
         _, part, handle, _, _ = self._open.pop(stream)
         handle.close()
         final = part.with_name(part.name.removesuffix(".part"))
-        if final.exists():
-            raise FileExistsError(f"refusing to overwrite finalised segment {final}")
+        seal = final.with_name(final.name + ".sha256")
+        for existing in (final, seal):
+            if existing.exists():
+                raise FileExistsError(f"refusing to overwrite finalised file {existing}")
+        tmp = seal.with_name(seal.name + ".tmp")
+        with open(tmp, "x", encoding="utf-8") as f:
+            f.write(_sha256(part) + "\n")
+        tmp.rename(seal)
         part.rename(final)
-        final.with_name(final.name + ".sha256").write_text(_sha256(final) + "\n")
 
     def close(self) -> None:
         """Best effort: try to finalise EVERY open segment, then raise if any failed. A failed

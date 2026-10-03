@@ -83,21 +83,37 @@ async def main(out: Path, products: list) -> None:
         finish(store, lock, primary=primary)
 
 
+def _is_cancellation(exc) -> bool:
+    return isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit))
+
+
 def finish(store, lock, primary) -> None:
-    """Finalise and release. A finalisation failure is FATAL when nothing else already failed;
-    if an earlier error is propagating, report this one on stderr instead of masking it."""
+    """Finalise and release. Each step is attempted independently (a failed stop event never
+    skips closing the other streams). A finalisation failure is FATAL unless a GENUINE earlier
+    error is already propagating, in which case it is reported on stderr instead of masking it.
+    An operator stop (Ctrl+C / cancellation) is not a genuine error: a storage failure during
+    it still surfaces as StoreError, so the CLI exits nonzero."""
+    errors = []
     try:
-        store.write(
-            "recorder/events",
-            envelope("recorder", "event", time.time_ns(), meta={"event": "stop"}),
-        )
-        store.close()
-    except StoreError as exc:
-        print(f"recorder: could not finalise segments: {exc}", file=sys.stderr)
-        if primary is None:
-            raise
+        for step in (
+            lambda: store.write(
+                "recorder/events",
+                envelope("recorder", "event", time.time_ns(), meta={"event": "stop"}),
+            ),
+            store.close,
+        ):
+            try:
+                step()
+            except StoreError as exc:
+                errors.append(str(exc))
     finally:
         lock.release()
+    if not errors:
+        return
+    message = "; ".join(errors)
+    print(f"recorder: could not finalise segments: {message}", file=sys.stderr)
+    if primary is None or _is_cancellation(primary):
+        raise StoreError(message)
 
 
 async def run_flusher(store, stop: asyncio.Event, interval_s: float = 1.0) -> None:

@@ -136,3 +136,45 @@ def test_run_flusher_flushes_on_its_own_timer(tmp_path):
     stop = asyncio.Event()
     asyncio.run(asyncio.wait_for(run_flusher(S(), stop, interval_s=0.01), timeout=2))
     assert len(calls) >= 3
+
+
+def test_ctrl_c_with_failing_finalisation_exits_nonzero(tmp_path, monkeypatch, capsys):
+    """Codex B1 (round 3): a real SIGINT cancels main; a close failure must not become exit 0."""
+    import signal
+
+    from tools.recorder import run
+
+    async def interrupted(*_a, **_k):
+        signal.raise_signal(signal.SIGINT)  # asyncio.Runner turns this into cancelling main
+        await asyncio.sleep(30)
+
+    async def idle(*_a, **_k):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(run, "SegmentStore", _FailingClose)
+    monkeypatch.setattr(run, "default_polls", lambda: [])
+    monkeypatch.setattr(run, "run_coinbase_ws", interrupted)
+    monkeypatch.setattr(run, "run_health", idle)
+    monkeypatch.setattr(run, "run_flusher", idle)
+    assert run.cli(["--out", str(tmp_path)]) == 2
+    assert "sidecar" in capsys.readouterr().err
+    WriterLock(tmp_path).acquire().release()
+
+
+def test_finish_closes_other_streams_when_stop_event_write_fails(tmp_path):
+    """Codex N1: a failed stop-event write must not skip finalising every other stream."""
+
+    class _FailingEvents(SegmentStore):
+        def write(self, stream, record):
+            if stream == "recorder/events":
+                raise StoreError("events: disk full")
+            super().write(stream, record)
+
+    store = _FailingEvents(tmp_path, "r")
+    store.write("poll/ok", envelope("okx", "poll", T0, payload="x"))
+    lock = WriterLock(tmp_path).acquire()
+    with pytest.raises(StoreError, match="disk full"):
+        finish(store, lock, primary=None)
+    assert list((tmp_path / "poll" / "ok").rglob("*.jsonl.gz"))  # healthy stream finalised
+    assert not list(tmp_path.rglob("*.part"))
+    WriterLock(tmp_path).acquire().release()

@@ -42,6 +42,21 @@ The plan was reviewed by Codex (4 blocking + 6 non-blocking), all applied under 
 plan's dispositions table. 31 tests. Live pilot: all 28 streams, every poll `ok`, no gaps.
 Real-crash salvage recovered 10,114 records; clean STOP exit 0 with 28/28 segments sealed.
 
+**Acceptance round 3 (Codex review of `e985012`): 2 blocking + 1 non-blocking, all fixed under
+TDD; each fix was broken on purpose and its test went red.**
+- **B1 — Ctrl+C could report a failed finalisation as exit 0.** A cancellation is not a genuine
+  earlier error, so a storage failure during an operator stop now raises and the CLI exits 2.
+  Tested with a REAL in-process SIGINT through `cli`, not a stub.
+- **B2 — a seal failure left final-named data with no checksum, outside recovery.**
+  - Finalisation now publishes the seal first (temp + rename) and only then the data, so
+    final-named data never exists without its complete seal.
+  - Startup recovery also marks final data with a missing or malformed seal `.incomplete`
+    (bytes kept, reason recorded), and sets stray seals and seal temp files aside as `.orphan`.
+  - The startup seal check is structural (64 hex characters) and does not re-hash the data.
+    A consumer still verifies content against the seal.
+- **N1 —** the stop-event write and the store close are now independent steps. Errors are
+  aggregated, and the lock is always released.
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
