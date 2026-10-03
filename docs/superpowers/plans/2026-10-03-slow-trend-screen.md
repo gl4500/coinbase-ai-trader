@@ -70,8 +70,12 @@ made before the period never carries in.
 - A sell whose proceeds would fall below `quote_min_size` is NOT executed: the holding is
   retained, `skipped_exits` is counted, and the sell is retried at later opens while the target
   stays flat. At the endpoint, a holding whose liquidation proceeds fall below `quote_min_size`
-  is **valued at 0** in the terminal value (never converted into invented cash) and flagged
-  `unliquidatable`. This is conservative by construction.
+  is excluded from the terminal cash value (never converted into invented cash). It is recorded
+  separately as `residual_units` and `residual_marked_value`, and flagged `unliquidatable`. That
+  cash value is a LOWER BOUND, not an economic value, so it is NOT treated as conservative
+  evidence. Any trend or buy-and-hold sleeve flagged in a gating period/scenario makes that
+  comparison **affected**, and the verdict order below handles it explicitly. DCA flags are
+  diagnostic only.
 - Before the first observed close, a position is marked at its execution price, for marking only.
 
 **Costs** (applied to actual entry/exit notionals; fee cash reserved; self-financing compounding)
@@ -148,15 +152,18 @@ made before the period never carries in.
 
 **Verdict, in this order, frozen**
 1. Data inadequate → `INCONCLUSIVE` (reason `data`).
-2. P0 fails G1 or G2 in development OR in the validation block → `KILL` (`primary_failed`).
-   A block failure is never averaged away.
-3. Any of S10, S25 or D1 fails G1 or G2 in either period → `INCONCLUSIVE` (`fragile`). SM is
-   never consulted.
-4. Validation block P0 trend has fewer than 4 completed round trips, pooled across sleeves →
+2. P0 fails G1 or G2 in an UNAFFECTED period (development OR validation block) → `KILL`
+   (`primary_failed`). A block failure is never averaged away. Explicitly prioritised: an
+   unaffected demonstrable failure decides even if the other period is affected.
+3. P0 is affected in either period → `INCONCLUSIVE` (`terminal_size`). An affected comparison
+   never produces `PASS_TO_FORWARD`, and an affected failure never produces `KILL`.
+4. Any of S10, S25 or D1 is affected in either period → `INCONCLUSIVE` (`terminal_size`). If
+   none is affected but any fails G1 or G2 → `INCONCLUSIVE` (`fragile`). SM is never consulted.
+5. Validation block P0 trend has fewer than 4 completed round trips, pooled across sleeves →
    `INCONCLUSIVE` (`insufficient_transitions`). 4 is an **explicitly arbitrary administrative
    threshold**; one asset can meet it, and it gives no independent-regime assurance. Per-asset
    counts are reported.
-5. Otherwise `PASS_TO_FORWARD`.
+6. Otherwise `PASS_TO_FORWARD`.
 
 **Freeze mechanics**
 1. `screen fetch` refuses to run if a snapshot manifest already exists. A new snapshot is a new
@@ -711,7 +718,8 @@ git log -1 --stat && git push
   - `SleeveResult` fields:
     - `equity` (marked at close), `initial`;
     - `terminal_value`, `exec_fees`, `terminal_fee`, `traded_notional` (executed only),
-      `slippage_cost` (terminal included), `unliquidatable`;
+      `slippage_cost` (terminal included), `unliquidatable`, `residual_units`,
+      `residual_marked_value`;
     - `entries`, `exits`, `round_trips`, `skipped`, `skipped_exits`;
     - `exposure`, `stale_mark_days`, `max_stale_run`.
   - Raises `ValueError("terminal close missing")` when the last bar has no close.
@@ -767,7 +775,8 @@ def test_sell_below_quote_min_is_retained_and_endpoint_unliquidatable():
                    FREE, coarse)
     assert r.entries == 1 and r.exits == 0 and r.skipped_exits == 2
     assert r.unliquidatable is True
-    assert r.terminal_value == pytest.approx(0.5)  # cash only; the unsellable unit is valued 0
+    assert r.terminal_value == pytest.approx(0.5)  # cash only: a LOWER BOUND, not a value
+    assert (r.residual_units, r.residual_marked_value) == (1.0, 0.5)
     assert r.terminal_fee == 0.0
 
 
@@ -880,6 +889,8 @@ class SleeveResult:
     traded_notional: float
     slippage_cost: float
     unliquidatable: bool
+    residual_units: float
+    residual_marked_value: float
     entries: int
     exits: int
     round_trips: int
@@ -956,7 +967,9 @@ def _finish(book: _Book, marks: _Marks, bars: pd.DataFrame, initial: float) -> S
         raise ValueError("terminal close missing: endpoint is never moved")
     proceeds = book.units * last * (1 - book.costs.slip)
     unliquidatable = book.units > 0 and proceeds < book.product.quote_min
+    residual_units, residual_marked = 0.0, 0.0
     if unliquidatable:  # never invent cash for a sale the size model forbids
+        residual_units, residual_marked = book.units, book.units * last
         proceeds, terminal_slip = 0.0, 0.0
     else:
         terminal_slip = book.units * last * book.costs.slip
@@ -966,6 +979,7 @@ def _finish(book: _Book, marks: _Marks, bars: pd.DataFrame, initial: float) -> S
         terminal_value=book.cash + proceeds - terminal_fee, exec_fees=book.exec_fees,
         terminal_fee=terminal_fee, traded_notional=book.traded,
         slippage_cost=book.slippage + terminal_slip, unliquidatable=bool(unliquidatable),
+        residual_units=residual_units, residual_marked_value=residual_marked,
         entries=book.entries, exits=book.exits, round_trips=book.exits,
         skipped=book.skipped, skipped_exits=book.skipped_exits,
         exposure=marks.held / len(bars), stale_mark_days=marks.stale,
@@ -1179,18 +1193,50 @@ git log -1 --stat && git push
 - Produces:
   - `gates.passes(trend: dict, bh: dict, initial: float, ratio: float) -> dict` (`G1`, `G2`,
     `pass`);
+  - `gates.affected(trend: dict, bh: dict) -> bool` (any `unliquidatable` sleeve in either);
   - `gates.verdict(data_ok: bool, results: dict | None, block_round_trips: int) -> dict`
-    (`verdict`, `reason`). `results[period][scenario]` is a `passes` output, for periods
-    `"dev"` and `"block"`.
+    (`verdict`, `reason`). `results[period][scenario]` is a `passes` output plus an
+    `"affected"` bool, for periods `"dev"` and `"block"`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # backend/tests/tools/slow_trend/test_gates.py
-from tools.slow_trend.gates import passes, verdict
+from tools.slow_trend.gates import affected, passes, verdict
 
-OK = {"G1": True, "G2": True, "pass": True}
-BAD = {"G1": False, "G2": True, "pass": False}
+OK = {"G1": True, "G2": True, "pass": True, "affected": False}
+BAD = {"G1": False, "G2": True, "pass": False, "affected": False}
+OK_AFFECTED = dict(OK, affected=True)
+BAD_AFFECTED = dict(BAD, affected=True)
+
+
+def _side(*flags):
+    return {"unliquidatable": list(flags)}
+
+
+def test_affected_by_buy_hold_only_or_trend_only():
+    assert affected(_side(False, False), _side(False, True)) is True   # buy-and-hold only
+    assert affected(_side(True, False), _side(False, False)) is True   # trend only
+    assert affected(_side(False, False), _side(False, False)) is False
+
+
+def test_buy_hold_write_down_cannot_manufacture_a_pass():
+    # near-boundary: trend would fail the return comparison but for a buy-and-hold write-down
+    r = verdict(True, _res(block=OK_AFFECTED), 10)
+    assert r == {"verdict": "INCONCLUSIVE", "reason": "terminal_size"}
+
+
+def test_affected_failure_is_not_a_kill():
+    assert verdict(True, _res(dev=BAD_AFFECTED), 10) == {"verdict": "INCONCLUSIVE",
+                                                         "reason": "terminal_size"}
+
+
+def test_unaffected_failure_kills_even_if_other_period_affected():
+    assert verdict(True, _res(dev=BAD, block=OK_AFFECTED), 10)["verdict"] == "KILL"
+
+
+def test_affected_gating_sensitivity_is_terminal_size():
+    assert verdict(True, _res(dev_D1=OK_AFFECTED), 10)["reason"] == "terminal_size"
 
 
 def _res(dev=OK, block=OK, **over):
@@ -1263,20 +1309,32 @@ def passes(trend: dict, bh: dict, initial: float, ratio: float) -> dict:
     return {"G1": bool(g1), "G2": bool(g2), "pass": bool(g1 and g2)}
 
 
+def affected(trend: dict, bh: dict) -> bool:
+    """A gating comparison is affected when a trend OR buy-and-hold sleeve ended holding units
+    it could not sell: its terminal cash is a lower bound, not an economic value."""
+    return bool(any(trend["unliquidatable"]) or any(bh["unliquidatable"]))
+
+
 def verdict(data_ok: bool, results, block_round_trips: int) -> dict:
     if not data_ok:
         return {"verdict": "INCONCLUSIVE", "reason": "data"}
     periods = ("dev", "block")
-    if not all(results[p]["P0"]["pass"] for p in periods):
+    p0 = [results[p]["P0"] for p in periods]
+    if any(not r["pass"] and not r["affected"] for r in p0):
         return {"verdict": "KILL", "reason": "primary_failed"}
-    if not all(results[p][s]["pass"] for p in periods for s in P.GATING_SENSITIVITIES):
+    if any(r["affected"] for r in p0):
+        return {"verdict": "INCONCLUSIVE", "reason": "terminal_size"}
+    sens = [results[p][s] for p in periods for s in P.GATING_SENSITIVITIES]
+    if any(r["affected"] for r in sens):
+        return {"verdict": "INCONCLUSIVE", "reason": "terminal_size"}
+    if not all(r["pass"] for r in sens):
         return {"verdict": "INCONCLUSIVE", "reason": "fragile"}
     if block_round_trips < P.MIN_BLOCK_ROUND_TRIPS:
         return {"verdict": "INCONCLUSIVE", "reason": "insufficient_transitions"}
     return {"verdict": "PASS_TO_FORWARD", "reason": "all_gates"}
 ```
 
-- [ ] **Step 4: Run to verify pass.** Expected: 8 passed.
+- [ ] **Step 4: Run to verify pass.** Expected: 13 passed.
 
 - [ ] **Step 5: Commit** (operator OK required)
 
@@ -1304,7 +1362,11 @@ git log -1 --stat && git push
   - `screen.run_mode(entries, experiment_id, replay=False, new_prereg=False) -> str`
     (`first|retry|replay|new_preregistration`; raises `RuntimeError`);
   - `screen.last_attempt(entries, experiment_id) -> int | None` (parent attempt);
-  - `screen.safe_overlap(hourly_path, raw, first) -> dict` (`absent|ok|error`; never raises);
+  - `screen.safe_overlap(hourly_path, raw, first) -> dict` (`absent|ok|error`; never raises;
+    hashes and parses the same captured bytes);
+  - `screen.source_digest(paths, root=REPO) -> str` (recorded per attempt);
+  - `screen.replay_label(entries, experiment_id, source_sha) -> (str, int)`
+    (`replay` or `corrected_replay`, linked to the first completed attempt);
   - CLI `python -m tools.slow_trend.screen {fetch|lock|run [--replay] [--new-preregistration]}`.
 
 - [ ] **Step 1: Write the failing tests** (synthetic data; no network, no git)
@@ -1350,7 +1412,7 @@ def test_period_runs_all_scenarios_and_comparators():
     assert set(out["scenarios"]) == {"P0", "S10", "S25", "D1", "SM"}
     assert {"trend", "buy_hold", "dca52", "cash", "passes", "ci_vs_bh", "ci_vs_dca52",
             "ci_vs_cash"} <= set(p0)
-    assert p0["cash"]["terminal_value"] == 1000.0
+    assert p0["cash"]["terminal_value"] == 1000.0 and p0["passes"]["affected"] is False
     assert p0["trend"]["round_trips"] == 0
     assert set(p0["trend"]["per_sleeve"]) == {"BTC-USD", "ETH-USD"}
 
@@ -1426,6 +1488,29 @@ def test_malformed_hourly_overlap_is_a_diagnostic(tmp_path):
     assert out["status"] == "error" and out["sha256"].startswith("sha256:")
     assert S.safe_overlap(tmp_path / "missing.parquet", _raw("2024-01-01", "2024-03-01"),
                           "2024-01-01") == {"status": "absent"}
+
+
+def test_unreadable_hourly_input_is_a_diagnostic_without_a_hash(tmp_path):
+    unreadable = tmp_path / "BTC-USD.parquet"
+    unreadable.mkdir()  # exists, but read_bytes() raises
+    out = S.safe_overlap(unreadable, _raw("2024-01-01", "2024-03-01"), "2024-01-01")
+    assert out["status"] == "error" and out["sha256"] is None
+
+
+def test_source_digest_tracks_content(tmp_path):
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    before = S.source_digest([f], root=tmp_path)
+    assert before == S.source_digest([f], root=tmp_path)
+    f.write_text("x = 2\n")
+    assert S.source_digest([f], root=tmp_path) != before
+
+
+def test_replay_label_distinguishes_corrected_computation():
+    entries = [{"experiment_id": "E", "status": "started", "attempt": 1, "source_sha256": "s1"},
+               {"experiment_id": "E", "status": "completed", "attempt": 1, "source_sha256": "s1"}]
+    assert S.replay_label(entries, "E", "s1") == ("replay", 1)
+    assert S.replay_label(entries, "E", "s2") == ("corrected_replay", 1)
 
 
 def test_missing_terminal_close_is_inadequate():
@@ -1510,6 +1595,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -1558,6 +1644,8 @@ def _summ(results: list, initial: float) -> dict:
         "exec_fees": ex, "terminal_fee": tf, "total_fees": ex + tf,
         "slippage_cost": sum(r.slippage_cost for r in results),
         "unliquidatable": [r.unliquidatable for r in results],
+        "residual_units": [r.residual_units for r in results],
+        "residual_marked_value": sum(r.residual_marked_value for r in results),
         "entries": sum(r.entries for r in results), "exits": sum(r.exits for r in results),
         "round_trips": sum(r.round_trips for r in results),
         "skipped": sum(r.skipped for r in results),
@@ -1597,7 +1685,9 @@ def run_period(cal: dict, start: str, end: str, products: dict) -> dict:
             legs["dca52"].append(run_dca(bars, P.SLEEVE_USD, P.DCA_TRANCHES, costs, prod))
         s = {k: _summ(v, P.INITIAL_USD) for k, v in legs.items()}
         s["cash"] = {"terminal_value": P.INITIAL_USD, "net_return": 0.0, "max_drawdown": 0.0}
-        s["passes"] = G.passes(s["trend"], s["buy_hold"], P.INITIAL_USD, P.G2_DRAWDOWN_RATIO)
+        s["passes"] = {**G.passes(s["trend"], s["buy_hold"], P.INITIAL_USD,
+                                  P.G2_DRAWDOWN_RATIO),
+                       "affected": G.affected(s["trend"], s["buy_hold"])}
         wt = M.weekly_returns(s["trend"]["_equity"])
         for name, key in (("buy_hold", "bh"), ("dca52", "dca52")):
             wc = M.weekly_returns(s[name]["_equity"])
@@ -1738,15 +1828,42 @@ def _lock() -> None:
 
 
 def safe_overlap(hourly_path: Path, raw: pd.DataFrame, first: str) -> dict:
-    """Informational only. Any failure is a recorded diagnostic and never fails the run."""
+    """Informational only. Never raises: the bytes are read ONCE, then hashed and parsed from
+    that same capture, and the error path does no file I/O."""
     if not hourly_path.exists():
         return {"status": "absent"}
+    digest = None
     try:
+        data = hourly_path.read_bytes()
+        digest = "sha256:" + hashlib.sha256(data).hexdigest()
         cal = D.to_calendar(D.normalise(D.window(raw, first, P.BLOCK_END)), first, P.BLOCK_END)
-        out = D.hourly_overlap(pd.read_parquet(hourly_path), cal)
-        return {"status": "ok", "sha256": _sha(hourly_path), **out}
+        out = D.hourly_overlap(pd.read_parquet(io.BytesIO(data)), cal)
+        return {"status": "ok", "sha256": digest, **out}
     except Exception as exc:
-        return {"status": "error", "sha256": _sha(hourly_path), "error": repr(exc)}
+        return {"status": "error", "sha256": digest, "error": repr(exc)}
+
+
+def source_digest(paths: list, root: Path = REPO) -> str:
+    """Digest of the measurement source actually on disk, recorded per attempt."""
+    h = hashlib.sha256()
+    for path in sorted(paths, key=str):
+        h.update(str(path.relative_to(root)).replace("\\", "/").encode() + b"\0")
+        h.update(path.read_bytes() + b"\0")
+    return "sha256:" + h.hexdigest()
+
+
+def _source_files() -> list:
+    return sorted(Path(__file__).parent.glob("*.py")) + [BACKEND / "clients" / "coinbase_client.py"]
+
+
+def replay_label(entries: list, experiment_id: str, source_sha: str):
+    """`replay` when the completed attempt ran the same source; otherwise `corrected_replay`,
+    linked to that first completed attempt. Both reports are kept."""
+    done = [e for e in entries
+            if e.get("experiment_id") == experiment_id and e["status"] == "completed"]
+    first = done[0]
+    label = "replay" if first.get("source_sha256") == source_sha else "corrected_replay"
+    return label, first.get("attempt")
 
 
 def _run(replay: bool, new_prereg: bool) -> None:
@@ -1763,8 +1880,13 @@ def _run(replay: bool, new_prereg: bool) -> None:
     entries = ([json.loads(x) for x in ledger.read_text().splitlines() if x.strip()]
                if ledger.exists() else [])
     mode = run_mode(entries, exp_id, replay=replay, new_prereg=new_prereg)
+    src = source_digest(_source_files())
+    corrects = None
+    if mode == "replay":
+        mode, corrects = replay_label(entries, exp_id, src)
     attempt = 1 + max((e.get("attempt", 0) for e in entries), default=0)
-    base = {"experiment_id": exp_id, "attempt": attempt, "head": head, "mode": mode}
+    base = {"experiment_id": exp_id, "attempt": attempt, "head": head, "mode": mode,
+            "source_sha256": src, "replays_attempt": corrects}
     _append(ledger, {**base, "status": "started", "parent": last_attempt(entries, exp_id),
                      "at": _now()})
     try:
@@ -1783,6 +1905,7 @@ def _run(replay: bool, new_prereg: bool) -> None:
         {pid: safe_overlap(BACKEND / "data" / "history" / f"{pid}.parquet", raw[pid], first)
          for pid in P.PRODUCTS} if first else {})
     report.update(experiment_id=exp_id, attempt=attempt, mode=mode, head=head,
+                  source_sha256=src, replays_attempt=corrects,
                   prereg_sha256=prereg_sha, manifest_sha256=manifest_sha)
     name = f"report_{exp_id}_a{attempt}_{mode}.json"
     (OUT / name).write_text(json.dumps(report, indent=2, default=str))
@@ -1819,8 +1942,8 @@ Notes for the implementer:
   way, the trend's return is lower and its drawdown is not ≤ 2/3 of buy-and-hold's, so G1
   passes and G2 fails. The test asserts both, so the `KILL` cannot come from another cause.
 
-- [ ] **Step 4: Run to verify pass.** Expected: 19 passed. Then run the whole package with
-`../.venv/Scripts/python.exe -m pytest tests/tools/slow_trend -v` (expected 69 passed).
+- [ ] **Step 4: Run to verify pass.** Expected: 22 passed. Then run the whole package with
+`../.venv/Scripts/python.exe -m pytest tests/tools/slow_trend -v` (expected 77 passed).
 Finally, ruff 0.9.0 `check` and `format --check` on `backend/tools/slow_trend` and
 `backend/tests/tools/slow_trend` must both be clean.
 
