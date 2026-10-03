@@ -111,6 +111,40 @@ TDD; each fix was broken on purpose and its test went red.**
   counts as malformed. Reading bytes exposed that text-mode seals on Windows end in CRLF, so
   the pattern accepts an optional ``. All 109 real seals on disk were checked: none would be
   quarantined.
+### Session 58.100 — 2026-10-03 — Data preservation: verified snapshot tool, known limitations, run isolation
+
+These are the first items of the Claude/Codex future-plans consensus (DO NOW package). No
+runtime, agent or DB-schema change.
+
+**`backend/tools/data_snapshot`** (`python -m tools.data_snapshot.snapshot`): a read-only,
+verified backup of `backend/data` plus `coinbase.db`, written to
+`C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`.
+- Per-file stability: (size, mtime_ns) unchanged across the copy AND a second source read hashes
+  identically to the copy; otherwise the file is marked `unstable`.
+- The sha256 is taken of the retained COPY.
+- Every Parquet copy is fully read.
+- The DB is copied with the SQLite online backup, then `integrity_check`.
+- A manifest records the capture interval with an explicit "not a globally consistent as-of
+  snapshot" note. The tool never overwrites a snapshot or writes to sources.
+- Six tests; the re-read check is mutation-verified.
+
+First real snapshot: `20261003T195004Z`, 809/809 files stable and valid, DB integrity ok, 14 s.
+Codex suggested the source re-read and the full Parquet read in review.
+
+**`docs/KNOWN_LIMITATIONS.md`** documents the frozen legacy bot's limits, so they are not used as
+evidence:
+- the `tiered_history` merge drops every live row (verified at `tiered_history.py:134-135`);
+- `macro_signals` has latent defects but no consumer;
+- the paper ledger is gross, with last-trade fills;
+- the shared `agent_state` row;
+- the replay closed-bar rule;
+- provisional candles (under inventory);
+- no demonstrated edge.
+
+**`CLAUDE.md`:** a new "Run isolation & data retention" section. Every parallel run gets its own
+DB copy, output root and run id. Historical data is never deleted. Originals, snapshots and
+corrected versions are immutable; routine top-ups publish only after the prior version is
+preserved; migrations run on copies with validation and rollback.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
