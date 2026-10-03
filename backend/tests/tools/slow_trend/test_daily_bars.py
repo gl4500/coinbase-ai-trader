@@ -38,7 +38,56 @@ def test_fetch_keeps_raw_rows_with_page_numbers():
         return {"candles": _candles(range(s - s % DAY, e, DAY))}
 
     raw = asyncio.run(D.fetch_daily("BTC-USD", T0, T0 + 700 * DAY, getter, page_days=300))
-    assert len(raw) == 700 and set(raw["page"]) == {0, 1, 2}
+    assert raw["start"].nunique() == 700 and set(raw["page"]) == {0, 1, 2}
+    assert raw.attrs["requests"] == 3
+
+
+def test_fetch_overlaps_pages_so_exclusive_bounds_lose_no_interior_day():
+    async def getter(path, params):  # worst case: BOTH bounds exclusive
+        s, e = int(params["start"]), int(params["end"])
+        return {"candles": _candles(range(s + DAY, e, DAY))}
+
+    raw = asyncio.run(D.fetch_daily("BTC-USD", T0, T0 + 700 * DAY, getter, page_days=300))
+    expected = set(range(T0 + DAY, T0 + 700 * DAY, DAY))  # only the global first day is lost
+    assert set(raw["start"]) == expected
+
+
+def test_fetch_records_requests_including_trailing_empty_pages():
+    async def getter(path, params):
+        s, e = int(params["start"]), int(params["end"])
+        newest = e >= T0 + 700 * DAY
+        return {"candles": _candles(range(s - s % DAY, e, DAY)) if newest else []}
+
+    raw = asyncio.run(D.fetch_daily("BTC-USD", T0, T0 + 700 * DAY, getter, page_days=300))
+    assert raw.attrs["requests"] == 3 and set(raw["page"]) == {0}
+
+
+def test_fetch_all_empty_returns_empty_frame_not_a_crash():
+    async def getter(path, params):
+        return {"candles": []}
+
+    raw = asyncio.run(D.fetch_daily("BTC-USD", T0, T0 + 700 * DAY, getter, page_days=300))
+    assert raw.empty and raw.attrs["requests"] == 3 and D.first_day(raw) is None
+
+
+def test_public_getter_uses_unauthenticated_market_endpoint():
+    import httpx
+
+    seen = {}
+
+    def handler(request):
+        seen["url"], seen["auth"] = str(request.url), request.headers.get("Authorization")
+        return httpx.Response(200, json={"candles": []})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await D.public_getter(client)("/products/BTC-USD/candles", {"start": "1"})
+
+    assert asyncio.run(go()) == {"candles": []}
+    assert seen["url"].startswith(
+        "https://api.coinbase.com/api/v3/brokerage/market/products/BTC-USD/candles"
+    )
+    assert seen["auth"] is None
 
 
 def test_fetch_rejects_malformed_response():

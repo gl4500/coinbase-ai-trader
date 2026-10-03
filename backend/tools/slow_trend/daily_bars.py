@@ -19,7 +19,7 @@ async def fetch_daily(
     pid: str, start_ts: int, end_ts: int, getter: Getter, page_days: int = 300
 ) -> pd.DataFrame:
     frames, end, page = [], end_ts, 0
-    while end > start_ts:
+    while True:
         start = max(start_ts, end - page_days * DAY)
         data = await getter(
             f"/products/{pid}/candles",
@@ -34,10 +34,30 @@ async def fetch_daily(
         df = pd.DataFrame(data["candles"], columns=list(FIELDS))
         df["page"] = page
         frames.append(df)
-        end, page = start, page + 1
+        page += 1
+        if start <= start_ts:
+            break
+        # overlap one day: page joins never depend on whether a bound is inclusive
+        end = start + DAY
     raw = pd.concat(frames, ignore_index=True)
     raw = raw.astype({"start": "int64", "page": "int64", **{k: float for k in VALUES}})
-    return raw[(raw["start"] >= start_ts) & (raw["start"] < end_ts)].reset_index(drop=True)
+    out = raw[(raw["start"] >= start_ts) & (raw["start"] < end_ts)].reset_index(drop=True)
+    out.attrs["requests"] = page  # includes pages that returned nothing
+    return out
+
+
+PUBLIC_BASE = "https://api.coinbase.com/api/v3/brokerage/market"
+
+
+def public_getter(client) -> Getter:
+    """Unauthenticated Coinbase market-data reads; no credentials are needed or sent."""
+
+    async def get(path: str, params: Optional[Dict[str, str]] = None) -> Any:
+        resp = await client.get(PUBLIC_BASE + path, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    return get
 
 
 def window(raw: pd.DataFrame, first: str, last: str) -> pd.DataFrame:

@@ -247,24 +247,27 @@ def _append(ledger: Path, entry: dict) -> None:
 
 
 async def _fetch() -> None:
-    from clients import coinbase_client as cc
+    import httpx
 
     ensure_new_snapshot(OUT)
     OUT.mkdir(parents=True, exist_ok=True)
     start = int(pd.Timestamp(P.FETCH_FROM).timestamp())
     end = int(pd.Timestamp(P.BLOCK_END).timestamp()) + D.DAY
-    manifest = {"fetched_at": _now(), "products": {}}
-    for pid in P.PRODUCTS:
-        raw = await D.fetch_daily(pid, start, end, cc._get)
-        path = OUT / f"{pid}.raw.parquet"
-        raw.to_parquet(path, index=False)
-        manifest["products"][pid] = {
-            "sha256": _sha(path),
-            "rows": len(raw),
-            "pages": int(raw["page"].max()) + 1,
-            "first_day": D.first_day(raw),
-            "constraints": D.product_constraints(await cc.get_product(pid)),
-        }
+    manifest = {"fetched_at": _now(), "source": D.PUBLIC_BASE, "products": {}}
+    async with httpx.AsyncClient() as client:
+        get = D.public_getter(client)
+        for pid in P.PRODUCTS:
+            raw = await D.fetch_daily(pid, start, end, get)
+            path = OUT / f"{pid}.raw.parquet"
+            raw.to_parquet(path, index=False)
+            manifest["products"][pid] = {
+                "sha256": _sha(path),
+                "rows": len(raw),
+                "requests": raw.attrs["requests"],
+                "pages_with_rows": int(raw["page"].nunique()),
+                "first_day": D.first_day(raw),
+                "constraints": D.product_constraints(await get(f"/products/{pid}")),
+            }
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(json.dumps(manifest, indent=2))
 
@@ -290,12 +293,20 @@ def safe_overlap(hourly_path: Path, raw: pd.DataFrame, first: str) -> dict:
         return {"status": "error", "sha256": digest, "error": repr(exc)}
 
 
+def _text_bytes(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")  # identity must not depend on checkout
+
+
+def text_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(_text_bytes(path)).hexdigest()
+
+
 def source_digest(paths: list, root: Path = REPO) -> str:
     """Digest of the measurement source actually on disk, recorded per attempt."""
     h = hashlib.sha256()
     for path in sorted(paths, key=str):
         h.update(str(path.relative_to(root)).replace("\\", "/").encode() + b"\0")
-        h.update(path.read_bytes() + b"\0")
+        h.update(_text_bytes(path) + b"\0")
     return "sha256:" + h.hexdigest()
 
 
@@ -322,7 +333,7 @@ def _run(replay: bool, new_prereg: bool) -> None:
     if not LOCK.exists() or LOCK.read_text().strip() != manifest_sha:
         sys.exit("snapshot.lock missing or does not match the manifest")
     manifest = json.loads((OUT / "manifest.json").read_text())
-    head, prereg_sha = _git("rev-parse", "HEAD"), _sha(Path(P.__file__))
+    head, prereg_sha = _git("rev-parse", "HEAD"), text_digest(Path(P.__file__))
     exp_id = experiment_identity(prereg_sha, manifest_sha)
     ledger = OUT / "runs.jsonl"
     entries = (
@@ -389,9 +400,6 @@ def _run(replay: bool, new_prereg: bool) -> None:
 if __name__ == "__main__":
     cmd, flags = (sys.argv[1] if len(sys.argv) > 1 else ""), set(sys.argv[2:])
     if cmd == "fetch":
-        from dotenv import load_dotenv
-
-        load_dotenv(REPO / ".env")
         asyncio.run(_fetch())
     elif cmd == "lock":
         _lock()

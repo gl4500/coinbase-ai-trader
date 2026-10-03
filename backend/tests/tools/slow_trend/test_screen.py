@@ -220,3 +220,16 @@ def test_new_preregistration_must_be_explicit():
     with pytest.raises(RuntimeError, match="new-preregistration"):
         S.run_mode(entries, "F")
     assert S.run_mode(entries, "F", new_prereg=True) == "new_preregistration"
+
+
+def test_digests_ignore_line_endings(tmp_path):
+    lf, crlf = tmp_path / "lf.py", tmp_path / "crlf.py"
+    lf.write_bytes(b"A = 1\nB = 2\n")
+    crlf.write_bytes(b"A = 1\r\nB = 2\r\n")
+    assert S.text_digest(lf) == S.text_digest(crlf)
+    for name, body in (("u", b"x = 1\n"), ("w", b"x = 1\r\n")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "m.py").write_bytes(body)
+    assert S.source_digest([tmp_path / "u" / "m.py"], root=tmp_path / "u") == S.source_digest(
+        [tmp_path / "w" / "m.py"], root=tmp_path / "w"
+    )
