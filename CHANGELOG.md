@@ -400,6 +400,81 @@ than what was asked for.
 
 ---
 
+### Session 58.96 — 2026-09-30 — Paper maker-entry shadow (measurement only)
+
+The controlling document names maker execution as the only untested lever with a
+large enough coefficient (breakeven hit rate 65.1% taker → 51.3% maker) and calls it
+**unmeasurable today because no fills exist** (`orders` has 0 rows). This adds a
+measurement of the price path a resting maker BUY would have faced, without placing
+a single order.
+
+**Estimand, stated so it is not over-read.** An *instantaneous virtual post-only BUY*
+resting at the WS best bid captured right after a successful paper BUY, observed for
+30 s (the window `execute_maker_signal` polls). It is a **price-path proxy, not a
+fill** — the ticker carries no queue position, displayed size or acknowledgement —
+and it is **conditional** on the BUYs the paper book took, not the live order path
+(which quotes and posts later).
+
+`services/maker_shadow.MakerShadow` resolves each intent from the ticker last-trade
+stream through `register_price_handler`, the hook `exit_watcher` already uses:
+
+- **`crossed`** (headline): an own-product trade printed strictly BELOW the limit
+  inside the window — the level was traded through. **`touched`**: at or below.
+- **`markout_bps`**: for crossed intents, the last own-product trade at or before
+  `cross_ts + 60 s` against the limit — a fixed horizon from the crossing, with
+  `mark_age_s` saying how stale that trade was. This is the adverse-selection read
+  and must be judged with the cross rate: crossing into a falling price is not savings.
+- **Deadline-driven finalisation**: an intent closes at its own deadline (window end,
+  or the markout horizon if crossed) via `sweep()`, run on every tick, on every
+  `register`, and from a 5 s sweeper — never by waiting for unrelated activity.
+  `finalised_late_s` records any delay.
+- **`feed_gap`**: `ws_subscriber.connect_count` (new) changed while the intent was
+  observed, so a crossing may have been missed. Such rows are excluded from rates.
+- Unmeasurable intents are recorded (`no_quote`, `duplicate`), not dropped; an
+  intent whose window has expired is finalised before a new BUY is checked, so it
+  is never miscounted as a duplicate.
+
+`tools/maker_shadow_report.py` reports `cross_rate`, `touch_rate`, medians of
+time-to-cross, spread and markout, and **`coverage`** (clean measured / all rows)
+plus gap, late, no-quote and duplicate counts — every rate is conditional and says so.
+
+**Review.** Codex's measurement-validity review of the first cut (`e0d1e9e`) found
+the original `drift_bps` endpoint was chosen by whichever tick finalised the row,
+that expiry waited on unrelated ticks (and could miscount a new BUY as a duplicate),
+that "fill" over-claimed, that feed gaps were invisible, and that my note about the
+ticker was wrong: the `ticker` channel reports on every match (`ticker_batch` is the
+5 s one). All addressed here.
+
+**Second review (Codex, on `266d7d6`).** The markout price is the last own-product
+trade *as of* the 60 s horizon, so in a quiet market it can be the crossing print
+itself. The report now applies a pre-fixed `MAX_MARK_AGE_S = 15` and reports
+`n_mark_fresh` / `n_mark_stale` / `n_mark_missing` and mark-age p50/p90; the markout
+median uses fresh marks only. `feed_gap` detects reconnects only — a silent stall is
+not detected — so rates are conditional on no *observed* reconnect. Codex accepted
+local receipt time for this exploratory run with one condition, recorded here: **these
+measurements are not decision-grade evidence for live maker execution without
+timestamped-event validation.** Results describe the 8002 copy's own paper
+trajectory after its snapshot, not later 8001 entries.
+
+**Files:** `services/maker_shadow.py`, `services/ws_subscriber.py` (`connect_count`),
+`database.py` (additive `maker_shadow` table + `save_maker_shadow` /
+`get_maker_shadow_rows`), `config.py` (`MAKER_SHADOW`, default false),
+`agents/cnn_agent.py` (`_shadow_register` after a successful paper buy), `main.py`
+(`maker_shadow.attach` when the flag is on), `tools/maker_shadow_report.py`. Tests:
+`test_maker_shadow.py` (18), `test_database_maker_shadow.py` (7),
+`test_maker_shadow_wiring.py` (6), `test_maker_shadow_report.py` (5),
+`test_ws_subscriber.py` (3).
+
+**Run it** on the 8002 dev backend per port discipline:
+`MAKER_SHADOW=true PORT=8002 python main.py`, then
+`python -m tools.maker_shadow_report --since-hours 24`.
+
+**Limits:** the handler receives local receipt time, not exchange event time or
+sequence, so a trade printed just before registration but delivered after it can be
+admitted (sub-second against a 30 s window; documented, not fixed — changing the
+handler signature touches `exit_watcher`). A crossing between reconnects is caught
+only as `feed_gap`, not recovered. Entry leg only; exit-leg maker fills are a
+follow-up.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 

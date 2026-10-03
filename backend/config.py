@@ -155,6 +155,13 @@ class Config:
         default_factory=lambda: os.getenv("USE_MAKER_EXECUTION", "false").lower() == "true"
     )
 
+    # Paper maker-fill SHADOW: after each paper BUY, record whether a post-only
+    # BUY at the WS best bid would have filled within 30 s (services/maker_shadow).
+    # Measurement only — places no orders. Default false → unchanged behaviour.
+    maker_shadow: bool = field(
+        default_factory=lambda: os.getenv("MAKER_SHADOW", "false").lower() == "true"
+    )
+
     # ── History backfill schedule ──────────────────────────────────────────────
     # How many hours between automatic incremental backfill runs (0 = disabled)
     backfill_interval_hours: int = field(

@@ -288,6 +288,30 @@ async def init_db() -> None:
                 components      TEXT,
                 computed_at     TEXT DEFAULT (datetime('now'))
             );
+
+            -- Paper maker-fill shadow (services/maker_shadow.py). Measurement
+            -- only: one row per resolved virtual post-only BUY intent.
+            CREATE TABLE IF NOT EXISTS maker_shadow (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id          TEXT NOT NULL,
+                status              TEXT NOT NULL,
+                touched             INTEGER NOT NULL,
+                limit_price         REAL,
+                ask                 REAL,
+                spread_bps          REAL,
+                created_ts          REAL NOT NULL,
+                cross_ts            REAL,
+                time_to_cross_s     REAL,
+                window_close_price  REAL,
+                markout_s           REAL NOT NULL,
+                markout_bps         REAL,
+                mark_age_s          REAL,
+                finalised_late_s    REAL,
+                feed_gap            INTEGER,
+                window_s            REAL NOT NULL,
+                detail              TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_maker_shadow_created ON maker_shadow(created_ts);
         """)
         await db.commit()
 
@@ -1262,6 +1286,42 @@ async def record_provenance(provenance: Dict) -> None:
         await db.commit()
 
 
+_MAKER_SHADOW_COLS = (
+    "product_id",
+    "status",
+    "touched",
+    "limit_price",
+    "ask",
+    "spread_bps",
+    "created_ts",
+    "cross_ts",
+    "time_to_cross_s",
+    "window_close_price",
+    "markout_s",
+    "markout_bps",
+    "mark_age_s",
+    "finalised_late_s",
+    "feed_gap",
+    "window_s",
+    "detail",
+)
+
+
+async def save_maker_shadow(row: Dict) -> None:
+    """Persist one resolved maker-shadow intent (measurement only)."""
+    values = [row[c] for c in _MAKER_SHADOW_COLS]
+    values[_MAKER_SHADOW_COLS.index("touched")] = 1 if row["touched"] else 0
+    gap = row["feed_gap"]
+    values[_MAKER_SHADOW_COLS.index("feed_gap")] = None if gap is None else int(bool(gap))
+    async with _db() as db:
+        await db.execute(
+            f"INSERT INTO maker_shadow ({','.join(_MAKER_SHADOW_COLS)}) "
+            f"VALUES ({','.join('?' * len(_MAKER_SHADOW_COLS))})",
+            values,
+        )
+        await db.commit()
+
+
 async def get_model_provenance(digest: str) -> Optional[Dict]:
     async with _db() as db:
         async with db.execute(
@@ -1271,3 +1331,23 @@ async def get_model_provenance(digest: str) -> Optional[Dict]:
     if row is None:
         return None
     return {"detail": json.loads(row[0]), "first_seen": row[1]}
+
+
+async def get_maker_shadow_rows(since_ts: Optional[float] = None) -> List[Dict]:
+    """Return maker-shadow rows oldest first, optionally from since_ts onward."""
+    sql = f"SELECT {','.join(_MAKER_SHADOW_COLS)} FROM maker_shadow"
+    args: tuple = ()
+    if since_ts is not None:
+        sql += " WHERE created_ts >= ?"
+        args = (since_ts,)
+    sql += " ORDER BY created_ts, id"
+    async with _db() as db:
+        async with db.execute(sql, args) as cur:
+            rows = await cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(_MAKER_SHADOW_COLS, r, strict=True))
+        d["touched"] = bool(d["touched"])
+        d["feed_gap"] = None if d["feed_gap"] is None else bool(d["feed_gap"])
+        out.append(d)
+    return out

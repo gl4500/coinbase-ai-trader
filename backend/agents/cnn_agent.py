@@ -1681,6 +1681,7 @@ class CoinbaseCNNAgent:
         # (xgb_signal.force_reload) clears the cache so an old prediction can never be
         # stamped with the new model's digest.
         self._cache_model_digest: Optional[str] = None
+        self.maker_shadow = None  # services.maker_shadow.MakerShadow, set by main.py
         # ── Runtime stats ──────────────────────────────────────────────────
         self.last_scan_at: Optional[float] = None
         self.next_scan_at: Optional[float] = None
@@ -2375,6 +2376,7 @@ class CoinbaseCNNAgent:
                     pid, price, frac, trigger="SCAN", model_provenance=provenance
                 )
                 if spent > 0:
+                    self._shadow_register(pid)
                     self.signals_executed += 1
                     signal["execution"] = {"success": True, "spent": round(spent, 2)}
                     logger.info(
@@ -2496,6 +2498,16 @@ class CoinbaseCNNAgent:
         except Exception:
             logger.exception("provenance unavailable — saving scan unattributed")
             return None
+
+    def _shadow_register(self, pid: str) -> None:
+        """Record a paper maker-fill intent for pid. Measurement only; never raises."""
+        if not config.maker_shadow or self.maker_shadow is None:
+            return
+        try:
+            quote = (self.ws.state.get(pid) if self.ws else None) or {}
+            self.maker_shadow.register(pid, bid=quote.get("bid"), ask=quote.get("ask"))
+        except Exception:
+            logger.exception("maker_shadow register failed for %s", pid)
 
     async def _execute_live_order(self, order_executor, signal: Dict) -> Dict:
         """Route a live order through the maker (post-only) or taker path.
