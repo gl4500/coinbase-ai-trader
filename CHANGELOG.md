@@ -46,17 +46,47 @@ was checked by breaking the code on purpose.
   and nothing was affected.
 
 **Diagnostics, never gates:**
-- **Mostly invested:** block exposure was BTC 0.97 and ETH 0.79. BTC was capped at weight 1 in
-  84% of its decisions, because realised volatility mostly sits below 50%.
+- **Mostly invested:** block exposure was BTC 0.97 and ETH 0.79. BTC's target was capped at 1
+  on about 84% of its valid block decisions, because its BACKWARD-LOOKING 20-return volatility
+  ESTIMATE was at or below 50%. That is a property of the estimator. It does not mean realised
+  future risk or drawdown was bounded by 50%.
 - **Fees:** dev fees were $4,276 on a compounding bankroll.
-- **Fixed 50/50 vs vol timing:** the fixed 50/50 mix matched vol-target's dev return with a
-  lower drawdown. Volatility *timing* added little over simply holding less crypto.
-- **Fixed 50/50 is not a candidate.** It would also fail dev G2 (ratio 0.70) and is
-  non-gating. Promoting it after seeing results is exactly what the preregistration forbids.
+- **Fixed 50/50 vs vol-target, by period:**
+  - **dev:** fixed50 +3,180% / DD 63.5% against vol-target +3,208% / DD 74.3%. Vol-target
+    shows no demonstrated advantage here.
+  - **block:** vol-target +30.0% beat fixed50's +19.4%, but with a deeper drawdown (57.6% vs
+    36.4%).
+  - Different exposure, turnover and fees prevent a clean causal estimate of timing alpha.
+- **Fixed 50/50 is not a candidate.** Its dev drawdown ratio of about 0.695 also misses the 2/3
+  bar, and it is non-gating. Promoting it after seeing results is exactly what the
+  preregistration forbids.
+
+**What the KILL means.** It is an interpretable rejection under the declared simulator and
+utility gate. It is not proof of negative profit, nor of a fee-only failure: P0 terminal wealth
+was $33,078 (dev) and $1,300 (block) from $1,000, both beating cash. Both periods fail the
+return-or-drawdown comparison with buy-and-hold.
+
+**Independent verification.** Codex (`212ce8c6`) checked:
+- every snapshot and lock digest, the source digest `7443de5b`, the combined prereg digest
+  `f43f0829` and the experiment id;
+- all 5,260 decision targets, recomputed from the raw closes (maximum error 1.3e-14);
+- all ten G1/G2 comparisons.
 
 **Status.** This is the second candidate on the same previously observed block (the first was
-the SMA100 KILL), and the ledger and report record that sequence. A KILL abandons THIS candidate
-only. Two systematic BTC/ETH timing rules have now failed this utility gate under real fees.
+the SMA100 KILL), and the ledger and report record that sequence.
+
+The supported conclusion (Codex wording, agreed): *neither of the two preregistered BTC/ETH
+rules met the frozen utility requirement under the assumed costs on this reused history. We
+currently have no validated active timing candidate.* This does NOT show that no systematic
+rule earns its fees. DCA-52 returned −7.9% in the block against buy-and-hold's +31.6%, so DCA
+is not the empirically superior policy here either.
+
+**This screen family is now CLOSED.** No third candidate follows from these results. Any future
+hypothesis must:
+- be independently motivated;
+- be preregistered as ONE exact rule;
+- be scored only on BTC/ETH data arriving after its freeze, with a fixed terminal date.
+Pre-2026-10-03 history is labelled development data, not a holdout.
 
 ### Session 58.98 — 2026-10-03 — Preregistered BTC/ETH slow-trend falsification screen
 
