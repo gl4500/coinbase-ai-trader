@@ -145,6 +145,70 @@ evidence:
 DB copy, output root and run id. Historical data is never deleted. Originals, snapshots and
 corrected versions are immutable; routine top-ups publish only after the prior version is
 preserved; migrations run on copies with validation and rollback.
+### Session 58.98 — 2026-10-03 — Preregistered BTC/ETH slow-trend falsification screen
+
+New offline research package `backend/tools/slow_trend/` only. No backend, agent,
+threshold, model or DB change; nothing in the live path imports it.
+
+**Why.** The live short-hold alt bot loses before fees (CNN all-time 1,674 trades,
+−$135.31 gross; this week the average winner, +1.22%, was smaller than one taker
+round trip). The account's verified Intro tier is 0.50% maker / 0.90% taker
+(read-only `transaction_summary`), so a taker round trip costs ~1.82%. Claude and
+Codex debated the research and converged on ONE cheap falsification screen
+before any funding discussion.
+
+**What.** One frozen rule — hold BTC/ETH while the completed UTC daily close is
+above its 100-day SMA — against cash, buy-and-hold and a 52-week fee-inclusive
+DCA, at the verified fees with taker/taker as the primary case. It emits exactly
+one of `KILL`, `INCONCLUSIVE` or `PASS_TO_FORWARD`; none authorises funding.
+Every tunable lives in `prereg.py`, pinned by a test. The plan
+(`docs/superpowers/plans/2026-10-03-slow-trend-screen.md`) went through four
+Codex review rounds; 10 blocking defects were found and fixed before any code.
+
+**Measurement safeguards:**
+- Raw candles are audited before normalisation: conflicting vs identical
+  duplicates, finite positive consistent OHLC, alignment.
+- The first period day comes from data coverage, never from P&L.
+- A missing terminal close returns an inadequate-data verdict, never a stale price.
+- Drawdown is seeded with the initial capital.
+- Decisions are sliced to the period before the held state is filled, so no
+  pre-period position carries in.
+- Unsellable endpoint holdings make a comparison "affected", which can never PASS.
+- Freeze: no snapshot overwrite, a committed `snapshot.lock`, and an append-only
+  run ledger keyed by a stable experiment id, with retry / replay /
+  corrected-replay / new-preregistration modes.
+
+**Tests:** 82 in `backend/tests/tools/slow_trend/` (77, plus 5 from the final-review
+fix pass: public market endpoints, one-day page overlap, request counting, and
+line-ending-independent digests). Mutation-checked: reintroducing the carry-in
+bug, dropping the affected-gate check, and forward-filling the terminal close
+each turned a test red.
+
+**RESULT — `KILL` (`primary_failed`).** Single run, experiment `2252e434a40e11f6`
+attempt 1, HEAD `55c9323`, snapshot lock `sha256:5215b520…`. Data was adequate:
+ETH had 2 missing days in development, within the 3-day allowance. The
+development period was 2016-08-30 → 2025-04-13 (first common valid SMA day).
+
+| P0 (taker 0.90%/0.90%) | Trend SMA100 | Buy-and-hold | DCA-52 |
+|---|---|---|---|
+| Development: net return | +6,890% | +14,236% | +7,982% |
+| Development: max drawdown | 70.5% | 91.3% | 91.5% |
+| Development: round trips / fees | 122 / $48.6k | 0 / — | — |
+| Validation block 2025-04-14 → 2026-10-02: net return | +34.5% | +31.6% | −7.9% |
+| Validation block: max drawdown | 40.9% | 62.2% | 50.4% |
+
+- **Development fails G2.** The trend earned less than buy-and-hold, and its
+  drawdown was 0.77× buy-and-hold's, not ≤ 0.67×. The validation block passed
+  P0, though under S25 it failed G2 by a hair.
+- **Weekly excess vs buy-and-hold (development):** −0.44%/week, block-bootstrap
+  CI [−1.09, +0.17]. Versus cash: +1.36%/week, CI [+0.30, +2.64] (exploratory).
+- **Plain reading.** At retail taker fees, the 100-day-average timing rule cut
+  the worst BTC/ETH crash from ~91% to ~70% but gave up about half the
+  long-run gain. That misses the preregistered bar, so this candidate is
+  abandoned. KILL is not a verdict on trend following in general, and
+  buy-and-hold is a comparator, not a proven edge.
+- **The hourly overlap diagnostic** was `absent` (the worktree has no
+  gitignored `data/history`). It is informational only.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
