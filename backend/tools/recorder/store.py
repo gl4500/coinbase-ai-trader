@@ -81,15 +81,15 @@ def read_records(path: Path, tolerant: bool = False):
     return (records, error) if tolerant else records
 
 
-_SEAL = re.compile(r"[0-9a-f]{64}\n?")
+_SEAL = re.compile(r"[0-9a-f]{64}\r?\n?")  # text-mode seals on Windows end in CRLF
 
 
 def _seal_ok(seal: Path) -> bool:
     """Structural check only (cheap at startup): a complete 64-hex digest. Content is verified
     against the data by consumers, not re-hashed here on every start."""
     try:
-        return _SEAL.fullmatch(seal.read_text()) is not None
-    except OSError:
+        return _SEAL.fullmatch(seal.read_bytes().decode("ascii")) is not None
+    except (OSError, UnicodeDecodeError):
         return False
 
 

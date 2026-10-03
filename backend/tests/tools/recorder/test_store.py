@@ -228,3 +228,15 @@ def test_failed_seal_write_leaves_no_final_looking_segment(tmp_path, monkeypatch
     monkeypatch.undo()
     assert not list(tmp_path.rglob("*.jsonl.gz"))  # nothing claims to be complete
     assert [r["records_recovered"] for r in recover_incomplete(tmp_path)] == [1]
+
+
+def test_recovery_quarantines_a_non_text_seal_instead_of_aborting(tmp_path):
+    """Codex round-3 N1: a binary/undecodable seal is malformed, not a startup crash."""
+    s = SegmentStore(tmp_path, "r")
+    s.write("poll/a", envelope("okx", "poll", T0, payload="a"))
+    s.close()
+    (seg,) = _segments(tmp_path, "poll/a")
+    seg.with_name(seg.name + ".sha256").write_bytes(b"\xff\xfe" + b"\x9d" * 62)
+    report = recover_incomplete(tmp_path)
+    assert [r["reason"] for r in report] == ["seal malformed"]
+    assert list(tmp_path.rglob("*.sha256.orphan"))

@@ -56,6 +56,11 @@ TDD; each fix was broken on purpose and its test went red.**
     A consumer still verifies content against the seal.
 - **N1 —** the stop-event write and the store close are now independent steps. Errors are
   aggregated, and the lock is always released.
+- **Codex accepted `cd24fcd`.** The non-blocking follow-up: a seal with non-text bytes crashed
+  startup instead of being quarantined. Seals are now read as ASCII bytes, and a decode failure
+  counts as malformed. Reading bytes exposed that text-mode seals on Windows end in CRLF, so
+  the pattern accepts an optional ``. All 109 real seals on disk were checked: none would be
+  quarantined.
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
