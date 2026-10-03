@@ -159,11 +159,14 @@ Agreed in the Claude/Codex consensus, 2026-10-03. See `docs/KNOWN_LIMITATIONS.md
 **Run isolation.**
 - Every parallel experiment, shadow backend or research run uses its OWN database copy, its own
   output root and an explicit run id.
-- Never point a second process at `backend/coinbase.db`. The shared `agent_state` row is keyed
-  only by agent, so a second backend overwrites the 8001 paper book. The 8002 shadow runs from a
-  DB copy for exactly this reason.
-- The market recorder (`backend/tools/recorder`) writes only to
-  `C:\Users\gl450\market_recorder_data` and imports nothing from the app.
+- Never point a second **state-writing** backend or trading experiment at `backend/coinbase.db`.
+  The shared `agent_state` row is keyed only by agent, so a second backend overwrites the 8001
+  paper book. The 8002 shadow runs from a DB copy for exactly this reason.
+- Read-only diagnostics, and online backups through a read-only connection, ARE permitted.
+- Data-only screens and the recorder never open the app DB, so they need no database of their
+  own.
+- The market recorder (`backend/tools/recorder`) defaults to `C:\Users\gl450\market_recorder_data`
+  (`--out` overrides it) and imports nothing from the app.
 
 **Data retention.**
 - Historical data (hourly, 5m, 1m and auxiliary Parquet, and the DB) is never deleted or
@@ -175,15 +178,24 @@ Agreed in the Claude/Codex consensus, 2026-10-03. See `docs/KNOWN_LIMITATIONS.md
 - Any migration runs on a copy first, validates the replacement, keeps the originals until
   validation completes, and has a rollback path.
 
-**Backups.** `python -m tools.data_snapshot.snapshot` (from `backend/`) writes a verified snapshot
-to `C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`:
+**Backups.** Pass explicit paths; the defaults resolve inside the current checkout, which in a
+worktree is NOT the 8001 runtime DB:
+
+```
+python -m tools.data_snapshot.snapshot --data-dir C:\Users\gl450\polymarket_app\backend\data --db C:\Users\gl450\polymarket_app\backend\coinbase.db
+```
+
+This writes a verified snapshot to `C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`.
+Missing inputs and an output inside the source tree are refused before anything is written.
+Snapshot details:
 - files are copied stable-per-file (stat check plus source re-read hash);
 - Parquet copies are fully read;
 - the DB is copied with the SQLite online backup and then integrity-checked;
 - a `manifest.json` records the capture interval.
 
-It is not a globally consistent as-of snapshot. A non-zero exit means some file was unstable or
-invalid.
+It is not a globally consistent as-of snapshot, and it covers only `included_roots`: worktree
+research outputs, model weights and caches, and the recorder archive are NOT included. A non-zero
+exit means a file was unstable, failed or invalid, or the DB integrity check failed.
 
 ---
 

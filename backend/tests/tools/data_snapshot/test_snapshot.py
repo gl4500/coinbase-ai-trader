@@ -105,7 +105,7 @@ def test_take_snapshot_end_to_end(tmp_path):
     assert m["database"]["integrity"] == "ok"
     assert m["captured_from_ns"] <= m["captured_to_ns"]
     assert "not a globally consistent" in m["consistency_note"]
-    assert m["summary"] == {"files": 3, "stable": 3, "unstable": 0, "invalid": 0}
+    assert m["summary"] == {"files": 3, "stable": 3, "unstable": 0, "failed": 0, "invalid": 0}
     assert not list(out.rglob("*.tmp"))
     assert {p: _sha(p) for p in data.rglob("*") if p.is_file()} == src_hashes  # sources untouched
     with pytest.raises(FileExistsError):
@@ -120,3 +120,85 @@ def test_copy_stable_detects_same_stat_rewrite_by_rereading_the_source(tmp_path)
         src, tmp_path / "out" / "a.bin", retries=2, read=lambda p: next(reads), sleep=lambda s: None
     )
     assert r["status"] == "unstable" and r["attempts"] == 2
+
+
+def _src(tmp_path):
+    data = tmp_path / "data"
+    _parquet(data / "history" / "BTC-USD.parquet")
+    return data, _db(tmp_path / "coinbase.db")
+
+
+def test_missing_db_fails_before_creating_anything(tmp_path):
+    data, _ = _src(tmp_path)
+    with pytest.raises(FileNotFoundError, match="nope.db"):
+        take_snapshot(data, tmp_path / "nope.db", tmp_path / "snaps", stamp="s")
+    assert not (tmp_path / "snaps").exists()
+
+
+def test_missing_data_dir_fails_before_creating_anything(tmp_path):
+    _, db = _src(tmp_path)
+    with pytest.raises(FileNotFoundError, match="missing_dir"):
+        take_snapshot(tmp_path / "missing_dir", db, tmp_path / "snaps", stamp="s")
+    assert not (tmp_path / "snaps").exists()
+
+
+def test_data_only_must_be_explicit(tmp_path):
+    data, _ = _src(tmp_path)
+    out = take_snapshot(data, None, tmp_path / "snaps", stamp="s", data_only=True)
+    m = json.loads((out / "manifest.json").read_text())
+    assert m["database"] == {"status": "omitted_explicitly"}
+    with pytest.raises(ValueError, match="data_only"):
+        take_snapshot(data, None, tmp_path / "snaps", stamp="t")
+
+
+def test_output_inside_source_is_rejected_before_any_write(tmp_path):
+    data, db = _src(tmp_path)
+    with pytest.raises(ValueError, match="inside the source"):
+        take_snapshot(data, db, data / "backups", stamp="s")
+    assert not (data / "backups").exists()
+
+
+def test_cli_returns_nonzero_for_missing_inputs(tmp_path):
+    from tools.data_snapshot.snapshot import cli
+
+    data, _ = _src(tmp_path)
+    assert (
+        cli(["--data-dir", str(data), "--db", str(tmp_path / "x.db"), "--out", str(tmp_path / "o")])
+        == 2
+    )
+
+
+def test_source_read_error_is_recorded_not_fatal(tmp_path):
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"x")
+
+    def boom(p):
+        raise PermissionError("locked by another process")
+
+    r = copy_stable(src, tmp_path / "out" / "a.bin", retries=2, read=boom, sleep=lambda s: None)
+    assert r["status"] == "failed" and "locked" in r["error"] and r["attempts"] == 2
+
+
+def test_wal_db_backup_includes_uncheckpointed_commits(tmp_path):
+    src = tmp_path / "wal.db"
+    writer = sqlite3.connect(src)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("create table t(x int)")
+    writer.executemany("insert into t values(?)", [(i,) for i in range(50)])
+    writer.commit()  # committed, still only in the -wal file; writer stays open
+    assert (tmp_path / "wal.db-wal").stat().st_size > 0
+    r = backup_sqlite(src, tmp_path / "out" / "copy.db")
+    writer.close()
+    con = sqlite3.connect(tmp_path / "out" / "copy.db")
+    assert con.execute("select count(*) from t").fetchone() == (50,) and r["integrity"] == "ok"
+    con.close()
+
+
+def test_manifest_scopes_its_coverage(tmp_path):
+    data, db = _src(tmp_path)
+    m = json.loads(
+        (take_snapshot(data, db, tmp_path / "snaps", stamp="s") / "manifest.json").read_text()
+    )
+    assert m["included_roots"] == [str(data.resolve()), str(db.resolve())]
+    assert "NOT included" in m["coverage_note"]
