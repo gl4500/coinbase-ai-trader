@@ -7,6 +7,43 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.98 — 2026-10-03 — Preregistered BTC/ETH slow-trend falsification screen
+
+New offline research package `backend/tools/slow_trend/` only. No backend, agent,
+threshold, model or DB change; nothing in the live path imports it.
+
+**Why.** The live short-hold alt bot loses before fees (CNN all-time 1,674 trades,
+−$135.31 gross; this week the average winner, +1.22%, was smaller than one taker
+round trip). The account's verified Intro tier is 0.50% maker / 0.90% taker
+(read-only `transaction_summary`), so a taker round trip costs ~1.82%. Claude and
+Codex debated the research and converged on ONE cheap falsification screen
+before any funding discussion.
+
+**What.** One frozen rule — hold BTC/ETH while the completed UTC daily close is
+above its 100-day SMA — against cash, buy-and-hold and a 52-week fee-inclusive
+DCA, at the verified fees with taker/taker as the primary case. It emits exactly
+one of `KILL`, `INCONCLUSIVE` or `PASS_TO_FORWARD`; none authorises funding.
+Every tunable lives in `prereg.py`, pinned by a test. The plan
+(`docs/superpowers/plans/2026-10-03-slow-trend-screen.md`) went through four
+Codex review rounds; 10 blocking defects were found and fixed before any code.
+
+**Measurement safeguards:**
+- Raw candles are audited before normalisation: conflicting vs identical
+  duplicates, finite positive consistent OHLC, alignment.
+- The first period day comes from data coverage, never from P&L.
+- A missing terminal close returns an inadequate-data verdict, never a stale price.
+- Drawdown is seeded with the initial capital.
+- Decisions are sliced to the period before the held state is filled, so no
+  pre-period position carries in.
+- Unsellable endpoint holdings make a comparison "affected", which can never PASS.
+- Freeze: no snapshot overwrite, a committed `snapshot.lock`, and an append-only
+  run ledger keyed by a stable experiment id, with retry / replay /
+  corrected-replay / new-preregistration modes.
+
+**Tests:** 77 in `backend/tests/tools/slow_trend/`. Mutation-checked: reintroducing
+the carry-in bug, dropping the affected-gate check, and forward-filling the
+terminal close each turned a test red.
+
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
