@@ -1446,7 +1446,8 @@ def test_evaluate_end_to_end_on_monotone_rise_kills():
     rep = S.evaluate(raw, CONSTRAINTS)
     assert rep["dev_start"] == "2024-04-09"
     assert rep["results"]["dev"]["scenarios"]["P0"]["passes"] == {"G1": True, "G2": False,
-                                                                 "pass": False}
+                                                                 "pass": False,
+                                                                 "affected": False}
     assert rep["verdict"] == {"verdict": "KILL", "reason": "primary_failed"}
 
 
