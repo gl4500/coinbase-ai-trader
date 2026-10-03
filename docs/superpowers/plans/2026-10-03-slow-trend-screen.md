@@ -67,6 +67,11 @@ made before the period never carries in.
   the open is absent is superseded by later targets; it is not queued.
 - A buy rejected by size limits (`units < base_min_size` or `notional < quote_min_size`) is
   counted as `skipped`, then retried at every later open while the target stays long.
+- A sell whose proceeds would fall below `quote_min_size` is NOT executed: the holding is
+  retained, `skipped_exits` is counted, and the sell is retried at later opens while the target
+  stays flat. At the endpoint, a holding whose liquidation proceeds fall below `quote_min_size`
+  is **valued at 0** in the terminal value (never converted into invented cash) and flagged
+  `unliquidatable`. This is conservative by construction.
 - Before the first observed close, a position is marked at its execution price, for marking only.
 
 **Costs** (applied to actual entry/exit notionals; fee cash reserved; self-financing compounding)
@@ -95,11 +100,15 @@ made before the period never carries in.
   - midnight-UTC alignment;
   - duplicates: an identical pagination copy is allowed and collapsed, while a **conflicting**
     duplicate makes the data inadequate.
-- `common_first` is the later of the two products' first aligned days.
+- `common_first` is the later of the two products' first aligned days. Rows outside
+  `[common_first, 2026-10-02]` are excluded BEFORE normalisation. They are unused and never
+  audited, so they can neither pass nor fail the screen.
 - The development audit window is `[common_first, 2025-04-13]` (warmup INCLUDED); the
   validation-block window is `[2025-04-14, 2026-10-02]`.
 - The data is inadequate if any of the following hold:
   - any invalid row, misaligned row or conflicting duplicate in a window;
+  - a product with no aligned rows at all, or `common_first` later than 2025-04-13 (no
+    development coverage);
   - more than 3 missing days per product per window (missing days are never filled);
   - no valid close for both products on 2025-04-13 or on 2026-10-02 (the endpoint is never moved);
   - no first common valid SMA day on or before 2025-04-13.
@@ -109,17 +118,20 @@ made before the period never carries in.
   through 2026-10-02, the last complete UTC day. It is NOT a clean holdout. We chose this
   candidate after studying this period for other policies. Its warmup uses development closes.
   It is reported separately and never averaged with development.
-- In-repo hourly `data/history/*.parquet` is used only for an informational overlap check.
+- In-repo hourly `data/history/*.parquet` is used only for an informational overlap check. Its
+  sha256 is recorded. A failure there is recorded as a diagnostic and never fails the run.
 - Disclosed per product per period: stale-mark days and the longest stale run, plus
   suppressed-decision days.
 
 **Metrics** (per period, per scenario, per strategy)
 - **Portfolio:**
   - value and costs: terminal liquidation value, net return, execution fees, terminal fee,
-    total costs;
+    `total_fees`, `slippage_cost` (the assumed adverse adjustment, terminal included), and
+    unliquidatable flags;
   - drawdown: max drawdown of marked equity **seeded with the pre-trade USD 1,000**;
   - activity: entries, exits, completed round trips (terminal liquidation is not a round trip),
-    skipped orders, turnover (traded notional / initial), mean sleeve exposure.
+    skipped buys and exits, `executed_turnover` (executed notional / initial; excludes the
+    hypothetical terminal sale), mean sleeve exposure.
 - **Per sleeve:** terminal value, net return, max drawdown, exposure, round trips, stale-mark days.
 - **Weekly returns** use COMPLETE Monday–Sunday weeks only (Sunday close to Sunday close). The
   partial head and tail are reported separately as boundary returns.
@@ -154,11 +166,17 @@ made before the period never carries in.
    is committed before `run`.
 3. `screen run` refuses when there are uncommitted changes under `backend/tools/slow_trend` or in
    `backend/clients/coinbase_client.py`, or when the lock does not match the manifest.
-4. `run_id = sha256(prereg digest, HEAD, manifest digest)`.
-5. An append-only `runs.jsonl` records `started`/`failed`/`completed`. A completed `run_id`
-   cannot run again except with `--replay`; a replay is labelled `replay`, and its report is
-   kept alongside the first, never replacing it. A `failed` or unfinished `started` run may be
-   retried and is labelled `retry`.
+4. `experiment_id = sha256(prereg digest, manifest digest)` is stable across commits. Each
+   attempt records its own HEAD, its parent attempt in the same experiment, and its mode.
+5. An append-only `runs.jsonl` records `started`/`failed`/`completed`. Permissions are keyed by
+   `experiment_id`, never by HEAD:
+   - a completed experiment cannot run again except with `--replay`;
+   - a replay is labelled `replay` and its report is kept alongside the first, never replacing
+     it;
+   - after a `failed` or unfinished `started` attempt, the next attempt is a `retry`, even on a
+     new commit;
+   - a DIFFERENT `experiment_id` while another experiment has already completed requires an
+     explicit `--new-preregistration`, and is labelled `new_preregistration`.
 
 ## Global Constraints
 
@@ -211,7 +229,8 @@ made before the period never carries in.
   - `daily_bars.audit(raw, first: str, last: str, max_missing: int) -> dict`
     (keys `missing_days`, `misaligned`, `invalid_rows`, `conflicting_duplicates`,
     `identical_copies`, `adequate`);
-  - `daily_bars.first_day(raw) -> str` (first aligned day);
+  - `daily_bars.first_day(raw) -> str | None` (first aligned day; `None` if there is none);
+  - `daily_bars.window(raw, first, last) -> pd.DataFrame` (rows whose start is in the window);
   - `daily_bars.normalise(raw) -> pd.DataFrame` (collapses identical copies; raises
     `ValueError` on a conflicting duplicate);
   - `daily_bars.to_calendar(norm, first, last) -> pd.DataFrame` (daily index, `open, close`,
@@ -355,6 +374,11 @@ def test_first_day_ignores_misaligned_rows():
     assert D.first_day(_raw([T0 - 3600, T0 + DAY])) == "2023-11-16"
 
 
+def test_first_day_none_without_aligned_rows():
+    assert D.first_day(_raw([T0 + 3600])) is None
+    assert D.first_day(_raw([])) is None
+
+
 def test_product_constraints_require_every_field():
     ok = {"base_increment": "0.00000001", "base_min_size": "0.00000001", "quote_min_size": "1"}
     assert D.product_constraints(ok) == {"base_increment": 1e-8, "base_min": 1e-8,
@@ -481,7 +505,7 @@ async def fetch_daily(pid: str, start_ts: int, end_ts: int, getter: Getter,
     return raw[(raw["start"] >= start_ts) & (raw["start"] < end_ts)].reset_index(drop=True)
 
 
-def _window(raw: pd.DataFrame, first: str, last: str) -> pd.DataFrame:
+def window(raw: pd.DataFrame, first: str, last: str) -> pd.DataFrame:
     lo = pd.Timestamp(first).timestamp()
     hi = pd.Timestamp(last).timestamp() + DAY
     return raw[(raw["start"] >= lo) & (raw["start"] < hi)]
@@ -498,7 +522,7 @@ def _valid_rows(r: pd.DataFrame) -> np.ndarray:
 
 
 def audit(raw: pd.DataFrame, first: str, last: str, max_missing: int) -> Dict[str, Any]:
-    r = _window(raw, first, last)
+    r = window(raw, first, last)
     aligned = (r["start"] % DAY == 0).to_numpy()
     valid = _valid_rows(r)
     content = r[list(FIELDS)]
@@ -517,8 +541,10 @@ def audit(raw: pd.DataFrame, first: str, last: str, max_missing: int) -> Dict[st
             "adequate": adequate}
 
 
-def first_day(raw: pd.DataFrame) -> str:
+def first_day(raw: pd.DataFrame) -> Optional[str]:
     aligned = raw["start"][raw["start"] % DAY == 0]
+    if aligned.empty:
+        return None
     return str(pd.to_datetime(aligned.min(), unit="s").date())
 
 
@@ -571,7 +597,7 @@ Append to `.gitignore`:
 backend/data/research/
 ```
 
-- [ ] **Step 4: Run to verify pass.** Expected: 15 passed.
+- [ ] **Step 4: Run to verify pass.** Expected: 16 passed.
 
 - [ ] **Step 5: Commit** (operator OK required while 8001 is live; the hook runs the full suite)
 
@@ -684,8 +710,9 @@ git log -1 --stat && git push
   - `sim.run_dca(bars, cash, tranches, costs, product) -> SleeveResult`.
   - `SleeveResult` fields:
     - `equity` (marked at close), `initial`;
-    - `terminal_value`, `exec_fees`, `terminal_fee`, `traded_notional`;
-    - `entries`, `exits`, `round_trips`, `skipped`;
+    - `terminal_value`, `exec_fees`, `terminal_fee`, `traded_notional` (executed only),
+      `slippage_cost` (terminal included), `unliquidatable`;
+    - `entries`, `exits`, `round_trips`, `skipped`, `skipped_exits`;
     - `exposure`, `stale_mark_days`, `max_stale_run`.
   - Raises `ValueError("terminal close missing")` when the last bar has no close.
 
@@ -729,6 +756,19 @@ def test_slip_is_adverse_on_both_legs():
     r = run_sleeve(_bars([100] * 3, [100] * 3), _t(True, False, False), 500.0,
                    Costs(0.0, 0.0, 0.0025), FINE)
     assert r.terminal_value == pytest.approx(500.0 * 0.9975 / 1.0025, rel=1e-6)
+    units = 500.0 / 100.25
+    assert r.slippage_cost == pytest.approx(2 * units * 100 * 0.0025, rel=1e-6)
+    assert r.terminal_value == pytest.approx(500.0 - r.slippage_cost, rel=1e-6)
+
+
+def test_sell_below_quote_min_is_retained_and_endpoint_unliquidatable():
+    coarse = Product(base_increment=1.0, base_min=1.0, quote_min=1.0)
+    r = run_sleeve(_bars([2.0, 0.5, 0.5], [2.0, 0.5, 0.5]), _t(True, False, False), 2.5,
+                   FREE, coarse)
+    assert r.entries == 1 and r.exits == 0 and r.skipped_exits == 2
+    assert r.unliquidatable is True
+    assert r.terminal_value == pytest.approx(0.5)  # cash only; the unsellable unit is valued 0
+    assert r.terminal_fee == 0.0
 
 
 def test_open_position_marked_in_equity_and_liquidated_in_terminal_value():
@@ -802,8 +842,10 @@ def test_dca_tranches_are_fee_inclusive_and_mondays_only():
 
 State-targeting, not an order queue: on each day with a valid open the sleeve moves to that
 day's target. A target missed on an absent open is superseded by later targets. A buy rejected
-by size limits is retried at every later open while the target stays long. Equity is marked at
-each close; a stale close is carried for MARKING only, never as a terminal price.
+by size limits is retried at every later open while the target stays long. A sell whose proceeds
+fall below quote_min is not executed (retained, counted, retried). Equity is marked at each close;
+a stale close is carried for MARKING only, never as a terminal price. An endpoint holding that
+cannot meet quote_min is valued at 0 and flagged, never converted into invented cash.
 """
 
 from __future__ import annotations
@@ -836,10 +878,13 @@ class SleeveResult:
     exec_fees: float
     terminal_fee: float
     traded_notional: float
+    slippage_cost: float
+    unliquidatable: bool
     entries: int
     exits: int
     round_trips: int
     skipped: int
+    skipped_exits: int
     exposure: float
     stale_mark_days: int
     max_stale_run: int
@@ -852,8 +897,8 @@ def trend_target(state: pd.Series, delay: int) -> pd.Series:
 class _Book:
     def __init__(self, cash: float, costs: Costs, product: Product):
         self.cash, self.units, self.costs, self.product = cash, 0.0, costs, product
-        self.exec_fees = self.traded = 0.0
-        self.entries = self.exits = self.skipped = 0
+        self.exec_fees = self.traded = self.slippage = 0.0
+        self.entries = self.exits = self.skipped = self.skipped_exits = 0
 
     def buy(self, open_px: float, budget: float) -> bool:
         px = open_px * (1 + self.costs.slip)
@@ -868,17 +913,23 @@ class _Book:
         self.units += units
         self.exec_fees += fee
         self.traded += notional
+        self.slippage += units * open_px * self.costs.slip
         self.entries += 1
         return True
 
-    def sell_all(self, open_px: float) -> None:
+    def sell_all(self, open_px: float) -> bool:
         proceeds = self.units * open_px * (1 - self.costs.slip)
+        if proceeds < self.product.quote_min:
+            self.skipped_exits += 1  # holding retained; retried while the target stays flat
+            return False
         fee = proceeds * self.costs.exit_fee
         self.cash += proceeds - fee
         self.exec_fees += fee
         self.traded += proceeds
+        self.slippage += self.units * open_px * self.costs.slip
         self.units = 0.0
         self.exits += 1
+        return True
 
 
 class _Marks:
@@ -904,12 +955,19 @@ def _finish(book: _Book, marks: _Marks, bars: pd.DataFrame, initial: float) -> S
     if math.isnan(last):
         raise ValueError("terminal close missing: endpoint is never moved")
     proceeds = book.units * last * (1 - book.costs.slip)
+    unliquidatable = book.units > 0 and proceeds < book.product.quote_min
+    if unliquidatable:  # never invent cash for a sale the size model forbids
+        proceeds, terminal_slip = 0.0, 0.0
+    else:
+        terminal_slip = book.units * last * book.costs.slip
     terminal_fee = proceeds * book.costs.exit_fee
     return SleeveResult(
         equity=pd.Series(marks.values, index=bars.index), initial=initial,
         terminal_value=book.cash + proceeds - terminal_fee, exec_fees=book.exec_fees,
-        terminal_fee=terminal_fee, traded_notional=book.traded, entries=book.entries,
-        exits=book.exits, round_trips=book.exits, skipped=book.skipped,
+        terminal_fee=terminal_fee, traded_notional=book.traded,
+        slippage_cost=book.slippage + terminal_slip, unliquidatable=bool(unliquidatable),
+        entries=book.entries, exits=book.exits, round_trips=book.exits,
+        skipped=book.skipped, skipped_exits=book.skipped_exits,
         exposure=marks.held / len(bars), stale_mark_days=marks.stale,
         max_stale_run=marks.max_run)
 
@@ -949,7 +1007,7 @@ Notes for the implementer:
 - In `test_dca_tranches_are_fee_inclusive_and_mondays_only`, `equity - traded_notional` is the
   remaining cash (price is constant at 10), so the cash spent is exactly 3 × 10, fees included.
 
-- [ ] **Step 4: Run to verify pass.** Expected: 12 passed.
+- [ ] **Step 4: Run to verify pass.** Expected: 13 passed.
 
 - [ ] **Step 5: Commit** (operator OK required)
 
@@ -1242,12 +1300,12 @@ git log -1 --stat && git push
   - `screen.evaluate(raw: dict[str, pd.DataFrame], constraints: dict[str, dict]) -> dict`
     (pure; returns `verdict`, `data_checks`, `dev_start`, `results`, `diagnostics`);
   - `screen.ensure_new_snapshot(out: Path) -> None` (raises `FileExistsError`);
-  - `screen.run_identity(prereg_sha, head, manifest_sha) -> str`;
-  - `screen.ledger_state(entries: list[dict], run_id: str) -> str`
-    (`none|started|failed|completed`);
-  - `screen.check_can_run(state: str, replay: bool) -> str` (`first|retry|replay`; raises
-    `RuntimeError`);
-  - CLI `python -m tools.slow_trend.screen {fetch|lock|run [--replay]}`.
+  - `screen.experiment_identity(prereg_sha, manifest_sha) -> str` (stable across commits);
+  - `screen.run_mode(entries, experiment_id, replay=False, new_prereg=False) -> str`
+    (`first|retry|replay|new_preregistration`; raises `RuntimeError`);
+  - `screen.last_attempt(entries, experiment_id) -> int | None` (parent attempt);
+  - `screen.safe_overlap(hourly_path, raw, first) -> dict` (`absent|ok|error`; never raises);
+  - CLI `python -m tools.slow_trend.screen {fetch|lock|run [--replay] [--new-preregistration]}`.
 
 - [ ] **Step 1: Write the failing tests** (synthetic data; no network, no git)
 
@@ -1325,8 +1383,49 @@ def test_evaluate_end_to_end_on_monotone_rise_kills():
     raw = {p: _raw("2024-01-01", "2026-10-02") for p in PRODUCTS}
     rep = S.evaluate(raw, CONSTRAINTS)
     assert rep["dev_start"] == "2024-04-09"
-    # buying one day after buy-and-hold on a monotone rise lags it with equal drawdown
+    assert rep["results"]["dev"]["scenarios"]["P0"]["passes"] == {"G1": True, "G2": False,
+                                                                 "pass": False}
     assert rep["verdict"] == {"verdict": "KILL", "reason": "primary_failed"}
+
+
+def test_evaluate_empty_input_is_inadequate():
+    raw = {p: _raw("2024-01-01", "2026-10-02").iloc[0:0] for p in PRODUCTS}
+    rep = S.evaluate(raw, CONSTRAINTS)
+    assert rep["verdict"]["reason"] == "data"
+    assert rep["data_checks"]["inadequate_because"] == "no_aligned_rows"
+
+
+def test_evaluate_all_misaligned_input_is_inadequate():
+    raw = {p: _raw("2024-01-01", "2026-10-02").assign(start=lambda d: d["start"] + 3600)
+           for p in PRODUCTS}
+    assert S.evaluate(raw, CONSTRAINTS)["data_checks"]["inadequate_because"] == "no_aligned_rows"
+
+
+def test_evaluate_coverage_starting_at_block_start_is_inadequate():
+    raw = {p: _raw("2025-04-14", "2026-10-02") for p in PRODUCTS}
+    rep = S.evaluate(raw, CONSTRAINTS)
+    assert rep["verdict"]["reason"] == "data"
+    assert rep["data_checks"]["inadequate_because"] == "no_development_coverage"
+
+
+def test_unused_early_conflict_is_excluded_not_a_crash():
+    early = _raw("2023-06-01", "2026-10-02")
+    dup = early.iloc[[3]].copy()
+    dup["close"] += 1.0
+    dup["high"] += 1.0
+    raw = {"BTC-USD": pd.concat([early, dup]), "ETH-USD": _raw("2024-01-01", "2026-10-02")}
+    rep = S.evaluate(raw, CONSTRAINTS)  # BTC's 2023 rows precede common_first and are unused
+    assert rep["data_checks"]["common_first"] == "2024-01-01"
+    assert rep["results"] is not None
+
+
+def test_malformed_hourly_overlap_is_a_diagnostic(tmp_path):
+    bad = tmp_path / "BTC-USD.parquet"
+    bad.write_text("not a parquet file")
+    out = S.safe_overlap(bad, _raw("2024-01-01", "2024-03-01"), "2024-01-01")
+    assert out["status"] == "error" and out["sha256"].startswith("sha256:")
+    assert S.safe_overlap(tmp_path / "missing.parquet", _raw("2024-01-01", "2024-03-01"),
+                          "2024-01-01") == {"status": "absent"}
 
 
 def test_missing_terminal_close_is_inadequate():
@@ -1353,22 +1452,43 @@ def test_refuses_snapshot_overwrite(tmp_path):
         S.ensure_new_snapshot(tmp_path)
 
 
-def test_run_identity_changes_with_every_input():
-    base = S.run_identity("a", "b", "c")
-    assert len({base, S.run_identity("x", "b", "c"), S.run_identity("a", "x", "c"),
-                S.run_identity("a", "b", "x")}) == 4
+def test_experiment_identity_ignores_head_but_not_prereg_or_snapshot():
+    base = S.experiment_identity("prereg", "snap")
+    assert base == S.experiment_identity("prereg", "snap")
+    assert len({base, S.experiment_identity("x", "snap"),
+                S.experiment_identity("prereg", "x")}) == 3
 
 
-def test_ledger_and_run_permissions():
-    rid = "r1"
-    assert S.check_can_run(S.ledger_state([], rid), False) == "first"
-    failed = [{"run_id": rid, "status": "started"}, {"run_id": rid, "status": "failed"}]
-    assert S.check_can_run(S.ledger_state(failed, rid), False) == "retry"
-    done = failed + [{"run_id": rid, "status": "started"}, {"run_id": rid, "status": "completed"}]
+def _e(exp, status, attempt=1, head="h1"):
+    return {"experiment_id": exp, "status": status, "attempt": attempt, "head": head}
+
+
+def test_first_attempt():
+    assert S.run_mode([], "E") == "first"
+
+
+def test_failure_then_new_commit_is_still_a_retry():
+    entries = [_e("E", "started", 1, "h1"), _e("E", "failed", 1, "h1")]
+    assert S.run_mode(entries, "E") == "retry"  # HEAD h2 is irrelevant to the permission
+    assert S.last_attempt(entries, "E") == 1
+
+
+def test_unfinished_start_is_a_retry():
+    assert S.run_mode([_e("E", "started")], "E") == "retry"
+
+
+def test_completion_then_new_commit_refuses_without_replay():
+    entries = [_e("E", "started"), _e("E", "completed")]
     with pytest.raises(RuntimeError, match="replay"):
-        S.check_can_run(S.ledger_state(done, rid), False)
-    assert S.check_can_run(S.ledger_state(done, rid), True) == "replay"
-    assert S.ledger_state(done + [{"run_id": rid, "status": "started"}], rid) == "completed"
+        S.run_mode(entries, "E")
+    assert S.run_mode(entries, "E", replay=True) == "replay"
+
+
+def test_new_preregistration_must_be_explicit():
+    entries = [_e("E", "started"), _e("E", "completed")]
+    with pytest.raises(RuntimeError, match="new-preregistration"):
+        S.run_mode(entries, "F")
+    assert S.run_mode(entries, "F", new_prereg=True) == "new_preregistration"
 ```
 
 - [ ] **Step 2: Run to verify failure.**
@@ -1435,11 +1555,14 @@ def _summ(results: list, initial: float) -> dict:
     return {
         "terminal_value": tv, "net_return": tv / initial - 1,
         "max_drawdown": M.max_drawdown(eq, initial),
-        "exec_fees": ex, "terminal_fee": tf, "total_costs": ex + tf,
+        "exec_fees": ex, "terminal_fee": tf, "total_fees": ex + tf,
+        "slippage_cost": sum(r.slippage_cost for r in results),
+        "unliquidatable": [r.unliquidatable for r in results],
         "entries": sum(r.entries for r in results), "exits": sum(r.exits for r in results),
         "round_trips": sum(r.round_trips for r in results),
         "skipped": sum(r.skipped for r in results),
-        "turnover": sum(r.traded_notional for r in results) / initial,
+        "skipped_exits": sum(r.skipped_exits for r in results),
+        "executed_turnover": sum(r.traded_notional for r in results) / initial,
         "exposure_mean": float(np.mean([r.exposure for r in results])),
         "boundary_returns": M.boundary_returns(eq, initial),
         "per_sleeve": {pid: {"terminal_value": r.terminal_value,
@@ -1488,27 +1611,41 @@ def run_period(cal: dict, start: str, end: str, products: dict) -> dict:
     return out
 
 
+def _inadequate(report: dict, why: str) -> dict:
+    report["data_checks"]["inadequate_because"] = why
+    report["verdict"] = G.verdict(False, None, 0)
+    return report
+
+
 def evaluate(raw: dict, constraints: dict) -> dict:
-    common_first = max(D.first_day(raw[p]) for p in P.PRODUCTS)
+    report = {"data_checks": {"terminal": {}}, "dev_start": None, "results": None}
+    firsts = {p: D.first_day(raw[p]) for p in P.PRODUCTS}
+    report["data_checks"]["first_day"] = firsts
+    if any(f is None for f in firsts.values()):
+        return _inadequate(report, "no_aligned_rows")
+    common_first = max(firsts.values())
+    report["data_checks"]["common_first"] = common_first
+    if common_first > P.DEV_END:
+        return _inadequate(report, "no_development_coverage")
     windows = {"dev": (common_first, P.DEV_END), "block": (P.BLOCK_START, P.BLOCK_END)}
     audits = {w: {p: D.audit(raw[p], a, b, P.MAX_MISSING_DAYS) for p in P.PRODUCTS}
               for w, (a, b) in windows.items()}
-    checks = {"common_first": common_first, "audits": audits, "terminal": {}}
-    data_ok = all(v["adequate"] for w in audits.values() for v in w.values())
-    report = {"data_checks": checks, "dev_start": None, "results": None}
-    if not data_ok:
-        report["verdict"] = G.verdict(False, None, 0)
-        return report
-    cal = {p: D.to_calendar(D.normalise(raw[p]), common_first, P.BLOCK_END) for p in P.PRODUCTS}
+    report["data_checks"]["audits"] = audits
+    if not all(v["adequate"] for w in audits.values() for v in w.values()):
+        return _inadequate(report, "audit")
+    # rows outside [common_first, BLOCK_END] are unused and excluded BEFORE normalisation
+    cal = {p: D.to_calendar(D.normalise(D.window(raw[p], common_first, P.BLOCK_END)),
+                            common_first, P.BLOCK_END) for p in P.PRODUCTS}
+    checks = report["data_checks"]
     for p in P.PRODUCTS:
         checks["terminal"][p] = {d: bool(pd.notna(cal[p].loc[d, "close"]))
                                  for d in (P.DEV_END, P.BLOCK_END)}
+    if not all(all(t.values()) for t in checks["terminal"].values()):
+        return _inadequate(report, "terminal_close_missing")
     dev_start = dev_start_from(cal, P.SMA_LEN, P.DEV_END)
     report["dev_start"] = dev_start
-    terminal_ok = all(all(t.values()) for t in checks["terminal"].values())
-    if not terminal_ok or dev_start is None:
-        report["verdict"] = G.verdict(False, None, 0)
-        return report
+    if dev_start is None:
+        return _inadequate(report, "no_common_valid_sma_before_dev_end")
     products = {p: Product(**constraints[p]) for p in P.PRODUCTS}
     periods = {"dev": (dev_start, P.DEV_END), "block": (P.BLOCK_START, P.BLOCK_END)}
     res = {n: run_period(cal, a, b, products) for n, (a, b) in periods.items()}
@@ -1527,24 +1664,34 @@ def ensure_new_snapshot(out: Path) -> None:
                               "preregistration - move the old directory aside deliberately")
 
 
-def run_identity(prereg_sha: str, head: str, manifest_sha: str) -> str:
-    return hashlib.sha256(f"{prereg_sha}|{head}|{manifest_sha}".encode()).hexdigest()[:16]
+def experiment_identity(prereg_sha: str, manifest_sha: str) -> str:
+    """Stable across commits: HEAD is attempt provenance, never part of the permission key."""
+    return hashlib.sha256(f"{prereg_sha}|{manifest_sha}".encode()).hexdigest()[:16]
 
 
-def ledger_state(entries: list, run_id: str) -> str:
-    mine = [e["status"] for e in entries if e.get("run_id") == run_id]
+def run_mode(entries: list, experiment_id: str, replay: bool = False,
+             new_prereg: bool = False) -> str:
+    mine = [e["status"] for e in entries if e.get("experiment_id") == experiment_id]
     if "completed" in mine:
-        return "completed"
-    return mine[-1] if mine else "none"
-
-
-def check_can_run(state: str, replay: bool) -> str:
-    if state == "completed":
         if replay:
             return "replay"
-        raise RuntimeError("run already completed: rerun only as --replay, or declare a new "
-                           "preregistration")
-    return "retry" if state in ("started", "failed") else "first"
+        raise RuntimeError("experiment already completed: rerun only as --replay")
+    if mine:
+        return "retry"  # an earlier attempt started or failed; a new commit does not reset it
+    others_done = any(e["status"] == "completed" and e.get("experiment_id") != experiment_id
+                      for e in entries)
+    if others_done:
+        if not new_prereg:
+            raise RuntimeError("a different preregistration already completed; pass "
+                               "--new-preregistration explicitly")
+        return "new_preregistration"
+    return "first"
+
+
+def last_attempt(entries: list, experiment_id: str) -> Optional[int]:
+    seqs = [e["attempt"] for e in entries
+            if e.get("experiment_id") == experiment_id and e["status"] == "started"]
+    return seqs[-1] if seqs else None
 
 
 def _sha(path: Path) -> str:
@@ -1590,7 +1737,19 @@ def _lock() -> None:
     print(f"wrote {LOCK}; commit it before `run`")
 
 
-def _run(replay: bool) -> None:
+def safe_overlap(hourly_path: Path, raw: pd.DataFrame, first: str) -> dict:
+    """Informational only. Any failure is a recorded diagnostic and never fails the run."""
+    if not hourly_path.exists():
+        return {"status": "absent"}
+    try:
+        cal = D.to_calendar(D.normalise(D.window(raw, first, P.BLOCK_END)), first, P.BLOCK_END)
+        out = D.hourly_overlap(pd.read_parquet(hourly_path), cal)
+        return {"status": "ok", "sha256": _sha(hourly_path), **out}
+    except Exception as exc:
+        return {"status": "error", "sha256": _sha(hourly_path), "error": repr(exc)}
+
+
+def _run(replay: bool, new_prereg: bool) -> None:
     dirty = _git("status", "--porcelain", "--", *P.FREEZE_PATHS)
     if dirty:
         sys.exit(f"refusing to run: uncommitted changes\n{dirty}")
@@ -1599,12 +1758,15 @@ def _run(replay: bool) -> None:
         sys.exit("snapshot.lock missing or does not match the manifest")
     manifest = json.loads((OUT / "manifest.json").read_text())
     head, prereg_sha = _git("rev-parse", "HEAD"), _sha(Path(P.__file__))
-    run_id = run_identity(prereg_sha, head, manifest_sha)
+    exp_id = experiment_identity(prereg_sha, manifest_sha)
     ledger = OUT / "runs.jsonl"
     entries = ([json.loads(x) for x in ledger.read_text().splitlines() if x.strip()]
                if ledger.exists() else [])
-    mode = check_can_run(ledger_state(entries, run_id), replay)
-    _append(ledger, {"run_id": run_id, "status": "started", "mode": mode, "at": _now()})
+    mode = run_mode(entries, exp_id, replay=replay, new_prereg=new_prereg)
+    attempt = 1 + max((e.get("attempt", 0) for e in entries), default=0)
+    base = {"experiment_id": exp_id, "attempt": attempt, "head": head, "mode": mode}
+    _append(ledger, {**base, "status": "started", "parent": last_attempt(entries, exp_id),
+                     "at": _now()})
     try:
         raw, constraints = {}, {}
         for pid, m in manifest["products"].items():
@@ -1613,27 +1775,24 @@ def _run(replay: bool) -> None:
                 raise RuntimeError(f"snapshot {pid} does not match its manifest digest")
             raw[pid], constraints[pid] = pd.read_parquet(path), m["constraints"]
         report = evaluate(raw, constraints)
-        overlap = {}
-        for pid in P.PRODUCTS:
-            hp = BACKEND / "data" / "history" / f"{pid}.parquet"
-            if hp.exists() and report["results"]:
-                cal = D.to_calendar(D.normalise(raw[pid]), report["data_checks"]["common_first"],
-                                    P.BLOCK_END)
-                overlap[pid] = D.hourly_overlap(pd.read_parquet(hp), cal)
-        report.update(run_id=run_id, mode=mode, head=head, prereg_sha256=prereg_sha,
-                      manifest_sha256=manifest_sha, hourly_overlap_informational=overlap)
     except Exception as exc:
-        _append(ledger, {"run_id": run_id, "status": "failed", "error": repr(exc), "at": _now()})
+        _append(ledger, {**base, "status": "failed", "error": repr(exc), "at": _now()})
         raise
-    name = f"report_{run_id}_{mode}_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
+    first = report["data_checks"].get("common_first")
+    report["hourly_overlap_informational"] = (
+        {pid: safe_overlap(BACKEND / "data" / "history" / f"{pid}.parquet", raw[pid], first)
+         for pid in P.PRODUCTS} if first else {})
+    report.update(experiment_id=exp_id, attempt=attempt, mode=mode, head=head,
+                  prereg_sha256=prereg_sha, manifest_sha256=manifest_sha)
+    name = f"report_{exp_id}_a{attempt}_{mode}.json"
     (OUT / name).write_text(json.dumps(report, indent=2, default=str))
-    _append(ledger, {"run_id": run_id, "status": "completed", "mode": mode, "report": name,
+    _append(ledger, {**base, "status": "completed", "report": name,
                      "verdict": report["verdict"], "at": _now()})
     print(json.dumps({"verdict": report["verdict"], "mode": mode, "report": name}, indent=2))
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    cmd, flags = (sys.argv[1] if len(sys.argv) > 1 else ""), set(sys.argv[2:])
     if cmd == "fetch":
         from dotenv import load_dotenv
 
@@ -1642,9 +1801,10 @@ if __name__ == "__main__":
     elif cmd == "lock":
         _lock()
     elif cmd == "run":
-        _run(replay="--replay" in sys.argv[2:])
+        _run(replay="--replay" in flags, new_prereg="--new-preregistration" in flags)
     else:
-        sys.exit("usage: python -m tools.slow_trend.screen {fetch|lock|run [--replay]}")
+        sys.exit("usage: python -m tools.slow_trend.screen "
+                 "{fetch|lock|run [--replay] [--new-preregistration]}")
 ```
 
 Notes for the implementer:
@@ -1652,12 +1812,15 @@ Notes for the implementer:
   2020-08-07 invalid. All 61 days of the May–June period are therefore suppressed, and with the
   B5 slicing the sleeve never enters. Before that fix it bought on 2020-05-02.
 - In `test_evaluate_end_to_end_on_monotone_rise_kills`, the trend's first valid decision is on
-  2024-04-09 (2024-01-01 + 99 days). It buys at the next open, one day after buy-and-hold, so on
-  a strictly rising path its return is lower and its seeded drawdown (the entry fee) equal,
-  which fails G2 → `KILL`.
+  2024-04-09 (2024-01-01 + 99 days) and it buys at the 04-10 open, one day after buy-and-hold.
+  `_raw` sets `open[t] = close[t-1]`, so each entry day's mark includes a positive intraday
+  move. The seeded drawdowns are therefore NOT exactly the entry fee and NOT identical: the later
+  entry earns a smaller percentage first-day gain, so its drawdown is slightly larger. Either
+  way, the trend's return is lower and its drawdown is not ≤ 2/3 of buy-and-hold's, so G1
+  passes and G2 fails. The test asserts both, so the `KILL` cannot come from another cause.
 
-- [ ] **Step 4: Run to verify pass.** Expected: 10 passed. Then run the whole package with
-`../.venv/Scripts/python.exe -m pytest tests/tools/slow_trend -v` (expected 58 passed).
+- [ ] **Step 4: Run to verify pass.** Expected: 19 passed. Then run the whole package with
+`../.venv/Scripts/python.exe -m pytest tests/tools/slow_trend -v` (expected 69 passed).
 Finally, ruff 0.9.0 `check` and `format --check` on `backend/tools/slow_trend` and
 `backend/tests/tools/slow_trend` must both be clean.
 
