@@ -74,3 +74,33 @@ def test_real_pythonw_without_handles_reaches_uvicorn_logging(tmp_path):
         timeout=60,
     )
     assert proc.returncode == 0 and result.read_text() == "ok"
+
+
+def test_an_oversized_console_log_is_rotated_at_startup(tmp_path, monkeypatch):
+    """Codex N1: console.log must not grow without bound across autostart runs."""
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    log = tmp_path / "console.log"
+    log.write_text("x" * 50)
+    (tmp_path / "console.log.1").write_text("older")
+    stream = ensure_std_streams(log, max_bytes=40)
+    try:
+        print("fresh")
+    finally:
+        stream.close()
+    assert (tmp_path / "console.log.1").read_text() == "x" * 50  # one previous kept
+    assert log.read_text(encoding="utf-8") == "fresh\n"
+
+
+def test_a_console_log_under_the_cap_is_appended(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    log = tmp_path / "console.log"
+    log.write_text("earlier\n")
+    stream = ensure_std_streams(log, max_bytes=10_000)
+    try:
+        print("later")
+    finally:
+        stream.close()
+    assert log.read_text(encoding="utf-8") == "earlier\nlater\n"
+    assert not (tmp_path / "console.log.1").exists()
