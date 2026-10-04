@@ -13,6 +13,12 @@ _venv_site = os.path.join(_root, ".venv", "Lib", "site-packages")
 if os.path.isdir(_venv_site) and _venv_site not in sys.path:
     sys.path.insert(0, _venv_site)
 
+# Before ANY logging: under pythonw (the logon autostart task) stdout/stderr are None and
+# uvicorn's log formatter would crash on sys.stdout.isatty() (exit 1, nothing logged).
+from services.std_streams import ensure_std_streams  # noqa: E402
+
+ensure_std_streams(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "console.log"))
+
 import asyncio
 import json
 import logging
