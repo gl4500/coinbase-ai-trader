@@ -475,6 +475,214 @@ admitted (sub-second against a 30 s window; documented, not fixed — changing t
 handler signature touches `exit_watcher`). A crossing between reconnects is caught
 only as `feed_gap`, not recovered. Entry leg only; exit-leg maker fills are a
 follow-up.
+### Session 58.94 — 2026-09-28/29 — Train and serve slice history by different mechanisms; 73% of the live feature vector differs
+
+Found while auditing whether the closed-bar defect had siblings. **It does, on the
+live side, where `closed_only` does not reach.**
+
+**The asymmetry.** `tools/train_xgb.py` builds features by **row position** —
+`records[t - 60 : t]`, exclusive of `t` — so every training sample's newest bar is
+**complete**. Live inference calls `fetch_tiered(source="live")` with no as-of
+filter, so its newest bar is the **current, still-forming hour**. Verified against
+the live store: **79 rows existed for the incomplete current hour**, the newest
+14.8 minutes into a 60-minute bar.
+
+**Measured, 23 products, v3 feature_set (350 features):** comparing the live
+vector against the same fetch taken as of the top of the hour —
+
+| | |
+|---|---|
+| features that differ | median **256 of 350 (73%)** |
+| median relative difference | **1.2%** |
+
+Two figures are deliberately **not** quoted as headline numbers: the p90 (86.5%)
+and max (188×) relative differences are dominated by features whose denominator is
+near zero, where any absolute change explodes the ratio. They are not evidence of
+large effects.
+
+**A second limitation, stated because it bounds the claim.** The comparison
+differs by *two* things — the partial bar's presence **and** the window shifting
+by one bar — so the magnitude conflates them. The *existence* of the skew is
+solid; the decomposition is not. Isolating truncation alone requires sub-hourly
+candles, to synthesise a partial version of a bar whose completion is already
+known (`tools/backfill_1m_candles.py` suggests 1m data is obtainable).
+
+**This is NOT filed as a bug, and deliberately not fixed.** Two readings are
+defensible: the live vector is drawn from a different distribution than training
+(invariant 11 exists because this codebase treats train/serve skew as serious);
+or the partial bar's close **is the current price**, which a trading decision
+wants, and waiting for bar close means acting on data up to 59 minutes stale.
+**The finding is that nobody has measured which is better** — and that the two
+paths were built by different mechanisms, positional versus timestamp, without
+being reconciled. Changing live feature construction is live behaviour and an
+operator decision.
+
+Probe: `partial_bar_skew.py` in the session scratchpad. Read-only; no production
+change.
+
+**Peer review, 2026-09-29 — three corrections and one scope extension:**
+
+1. **I overclaimed the reach.** I wrote that *every* historical `model_prob` was
+   computed on a partial final bar. Not provable: `trades`/`cnn_scans` carry no
+   immutable model+feature provenance, so which path produced any given stored
+   score cannot be established. The source supports the *mismatch*; it does not
+   support the *attribution*.
+2. **Scope is wider than v3.** The v4 and v4.5 sample builders also slice ending
+   before index `i`, while live `xgb_prob` and `xgb_prob_v4` call
+   `fetch_tiered(source="live")` with no as-of instant and the v4.5 shadow uses
+   the default `now_ts=None`. **All three XGB live paths are affected**, not just
+   the one measured here.
+3. **The corrected replay is a different policy, not a reconstruction of live.**
+   `closed_only=True` makes a backfill internally valid, but a closed-bar replay
+   score is **not** a substitute for the historical partial-bar score the live
+   system actually produced. Those cohorts must stay separate: v4.5 backfills made
+   with final in-progress bars are look-ahead contaminated; the corrected path is
+   safer but measures something else.
+
+Framing accepted: **train/serve distribution mismatch and unvalidated design
+choice — not a quantified performance bug.** High/low/volume are *censored* until
+bar close, and the extractor consumes extrema, distribution and slopes, so a
+completed-bar model is served a different covariate process. This changes how
+model **transportability** is interpreted; it does **not** establish that the
+model loses because of the partial bar, and it does not rehabilitate the
+historical rescores.
+
+**Two audit guards added from the peer's suggested scope (4 tests):**
+
+- *As-of correctness at the real cadence.* Scans run every 15 minutes against
+  hourly bars, so the common case is a decision taken mid-bar. Parametrised at
+  :15/:30/:45, asserting **both** that each tier returns its full bar count
+  (60/168/336) **and** that the newest bar closed before the decision instant.
+  Either assertion alone is insufficient: count-only passes if a future bar is
+  admitted, recency-only passes if the window silently shortens.
+- *Isolation must not become silence.* Invariants 16/17 require a v4.5 failure to
+  degrade to a neutral 3-tuple and never reach the driver — but the same broad
+  `except` also catches programming errors, so a signature mismatch could turn
+  every call neutral. The guard pins that such a failure is logged at ERROR **with
+  a traceback**, so a later refactor cannot downgrade it to a debug line. This is
+  the exact shape hit during this session: an unexpected kwarg raised `TypeError`
+  inside the `try`, and the neutral fallback made the call look successful.
+
+**Both were falsified before being trusted.** Reverting `closed_only` to filter on
+bar start fails all three offsets; replacing `logger.exception` with `pass` fails
+the observability assertion while its non-vacuity partner still passes. Sources
+restored; 33 tests green.
+
+Settling it requires matching training to serving — a closed-hour model evaluated
+only at hour boundaries versus a model *trained* on as-of partial snapshots at the
+real scan cadence — on preregistered forward data. And the sharp corollary: if
+waiting an hour is too stale for the product goal, that argues for **training on
+partial snapshots**, not for feeding them to a completed-bar model by assumption.
+
+---
+
+---
+
+
+### Session 58.93 — 2026-09-28 — The replay caller now opts in, so the leak is actually closed
+
+Completes 58.91, which landed a closed-bar *capability* that nothing called. The
+peer session's test for whether a leak is fixed — does a replay caller pass the
+flag? — was failing.
+
+`xgb_prob_v4_5` now calls `fetch_tiered(..., closed_only=now_ts is not None)`.
+
+**Deriving the opt-in from `now_ts` rather than exposing a second switch makes the
+live path byte-identical by construction rather than by discipline.** Live callers
+(`cnn_agent` via `xgb_prob_shadow_v4_5`) pass no instant, so they cannot acquire
+replay semantics by accident; the only caller that passes one is
+`tools/backfill_v4_5_shadow.py`, which is a replay by definition. There is no
+configuration in which the live scan loop changes behaviour.
+
+**Files:**
+- `backend/agents/xgb_signal.py` — the call, plus a docstring that had described
+  the leak as intended behaviour ("drops candles with start >= now_ts").
+- `backend/tests/test_backfill_v4_5_shadow.py` — 2 tests: supplying `now_ts`
+  requests closed bars; the live path still does not. Both assert the spy was
+  actually invoked first, so neither can pass vacuously. Three pre-existing fake
+  `fetch_tiered` signatures were widened to accept the kwarg — without that they
+  raise `TypeError` inside the function's own `except`, which would have hidden
+  the change behind a fallback rather than surfacing it.
+
+**Consequence worth stating:** any previously stored v4.5 shadow metric was
+computed with the leak and is not reproducible under the corrected path. Those
+figures were already invalid; this makes the invalidity explicit rather than
+silent. 217 tests green across the replay path, xgb_signal, tiered_history and
+cnn_agent.
+
+---
+
+
+### Session 58.92 — 2026-09-28 — Operator-visible incident: I stopped the live backend, and two data-provenance facts it exposed
+
+**Incident.** Asked to kill what I had reported as a duplicate backend, I terminated
+PID 11484 with `Stop-Process -Force`. It was **not** a duplicate: the live
+backend runs as a **two-process tree** — a parent launcher and the child that
+binds 8001 — so killing the parent took down the live process. Port 8001 was down
+from **10:41Z to 11:09Z (~28 minutes)**.
+
+My diagnosis failed on one specific omission: I verified the two PIDs were
+distinct processes holding distinct ports, and never checked the **parent/child
+relationship**, which is the only fact that determines whether killing one kills
+the other. Separating "verify" from "act" — which had just been written into
+`CLAUDE.md` — does not help when the verification omits the relevant fact.
+
+Restarted on operator authorisation; 8001 listening, scan loop running, ~3,100
+scans in the following ten minutes, models and HMM regime reloaded.
+
+**Data-provenance consequence, recorded because it will otherwise silently
+corrupt later analysis:** `cnn_scans` has a **hole from 2026-09-28T10:41:02Z to
+11:09:40Z**. Any windowed statistic spanning it is computed over missing bars.
+
+**And a pre-existing fact this exposed.** `trades` holds **52 rows with
+`closed_at IS NULL`, ALL belonging to TECH**, the agent retired 2026-05-17; the
+newest opened 2026-05-16. They are four-month-old orphans, not live exposure. The
+CNN book correctly restores `positions=0`. Any query counting "open positions"
+without filtering by agent will report 52 phantom positions — the same
+agent-scoping defect that invalidated this session's first PnL attribution.
+
+---
+
+
+### Session 58.91 — 2026-09-28 — Closed-bar filtering for historical replay (opt-in)
+
+Found by the peer session; verified here. `services/tiered_history.py` filtered
+`df["start"] < now_ts` — on the bar's **start** only — so a bar that had begun
+but not yet **closed** was included.
+
+**Live this is correct and harmless:** the store holds nothing beyond now, so the
+newest bar is genuinely partial. **In replay it is a look-ahead:** the same bar
+in a completed parquet carries its final high/low/close/volume, so up to one bar
+of future information enters the features — at a 15-minute scan cadence, most of
+an hour. Every retrospective re-score built this way is invalid, which is why the
+defect survived: *the production code reads correctly and only misbehaves in
+replay.*
+
+**Files:**
+- `backend/services/tiered_history.py` — `fetch_tiered(..., closed_only=False)`.
+  When true, a bar is kept only if `start + 3600 <= now_ts`. Plumbed through both
+  the parquet and SQLite readers, because a fix covering only one leaves the leak
+  reachable through the other. `closed_only=True` without `now_ts` raises rather
+  than silently no-opping — with no decision instant, "closed" has no referent,
+  and quietly ignoring the flag hands the caller a guarantee never applied.
+- `backend/tests/test_tiered_history.py` — 6 tests. One **characterises the
+  defect** (the unclosed bar is still admitted by default) so the behaviour is
+  pinned rather than assumed; one asserts the default is byte-identical to
+  passing `False`, so the opt-in claim is non-vacuous; one pins the boundary — a
+  bar closing *exactly* at `now_ts` was fully observed and must stay usable.
+
+**Deliberately opt-in — and therefore NOT YET A FIX.** Corrected 2026-09-28
+after peer review: **no caller passes `closed_only=True`.** `xgb_signal.py:325`
+is the only production site supplying `now_ts` — the only replay path — and it
+does not opt in. What landed is a *tested capability*, not a closed leak. Calling
+it "fixed" claimed more than the code delivers, which is the defect class this
+session exists to catalogue. Flipping the default changes what that callsite
+computes and remains an operator decision. *Grep hazard: `closed_only` is also an
+unrelated parameter of `database.get_trades`, so searching the name gives false
+comfort.* No live path moves: 20 tiered-history tests and 45 caller tests green.
+
+---
+
 
 ### Session 58.88 — 2026-09-27 — Session-link mailbox hid new mail behind a backlog
 
