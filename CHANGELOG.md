@@ -7,6 +7,26 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.106 — 2026-10-05 — Read-only market alert (BTC, ETH, SOL, XRP)
+
+New standalone tool `backend/tools/alerts` (`python -m tools.alerts.run`). It places **no orders**,
+reads only Coinbase public market data, imports nothing from the app and never opens the DB.
+Scope is the operator's four coins: BTC, ETH, SOL, XRP.
+
+- **Carry check** (`carry.py`, pure): for every dated CDE future of the four coins (perps
+  excluded), buy spot at the ask and sell the future at the bid. Capital per contract = spot
+  outlay + short margin on futures notional + a 30% rally reserve + futures fees. It alerts only
+  if at least one contract fits the operator's capital (default $1,000, `--capital`), the contract
+  has ≥ 7 days left, and the premium beats costs plus the cash yield forgone on all capital by
+  ≥ 1%/yr. The futures fee ($0.15 minimum / 0.02%) and the 4.17% cash rate are stated
+  assumptions.
+- **Move check** (`moves.py`, pure): spot moves of ≥ 5% over 1 hour or ≥ 10% over 24 hours.
+- **Output**: every run appends a line to `C:\Users\gl450\market_alerts\alerts.jsonl` and
+  rewrites `latest.json`. A new alert raises a Windows notification, with a 6-hour cooldown per
+  alert key. A failure for one product is recorded and never stops the others.
+- **First live run (2026-10-05)**: no alerts. Every dated contract sits 2.8–9.8%/yr **below** the
+  cash hurdle. Only ETH contracts (~$460 per contract) fit in $1,000.
+
 ### Session 58.101 — 2026-10-03 — Stop freezing in-progress candles (writer inventory P1/P2)
 
 The operator approved this change to 8001's behaviour. It takes effect only after this branch is
