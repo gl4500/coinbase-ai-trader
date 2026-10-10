@@ -7,6 +7,34 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.107 — 2026-10-10 — Net-of-fee paper accounting
+
+**Why.** The paper book fills at the last-trade price and charges no fee, so every gross `pnl`
+figure overstated results. The account's verified Coinbase US Intro tier (2026-10-03,
+read-only `transaction_summary`) is 0.50% maker / 0.90% taker per side: a 1.8% taker round trip.
+`exit_thresholds.FEE_RATE` (0.006) is NOT a PnL deduction; it only sets the trail's minimum
+giveback and is deliberately left unchanged (changing it would change live exits untested).
+
+**Change (accounting only; no sizing, exit or paper-balance change):**
+- New pure `services/fees.py`: `PAPER_TAKER_FEE_RATE` 0.009, `PAPER_MAKER_FEE_RATE` 0.005,
+  `round_trip_fee(usd_open, usd_close, rate)` (each side on its own notional; impossible inputs
+  raise).
+- `trades` gains `fee_rate`, `fee_usd` and `pnl_net` (ALTER migration). `database.close_trade`
+  takes `fee_rate` (default taker) and records all three. Gross `pnl` and `balance_after` are
+  stored unchanged. The restart path, which has no open row, charges both sides on the close
+  notional.
+- Historical rows stay NULL: no retroactive fee attribution. `close_trade_by_id`
+  (reconcile, forced `pnl=0`) writes no fee.
+- New `database.get_fee_summary(since=None)`. `/api/performance` adds `net_of_fees` to `overall`
+  and `rolling_30d`: closed trades, fee-bearing trades, gross over fee-bearing rows, fees and net.
+  Net covers only fee-bearing rows; existing gross fields are unchanged.
+
+**Tests:** `test_fees.py` (7) + `test_trade_fee_accounting.py` (10, incl. the endpoint). Three
+mutations were caught: the open notional replaced by the close notional; net summed over all rows;
+the summary window broken. Pinned ruff 0.9.0 check + format are clean.
+
+**Takes effect on 8001 only after merge + restart** (operator).
+
 ### Session 58.101 — 2026-10-03 — Stop freezing in-progress candles (writer inventory P1/P2)
 
 The operator approved this change to 8001's behaviour. It takes effect only after this branch is
@@ -109,7 +137,8 @@ TDD; each fix was broken on purpose and its test went red.**
 - **Codex accepted `cd24fcd`.** The non-blocking follow-up: a seal with non-text bytes crashed
   startup instead of being quarantined. Seals are now read as ASCII bytes, and a decode failure
   counts as malformed. Reading bytes exposed that text-mode seals on Windows end in CRLF, so
-  the pattern accepts an optional ``. All 109 real seals on disk were checked: none would be
+  the pattern accepts an optional `
+`. All 109 real seals on disk were checked: none would be
   quarantined.
 ### Session 58.100 — 2026-10-03 — Data preservation: verified snapshot tool, known limitations, run isolation
 

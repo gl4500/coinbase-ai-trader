@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import aiosqlite
 
 from config import config
+from services.fees import PAPER_TAKER_FEE_RATE, round_trip_fee
 from services.provenance import validate_digest
 
 logger = logging.getLogger(__name__)
@@ -341,6 +342,9 @@ async def init_db() -> None:
             "ALTER TABLE cnn_scans ADD COLUMN xgb_prob_v4_5_up REAL",
             "ALTER TABLE cnn_scans ADD COLUMN model_provenance TEXT",
             "ALTER TABLE trades ADD COLUMN model_provenance TEXT",
+            "ALTER TABLE trades ADD COLUMN fee_rate REAL",
+            "ALTER TABLE trades ADD COLUMN fee_usd REAL",
+            "ALTER TABLE trades ADD COLUMN pnl_net REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_auc REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_precision_at_thresh REAL",
             "ALTER TABLE cnn_training_sessions ADD COLUMN val_recall_at_thresh REAL",
@@ -875,22 +879,30 @@ async def close_trade(
     pnl: float,
     trigger_close: str,
     balance_after: float,
+    fee_rate: float = PAPER_TAKER_FEE_RATE,
 ) -> None:
-    """Update the most recent open trade for (agent, product_id) with close data."""
+    """Update the most recent open trade for (agent, product_id) with close data.
+
+    `pnl` is the paper book's gross result and is stored unchanged. `fee_rate` (per side) is
+    recorded with the dollar fee and `pnl_net`, so net results are reportable without changing
+    the paper balance or any exit decision.
+    """
     usd_close = exit_price * size
+    round_trip_fee(0.0, usd_close, fee_rate)  # validate before any write
     pct_pnl = (pnl / (usd_close - pnl)) * 100 if (usd_close - pnl) > 0 else 0.0
     now = _now()
     async with _db() as db:
         # Find the most recent open trade for this agent+product
         cursor = await db.execute(
-            """SELECT id, opened_at FROM trades
+            """SELECT id, opened_at, usd_open FROM trades
                WHERE agent=? AND product_id=? AND closed_at IS NULL
                ORDER BY opened_at DESC LIMIT 1""",
             (agent, product_id),
         )
         row = await cursor.fetchone()
         if row:
-            trade_id, opened_at = row[0], row[1]
+            trade_id, opened_at, usd_open = row[0], row[1], row[2]
+            fee_usd = round_trip_fee(usd_open, usd_close, fee_rate)
             try:
                 from datetime import datetime, timezone
 
@@ -902,7 +914,8 @@ async def close_trade(
             await db.execute(
                 """UPDATE trades SET
                    exit_price=?, usd_close=?, pnl=?, pct_pnl=?,
-                   hold_secs=?, trigger_close=?, balance_after=?, closed_at=?
+                   hold_secs=?, trigger_close=?, balance_after=?, closed_at=?,
+                   fee_rate=?, fee_usd=?, pnl_net=?
                    WHERE id=?""",
                 (
                     exit_price,
@@ -913,17 +926,22 @@ async def close_trade(
                     trigger_close,
                     balance_after,
                     now,
+                    fee_rate,
+                    round(fee_usd, 4),
+                    round(pnl - fee_usd, 4),
                     trade_id,
                 ),
             )
         else:
             # No open row found — insert a closed row directly (e.g. after restart)
+            fee_usd = round_trip_fee(usd_close, usd_close, fee_rate)
             await db.execute(
                 """INSERT INTO trades
                    (agent, product_id, entry_price, exit_price, size,
                     usd_open, usd_close, pnl, pct_pnl, trigger_open,
-                    trigger_close, balance_after, opened_at, closed_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    trigger_close, balance_after, opened_at, closed_at,
+                    fee_rate, fee_usd, pnl_net)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     agent,
                     product_id,
@@ -939,9 +957,37 @@ async def close_trade(
                     balance_after,
                     now,
                     now,
+                    fee_rate,
+                    round(fee_usd, 4),
+                    round(pnl - fee_usd, 4),
                 ),
             )
         await db.commit()
+
+
+async def get_fee_summary(since: Optional[str] = None) -> Dict:
+    """Gross vs net over closed trades. Net covers only rows that carry fee data (closed after
+    fee accounting landed); older rows are counted in `closed_trades` but never given a fee."""
+    where = "WHERE closed_at IS NOT NULL" + (" AND closed_at >= ?" if since else "")
+    params = (since,) if since else ()
+    async with _db() as db:
+        cursor = await db.execute(
+            f"""SELECT COUNT(*),
+                       SUM(CASE WHEN pnl_net IS NOT NULL THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN pnl_net IS NOT NULL THEN pnl END),
+                       SUM(fee_usd),
+                       SUM(pnl_net)
+                FROM trades {where}""",
+            params,
+        )
+        closed, fee_rows, gross, fees, net = await cursor.fetchone()
+    return {
+        "closed_trades": closed or 0,
+        "fee_bearing_trades": fee_rows or 0,
+        "gross_pnl_fee_bearing": round(gross or 0.0, 2),
+        "fee_usd": round(fees or 0.0, 2),
+        "net_pnl": round(net or 0.0, 2),
+    }
 
 
 async def close_trade_by_id(trade_id: int, trigger_close: str = "RECONCILE") -> None:
