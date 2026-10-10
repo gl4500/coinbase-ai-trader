@@ -7,6 +7,31 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.108 — 2026-10-10 — CoinPaprika identity fix: TREE and EDGE pointed at the wrong tokens
+
+`_PRODUCT_TO_CP_ID` mapped two Coinbase products to unrelated CoinPaprika coins, so their market
+cap and volume history described a different asset. Codex found this in the volume audit; Claude
+re-verified it against the archived public metadata
+(`analysis_archive/coinpaprika_leading_2026-10-10/validation_path/identity_evidence/`).
+
+| Product | Was | Is now | Evidence |
+|---|---|---|---|
+| `TREE-USD` | `tree-tree-capital` (Tree Capital, 0xba25…1c0a) | `tree-treehouse` | Coinbase TREE = Treehouse, 0x7714…f1f3 |
+| `EDGE-USD` | `edge-edgex` (edgeX, 0xB007…a241) | `edge-definitive` | Coinbase EDGE = Definitive, Base 0xED6E…f110 |
+
+Coinbase also lists edgeX separately, as EDGEX.
+
+**Deployment step (operator).** `fetch_marketcap_history_cached` merges new rows into the
+existing per-product Parquet. Old wrong-token rows outside the refetched range would therefore
+survive and mix two assets. When this code reaches 8001:
+1. Move `backend/data/marketcap/{TREE,EDGE}-USD.parquet` (and the `marketcap_full/` copies) to an
+   archive. Keep them; do not delete them.
+2. Then restart, so the cache rebuilds from the correct coin.
+
+Doing step 1 before deployment is useless: the old mapping would refetch the wrong token. Research
+datasets already quarantine both identities (`coinpaprika_clean_v3`). Test:
+`test_tree_and_edge_map_to_the_coinbase_listed_tokens`.
+
 ### Session 58.101 — 2026-10-03 — Stop freezing in-progress candles (writer inventory P1/P2)
 
 The operator approved this change to 8001's behaviour. It takes effect only after this branch is
