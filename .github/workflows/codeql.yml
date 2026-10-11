@@ -1,0 +1,45 @@
+# CodeQL static analysis (free for public repositories). Covers the Python backend and the
+# TypeScript frontend; Bandit in ci.yml covers Python only. Findings appear under
+# Security -> Code scanning. Not wired into ci.yml's Security gate: alerts are reviewed in the
+# Security tab, and a failing analysis run (not a finding) is what turns this check red.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * 1"   # weekly, Monday 07:17 UTC, so new queries run on unchanged code
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload results to code scanning
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none            # interpreted languages: no build step needed
+          queries: security-extended  # default suite plus additional security queries
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

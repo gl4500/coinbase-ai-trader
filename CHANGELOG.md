@@ -7,6 +7,17 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.109 — 2026-10-11 — CI: add CodeQL; Fortify manual-only
+
+- **New `.github/workflows/codeql.yml`.** GitHub CodeQL (free for public repositories) on push/PR to
+  main, weekly, and on demand. It analyses Python and TypeScript with the `security-extended` suite;
+  Bandit covers Python only, so the frontend previously had no static analysis. Results go to
+  Security -> Code scanning. It is not added to the ci.yml Security gate.
+- **`fortify.yml` is now manual-only (`workflow_dispatch`).** No Fortify on Demand account or
+  `FOD_*` secrets exist, so every push/PR run failed at login (`Either FOD_CLIENT_ID or FOD_USER
+  must be declared`). The scan steps are unchanged; restore the triggers after adding secrets.
+- Context: `SNYK_TOKEN` was renewed by the operator on 2026-10-11, and Snyk passes again on main.
+
 ### Session 58.108 — 2026-10-10 — CoinPaprika identity fix: TREE and EDGE pointed at the wrong tokens
 
 `_PRODUCT_TO_CP_ID` mapped two Coinbase products to unrelated CoinPaprika coins, so their market

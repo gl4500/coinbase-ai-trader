@@ -17,13 +17,8 @@ name: Fortify AST Scan
 
 # Customize trigger events based on your DevSecOps process and/or policy
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ "main" ]
-  schedule:
-    - cron: '20 6 * * 2'
+  # Manual runs only: no Fortify on Demand account or FOD_* secrets exist yet, so automatic runs
+  # failed at login on every push/PR. Restore push/pull_request/schedule once secrets are added.
   workflow_dispatch:
 
 jobs:
