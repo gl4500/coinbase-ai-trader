@@ -61,6 +61,12 @@ class TestIdMapping:
         assert cp._coinbase_to_cp_id("AVAX-USD") == "avax-avalanche"
         assert cp._coinbase_to_cp_id("LINK-USD") == "link-chainlink"
 
+    def test_tree_and_edge_map_to_the_coinbase_listed_tokens(self):
+        # Contracts captured 2026-10-10: Coinbase TREE is Treehouse (0x7714…f1f3) and EDGE is
+        # Definitive (Base 0xED6E…f110); tree-tree-capital / edge-edgex are different tokens.
+        assert cp._coinbase_to_cp_id("TREE-USD") == "tree-treehouse"
+        assert cp._coinbase_to_cp_id("EDGE-USD") == "edge-definitive"
+
     def test_unknown_pid_returns_none(self):
         assert cp._coinbase_to_cp_id("DOES-NOT-EXIST-USD") is None
         assert cp._coinbase_to_cp_id("") is None
