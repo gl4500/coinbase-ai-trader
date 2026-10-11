@@ -7,6 +7,24 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.110 — 2026-10-11 — Frontend security/build migration (Codex)
+
+- **Trigger:** the operator ran `npm audit fix --force`, which moved the frontend to Vite 8.3.4 and
+  Tailwind 4.3.3 and broke the CSS build and the React plugin's peer dependencies.
+- **Kept:** Vitest/UI/mocker 4.1.11, Vite 8.3.4, Tailwind 4.3.3.
+- **Changed:**
+  - updated the React plugin to 6.1.2 and added `@tailwindcss/postcss` 4.3.3;
+  - switched to an ESM package and migrated the CSS import and config;
+  - added a composable badge utility;
+  - restored Tailwind v3 control defaults (border, placeholder, button cursor);
+  - renamed the obsolete shrink/outline utilities in 4 components;
+  - added an `npm test` script.
+- **Verified (Codex):** the build is warning-free; 5 Vitest tests pass; 7 compiled-CSS regressions
+  pass (`backend/tests/test_frontend_css.py`, skipped when frontend deps are absent); npm audit
+  reports 0 issues and `npm ls` is valid. A Chrome smoke test rendered the app with no fatal error.
+- Transplanted unchanged from the uncommitted working tree on `fix/replay-closed-bar-filter` onto a fresh
+  branch off main (operator-approved).
+
 ### Session 58.109 — 2026-10-11 — CI: Fortify workflow removed; CodeQL added
 
 - **CodeQL** (`.github/workflows/codeql.yml`, "CodeQL Advanced") was added by the operator via GitHub

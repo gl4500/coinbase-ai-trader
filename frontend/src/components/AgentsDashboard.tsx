@@ -91,7 +91,7 @@ function ConfBar({ value, max = 1, color }: { value: number | null; max?: number
   const pct = Math.min(Math.round((value / max) * 100), 100)
   return (
     <div className="flex items-center gap-1.5">
-      <div className="w-16 bg-gray-700 rounded-full h-1.5 flex-shrink-0">
+      <div className="w-16 bg-gray-700 rounded-full h-1.5 shrink-0">
         <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-xs font-mono text-gray-300">{Math.round(value * 100)}%</span>

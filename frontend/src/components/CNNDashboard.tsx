@@ -130,7 +130,7 @@ function ProbBar({ value, color }: { value: number | null; color: string }) {
   const pct = Math.round(value * 100)
   return (
     <div className="flex items-center gap-1.5">
-      <div className="w-20 bg-gray-700 rounded-full h-1.5 flex-shrink-0">
+      <div className="w-20 bg-gray-700 rounded-full h-1.5 shrink-0">
         <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
       <span className="text-xs font-mono text-gray-300">{pct}%</span>
@@ -588,16 +588,16 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                 return (
                   <div key={t.id} className="card p-3 flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded flex-shrink-0 ${
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded shrink-0 ${
                         isOpen
                           ? 'bg-green-900/50 text-green-400 border border-green-800'
                           : 'bg-gray-800 text-gray-400 border border-gray-700'
                       }`}>{isOpen ? 'OPEN' : 'CLOSED'}</span>
                       <span className="font-bold text-white text-sm truncate">{t.product_id}</span>
-                      <span className="text-xs text-gray-500 flex-shrink-0">{t.trigger_open}</span>
+                      <span className="text-xs text-gray-500 shrink-0">{t.trigger_open}</span>
                     </div>
 
-                    <div className="flex items-center gap-4 flex-shrink-0 text-right">
+                    <div className="flex items-center gap-4 shrink-0 text-right">
                       <div>
                         <div className="text-xs text-gray-500">Spent</div>
                         <div className="text-sm font-mono text-white">${t.usd_open.toFixed(2)}</div>
@@ -674,7 +674,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                 placeholder="Search symbol…"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs text-white w-36 focus:outline-none focus:border-blue-600"
+                className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs text-white w-36 focus:outline-hidden focus:border-blue-600"
               />
 
               {/* Side filter */}
@@ -704,7 +704,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
               <span className="text-xs text-gray-600 ml-auto">{filteredScans.length} rows</span>
               <button
                 onClick={() => setShowLegend(v => !v)}
-                className="text-xs text-blue-400 hover:text-blue-300 px-2 py-1.5 border border-blue-900 rounded hover:border-blue-700 flex-shrink-0"
+                className="text-xs text-blue-400 hover:text-blue-300 px-2 py-1.5 border border-blue-900 rounded hover:border-blue-700 shrink-0"
               >
                 {showLegend ? 'Hide guide' : 'Signal guide ?'}
               </button>
@@ -828,7 +828,7 @@ export default function CNNDashboard({ signals, orders, postJSON }: Props) {
                         {/* Strength — bar (≥60% fires a signal) */}
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-1.5">
-                            <div className="w-16 bg-gray-700 rounded-full h-1.5 flex-shrink-0">
+                            <div className="w-16 bg-gray-700 rounded-full h-1.5 shrink-0">
                               <div
                                 className={`h-1.5 rounded-full ${
                                   s.strength >= 0.6
