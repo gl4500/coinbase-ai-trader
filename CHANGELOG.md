@@ -7,6 +7,20 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.109 — 2026-10-11 — CI: Fortify workflow removed; CodeQL added
+
+- **CodeQL** (`.github/workflows/codeql.yml`, "CodeQL Advanced") was added by the operator via GitHub
+  (e5ee808). It analyses Python, TypeScript and the GitHub Actions workflows on push/PR to main and
+  weekly; Bandit covers Python only, so the frontend previously had no static analysis. Results go
+  to Security -> Code scanning. It is not part of the ci.yml Security gate.
+- **`fortify.yml` removed** (operator decision). It was the GitHub starter template added the same
+  day (704e221). Fortify on Demand is a paid OpenText service (15-day trial only) and no account or
+  `FOD_*` secrets exist, so every run failed at login (`Either FOD_CLIENT_ID or FOD_USER must be
+  declared`). CodeQL, Bandit, Snyk, pip-audit/npm audit and Gitleaks cover the same ground for this
+  project. To reinstate it: restore the file from 704e221, add the FoD secrets, and upgrade the action
+  from v1.7.0 to the current v3 release.
+- Context: `SNYK_TOKEN` was renewed by the operator on 2026-10-11, and Snyk passes again on main.
+
 ### Session 58.108 — 2026-10-10 — CoinPaprika identity fix: TREE and EDGE pointed at the wrong tokens
 
 `_PRODUCT_TO_CP_ID` mapped two Coinbase products to unrelated CoinPaprika coins, so their market
