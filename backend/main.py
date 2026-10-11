@@ -28,7 +28,7 @@ import threading
 import time as _time
 import webbrowser
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
@@ -1491,6 +1491,10 @@ async def get_performance():
         """)
         overall = dict(await cursor.fetchone())
 
+    since_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    fees_overall = await database.get_fee_summary()
+    fees_30d = await database.get_fee_summary(since=since_30d)
+
     curr_bal = overall["current_balance"] or 0
     overall["first_balance"] or curr_bal or 1
     total_t = overall["total_trades"] or 0
@@ -1521,6 +1525,7 @@ async def get_performance():
             "win_rate_pct": rolling_win_rate,
             "return_pct": rolling_return_pct,
             "total_pnl": round(r30["total_pnl"] or 0, 2),
+            "net_of_fees": fees_30d,
         },
         "overall": {
             "total_trades": total_t,
@@ -1529,6 +1534,7 @@ async def get_performance():
             "total_pnl": round(overall["total_pnl"] or 0, 2),
             "current_balance": round(curr_bal, 2),
             "peak_balance": round(overall["peak_balance"] or 0, 2),
+            "net_of_fees": fees_overall,
         },
         "projection": {
             "annual_goal_usd": annual_goal_usd,
