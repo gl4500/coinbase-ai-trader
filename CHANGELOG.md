@@ -7,6 +7,15 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.111 — 2026-10-11 — CLAUDE.md trim (from /doctor)
+
+- **Removed:** the stale "Current Test Coverage" table (it said ~970 tests; the suite now has 1,696).
+- **Replaced:** the two cleanup code snippets, called "the only sanctioned cleanup commands", with
+  kill-by-identity rules (port 8001 aware; never blanket-kill python).
+- **Moved:** the 7-step 8002 shadow → 8001 promotion procedure to the new project skill
+  `.claude/skills/promote-model/SKILL.md`; the port rules stay in CLAUDE.md with a pointer.
+- CLAUDE.md shrinks from 30,456 to 28,894 chars (about 390 fewer est. tokens per session). Docs only.
+
 ### Session 58.110 — 2026-10-11 — Frontend security/build migration (Codex)
 
 - **Trigger:** the operator ran `npm audit fix --force`, which moved the frontend to Vite 8.3.4 and

@@ -104,27 +104,16 @@ python -m pytest backend/tests/ -v            # full suite (run once before comm
 
 ### Shell cleanup — required after every test run
 
-Running tests repeatedly causes background python processes to stack up. After any test run:
-
-```powershell
-# PowerShell — SKIPS the live backend (port 8001) and the launcher exe
-$backendPid = (Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue).OwningProcess
-Get-Process python -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -ne $backendPid -and $_.ProcessName -ne 'Coinbase AI Trader' } |
-    Stop-Process -Force
-```
-
-```bash
-# Bash — same intent: only kill processes that are NOT the backend (port 8001)
-BACKEND_PID=$(ss -ltnp 2>/dev/null | awk '/:8001 /{match($0,/pid=[0-9]+/); if (RSTART) print substr($0,RSTART+4,RLENGTH-4)}' | head -1)
-ps aux | grep -E 'python|pytest' | grep -v grep | awk -v skip="$BACKEND_PID" '$2 != skip {print $2}' | xargs -r kill -9 2>/dev/null
-```
+Running tests repeatedly causes background python processes to stack up. After any test run, clean up your own test processes.
 
 Rules:
 - **Prefer per-module tests** over full suite during development — faster, stays foreground, no stacking
 - **Only run full suite once** before committing, not repeatedly
 - **Always clean up** after a test run completes or is interrupted
-- **Never** issue a blanket `Stop-Process python -Force` / `pkill -9 python` — it kills the live backend, breaking the scan loop and stopping MC telemetry accumulation. The port-8001-aware snippets above are the only sanctioned cleanup commands.
+- **Never** issue a blanket `Stop-Process python -Force` / `pkill -9 python` — it kills the live backend, breaking the scan loop and stopping MC telemetry accumulation.
+- **Port-8001 awareness is NOT sufficient.** Verified on 2026-09-28: of 12 running `python.exe` processes, only one was the 8001 backend. A port-8001-aware sweep would also have killed **a second `main.py`** (an 8002 shadow is explicitly sanctioned by the port-discipline section below — killing it contradicts that rule), **both `.coordination-runtime` servers**, **the peer session's `bridge.py --role codex`**, the session-link **MCP server**, and two processes belonging to an **entirely different project** (`grain-marketing`), which the Scope rule forbids touching.
+- **Kill by identity, never by absence of a port.** Before terminating anything, resolve command lines — `Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Select ProcessId, CommandLine` — and terminate only processes you can name as your own test runs. Exclude, at minimum: any `main.py`; anything under `.coordination-runtime\` or `tools\session_bridge\`; anything whose path lies outside this repository.
+- **Verify and act as SEPARATE steps.** Identifying a process and killing it in the same command makes the verification theatre — there is no point at which the answer can change the decision.
 
 ---
 
@@ -139,14 +128,7 @@ Rule:
 
 Why this matters: SQLite (`coinbase.db`) is a shared file. Multiple backends can run simultaneously, all writing to the same `cnn_scans` / `trades` / `signal_outcomes` tables. A backend on 8002 with new code will populate v4 (or other) telemetry columns in those shared tables — you don't need 8001 to validate the new path's output. Only push to 8001 when you're ready to swap the *driver*.
 
-How to apply when shipping a new XGB model / inference path:
-1. Land code + migration (creates new telemetry column nullable).
-2. Operator-train the new model → unsuffixed artifacts (or horizon-suffixed during sweep).
-3. Operator-start the new backend on **port 8002**: `PORT=8002 python main.py` from `backend/` cwd.
-4. Verify new telemetry column populates in `cnn_scans` (rows from PID 8002 backend will have non-NULL).
-5. Compare new vs old metrics over a shadow week (or however long the cutover plan specifies).
-6. **If new model shows promise** → copy new-model artifacts to the unsuffixed paths the 8001 backend loads, then restart the 8001 backend (which will pick up the new artifacts). The promotion is just a file-copy + restart.
-7. If new model doesn't show promise → kill the 8002 backend, leave 8001 untouched, iterate on the model.
+The step-by-step procedure for shipping a new XGB model / inference path through the 8002 shadow lives in the `promote-model` skill (`.claude/skills/promote-model/SKILL.md`).
 
 Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met.
 
@@ -342,25 +324,3 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 
 26. **Paper PnL is gross; net is recorded beside it, never instead of it.** `trades.pnl` and `balance_after` stay the paper book's gross values (fees never touch sizing, exits or the balance). `database.close_trade` records `fee_rate`, `fee_usd` = `services/fees.round_trip_fee(usd_open, usd_close, fee_rate)` and `pnl_net`. The default is the verified taker rate, because paper fills are market fills. Historical rows are never backfilled. Any net figure must state its coverage (`fee_bearing_trades`). `exit_thresholds.FEE_RATE` is a trail-floor parameter, not the accounting rate.
 
----
-
-## Current Test Coverage
-
-| Module | Test File | Status |
-|---|---|---|
-| `agents/cnn_agent.py` | `test_cnn_agent.py` | ✅ covered |
-| `agents/cnn_agent.py` (risk exits) | `test_cnn_risk_exits.py` | ✅ covered |
-| `agents/xgb_signal.py` | `test_xgb_signal.py` | ✅ covered |
-| `agents/mc/*` | `tests/agents/mc/*` | ✅ covered |
-| `agents/signal_generator.py` | `test_signal_improvements.py` | ✅ covered |
-| `data/cnn_model.py` | `test_cnn_model.py` | ✅ covered |
-| `data/history_backfill.py` | `test_history_backfill.py` | ✅ covered |
-| `data/macro_history.py` | `test_macro_history.py` | ✅ covered |
-| `database.py` | `test_database.py` + integration via agent tests | ✅ covered |
-| `services/marketcap_history_cache.py` | `test_marketcap_history_cache.py` | ✅ covered |
-| `services/coingecko_marketcap.py` | `test_coingecko_marketcap.py` | ✅ covered |
-| `services/coinpaprika_marketcap.py` | `test_coinpaprika_marketcap.py` | ✅ covered |
-| `services/tiered_history.py` | `test_tiered_history.py` | ✅ covered |
-| `tools/xgb_features.py` (v1/v2/v3) | `test_xgb_features.py`, `test_xgb_features_v3.py` | ✅ covered |
-
-(Test count: ~970 passing as of Session 58.71i.) Modules retired: `tech_agent_cb.py` (#311-refactor-c, 2026-05-16).
