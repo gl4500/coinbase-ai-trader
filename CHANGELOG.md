@@ -17,6 +17,8 @@ Format: reverse-chronological by session date.
   `requirements-dev.txt`.
 - **Guard:** `backend/tests/test_requirements_pins.py` fails if any package is pinned to two different
   versions across the two files (red on the old files, green now). A pip dry-run of the dev file resolves.
+  Names are PyPA-normalized (`pytest.asyncio` = `pytest-asyncio`) and conflicting duplicates inside one
+  file are kept, not overwritten (both holes found in Codex review). Exact `==` pins only.
 
 ### Session 58.111 — 2026-10-11 — CLAUDE.md trim (from /doctor)
 
