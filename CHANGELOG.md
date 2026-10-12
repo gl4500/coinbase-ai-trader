@@ -10,7 +10,8 @@ Format: reverse-chronological by session date.
 ### Session 58.113 — 2026-10-11 — Peer review required before merge
 
 - New CLAUDE.md rule (Commit Standards → "Peer review before merge"): every PR needs an explicit
-  sign-off from the other agent via the session-link mailbox before it is merged. Only the operator
+  sign-off, naming the reviewed head SHA, from the other agent via the session-link mailbox before it
+  is merged; any later commit or rebase needs the reviewer to reconfirm. Only the operator
   can waive it. Prompted by PRs #96 and #98, which were merged without a completed Codex review.
   Docs only.
 

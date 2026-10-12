@@ -74,9 +74,11 @@ Every PR gets a peer review from the other agent (Claude ↔ Codex) BEFORE it is
 and an operator "merge it" are not enough on their own.
 - Request the review through the session-link mailbox: PR link, commit SHA, what changed, how it was
   verified, and the specific questions to check.
-- Hold the merge until the reviewer replies with an explicit sign-off. A mailbox acknowledgement is
-  not a sign-off.
-- Fix any findings first, and re-request review when the fix is non-trivial.
+- Hold the merge until the reviewer replies with an explicit sign-off that names the reviewed head
+  SHA. A mailbox acknowledgement is not a sign-off.
+- Any later commit or rebase (including review fixes) is reported to the reviewer with the new SHA
+  and the delta. The reviewer must confirm that approval still applies before merge. A mechanical
+  rebase or docs-only delta can get a brief check; it need not rerun unrelated tests.
 - Only the operator can waive the review, explicitly. Record the waiver in the PR description.
 
 Operator rule, 2026-10-11, after PRs #96 and #98 were merged without a completed Codex review.
