@@ -7,6 +7,13 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.113 — 2026-10-11 — Peer review required before merge
+
+- New CLAUDE.md rule (Commit Standards → "Peer review before merge"): every PR needs an explicit
+  sign-off from the other agent via the session-link mailbox before it is merged. Only the operator
+  can waive it. Prompted by PRs #96 and #98, which were merged without a completed Codex review.
+  Docs only.
+
 ### Session 58.112 — 2026-10-11 — requirements-dev.txt installable again
 
 - **Bug:** Dependabot bumped pytest to 9.0.3 (fixing GHSA-6w46-j5rx-g56g), but `requirements-dev.txt` still
