@@ -68,6 +68,22 @@ Rule:
 
 Reinforced 2026-05-24 after a Phase 2 collision where parallel agent's `git commit -a` swept my staged Phase 2 file into their GPU-kernel commit on my branch, AND one of my Phase 2 test commits accidentally landed on their branch and was pushed to origin. See `feedback_parallel_agent_coordination.md` for the full incident log.
 
+### Peer review before merge
+
+Every PR gets a peer review from the other agent (Claude ↔ Codex) BEFORE it is merged. Green CI
+and an operator "merge it" are not enough on their own.
+- Request the review through the session-link mailbox: PR link, commit SHA, what changed, how it was
+  verified, and the specific questions to check.
+- Hold the merge until the reviewer replies with an explicit sign-off that names the reviewed head
+  SHA. A mailbox acknowledgement is not a sign-off.
+- Any later commit or rebase (including review fixes) is reported to the reviewer with the new SHA
+  and the delta. The reviewer must confirm that approval still applies before merge. A mechanical
+  rebase or docs-only delta can get a brief check; it need not rerun unrelated tests.
+- Only the operator can waive the review, explicitly. Record the waiver in the PR description.
+
+Operator rule, 2026-10-11, after PRs #96 and #98 were merged without a completed Codex review.
+Mirrored in memory `feedback_codex_review_before_merge.md`.
+
 ---
 
 ## Security Gate — Pre-commit Checks
