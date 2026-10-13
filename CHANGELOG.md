@@ -7,6 +7,19 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.112 — 2026-10-11 — requirements-dev.txt installable again
+
+- **Bug:** Dependabot bumped pytest to 9.0.3 (fixing GHSA-6w46-j5rx-g56g), but `requirements-dev.txt` still
+  pinned `pytest-asyncio==0.24.0` and `pytest-cov==6.0.0` while the `requirements.txt` it includes pins
+  1.3.0 and 7.1.0. `pip install -r backend/requirements-dev.txt` failed with ResolutionImpossible. CI
+  installs `requirements.txt` only, so nothing caught it.
+- **Fix:** the testing packages are pinned once, in `requirements.txt`; the duplicates are removed from
+  `requirements-dev.txt`.
+- **Guard:** `backend/tests/test_requirements_pins.py` fails if any package is pinned to two different
+  versions across the two files (red on the old files, green now). A pip dry-run of the dev file resolves.
+  Names are PyPA-normalized (`pytest.asyncio` = `pytest-asyncio`) and conflicting duplicates inside one
+  file are kept, not overwritten (both holes found in Codex review). Exact `==` pins only.
+
 ### Session 58.111 — 2026-10-11 — CLAUDE.md trim (from /doctor)
 
 - **Removed:** the stale "Current Test Coverage" table (it said ~970 tests; the suite now has 1,696).
