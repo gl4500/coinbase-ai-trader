@@ -40,6 +40,16 @@ could not see: a backlog silently disabled it.
   rather than as an empty list: a partial answer has to be distinguishable from a complete
   one. Any new windowed read here carries its own count.
 
+### Auto-connect (2026-10-17)
+
+No session needs a manual step to join the link. The hook is user-level for both CLIs and
+scoped by cwd to this repo or the bare home dir (`hooks.in_scope`); every MCP server start
+runs `autostart.ensure_coordinator`, which honours `.coordination/task-coordinator.stop`;
+the coordinator resolves the Codex thread from the `sessions` rows the hooks write (newest
+in-scope Codex session, 24 h bound). An idle Claude session still cannot be woken -- it
+sees mail on its next turn. If Codex mail sits `mailbox_only`, check `status` for
+`codex_thread_hint` before suspecting the peer.
+
 ### Running the bridge suite
 
 The bridge needs `crewai` + `mcp`, which live in `.coordination-runtime`, NOT in `.venv`
