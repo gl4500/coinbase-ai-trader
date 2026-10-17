@@ -1,9 +1,10 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from session_bridge.store import Store
-from task_coordinator import TaskCoordinator
+from task_coordinator import TaskCoordinator, resolve_codex_thread
 
 
 class TaskCoordinatorTests(unittest.TestCase):
@@ -186,6 +187,82 @@ class TaskCoordinatorTests(unittest.TestCase):
         result = coordinator.process_once()
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["state"], "mailbox_notice")
+
+
+class CodexThreadDiscoveryTests(unittest.TestCase):
+    REPO = Path(r"C:\Users\gl450\polymarket_app")
+    HOME = Path(r"C:\Users\gl450")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.mailbox = root / "mailbox.sqlite3"
+        self.state = root / "coordinator.sqlite3"
+        self.codex = Store(self.mailbox, "codex")
+        self.claude = Store(self.mailbox, "claude")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def register(self, role, session_id, cwd, last_seen):
+        with self.codex.connect(True) as db:
+            db.execute("INSERT INTO sessions VALUES (?,?,?,?)", (role, session_id, cwd, last_seen))
+
+    def test_resolves_newest_in_scope_recent_codex_session(self):
+        now = 1_000_000.0
+        self.register("codex", "old", str(self.REPO), now - 3600)
+        self.register("codex", "new", str(self.REPO / "backend"), now - 60)
+        self.register("codex", "other-repo", str(self.HOME / "trading_app"), now - 1)
+        self.register("claude", "claude-1", str(self.REPO), now)
+        found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
+        self.assertEqual(found["session_id"], "new")
+
+    def test_ignores_codex_sessions_older_than_24h(self):
+        now = 1_000_000.0
+        self.register("codex", "stale", str(self.REPO), now - 24 * 3600 - 1)
+        self.assertIsNone(resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now))
+
+    def test_dispatch_uses_discovered_thread_without_flag(self):
+        now = time.time()
+        self.register("codex", "discovered-thread", str(self.REPO), now - 5)
+        self.claude.send("codex", "please review", "auto-1")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(queued, ["discovered-thread"])
+
+    def test_explicit_thread_flag_still_wins(self):
+        self.register("codex", "discovered-thread", str(self.REPO), time.time())
+        self.claude.send("codex", "please review", "auto-2")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, codex_thread="pinned", root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(queued, ["pinned"])
+
+    def test_no_registered_codex_session_leaves_mail_in_mailbox(self):
+        self.claude.send("codex", "please review", "auto-3")
+        events = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda *a: self.fail("must not queue"), on_event=events.append,
+            include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(events[0]["state"], "mailbox_only")
+        self.assertIn("no recent Codex session registered", events[0]["detail"])
+
+    def test_status_reports_missing_codex_session(self):
+        coordinator = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                      on_event=lambda e: None)
+        status = coordinator.status()
+        self.assertIsNone(status["codex_thread"])
+        self.assertIn("trust", status["codex_thread_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()
