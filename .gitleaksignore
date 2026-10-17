@@ -1,0 +1,6 @@
+# One exact finding, not a path allowlist. tools/session_bridge/AGENTS.md is the file
+# `crewai create` generates; line 1071 is its CI/CD curl example with the literal
+# placeholder "Authorization: Bearer YOUR_PERSONAL_ACCESS_TOKEN", not a credential.
+# The fingerprint pins the commit that introduced it, so any real secret anywhere else,
+# including later edits to this same file, is still reported.
+c31abb47d83dfd479d90027d235baf54664896c3:tools/session_bridge/AGENTS.md:curl-auth-header:1071
