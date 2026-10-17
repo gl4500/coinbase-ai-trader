@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,12 +30,49 @@ class HookCommandTests(unittest.TestCase):
 class MainGuardTests(unittest.TestCase):
     def test_refuses_to_install_from_a_worktree(self):
         calls = []
-        with mock.patch.object(ih, "ROOT", Path("C:/repo/.claude/worktrees/x")), \
+        with mock.patch.object(ih, "is_linked_worktree", lambda root: True), \
                 mock.patch.object(ih, "install", lambda *a, **k: calls.append(a) or []):
             self.assertEqual(ih.main([]), 2)
             self.assertEqual(calls, [])
             self.assertEqual(ih.main(["--force"]), 0)
             self.assertEqual(len(calls), 1)
+
+
+class LinkedWorktreeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.main, self.sibling = base / "repo", base / "anywhere-wt"
+        git = lambda *a, cwd=self.main: subprocess.run(["git", *a], cwd=cwd, check=True,
+                                                       capture_output=True)
+        self.main.mkdir()
+        git("init", "-q")
+        git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")
+        git("worktree", "add", "-q", str(self.sibling))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_main_checkout_is_not_a_linked_worktree(self):
+        self.assertFalse(ih.is_linked_worktree(self.main))
+
+    def test_any_linked_worktree_is_detected_regardless_of_path_name(self):
+        self.assertTrue(ih.is_linked_worktree(self.sibling))
+
+
+class SpacePathTests(unittest.TestCase):
+    def test_codex_hook_with_a_space_in_its_path_is_refused_not_written(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root, home = base / "my repo", base / "home"
+            for d in (root, home / ".claude", home / ".codex"):
+                d.mkdir(parents=True)
+            codex = home / ".codex/hooks.json"
+            codex.write_text("{}", encoding="utf-8")
+            lines = ih.install(root, home, root / "python.exe")
+            self.assertEqual(codex.read_text(encoding="utf-8"), "{}")
+            self.assertTrue(any(line.startswith("ERROR:") and "hooks.json" in line for line in lines))
+            self.assertTrue(any(line.startswith("Installed:") and "settings.json" in line for line in lines))
 
 
 class InstallTests(unittest.TestCase):
@@ -104,6 +142,18 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(bridge_cmds(codex, event), [])
         self.assertIn("echo AUTO-INVOKE", json.dumps(user))
         self.assertIn("herdr-agent-state.ps1", json.dumps(codex))
+
+    def test_failed_user_install_keeps_working_project_local_hooks(self):
+        self.user.write_text("{not json", encoding="utf-8")
+        before = self.local.read_text(encoding="utf-8")
+        self.run_install()
+        self.assertEqual(self.local.read_text(encoding="utf-8"), before)
+        self.assertEqual(len(bridge_cmds(read(self.wt_local), "SessionStart")), 1)
+
+    def test_uninstall_strips_project_local_hooks_even_if_user_file_is_bad(self):
+        self.user.write_text("{not json", encoding="utf-8")
+        self.run_install(uninstall=True)
+        self.assertEqual(bridge_cmds(read(self.local), "SessionStart"), [])
 
     def test_malformed_json_is_reported_and_never_overwritten(self):
         self.codex.write_text("{not json", encoding="utf-8")

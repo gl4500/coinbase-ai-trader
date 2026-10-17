@@ -126,9 +126,18 @@ file therefore keeps it stopped; delete the file to re-enable auto-start. Server
 against a non-default `--db` (the test suite) never spawn one.
 
 **Thread discovery.** Without `--codex-thread`, each Codex message is queued into the most
-recently active Codex session registered from this repo within the last 24 h; with none, the
-message stays in the mailbox and `status` reports `codex_thread: null` with a hint (usually
-the Codex hook has not been trusted yet). An explicit `--codex-thread` still wins. This
+recently active Codex session registered from this repo within the last 24 h. With none, the
+dispatch is recorded `pending_target` (no delivery attempted) and is queued, once, on the
+first cycle after a Codex session registers -- unless the message was read in the meantime.
+`status` reports `codex_thread: null` with a hint (usually the Codex hook has not been
+trusted yet). An explicit `--codex-thread` still wins. Only a queue attempt whose outcome is
+ambiguous becomes `delivery_uncertain`; those are never retried automatically.
+
+**Rollout and pre-existing mail.** A coordinator with no state DB starts at the newest
+mailbox row, so mail sent before it first runs is never queued; it is still surfaced by each
+session's hook on its next turn, and `pending_count()` shows the true backlog. A state DB
+left from an earlier manual run resumes from its saved cursor and processes everything after
+it at once -- check `status` and the unacknowledged codex-bound mail before first start. This
 replaces `ping_monitor.py`, which is kept but no longer needs to run.
 
 Codex messages are queued into an **existing** Codex thread, never a new one. Claude
@@ -187,8 +196,10 @@ Multiple independent Claude sessions should not consume this same role mailbox.
 - Mailbox: `<project>/.coordination/session-link.sqlite3` (WAL, restart-safe).
 - Source: this directory, scaffolded with `crewai create flow`.
 - Hooks: user level, `~/.claude/settings.json` and `~/.codex/hooks.json`, written by
-  `install_hooks.py` (run from the MAIN checkout so the hook points at its `bridge.py`). It
-  also removes the project-local copies older versions wrote. Codex asks the operator to
+  `install_hooks.py` (run from the MAIN checkout so the hook points at its `bridge.py`; any
+  linked git worktree is refused unless `--force`). It removes the project-local copies older
+  versions wrote, but only after the user-level Claude hook is in. It refuses to write a Codex
+  hook whose paths contain whitespace, since no quoting is valid in every shell. Codex asks the operator to
   trust a new hook once. `python install_hooks.py --uninstall` removes only bridge entries.
 - MCP: Claude local project config and Codex user config, registered using their CLIs.
 

@@ -6,6 +6,7 @@ is not notified twice. Only entries whose command contains MARKER are ever touch
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,10 +79,20 @@ def _apply(path: Path, change, backups: Path, verbs: tuple[str, str]) -> str:
     return f'{verbs[0]} {path}'
 
 
+def is_linked_worktree(root: Path) -> bool:
+    """True for any `git worktree add` checkout, whatever its path is called."""
+    def git_path(flag: str) -> Path:
+        out = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute', flag],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        return Path(out).resolve()
+    return git_path('--git-dir') != git_path('--git-common-dir')
+
+
 def install(root: Path, home: Path, python: Path, uninstall: bool = False) -> list[str]:
     launcher = root / 'tools/session_bridge/bridge.py'
     backups = root / '.coordination' / 'config-backups'
     lines = []
+    claude_ok = False
     targets = [(home / '.claude' / 'settings.json', 'claude'),
                (home / '.codex' / 'hooks.json', 'codex')]
     for path, role in targets:
@@ -90,10 +101,21 @@ def install(root: Path, home: Path, python: Path, uninstall: bool = False) -> li
             continue
         if uninstall:
             lines.append(_apply(path, strip_hooks, backups, ('Removed:', 'Unchanged:')))
-        else:
-            command = hook_command(python, launcher, role)
-            lines.append(_apply(path, lambda d, c=command: add_hooks(d, c), backups,
-                                ('Installed:', 'Already installed:')))
+            continue
+        command = hook_command(python, launcher, role)
+        if role == 'codex' and '"' in command:
+            # No quoting form is valid in every shell, and Codex's Windows hook shell is unverified.
+            lines.append(f'ERROR: {path}: a path contains whitespace; not writing a Codex hook '
+                         f'that may not parse ({command}) (left unchanged)')
+            continue
+        line = _apply(path, lambda d, c=command: add_hooks(d, c), backups,
+                      ('Installed:', 'Already installed:'))
+        lines.append(line)
+        claude_ok = claude_ok or (role == 'claude' and not line.startswith('ERROR:'))
+    if not (uninstall or claude_ok):
+        # The project-local hooks are the only working Claude path until the user-level one is in.
+        lines.append('Kept project-local hooks: user-level Claude hook was not installed')
+        return lines
     local_files = [root / '.claude' / 'settings.local.json',
                    *sorted((root / '.claude' / 'worktrees').glob('*/.claude/settings.local.json'))]
     for path in local_files:
@@ -107,7 +129,7 @@ def main(argv=None) -> int:
     parser.add_argument('--uninstall', action='store_true')
     parser.add_argument('--force', action='store_true', help='allow running from a worktree')
     args = parser.parse_args(argv)
-    if '/.claude/worktrees/' in ROOT.as_posix() + '/' and not args.force:
+    if not args.force and is_linked_worktree(ROOT):
         # User-level hooks would point every session on the machine at this worktree.
         print(f'ERROR: {ROOT} is a worktree; run install_hooks.py from the main checkout')
         return 2

@@ -255,8 +255,38 @@ class CodexThreadDiscoveryTests(unittest.TestCase):
             queue=lambda *a: self.fail("must not queue"), on_event=events.append,
             include_existing=True)
         coordinator.process_once()
-        self.assertEqual(events[0]["state"], "mailbox_only")
+        self.assertEqual(events[0]["state"], "pending_target")
         self.assertIn("no recent Codex session registered", events[0]["detail"])
+
+    def test_late_registration_queues_pending_message_exactly_once(self):
+        message = self.claude.send("codex", "please review", "late-1")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append((thread, prompt)) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(queued, [])
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+        events = coordinator.process_once()
+        coordinator.process_once()
+        self.assertEqual([t for t, _ in queued], ["late-thread"])
+        self.assertIn(message["id"], queued[0][1])
+        self.assertEqual(events[0]["state"], "queued")
+        self.assertIsNone(self.codex.inbox()[0]["acknowledged"])
+
+    def test_pending_message_acked_before_registration_is_not_queued(self):
+        message = self.claude.send("codex", "please review", "late-2")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.codex.ack(message["id"])
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+        coordinator.process_once()
+        self.assertEqual(queued, [])
 
     def test_home_dir_codex_session_is_not_a_target(self):
         now = 1_000_000.0
