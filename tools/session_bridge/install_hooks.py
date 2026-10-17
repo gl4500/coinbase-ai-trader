@@ -15,9 +15,15 @@ EVENTS = ('SessionStart', 'UserPromptSubmit', 'PostToolUse')
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _shell_arg(path: Path) -> str:
+    # A leading quoted path is a parse error in PowerShell, so quote only when required.
+    text = path.as_posix()
+    return f'"{text}"' if any(c.isspace() for c in text) else text
+
+
 def hook_command(python: Path, launcher: Path, role: str) -> str:
-    # Both CLIs run command hooks through a shell; forward slashes work in cmd and Git Bash.
-    return f'"{python.as_posix()}" "{launcher.as_posix()}" --role {role} hook'
+    # Forward slashes work in cmd, Git Bash and PowerShell.
+    return f'{_shell_arg(python)} {_shell_arg(launcher)} --role {role} hook'
 
 
 def _is_bridge(hook: dict) -> bool:
@@ -99,7 +105,12 @@ def install(root: Path, home: Path, python: Path, uninstall: bool = False) -> li
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--uninstall', action='store_true')
+    parser.add_argument('--force', action='store_true', help='allow running from a worktree')
     args = parser.parse_args(argv)
+    if '/.claude/worktrees/' in ROOT.as_posix() + '/' and not args.force:
+        # User-level hooks would point every session on the machine at this worktree.
+        print(f'ERROR: {ROOT} is a worktree; run install_hooks.py from the main checkout')
+        return 2
     python = ROOT / '.coordination-runtime' / 'Scripts' / 'python.exe'
     lines = install(ROOT, Path.home(), python, uninstall=args.uninstall)
     print('\n'.join(lines))

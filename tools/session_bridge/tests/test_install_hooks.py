@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import install_hooks as ih
 
@@ -13,6 +14,27 @@ def read(path):
 def bridge_cmds(data, event):
     return [h["command"] for e in data.get("hooks", {}).get(event, []) for h in e["hooks"]
             if ih.MARKER in h["command"]]
+
+
+class HookCommandTests(unittest.TestCase):
+    def test_paths_without_spaces_are_unquoted_for_any_shell(self):
+        cmd = ih.hook_command(Path("C:/a/python.exe"), Path("C:/a/bridge.py"), "codex")
+        self.assertEqual(cmd, "C:/a/python.exe C:/a/bridge.py --role codex hook")
+
+    def test_paths_with_spaces_are_quoted(self):
+        cmd = ih.hook_command(Path("C:/my dir/python.exe"), Path("C:/a/bridge.py"), "claude")
+        self.assertEqual(cmd, '"C:/my dir/python.exe" C:/a/bridge.py --role claude hook')
+
+
+class MainGuardTests(unittest.TestCase):
+    def test_refuses_to_install_from_a_worktree(self):
+        calls = []
+        with mock.patch.object(ih, "ROOT", Path("C:/repo/.claude/worktrees/x")), \
+                mock.patch.object(ih, "install", lambda *a, **k: calls.append(a) or []):
+            self.assertEqual(ih.main([]), 2)
+            self.assertEqual(calls, [])
+            self.assertEqual(ih.main(["--force"]), 0)
+            self.assertEqual(len(calls), 1)
 
 
 class InstallTests(unittest.TestCase):

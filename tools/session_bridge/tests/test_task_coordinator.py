@@ -1,10 +1,12 @@
+import socket
+import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 from session_bridge.store import Store
-from task_coordinator import TaskCoordinator, resolve_codex_thread
+from task_coordinator import TaskCoordinator, resolve_codex_thread, run
 
 
 class TaskCoordinatorTests(unittest.TestCase):
@@ -255,6 +257,65 @@ class CodexThreadDiscoveryTests(unittest.TestCase):
         coordinator.process_once()
         self.assertEqual(events[0]["state"], "mailbox_only")
         self.assertIn("no recent Codex session registered", events[0]["detail"])
+
+    def test_home_dir_codex_session_is_not_a_target(self):
+        now = 1_000_000.0
+        self.register("codex", "repo-thread", str(self.REPO), now - 60)
+        self.register("codex", "home-thread", str(self.HOME), now - 1)
+        found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
+        self.assertEqual(found["session_id"], "repo-thread")
+
+    def test_dispatch_detail_names_the_thread(self):
+        self.register("codex", "discovered-thread", str(self.REPO), time.time())
+        self.claude.send("codex", "please review", "auto-4")
+        events = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: (0, "queued"), on_event=events.append,
+            include_existing=True)
+        coordinator.process_once()
+        self.assertIn("discovered-thread", events[0]["detail"])
+
+    def test_target_lookup_failure_leaves_message_deliverable(self):
+        self.register("codex", "discovered-thread", str(self.REPO), time.time())
+        message = self.claude.send("codex", "please review", "auto-5")
+        broken = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda *a: self.fail("must not queue"), on_event=lambda e: None,
+            include_existing=True)
+
+        def boom():
+            raise sqlite3.OperationalError("database is locked")
+
+        broken._codex_target = boom
+        with self.assertRaises(sqlite3.OperationalError):
+            broken.process_once()
+        queued = []
+        healthy = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None)
+        healthy.process_once()
+        self.assertEqual(queued, ["discovered-thread"], message["id"])
+
+    def test_run_survives_a_failing_cycle(self):
+        stop_file = Path(self.temp.name) / "stop"
+        calls = []
+
+        class Flaky:
+            def process_once(self):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise sqlite3.OperationalError("disk I/O error")
+                stop_file.touch()
+                return []
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        run(Flaky(), 0.1, port=port, stop_file=stop_file)
+        self.assertEqual(len(calls), 2)
 
     def test_status_reports_missing_codex_session(self):
         coordinator = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,

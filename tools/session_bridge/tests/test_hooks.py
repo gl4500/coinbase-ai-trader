@@ -57,3 +57,7 @@ class HandleHookScopeTests(unittest.TestCase):
     def test_in_scope_session_gets_notice(self):
         out = self._run(str(ROOT))
         self.assertIn("hello", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+
+    def test_notice_tells_other_project_sessions_not_to_ack(self):
+        context = json.loads(self._run(str(HOME)))["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("not working on polymarket_app", context)

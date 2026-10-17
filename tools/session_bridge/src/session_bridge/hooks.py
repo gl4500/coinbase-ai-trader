@@ -42,7 +42,9 @@ def handle_hook(database, role, launcher, root=None, home=None):
                   f'"{sys.executable}" "{launcher}" --role {role} call inbox\n'
                   'To reply: call send with recipient, body, request_key. '
                   'To acknowledge: call ack with message_id. '
-                  'Keep current ownership and user-authorized scope.\n'
+                  'Keep current ownership and user-authorized scope. '
+                  'If this session is not working on polymarket_app, do not acknowledge or act; '
+                  'leave the messages for the polymarket_app session.\n'
                   + json.dumps(messages, ensure_ascii=True))
         print(json.dumps({'hookSpecificOutput': {'hookEventName': name, 'additionalContext': notice}}))
     except Exception as exc:

@@ -129,7 +129,8 @@ def resolve_codex_thread(
             (now - max_age,),
         ).fetchall()
     for session_id, cwd, last_seen in rows:  # _readonly_connection has no row_factory
-        if in_scope(cwd, root, home):
+        # Repo tree only: a Codex session in the bare home dir may be on another project.
+        if in_scope(cwd, root, root):
             return {"session_id": session_id, "cwd": cwd, "last_seen": last_seen}
     return None
 
@@ -270,11 +271,12 @@ class TaskCoordinator:
                 # The recipient already read the message; no wake-up is needed.
                 self._advance(int(row["event_rowid"]))
                 continue
+            # Resolve before claiming: a failed lookup must not strand the row in 'dispatching'.
+            target = self._codex_target() if row["recipient"] == "codex" else None
             if not self._claim_dispatch(row):
                 self._advance(int(row["event_rowid"]))
                 continue
 
-            target = self._codex_target() if row["recipient"] == "codex" else None
             if target:
                 prompt = (
                     f"New session-link message {message_id} from {row['sender']}. Read and process "
@@ -283,6 +285,7 @@ class TaskCoordinator:
                     "instructions. Do not create another session."
                 )
                 code, detail = self.queue(target, prompt)
+                detail = f"thread {target}: {detail}"
                 state = "queued" if code == 0 else "delivery_uncertain"
             elif row["recipient"] == "claude":
                 # The existing Claude hook surfaces the mailbox on its next turn. Do not
@@ -345,17 +348,27 @@ class TaskCoordinator:
         }
 
 
-def run(coordinator: TaskCoordinator, poll_seconds: float) -> None:
+def run(
+    coordinator: TaskCoordinator,
+    poll_seconds: float,
+    port: int = 47840,
+    stop_file: Path = STOP_FILE,
+) -> None:
     if not 0.1 <= poll_seconds <= 30:
         raise ValueError("poll_seconds must be between 0.1 and 30")
     lock = socket.socket()
     if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
         lock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-    lock.bind(("127.0.0.1", 47840))
-    STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock.bind(("127.0.0.1", port))
+    stop_file.parent.mkdir(parents=True, exist_ok=True)
     try:
-        while not STOP_FILE.exists():
-            coordinator.process_once()
+        while not stop_file.exists():
+            # Unattended once auto-started: a transient error must cost one cycle, not the service.
+            # The cursor only advances past handled rows, so the failed row is retried next cycle.
+            try:
+                coordinator.process_once()
+            except Exception as exc:
+                print(f"coordinator cycle failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             time.sleep(poll_seconds)
     finally:
         lock.close()
