@@ -1,6 +1,10 @@
+import sys
+from pathlib import Path
+
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
+from session_bridge.autostart import ensure_coordinator
 from session_bridge.main import _session_link_flow, dispatch_routed
 
 
@@ -57,6 +61,10 @@ def run(database, role, protocol_stdin, protocol_stdout):
     # MCP transport until the client timed out -- caught by test_mcp. Operations that take
     # the fast route never need it, but status/claim/update_task still do.
     _session_link_flow()
+
+    # Every session starts this server, so this is where the coordinator gets started.
+    root = Path(__file__).resolve().parents[4]
+    print(f'session-link coordinator: {ensure_coordinator(root, Path(database))}', file=sys.stderr)
 
     async def serve():
         async with stdio_server(stdin=anyio.wrap_file(protocol_stdin), stdout=anyio.wrap_file(protocol_stdout)) as (reader, writer):

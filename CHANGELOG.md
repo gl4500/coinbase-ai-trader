@@ -7,6 +7,23 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.114 — 2026-10-17 — Session link connects itself
+
+`tools/session_bridge` only. No backend, agent, threshold or model change.
+
+- Three Codex messages sat unread for three days and a review request went unanswered,
+  because every delivery path needed a manual step: the Claude hook was project-local (a
+  session launched elsewhere never loaded it), Codex had no bridge hook, and the coordinator
+  only ran when started by hand with a thread ID.
+- `install_hooks.py` now installs the hook at user level for Claude and Codex and removes the
+  old project-local copies; `hooks.in_scope` limits it to this repo and the home dir.
+- `autostart.ensure_coordinator`: every MCP server start launches the one coordinator if none
+  holds its lock, unless the operator's stop file exists.
+- The coordinator discovers the Codex thread from hook-registered sessions (newest in this
+  repo, else the bare home dir, 24 h bound); `--codex-thread` still overrides. Pending-target
+  retry, in-flight recovery on restart, git-based worktree guard (Codex review of #102).
+  Bridge suite 50 → 92.
+
 ### Session 58.113 — 2026-10-11 — Peer review required before merge
 
 - New CLAUDE.md rule (Commit Standards → "Peer review before merge"): every PR needs an explicit

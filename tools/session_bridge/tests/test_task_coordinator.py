@@ -1,9 +1,12 @@
+import socket
+import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from session_bridge.store import Store
-from task_coordinator import TaskCoordinator
+from task_coordinator import TaskCoordinator, resolve_codex_thread, run
 
 
 class TaskCoordinatorTests(unittest.TestCase):
@@ -186,6 +189,240 @@ class TaskCoordinatorTests(unittest.TestCase):
         result = coordinator.process_once()
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["state"], "mailbox_notice")
+
+
+class CodexThreadDiscoveryTests(unittest.TestCase):
+    REPO = Path(r"C:\Users\gl450\polymarket_app")
+    HOME = Path(r"C:\Users\gl450")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.mailbox = root / "mailbox.sqlite3"
+        self.state = root / "coordinator.sqlite3"
+        self.codex = Store(self.mailbox, "codex")
+        self.claude = Store(self.mailbox, "claude")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def register(self, role, session_id, cwd, last_seen):
+        with self.codex.connect(True) as db:
+            db.execute("INSERT INTO sessions VALUES (?,?,?,?)", (role, session_id, cwd, last_seen))
+
+    def test_resolves_newest_in_scope_recent_codex_session(self):
+        now = 1_000_000.0
+        self.register("codex", "old", str(self.REPO), now - 3600)
+        self.register("codex", "new", str(self.REPO / "backend"), now - 60)
+        self.register("codex", "other-repo", str(self.HOME / "trading_app"), now - 1)
+        self.register("claude", "claude-1", str(self.REPO), now)
+        found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
+        self.assertEqual(found["session_id"], "new")
+
+    def test_ignores_codex_sessions_older_than_24h(self):
+        now = 1_000_000.0
+        self.register("codex", "stale", str(self.REPO), now - 24 * 3600 - 1)
+        self.assertIsNone(resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now))
+
+    def test_dispatch_uses_discovered_thread_without_flag(self):
+        now = time.time()
+        self.register("codex", "discovered-thread", str(self.REPO), now - 5)
+        self.claude.send("codex", "please review", "auto-1")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(queued, ["discovered-thread"])
+
+    def test_explicit_thread_flag_still_wins(self):
+        self.register("codex", "discovered-thread", str(self.REPO), time.time())
+        self.claude.send("codex", "please review", "auto-2")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, codex_thread="pinned", root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(queued, ["pinned"])
+
+    def test_no_registered_codex_session_leaves_mail_in_mailbox(self):
+        self.claude.send("codex", "please review", "auto-3")
+        events = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda *a: self.fail("must not queue"), on_event=events.append,
+            include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(events[0]["state"], "pending_target")
+        self.assertIn("no recent Codex session registered", events[0]["detail"])
+
+    def test_late_registration_queues_pending_message_exactly_once(self):
+        message = self.claude.send("codex", "please review", "late-1")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append((thread, prompt)) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.assertEqual(queued, [])
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+        events = coordinator.process_once()
+        coordinator.process_once()
+        self.assertEqual([t for t, _ in queued], ["late-thread"])
+        self.assertIn(message["id"], queued[0][1])
+        self.assertEqual(events[0]["state"], "queued")
+        self.assertIsNone(self.codex.inbox()[0]["acknowledged"])
+
+    def test_pending_message_acked_before_registration_is_not_queued(self):
+        message = self.claude.send("codex", "please review", "late-2")
+        queued = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.codex.ack(message["id"])
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+        coordinator.process_once()
+        self.assertEqual(queued, [])
+
+    def test_home_dir_codex_session_is_not_a_target(self):
+        now = 1_000_000.0
+        self.register("codex", "repo-thread", str(self.REPO), now - 60)
+        self.register("codex", "home-thread", str(self.HOME), now - 1)
+        found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
+        self.assertEqual(found["session_id"], "repo-thread")
+
+    def test_home_session_is_used_when_no_repo_session(self):
+        now = 1_000_000.0
+        self.register("codex", "home-thread", str(self.HOME), now - 60)
+        self.register("codex", "other-repo", str(self.HOME / "trading_app"), now - 1)
+        found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
+        self.assertEqual(found["session_id"], "home-thread")
+
+    def dispatch_state(self, message_id):
+        db = sqlite3.connect(self.state)
+        try:
+            return db.execute("SELECT state FROM dispatches WHERE message_id=?",
+                              (message_id,)).fetchone()[0]
+        finally:
+            db.close()
+
+    def test_interrupted_pending_delivery_becomes_uncertain_on_restart(self):
+        message = self.claude.send("codex", "please review", "crash-1")
+        first = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                queue=lambda *a: (0, "queued"), on_event=lambda e: None,
+                                include_existing=True)
+        first.process_once()
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+
+        def interrupted(*_):
+            raise SystemExit("process killed mid-delivery")
+
+        first._queue_to = interrupted
+        with self.assertRaises(SystemExit):
+            first.process_once()
+        self.assertEqual(self.dispatch_state(message["id"]), "dispatching")
+
+        queued = []
+        restarted = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                    queue=lambda thread, prompt: queued.append(thread) or (0, "q"),
+                                    on_event=lambda e: None)
+        restarted.status()  # a status reader must not reclassify in-flight rows
+        self.assertEqual(self.dispatch_state(message["id"]), "dispatching")
+        stop_file = Path(self.temp.name) / "stop"
+        stop_file.touch()
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        run(restarted, 0.1, port=port, stop_file=stop_file)
+        self.assertEqual(self.dispatch_state(message["id"]), "delivery_uncertain")
+        restarted.process_once()
+        self.assertEqual(queued, [])
+        self.assertIsNone(self.codex.inbox()[0]["acknowledged"])
+
+    def test_queue_exception_is_recorded_uncertain_and_not_retried(self):
+        message = self.claude.send("codex", "please review", "crash-2")
+        calls = []
+
+        def failing(thread, prompt):
+            calls.append(thread)
+            raise RuntimeError("codex CLI crashed")
+
+        coordinator = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                      queue=failing, on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+        coordinator.process_once()
+        coordinator.process_once()
+        self.assertEqual(calls, ["late-thread"])
+        self.assertEqual(self.dispatch_state(message["id"]), "delivery_uncertain")
+
+    def test_dispatch_detail_names_the_thread(self):
+        self.register("codex", "discovered-thread", str(self.REPO), time.time())
+        self.claude.send("codex", "please review", "auto-4")
+        events = []
+        coordinator = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: (0, "queued"), on_event=events.append,
+            include_existing=True)
+        coordinator.process_once()
+        self.assertIn("discovered-thread", events[0]["detail"])
+
+    def test_target_lookup_failure_leaves_message_deliverable(self):
+        self.register("codex", "discovered-thread", str(self.REPO), time.time())
+        message = self.claude.send("codex", "please review", "auto-5")
+        broken = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda *a: self.fail("must not queue"), on_event=lambda e: None,
+            include_existing=True)
+
+        def boom():
+            raise sqlite3.OperationalError("database is locked")
+
+        broken._codex_target = boom
+        with self.assertRaises(sqlite3.OperationalError):
+            broken.process_once()
+        queued = []
+        healthy = TaskCoordinator(
+            self.mailbox, self.state, root=self.REPO, home=self.HOME,
+            queue=lambda thread, prompt: queued.append(thread) or (0, "queued"),
+            on_event=lambda e: None)
+        healthy.process_once()
+        self.assertEqual(queued, ["discovered-thread"], message["id"])
+
+    def test_run_survives_a_failing_cycle(self):
+        stop_file = Path(self.temp.name) / "stop"
+        calls = []
+
+        class Flaky:
+            def recover_in_flight(self):
+                return 0
+
+            def process_once(self):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise sqlite3.OperationalError("disk I/O error")
+                stop_file.touch()
+                return []
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        run(Flaky(), 0.1, port=port, stop_file=stop_file)
+        self.assertEqual(len(calls), 2)
+
+    def test_status_reports_missing_codex_session(self):
+        coordinator = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                      on_event=lambda e: None)
+        status = coordinator.status()
+        self.assertIsNone(status["codex_thread"])
+        self.assertIn("trust", status["codex_thread_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()

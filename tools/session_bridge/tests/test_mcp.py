@@ -30,7 +30,7 @@ class MCPTests(unittest.TestCase):
                 self.assertFalse(sent.isError, sent)
                 mid = json.loads(sent.content[0].text)['id']
                 hook = subprocess.run([sys.executable, str(LAUNCHER), '--role', 'claude', '--db', db, 'hook'],
-                    input=json.dumps({'hook_event_name': 'PostToolUse', 'session_id': 'test-only', 'cwd': 'temporary'}),
+                    input=json.dumps({'hook_event_name': 'PostToolUse', 'session_id': 'test-only', 'cwd': str(LAUNCHER.parents[2])}),
                     text=True, capture_output=True, timeout=10, check=True)
                 context = json.loads(hook.stdout)['hookSpecificOutput']['additionalContext']
                 self.assertIn('integration ping', context)

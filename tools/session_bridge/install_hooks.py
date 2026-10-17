@@ -1,35 +1,143 @@
-"""Idempotently add project-local Claude notifications, preserving existing settings."""
+"""Idempotently install the session-link hook at USER level for Claude and Codex.
+
+Project-local copies written by earlier versions are removed so a session inside the repo
+is not notified twice. Only entries whose command contains MARKER are ever touched.
+"""
+import argparse
 import json
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+MARKER = 'tools/session_bridge/bridge.py'
+EVENTS = ('SessionStart', 'UserPromptSubmit', 'PostToolUse')
 ROOT = Path(__file__).resolve().parents[2]
-launcher = ROOT / 'tools/session_bridge/bridge.py'
-python = ROOT / '.coordination-runtime/Scripts/python.exe'
-# Claude uses a shell for command hooks; forward slashes work in Windows and Git Bash.
-command = f'"{python.as_posix()}" "{launcher.as_posix()}" --role claude hook'
-backups = ROOT / '.coordination' / 'config-backups'
-for project in [ROOT, ROOT / '.claude/worktrees/outcome-labels']:
-    if not project.is_dir():
-        continue
-    path = project / '.claude/settings.local.json'
-    data = json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
-    original = json.dumps(data, sort_keys=True)
-    for event in ['PostToolUse', 'UserPromptSubmit', 'SessionStart']:
-        entries = data.setdefault('hooks', {}).setdefault(event, [])
-        if not any(h.get('command') == command for e in entries for h in e.get('hooks', [])):
-            entries.append({'hooks': [{'type': 'command', 'command': command, 'timeout': 8}]})
-    if json.dumps(data, sort_keys=True) == original:
-        print(f'Already installed: {path}')
-        continue
+
+
+def _shell_arg(path: Path) -> str:
+    # A leading quoted path is a parse error in PowerShell, so quote only when required.
+    text = path.as_posix()
+    return f'"{text}"' if any(c.isspace() for c in text) else text
+
+
+def hook_command(python: Path, launcher: Path, role: str) -> str:
+    # Forward slashes work in cmd, Git Bash and PowerShell.
+    return f'{_shell_arg(python)} {_shell_arg(launcher)} --role {role} hook'
+
+
+def _is_bridge(hook: dict) -> bool:
+    return MARKER in str(hook.get('command', ''))
+
+
+def strip_hooks(data: dict) -> dict:
+    out = {k: v for k, v in data.items() if k != 'hooks'}
+    hooks = {}
+    for event, entries in data.get('hooks', {}).items():
+        kept = []
+        for entry in entries:
+            inner = [h for h in entry.get('hooks', []) if not _is_bridge(h)]
+            if inner:
+                kept.append({**entry, 'hooks': inner})
+        if kept:
+            hooks[event] = kept
+    if hooks:
+        out['hooks'] = hooks
+    return out
+
+
+def add_hooks(data: dict, command: str) -> dict:
+    # Strip first so a stale bridge entry (old interpreter path) is replaced, not duplicated.
+    out = strip_hooks(data)
+    hooks = out.setdefault('hooks', {})
+    for event in EVENTS:
+        hooks.setdefault(event, []).append(
+            {'hooks': [{'type': 'command', 'command': command, 'timeout': 8}]})
+    return out
+
+
+def _write(path: Path, data: dict, backups: Path) -> None:
     if path.exists():
         backups.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
-        shutil.copy2(path, backups / f'{project.name}-{stamp}.json')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix('.json.session-link.tmp')
+        shutil.copy2(path, backups / f'{path.parent.parent.name}-{path.name}-{stamp}.json')
+    temp = path.with_suffix(path.suffix + '.session-link.tmp')
     temp.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
     temp.replace(path)
-    print(f'Installed: {path}')
+
+
+def _apply(path: Path, change, backups: Path, verbs: tuple[str, str]) -> str:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
+    except (OSError, ValueError) as exc:
+        return f'ERROR: {path}: {type(exc).__name__}: {exc} (left unchanged)'
+    new = change(data)
+    if json.dumps(new, sort_keys=True) == json.dumps(data, sort_keys=True):
+        return f'{verbs[1]} {path}'
+    _write(path, new, backups)
+    return f'{verbs[0]} {path}'
+
+
+def is_linked_worktree(root: Path) -> bool:
+    """True for any `git worktree add` checkout, whatever its path is called."""
+    def git_path(flag: str) -> Path:
+        out = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute', flag],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        return Path(out).resolve()
+    return git_path('--git-dir') != git_path('--git-common-dir')
+
+
+def install(root: Path, home: Path, python: Path, uninstall: bool = False) -> list[str]:
+    launcher = root / 'tools/session_bridge/bridge.py'
+    backups = root / '.coordination' / 'config-backups'
+    lines = []
+    claude_ok = False
+    targets = [(home / '.claude' / 'settings.json', 'claude'),
+               (home / '.codex' / 'hooks.json', 'codex')]
+    for path, role in targets:
+        if not path.parent.is_dir():
+            lines.append(f'Skipped {path}: {"Codex" if role == "codex" else "Claude"} not installed')
+            continue
+        if uninstall:
+            lines.append(_apply(path, strip_hooks, backups, ('Removed:', 'Unchanged:')))
+            continue
+        command = hook_command(python, launcher, role)
+        if role == 'codex' and '"' in command:
+            # No quoting form is valid in every shell, and Codex's Windows hook shell is unverified.
+            lines.append(f'ERROR: {path}: a path contains whitespace; not writing a Codex hook '
+                         f'that may not parse ({command}) (left unchanged)')
+            continue
+        line = _apply(path, lambda d, c=command: add_hooks(d, c), backups,
+                      ('Installed:', 'Already installed:'))
+        lines.append(line)
+        claude_ok = claude_ok or (role == 'claude' and not line.startswith('ERROR:'))
+    if not (uninstall or claude_ok):
+        # The project-local hooks are the only working Claude path until the user-level one is in.
+        lines.append('Kept project-local hooks: user-level Claude hook was not installed')
+        return lines
+    local_files = [root / '.claude' / 'settings.local.json',
+                   *sorted((root / '.claude' / 'worktrees').glob('*/.claude/settings.local.json'))]
+    for path in local_files:
+        if path.exists():
+            lines.append(_apply(path, strip_hooks, backups, ('Removed:', 'Unchanged:')))
+    return lines
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--uninstall', action='store_true')
+    parser.add_argument('--force', action='store_true', help='allow running from a worktree')
+    args = parser.parse_args(argv)
+    if not args.force and is_linked_worktree(ROOT):
+        # User-level hooks would point every session on the machine at this worktree.
+        print(f'ERROR: {ROOT} is a worktree; run install_hooks.py from the main checkout')
+        return 2
+    python = ROOT / '.coordination-runtime' / 'Scripts' / 'python.exe'
+    lines = install(ROOT, Path.home(), python, uninstall=args.uninstall)
+    print('\n'.join(lines))
+    return 1 if any(line.startswith('ERROR:') for line in lines) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
