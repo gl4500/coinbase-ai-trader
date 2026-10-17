@@ -13,6 +13,12 @@ _venv_site = os.path.join(_root, ".venv", "Lib", "site-packages")
 if os.path.isdir(_venv_site) and _venv_site not in sys.path:
     sys.path.insert(0, _venv_site)
 
+# Before ANY logging: under pythonw (the logon autostart task) stdout/stderr are None and
+# uvicorn's log formatter would crash on sys.stdout.isatty() (exit 1, nothing logged).
+from services.std_streams import ensure_std_streams  # noqa: E402
+
+ensure_std_streams(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "console.log"))
+
 import asyncio
 import json
 import logging
@@ -22,7 +28,7 @@ import threading
 import time as _time
 import webbrowser
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
@@ -464,6 +470,14 @@ async def lifespan(app: FastAPI):
         executor_fn=lambda: app_state.order_executor,
     )
     logger.info("WS exit watcher attached")
+
+    if config.maker_shadow:
+        from services.maker_shadow import attach as attach_maker_shadow
+
+        attach_maker_shadow(
+            app_state.ws_subscriber, app_state.cnn_agent, sink=database.save_maker_shadow
+        )
+        logger.info("Maker entry shadow attached (measurement only, no orders)")
 
     # Background scan — refreshes product list without blocking startup
     async def _background_scan():
@@ -1477,6 +1491,10 @@ async def get_performance():
         """)
         overall = dict(await cursor.fetchone())
 
+    since_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    fees_overall = await database.get_fee_summary()
+    fees_30d = await database.get_fee_summary(since=since_30d)
+
     curr_bal = overall["current_balance"] or 0
     overall["first_balance"] or curr_bal or 1
     total_t = overall["total_trades"] or 0
@@ -1507,6 +1525,7 @@ async def get_performance():
             "win_rate_pct": rolling_win_rate,
             "return_pct": rolling_return_pct,
             "total_pnl": round(r30["total_pnl"] or 0, 2),
+            "net_of_fees": fees_30d,
         },
         "overall": {
             "total_trades": total_t,
@@ -1515,6 +1534,7 @@ async def get_performance():
             "total_pnl": round(overall["total_pnl"] or 0, 2),
             "current_balance": round(curr_bal, 2),
             "peak_balance": round(overall["peak_balance"] or 0, 2),
+            "net_of_fees": fees_overall,
         },
         "projection": {
             "annual_goal_usd": annual_goal_usd,

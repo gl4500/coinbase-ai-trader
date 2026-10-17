@@ -250,7 +250,9 @@ async def _backfill_to_path(
     while window_end > fetch_start:
         window_start = max(fetch_start, window_end - _MAX_PER_REQ * bar_secs)
         page = await _fetch_range(product_id, window_start, window_end, granularity=granularity)
-        new = [c for c in page if c["start"] not in known_set]
+        # Closed bars only: a bar fetched while in progress would be skipped as "known" on
+        # every later run and stay partial forever (inventory P2).
+        new = [c for c in page if c["start"] not in known_set and c["start"] + bar_secs <= now]
         all_new.extend(new)
         known_set.update(c["start"] for c in new)
 

@@ -85,3 +85,6 @@ tools/__pycache__/
 
 # Obsidian vault config (per-user UI/plugin state, not project config)
 .obsidian/
+
+# slow-trend research outputs (snapshots, ledger, reports; never committed)
+backend/data/research/
