@@ -135,7 +135,7 @@ Rules:
 
 ## Backend port discipline — dev on 8002+, promote to 8001
 
-**Port 8001 is reserved for the live trading backend.** Active paper/live trading runs there. Frontend (port 5174) is hardcoded to hit 8001. Never start a new/experimental/shadow backend on 8001 while the production backend is running — the `_free_port(8001)` helper will kill the production process, stopping live trading.
+**Port 8001 is reserved for the live trading backend.** Active paper/live trading runs there. Frontend (port 5174) is hardcoded to hit 8001. Never start a new/experimental/shadow backend on 8001 while the production backend is running. Since Session 58.116 every entry point goes through `backend/startup_guard.py`, which **refuses** an occupied port or a held instance lock (distinct exit codes) instead of killing it; `--mode replace` / `-Replace` replaces only an instance the guard itself registered (lock record PID + creation time + backend dir). Before 58.116, all entry points force-killed whatever held 8001 (the 2026-10-17 incident).
 
 Rule:
 - **Production / live trading** → port 8001 (default, set via `PORT` env or default in `main.py`)

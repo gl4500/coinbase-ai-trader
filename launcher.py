@@ -137,18 +137,6 @@ def _is_url_up(url: str, timeout: float = 5.0) -> bool:
         return False
 
 
-def _is_backend_healthy(timeout: float = 5.0) -> bool:
-    """Watchdog probe. /api/health returns 503 when the scan loop is hung while
-    HTTP is still serving (the 2026-08-01 stall). urlopen raises on non-2xx, so
-    a stalled-but-serving backend reads as unhealthy and the 3-strike restart
-    fires. /api/status stays the readiness probe for startup checks."""
-    try:
-        urllib.request.urlopen(BACKEND_HEALTH_URL, timeout=timeout)
-        return True
-    except Exception:
-        return False
-
-
 def _is_frontend_up(timeout: float = 1.5) -> bool:
     try:
         urllib.request.urlopen(FRONTEND_URL, timeout=timeout)
@@ -157,34 +145,107 @@ def _is_frontend_up(timeout: float = 1.5) -> bool:
         return False
 
 
-# Ports owned by the AI trading app — the launcher must never kill these.
-_TRADING_APP_PORTS = {8000, 5173}
+def _backend_cmd(python: str, mode: str = None) -> list:
+    """main.py command; the startup guard inside main.py owns all port decisions."""
+    return [python, "main.py"] + (["--mode", mode] if mode else [])
 
 
-def _free_port(port: int) -> None:
-    """
-    Kill the process bound to `port`.
-    Guard: refuses to touch trading_app ports so both apps can coexist.
-    """
-    if port in _TRADING_APP_PORTS:
-        _launcher_log.warning("Skipping _free_port(%d) — belongs to AI trading app", port)
-        return
+def _restart_plan(own_child_running: bool) -> str:
+    """The launcher kills only a backend it started itself (known PID). Any other
+    instance is handed to main.py's guard, which re-verifies ownership and health."""
+    return "kill_own_child_then_start" if own_child_running else "spawn_replace_unhealthy"
+
+
+_GUARD_EXIT = {
+    2: "Backend already running on 8001 (another instance holds the port) — not replaced.",
+    3: "Another backend instance holds the startup lock — not replaced.",
+    4: "Port 8001 owner could not be verified as this app's backend — not replaced; stop it manually.",
+    5: "Backend not proven unhealthy (healthy or ambiguous health reply) — not replaced.",
+    6: "Backend owner changed or taskkill failed during replacement — aborted.",
+    7: "Old backend did not release port 8001 in time — aborted.",
+    8: "Inconsistent port/lock state — refused.",
+}
+
+
+def _guard_exit_message(code: int):
+    return _GUARD_EXIT.get(code)
+
+
+def _health_state(status, exc) -> str:
+    """/api/health outcome -> 'ok' | 'unhealthy' (503 or timeout) | 'down' (refused) | 'ambiguous'."""
+    if exc is not None:
+        if isinstance(exc, ConnectionRefusedError):
+            return "down"
+        if isinstance(exc, TimeoutError):
+            return "unhealthy"
+        return "ambiguous"
+    return {200: "ok", 503: "unhealthy"}.get(status, "ambiguous")
+
+
+def _probe_backend_health(timeout: float = 5.0) -> str:
+    import socket
+    import urllib.error
     try:
-        out = subprocess.check_output(
-            ["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL, timeout=5,
-            **_no_window(),
-        )
-        for line in out.splitlines():
-            if f":{port}" in line and ("LISTENING" in line or "LISTEN" in line):
-                parts = line.split()
-                pid = parts[-1]
-                if pid.isdigit() and int(pid) != os.getpid():
-                    subprocess.run(["taskkill", "/F", "/PID", pid],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   **_no_window())
-                    _launcher_log.info("Freed port %d (killed PID %s)", port, pid)
-    except Exception:
-        pass
+        with urllib.request.urlopen(BACKEND_HEALTH_URL, timeout=timeout) as r:
+            return _health_state(r.status, None)
+    except urllib.error.HTTPError as e:
+        return _health_state(e.code, None)
+    except urllib.error.URLError as e:
+        reason = e.reason
+        if isinstance(reason, socket.timeout):
+            reason = TimeoutError()
+        return _health_state(None, reason if isinstance(reason, BaseException) else OSError(str(reason)))
+    except (socket.timeout, TimeoutError):
+        return _health_state(None, TimeoutError())
+    except OSError as e:
+        return _health_state(None, e)
+
+
+class _Watchdog:
+    """Pure restart policy for the status loop (no tk, no I/O).
+
+    - Own child (launcher-started): any non-ok probe counts; 3 strikes -> restart_own.
+    - Not owned: only a positively 'unhealthy' reply counts; 3 strikes -> replace_external
+      (main.py --mode replace-unhealthy, which re-verifies ownership and health itself).
+    - In flight (a start or replacement the launcher just spawned): suppress all action until
+      the backend is healthy, the process exits, or inflight_secs passes.
+    - A replacement that exits without a healthy backend starts a cooldown, so a refusing
+      guard (e.g. unverifiable owner) is not respawned every few seconds.
+    """
+
+    threshold = 3
+    inflight_secs = 180.0
+    cooldown_secs = 600.0
+
+    def __init__(self):
+        self.fails = 0
+        self.inflight_until = None
+        self.cooldown_until = None
+
+    def begin_inflight(self, now: float) -> None:
+        self.inflight_until = now + self.inflight_secs
+        self.fails = 0
+
+    def step(self, health: str, own_alive: bool, now: float) -> str:
+        if self.inflight_until is not None:
+            if health == "ok" or not own_alive or now >= self.inflight_until:
+                if not own_alive and health != "ok":
+                    self.cooldown_until = now + self.cooldown_secs
+                self.inflight_until = None
+            else:
+                return "wait"
+        if health == "ok":
+            self.fails = 0
+            self.cooldown_until = None
+            return "none"
+        if not own_alive and (health != "unhealthy" or (self.cooldown_until is not None and now < self.cooldown_until)):
+            self.fails = 0
+            return "none"
+        self.fails += 1
+        if self.fails < self.threshold:
+            return "none"
+        self.fails = 0
+        return "restart_own" if own_alive else "replace_external"
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -304,6 +365,7 @@ class LauncherApp(tk.Tk):
         self._frontend_proc: subprocess.Popen | None = None
         self._log_queue: queue.Queue = queue.Queue()
         self._running = True
+        self._watchdog = _Watchdog()
         self._startup_var: tk.BooleanVar | None = None   # set in _build_ui
 
         # First-run only: default Start-on-login to ON so the launcher (and
@@ -535,6 +597,18 @@ class LauncherApp(tk.Tk):
                     pass
         threading.Thread(target=drain, daemon=True).start()
 
+    def _report_guard_exit(self, proc: subprocess.Popen):
+        """If main.py's startup guard refuses, say why instead of failing silently."""
+        try:
+            code = proc.wait(timeout=120)
+        except Exception:
+            return
+        msg = _guard_exit_message(code)
+        if msg:
+            self._queue_log("warn", msg)
+            if self._backend_proc is proc:
+                self._backend_proc = None
+
     def _stream_proc(self, proc: subprocess.Popen, tag: str):
         """Stream stdout+stderr of a process to the log panel."""
         for line in proc.stdout:
@@ -569,39 +643,40 @@ class LauncherApp(tk.Tk):
     # ── Status loop ───────────────────────────────────────────────────────────
 
     def _start_status_loop(self):
-        _BE_FAIL_THRESH = 3
-        be_fail_count = 0
-
         def loop():
-            nonlocal be_fail_count
             while self._running:
-                be_up = _is_backend_healthy()
-                fe_up = _is_frontend_up()
-                self.after(0, self._update_status, be_up, fe_up)
-                if be_up:
-                    be_fail_count = 0
-                elif self._backend_proc and self._backend_proc.poll() is None:
-                    # Process alive but not accepting connections — WinError 64
-                    be_fail_count += 1
-                    if be_fail_count >= _BE_FAIL_THRESH:
-                        be_fail_count = 0
-                        self._queue_log(
-                            "warn",
-                            "Backend not responding (3 checks) — auto-restarting (WinError 64 recovery)…",
-                        )
-                        self.after(0, self._restart_backend)
-                else:
-                    be_fail_count = 0
+                self._status_tick(_probe_backend_health(), _is_frontend_up(), time.monotonic())
                 time.sleep(1)
 
         threading.Thread(target=loop, daemon=True).start()
 
+    def _status_tick(self, health: str, fe_up: bool, now: float):
+        self.after(0, self._update_status, health == "ok", fe_up)
+        own = bool(self._backend_proc and self._backend_proc.poll() is None)
+        action = self._watchdog.step(health, own, now)
+        if action == "restart_own":
+            self._queue_log("warn", "Backend not responding (3 checks) — restarting the launcher-owned backend…")
+            self.after(0, self._restart_backend)
+        elif action == "replace_external":
+            self._queue_log("warn", "External backend unhealthy (3 checks) — asking main.py to verify and replace…")
+            self.after(0, self._start_backend, "replace-unhealthy")
+
     def _restart_backend(self):
-        self._log_line("warn", "Restarting backend…")
-        if self._backend_proc:
-            _kill_tree(self._backend_proc)
+        own = bool(self._backend_proc and self._backend_proc.poll() is None)
+        if _restart_plan(own) == "kill_own_child_then_start":
+            self._log_line("warn", "Restarting backend (launcher-owned process)…")
+            proc = self._backend_proc
+            _kill_tree(proc)
+            try:
+                proc.wait(timeout=15)
+            except Exception:
+                self._log_line("error", "Backend did not exit after kill — not starting a second one.")
+                return
             self._backend_proc = None
-        self._start_backend()
+            self._start_backend()
+        else:
+            self._log_line("warn", "Backend not launcher-owned — asking main.py to verify and replace if unhealthy…")
+            self._start_backend(mode="replace-unhealthy")
 
     def _update_status(self, be_up: bool, fe_up: bool):
         self.dot_ref_b.config(fg=GREEN if be_up else RED)
@@ -679,25 +754,24 @@ class LauncherApp(tk.Tk):
 
     # ── Process control ───────────────────────────────────────────────────────
 
-    def _start_backend(self):
-        if _is_url_up(BACKEND_URL):
-            self._log_line("system", "Backend already responding — skipping start.")
-            return
-        if self._backend_proc and self._backend_proc.poll() is None:
-            self._log_line("warn", "Backend process exists but not responding.")
-            return
+    def _start_backend(self, mode: str = None):
+        if mode is None:
+            if _is_url_up(BACKEND_URL):
+                self._log_line("system", "Backend already responding — skipping start.")
+                return
+            if self._backend_proc and self._backend_proc.poll() is None:
+                self._log_line("warn", "Backend process exists but not responding.")
+                return
 
         python = _python_exe()
         self._log_line("system", f"Starting backend with {Path(python).name}…")
-        self._log_line("system", "Freeing port 8001 if occupied…")
-        _free_port(8001)
 
         try:
             # Run via `python main.py` so main.py's port-cleanup and
             # RotatingFileHandler logging initialise correctly — same pattern
             # as the AI trading app.
             self._backend_proc = subprocess.Popen(
-                [python, "main.py"],
+                _backend_cmd(python, mode),
                 cwd=str(BACKEND_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -713,6 +787,8 @@ class LauncherApp(tk.Tk):
                 daemon=True,
             ).start()
             self._log_line("backend", f"Backend PID {self._backend_proc.pid} started.")
+            self._watchdog.begin_inflight(time.monotonic())
+            threading.Thread(target=self._report_guard_exit, args=(self._backend_proc,), daemon=True).start()
         except Exception as e:
             self._log_line("error", f"Backend start failed: {e}")
 

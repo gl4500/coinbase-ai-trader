@@ -9,11 +9,12 @@ Usage:
     python start_app.py --no-browser   # skip auto-open
     python start_app.py --startup      # enable start-on-login (Windows registry)
     python start_app.py --no-startup   # disable start-on-login
+    python start_app.py --replace      # ask main.py to replace a running instance it can verify
 
 Mirrors the AI Trading Competition launcher.py pattern exactly:
   - CREATE_NEW_CONSOLE so each service has its own window (killable independently)
   - Polls /api/status every 0.5 s, 60 s timeout (fast fail detection)
-  - Kills any stale process on port 8001 before starting
+  - Never kills anything: main.py's startup guard refuses an occupied port
   - No shell=True anywhere (no command injection surface)
 """
 
@@ -82,11 +83,6 @@ def _set_startup(enabled: bool) -> None:
     except Exception as e:
         print(f"[WARN] Registry write failed: {e}")
 
-# ── Port ownership map ────────────────────────────────────────────────────────
-# Explicit declaration of which ports belong to which app.
-# _free_port() will NEVER touch ports that belong to another known app.
-COINBASE_APP_PORTS = {8001, 5174}   # ports this app owns
-TRADING_APP_PORTS = {8000, 5173}    # trading_app ports — never kill these
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -108,33 +104,9 @@ def _check_port_occupied(port: int) -> bool:
         return False
 
 
-def _free_port(port: int) -> None:
-    """
-    Kill the process bound to `port`.
-    Safety guard: raises if `port` is in TRADING_APP_PORTS so we never
-    accidentally kill the AI trading app.
-    """
-    if port in TRADING_APP_PORTS:
-        raise RuntimeError(
-            f"Port {port} belongs to the AI Trading App — refusing to free it."
-        )
-    try:
-        out = subprocess.check_output(
-            ["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL, timeout=5
-        )
-        for line in out.splitlines():
-            if f":{port}" in line and ("LISTENING" in line or "LISTEN" in line):
-                pid = line.split()[-1]
-                if pid.isdigit() and int(pid) != os.getpid():
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", pid],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    print(f"[INFO] Freed port {port} (killed PID {pid})")
-    except RuntimeError:
-        raise
-    except Exception:
-        pass
+def _backend_args(argv) -> list:
+    """main.py arguments; --replace passes through to the startup guard."""
+    return ["main.py", "--mode", "replace"] if "--replace" in argv else ["main.py"]
 
 
 def _warn_if_trading_app_running() -> None:
@@ -191,14 +163,13 @@ def main():
     # 0. Detect other apps — friendly notice, never interfere
     _warn_if_trading_app_running()
 
-    # 1. Free port 8001 if stale process is occupying it
-    print("[INFO] Checking port 8001...")
-    _free_port(8001)
-
-    # 2. Start backend with no console window
+    # 1. Start backend with no console window. main.py's startup guard refuses an
+    #    occupied port (exit 2) instead of killing whatever holds it.
+    if _check_port_occupied(8001):
+        print("[INFO] Port 8001 already in use — main.py will refuse unless --replace can verify it.")
     print("[INFO] Starting backend...")
     subprocess.Popen(
-        [python, "main.py"],
+        [python, *_backend_args(sys.argv)],
         cwd=str(BACKEND_DIR),
         creationflags=subprocess.CREATE_NO_WINDOW,
     )

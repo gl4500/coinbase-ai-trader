@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 import aiosqlite
 
+import db_open
 from config import config
 from services.fees import PAPER_TAKER_FEE_RATE, round_trip_fee
 from services.provenance import validate_digest
@@ -35,8 +36,21 @@ async def _db():
         yield conn
 
 
+@asynccontextmanager
+async def _init_conn():
+    """Startup connection: bounded open/configure retry, then the post-I/O integrity gate."""
+    conn, had_io = await db_open.open_with_retry(DB_PATH)
+    try:
+        if had_io:
+            await db_open.integrity_gate(DB_PATH)
+        await conn.execute("PRAGMA busy_timeout=30000")
+        yield conn
+    finally:
+        await conn.close()
+
+
 async def init_db() -> None:
-    async with _db() as db:
+    async with _init_conn() as db:
         # WAL mode: multiple readers + one writer can coexist; prevents most lock errors
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=30000")  # 30s in milliseconds
