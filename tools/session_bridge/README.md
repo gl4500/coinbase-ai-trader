@@ -126,7 +126,11 @@ file therefore keeps it stopped; delete the file to re-enable auto-start. Server
 against a non-default `--db` (the test suite) never spawn one.
 
 **Thread discovery.** Without `--codex-thread`, each Codex message is queued into the most
-recently active Codex session registered from this repo within the last 24 h. With none, the
+recently active Codex session registered from this repo within the last 24 h, or, if there
+is none, from the bare home directory (where the operator runs the polymarket Codex). Other
+project directories never qualify. A coordinator that starts and finds deliveries left
+`dispatching` by a dead predecessor marks them `delivery_uncertain`; a queue call that raises
+is recorded the same way. With none, the
 dispatch is recorded `pending_target` (no delivery attempted) and is queued, once, on the
 first cycle after a Codex session registers -- unless the message was read in the meantime.
 `status` reports `codex_thread: null` with a hint (usually the Codex hook has not been

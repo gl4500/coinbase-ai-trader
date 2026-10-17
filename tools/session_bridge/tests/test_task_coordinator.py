@@ -295,6 +295,72 @@ class CodexThreadDiscoveryTests(unittest.TestCase):
         found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
         self.assertEqual(found["session_id"], "repo-thread")
 
+    def test_home_session_is_used_when_no_repo_session(self):
+        now = 1_000_000.0
+        self.register("codex", "home-thread", str(self.HOME), now - 60)
+        self.register("codex", "other-repo", str(self.HOME / "trading_app"), now - 1)
+        found = resolve_codex_thread(self.mailbox, self.REPO, self.HOME, now)
+        self.assertEqual(found["session_id"], "home-thread")
+
+    def dispatch_state(self, message_id):
+        db = sqlite3.connect(self.state)
+        try:
+            return db.execute("SELECT state FROM dispatches WHERE message_id=?",
+                              (message_id,)).fetchone()[0]
+        finally:
+            db.close()
+
+    def test_interrupted_pending_delivery_becomes_uncertain_on_restart(self):
+        message = self.claude.send("codex", "please review", "crash-1")
+        first = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                queue=lambda *a: (0, "queued"), on_event=lambda e: None,
+                                include_existing=True)
+        first.process_once()
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+
+        def interrupted(*_):
+            raise SystemExit("process killed mid-delivery")
+
+        first._queue_to = interrupted
+        with self.assertRaises(SystemExit):
+            first.process_once()
+        self.assertEqual(self.dispatch_state(message["id"]), "dispatching")
+
+        queued = []
+        restarted = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                    queue=lambda thread, prompt: queued.append(thread) or (0, "q"),
+                                    on_event=lambda e: None)
+        restarted.status()  # a status reader must not reclassify in-flight rows
+        self.assertEqual(self.dispatch_state(message["id"]), "dispatching")
+        stop_file = Path(self.temp.name) / "stop"
+        stop_file.touch()
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        run(restarted, 0.1, port=port, stop_file=stop_file)
+        self.assertEqual(self.dispatch_state(message["id"]), "delivery_uncertain")
+        restarted.process_once()
+        self.assertEqual(queued, [])
+        self.assertIsNone(self.codex.inbox()[0]["acknowledged"])
+
+    def test_queue_exception_is_recorded_uncertain_and_not_retried(self):
+        message = self.claude.send("codex", "please review", "crash-2")
+        calls = []
+
+        def failing(thread, prompt):
+            calls.append(thread)
+            raise RuntimeError("codex CLI crashed")
+
+        coordinator = TaskCoordinator(self.mailbox, self.state, root=self.REPO, home=self.HOME,
+                                      queue=failing, on_event=lambda e: None, include_existing=True)
+        coordinator.process_once()
+        self.register("codex", "late-thread", str(self.REPO), time.time())
+        coordinator.process_once()
+        coordinator.process_once()
+        self.assertEqual(calls, ["late-thread"])
+        self.assertEqual(self.dispatch_state(message["id"]), "delivery_uncertain")
+
     def test_dispatch_detail_names_the_thread(self):
         self.register("codex", "discovered-thread", str(self.REPO), time.time())
         self.claude.send("codex", "please review", "auto-4")
@@ -333,6 +399,9 @@ class CodexThreadDiscoveryTests(unittest.TestCase):
         calls = []
 
         class Flaky:
+            def recover_in_flight(self):
+                return 0
+
             def process_once(self):
                 calls.append(1)
                 if len(calls) == 1:
