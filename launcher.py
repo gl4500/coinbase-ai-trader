@@ -157,34 +157,30 @@ def _is_frontend_up(timeout: float = 1.5) -> bool:
         return False
 
 
-# Ports owned by the AI trading app — the launcher must never kill these.
-_TRADING_APP_PORTS = {8000, 5173}
+def _backend_cmd(python: str, mode: str = None) -> list:
+    """main.py command; the startup guard inside main.py owns all port decisions."""
+    return [python, "main.py"] + (["--mode", mode] if mode else [])
 
 
-def _free_port(port: int) -> None:
-    """
-    Kill the process bound to `port`.
-    Guard: refuses to touch trading_app ports so both apps can coexist.
-    """
-    if port in _TRADING_APP_PORTS:
-        _launcher_log.warning("Skipping _free_port(%d) — belongs to AI trading app", port)
-        return
-    try:
-        out = subprocess.check_output(
-            ["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL, timeout=5,
-            **_no_window(),
-        )
-        for line in out.splitlines():
-            if f":{port}" in line and ("LISTENING" in line or "LISTEN" in line):
-                parts = line.split()
-                pid = parts[-1]
-                if pid.isdigit() and int(pid) != os.getpid():
-                    subprocess.run(["taskkill", "/F", "/PID", pid],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   **_no_window())
-                    _launcher_log.info("Freed port %d (killed PID %s)", port, pid)
-    except Exception:
-        pass
+def _restart_plan(own_child_running: bool) -> str:
+    """The launcher kills only a backend it started itself (known PID). Any other
+    instance is handed to main.py's guard, which re-verifies ownership and health."""
+    return "kill_own_child_then_start" if own_child_running else "spawn_replace_unhealthy"
+
+
+_GUARD_EXIT = {
+    2: "Backend already running on 8001 (another instance holds the port) — not replaced.",
+    3: "Another backend instance holds the startup lock — not replaced.",
+    4: "Port 8001 owner could not be verified as this app's backend — not replaced; stop it manually.",
+    5: "Backend not proven unhealthy (healthy or ambiguous health reply) — not replaced.",
+    6: "Backend owner changed or taskkill failed during replacement — aborted.",
+    7: "Old backend did not release port 8001 in time — aborted.",
+    8: "Inconsistent port/lock state — refused.",
+}
+
+
+def _guard_exit_message(code: int):
+    return _GUARD_EXIT.get(code)
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -535,6 +531,18 @@ class LauncherApp(tk.Tk):
                     pass
         threading.Thread(target=drain, daemon=True).start()
 
+    def _report_guard_exit(self, proc: subprocess.Popen):
+        """If main.py's startup guard refuses, say why instead of failing silently."""
+        try:
+            code = proc.wait(timeout=120)
+        except Exception:
+            return
+        msg = _guard_exit_message(code)
+        if msg:
+            self._queue_log("warn", msg)
+            if self._backend_proc is proc:
+                self._backend_proc = None
+
     def _stream_proc(self, proc: subprocess.Popen, tag: str):
         """Stream stdout+stderr of a process to the log panel."""
         for line in proc.stdout:
@@ -597,11 +605,21 @@ class LauncherApp(tk.Tk):
         threading.Thread(target=loop, daemon=True).start()
 
     def _restart_backend(self):
-        self._log_line("warn", "Restarting backend…")
-        if self._backend_proc:
-            _kill_tree(self._backend_proc)
+        own = bool(self._backend_proc and self._backend_proc.poll() is None)
+        if _restart_plan(own) == "kill_own_child_then_start":
+            self._log_line("warn", "Restarting backend (launcher-owned process)…")
+            proc = self._backend_proc
+            _kill_tree(proc)
+            try:
+                proc.wait(timeout=15)
+            except Exception:
+                self._log_line("error", "Backend did not exit after kill — not starting a second one.")
+                return
             self._backend_proc = None
-        self._start_backend()
+            self._start_backend()
+        else:
+            self._log_line("warn", "Backend not launcher-owned — asking main.py to verify and replace if unhealthy…")
+            self._start_backend(mode="replace-unhealthy")
 
     def _update_status(self, be_up: bool, fe_up: bool):
         self.dot_ref_b.config(fg=GREEN if be_up else RED)
@@ -679,25 +697,24 @@ class LauncherApp(tk.Tk):
 
     # ── Process control ───────────────────────────────────────────────────────
 
-    def _start_backend(self):
-        if _is_url_up(BACKEND_URL):
-            self._log_line("system", "Backend already responding — skipping start.")
-            return
-        if self._backend_proc and self._backend_proc.poll() is None:
-            self._log_line("warn", "Backend process exists but not responding.")
-            return
+    def _start_backend(self, mode: str = None):
+        if mode is None:
+            if _is_url_up(BACKEND_URL):
+                self._log_line("system", "Backend already responding — skipping start.")
+                return
+            if self._backend_proc and self._backend_proc.poll() is None:
+                self._log_line("warn", "Backend process exists but not responding.")
+                return
 
         python = _python_exe()
         self._log_line("system", f"Starting backend with {Path(python).name}…")
-        self._log_line("system", "Freeing port 8001 if occupied…")
-        _free_port(8001)
 
         try:
             # Run via `python main.py` so main.py's port-cleanup and
             # RotatingFileHandler logging initialise correctly — same pattern
             # as the AI trading app.
             self._backend_proc = subprocess.Popen(
-                [python, "main.py"],
+                _backend_cmd(python, mode),
                 cwd=str(BACKEND_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -713,6 +730,7 @@ class LauncherApp(tk.Tk):
                 daemon=True,
             ).start()
             self._log_line("backend", f"Backend PID {self._backend_proc.pid} started.")
+            threading.Thread(target=self._report_guard_exit, args=(self._backend_proc,), daemon=True).start()
         except Exception as e:
             self._log_line("error", f"Backend start failed: {e}")
 

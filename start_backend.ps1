@@ -1,5 +1,8 @@
-# Coinbase Trader — Backend Startup Script
-# Mirrors trading_app pattern: venv check, port cleanup, log dirs, then uvicorn
+﻿# Coinbase Trader — Backend Startup Script
+# venv check, log dirs, then main.py. main.py's startup guard refuses an occupied port;
+# pass -Replace to ask it to replace a running instance it can verify as its own.
+
+param([switch]$Replace)
 
 $ErrorActionPreference = "Stop"
 $root   = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -37,20 +40,10 @@ if (-not (Test-Path $envFile)) {
     Write-Host "  Edit .env with your Coinbase CDP API keys before trading." -ForegroundColor Yellow
 }
 
-# 5. Free port 8001 if already in use
-Write-Host "  Checking port 8001..." -ForegroundColor Yellow
-$occupied = netstat -ano 2>$null | Select-String ":8001\s.*LISTENING"
-if ($occupied) {
-    $pid_ = ($occupied -split '\s+')[-1]
-    if ($pid_ -match '^\d+$') {
-        Write-Host "  Port 8001 occupied by PID $pid_ — killing..." -ForegroundColor Yellow
-        taskkill /F /PID $pid_ 2>$null | Out-Null
-        Start-Sleep -Milliseconds 500
-    }
-}
-
-# 6. Start backend
+# 5. Start backend (the guard in main.py decides whether the port may be used)
 Write-Host "  Starting backend on http://localhost:8001 ..." -ForegroundColor Green
 Write-Host "  Logs → backend\logs\backend.log" -ForegroundColor Gray
 Set-Location (Join-Path $root "backend")
-& $python "main.py"
+$mainArgs = @("main.py")
+if ($Replace) { $mainArgs += @("--mode", "replace") }
+& $python @mainArgs

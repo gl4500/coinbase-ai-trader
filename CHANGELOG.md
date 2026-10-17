@@ -7,6 +7,27 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.116 — 2026-10-17 — Backend start refuses instead of killing
+
+- Incident: starting the backend while 8001 was live killed the running instance (every entry
+  point ran `taskkill /F` on the port owner); the new process then hit `disk I/O error` opening
+  the DB. The handle-release explanation remains a hypothesis.
+- New `backend/startup_guard.py`, the only startup policy: single-instance lock
+  (`backend/.locks/backend-<port>.lock`), refuse an occupied port (exit 2) or held lock (3);
+  `--mode replace` (operator) / `replace-unhealthy` (launcher watchdog) replace only an
+  instance proven to be this guard's (lock PID + creation time + backend dir), after
+  revalidation, with a checked `taskkill`, a wait for exit AND port release, and a lock/port
+  recheck. Unverifiable owners (incl. today's pre-guard instance) are refused (4). Health
+  must be positively unhealthy for >= 30 s; ambiguous replies refuse (5).
+- `main.py`, `launcher.py`, `start_app.py`, `start_backend.ps1` no longer kill anything;
+  `start_backend.ps1` gains `-Replace` and a UTF-8 BOM (it had 4 parse errors under
+  Windows PowerShell 5.1).
+- New `backend/db_open.py`: init opens with a bounded retry (transient OperationalErrors
+  only, fresh connection each attempt, 30 s total); corruption is never retried; after a
+  `disk I/O error` recovery a 60 s-capped `quick_check` must return ok, else startup fails.
+- Tests: test_startup_guard (41), test_db_open (17), test_startup_entrypoints (9).
+  Design reviewed by Codex (v3 approved, conditions cde4301f).
+
 ### Session 58.114 — 2026-10-17 — Session link connects itself
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
