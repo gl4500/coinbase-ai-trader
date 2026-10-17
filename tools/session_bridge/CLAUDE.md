@@ -46,8 +46,9 @@ No session needs a manual step to join the link. The hook is user-level for both
 scoped by cwd to this repo or the bare home dir (`hooks.in_scope`); every MCP server start
 runs `autostart.ensure_coordinator`, which honours `.coordination/task-coordinator.stop`;
 the coordinator resolves the Codex thread from the `sessions` rows the hooks write (newest
-repo-tree Codex session, else newest bare-home one, 24 h bound). Codex reads hooks.json only
-when a session starts, so an already-open Codex session registers only after it restarts. An idle Claude session still cannot be woken -- it
+repo-tree Codex session, else newest bare-home one, 24 h bound). Unverified (2026-10-17): an
+already-open Codex session did not register after its hooks were trusted; likely Codex
+loads hooks.json only at session start, so restart it before concluding the hook is broken. An idle Claude session still cannot be woken -- it
 sees mail on its next turn. If Codex mail sits `mailbox_only`, check `status` for
 `codex_thread_hint` before suspecting the peer.
 
