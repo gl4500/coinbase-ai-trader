@@ -29,6 +29,10 @@ class DatabaseIntegrityError(RuntimeError):
     pass
 
 
+class DatabaseOpenTimeout(TimeoutError):
+    """An open finished only after the total deadline; the connection was closed and refused."""
+
+
 class ConfigureError(Exception):
     """Raised by connect() when the file opened but configuration failed; carries the conn to close."""
 
@@ -59,21 +63,41 @@ async def open_with_retry(
     sleep=asyncio.sleep,
     clock=time.monotonic,
 ):
-    """Return (connection, had_io_error). Raises the last error once the deadline would be passed."""
+    """Return (connection, had_io_error) within `deadline_secs` of monotonic time.
+
+    A retry starts only if a full attempt (INIT_BUSY_MS) still fits in the remaining
+    budget, and the first attempt's busy timeout is capped to the budget. An attempt that
+    still overruns (OS I/O blocked past the busy timeout cannot be interrupted from here)
+    is closed and refused rather than accepted late.
+    """
     start = clock()
     had_io = False
     attempt = 0
+    last_exc = None
     while True:
+        remaining = deadline_secs - (clock() - start)
+        if remaining <= 0:
+            raise last_exc or DatabaseOpenTimeout(f"no DB open attempt fit in {deadline_secs:.0f}s")
+        busy_ms = max(1, min(INIT_BUSY_MS, int(remaining * 1000)))
         attempt += 1
         try:
-            return await connect(path, INIT_BUSY_MS), had_io
+            conn = await connect(path, busy_ms)
         except ConfigureError as ce:
             await ce.conn.close()
             exc = ce.cause
         except sqlite3.Error as e:
             exc = e
+        else:
+            elapsed = clock() - start
+            if elapsed > deadline_secs:
+                await conn.close()
+                raise DatabaseOpenTimeout(
+                    f"DB opened after {elapsed:.1f}s, past the {deadline_secs:.0f}s deadline; refused"
+                )
+            return conn, had_io
         if not _retryable(exc):
             raise exc
+        last_exc = exc
         had_io = had_io or "disk i/o error" in str(exc).lower()
         backoff = BACKOFFS[min(attempt - 1, len(BACKOFFS) - 1)]
         elapsed = clock() - start
@@ -85,7 +109,7 @@ async def open_with_retry(
             exc,
             getattr(exc, "sqlite_errorname", "?"),
         )
-        if elapsed + backoff > deadline_secs:
+        if elapsed + backoff + INIT_BUSY_MS / 1000 > deadline_secs:
             raise exc
         await sleep(backoff)
 

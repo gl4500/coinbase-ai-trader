@@ -137,18 +137,6 @@ def _is_url_up(url: str, timeout: float = 5.0) -> bool:
         return False
 
 
-def _is_backend_healthy(timeout: float = 5.0) -> bool:
-    """Watchdog probe. /api/health returns 503 when the scan loop is hung while
-    HTTP is still serving (the 2026-08-01 stall). urlopen raises on non-2xx, so
-    a stalled-but-serving backend reads as unhealthy and the 3-strike restart
-    fires. /api/status stays the readiness probe for startup checks."""
-    try:
-        urllib.request.urlopen(BACKEND_HEALTH_URL, timeout=timeout)
-        return True
-    except Exception:
-        return False
-
-
 def _is_frontend_up(timeout: float = 1.5) -> bool:
     try:
         urllib.request.urlopen(FRONTEND_URL, timeout=timeout)
@@ -181,6 +169,83 @@ _GUARD_EXIT = {
 
 def _guard_exit_message(code: int):
     return _GUARD_EXIT.get(code)
+
+
+def _health_state(status, exc) -> str:
+    """/api/health outcome -> 'ok' | 'unhealthy' (503 or timeout) | 'down' (refused) | 'ambiguous'."""
+    if exc is not None:
+        if isinstance(exc, ConnectionRefusedError):
+            return "down"
+        if isinstance(exc, TimeoutError):
+            return "unhealthy"
+        return "ambiguous"
+    return {200: "ok", 503: "unhealthy"}.get(status, "ambiguous")
+
+
+def _probe_backend_health(timeout: float = 5.0) -> str:
+    import socket
+    import urllib.error
+    try:
+        with urllib.request.urlopen(BACKEND_HEALTH_URL, timeout=timeout) as r:
+            return _health_state(r.status, None)
+    except urllib.error.HTTPError as e:
+        return _health_state(e.code, None)
+    except urllib.error.URLError as e:
+        reason = e.reason
+        if isinstance(reason, socket.timeout):
+            reason = TimeoutError()
+        return _health_state(None, reason if isinstance(reason, BaseException) else OSError(str(reason)))
+    except (socket.timeout, TimeoutError):
+        return _health_state(None, TimeoutError())
+    except OSError as e:
+        return _health_state(None, e)
+
+
+class _Watchdog:
+    """Pure restart policy for the status loop (no tk, no I/O).
+
+    - Own child (launcher-started): any non-ok probe counts; 3 strikes -> restart_own.
+    - Not owned: only a positively 'unhealthy' reply counts; 3 strikes -> replace_external
+      (main.py --mode replace-unhealthy, which re-verifies ownership and health itself).
+    - In flight (a start or replacement the launcher just spawned): suppress all action until
+      the backend is healthy, the process exits, or inflight_secs passes.
+    - A replacement that exits without a healthy backend starts a cooldown, so a refusing
+      guard (e.g. unverifiable owner) is not respawned every few seconds.
+    """
+
+    threshold = 3
+    inflight_secs = 180.0
+    cooldown_secs = 600.0
+
+    def __init__(self):
+        self.fails = 0
+        self.inflight_until = None
+        self.cooldown_until = None
+
+    def begin_inflight(self, now: float) -> None:
+        self.inflight_until = now + self.inflight_secs
+        self.fails = 0
+
+    def step(self, health: str, own_alive: bool, now: float) -> str:
+        if self.inflight_until is not None:
+            if health == "ok" or not own_alive or now >= self.inflight_until:
+                if not own_alive and health != "ok":
+                    self.cooldown_until = now + self.cooldown_secs
+                self.inflight_until = None
+            else:
+                return "wait"
+        if health == "ok":
+            self.fails = 0
+            self.cooldown_until = None
+            return "none"
+        if not own_alive and (health != "unhealthy" or (self.cooldown_until is not None and now < self.cooldown_until)):
+            self.fails = 0
+            return "none"
+        self.fails += 1
+        if self.fails < self.threshold:
+            return "none"
+        self.fails = 0
+        return "restart_own" if own_alive else "replace_external"
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -300,6 +365,7 @@ class LauncherApp(tk.Tk):
         self._frontend_proc: subprocess.Popen | None = None
         self._log_queue: queue.Queue = queue.Queue()
         self._running = True
+        self._watchdog = _Watchdog()
         self._startup_var: tk.BooleanVar | None = None   # set in _build_ui
 
         # First-run only: default Start-on-login to ON so the launcher (and
@@ -577,32 +643,23 @@ class LauncherApp(tk.Tk):
     # ── Status loop ───────────────────────────────────────────────────────────
 
     def _start_status_loop(self):
-        _BE_FAIL_THRESH = 3
-        be_fail_count = 0
-
         def loop():
-            nonlocal be_fail_count
             while self._running:
-                be_up = _is_backend_healthy()
-                fe_up = _is_frontend_up()
-                self.after(0, self._update_status, be_up, fe_up)
-                if be_up:
-                    be_fail_count = 0
-                elif self._backend_proc and self._backend_proc.poll() is None:
-                    # Process alive but not accepting connections — WinError 64
-                    be_fail_count += 1
-                    if be_fail_count >= _BE_FAIL_THRESH:
-                        be_fail_count = 0
-                        self._queue_log(
-                            "warn",
-                            "Backend not responding (3 checks) — auto-restarting (WinError 64 recovery)…",
-                        )
-                        self.after(0, self._restart_backend)
-                else:
-                    be_fail_count = 0
+                self._status_tick(_probe_backend_health(), _is_frontend_up(), time.monotonic())
                 time.sleep(1)
 
         threading.Thread(target=loop, daemon=True).start()
+
+    def _status_tick(self, health: str, fe_up: bool, now: float):
+        self.after(0, self._update_status, health == "ok", fe_up)
+        own = bool(self._backend_proc and self._backend_proc.poll() is None)
+        action = self._watchdog.step(health, own, now)
+        if action == "restart_own":
+            self._queue_log("warn", "Backend not responding (3 checks) — restarting the launcher-owned backend…")
+            self.after(0, self._restart_backend)
+        elif action == "replace_external":
+            self._queue_log("warn", "External backend unhealthy (3 checks) — asking main.py to verify and replace…")
+            self.after(0, self._start_backend, "replace-unhealthy")
 
     def _restart_backend(self):
         own = bool(self._backend_proc and self._backend_proc.poll() is None)
@@ -730,6 +787,7 @@ class LauncherApp(tk.Tk):
                 daemon=True,
             ).start()
             self._log_line("backend", f"Backend PID {self._backend_proc.pid} started.")
+            self._watchdog.begin_inflight(time.monotonic())
             threading.Thread(target=self._report_guard_exit, args=(self._backend_proc,), daemon=True).start()
         except Exception as e:
             self._log_line("error", f"Backend start failed: {e}")

@@ -25,7 +25,13 @@ Format: reverse-chronological by session date.
 - New `backend/db_open.py`: init opens with a bounded retry (transient OperationalErrors
   only, fresh connection each attempt, 30 s total); corruption is never retried; after a
   `disk I/O error` recovery a 60 s-capped `quick_check` must return ok, else startup fails.
-- Tests: test_startup_guard (41), test_db_open (17), test_startup_entrypoints (9).
+- Launcher watchdog is a pure `_Watchdog` state machine: an unhealthy non-owned backend is handed
+  to `replace-unhealthy`; spawned starts/replacements are in flight (no restarts) until healthy,
+  exited or 180 s; a refused replacement starts a 600 s cooldown (Codex P105-01/02).
+- DB open retries start only if a full attempt fits the 30 s budget; a late success is closed and
+  refused (Codex P105-03).
+- Tests: test_startup_guard (41), test_db_open (21), test_startup_entrypoints (9),
+  test_launcher_watchdog (15).
   Design reviewed by Codex (v3 approved, conditions cde4301f).
 
 ### Session 58.114 — 2026-10-17 — Session link connects itself

@@ -210,3 +210,81 @@ async def test_init_db_creates_schema_through_bounded_open(tmp_path, monkeypatch
     con = sqlite3.connect(p)
     assert con.execute("SELECT name FROM sqlite_master WHERE name='products'").fetchone()
     con.close()
+
+
+def _slow_script(clock, *outcomes):
+    """connect() that spends its full busy budget (as a blocked lock wait would) before each outcome."""
+    calls = []
+
+    async def connect(path, busy_ms):
+        calls.append(busy_ms)
+        clock.t += busy_ms / 1000
+        o = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+        if isinstance(o, BaseException):
+            raise o
+        return o
+
+    return connect, calls
+
+
+@pytest.mark.asyncio
+async def test_slow_attempts_never_exceed_the_total_deadline():
+    clock = Clock()
+    connect, calls = _slow_script(clock, _op("database is locked"))
+    with pytest.raises(sqlite3.OperationalError):
+        await db_open.open_with_retry(
+            "x.db", deadline_secs=30.0, connect=connect, sleep=clock.sleep, clock=clock.now
+        )
+    assert clock.t <= 30.0 + 1e-9
+    assert all(
+        b == db_open.INIT_BUSY_MS for b in calls
+    )  # a retry starts only if a full attempt fits
+
+
+@pytest.mark.asyncio
+async def test_late_success_after_deadline_is_refused_and_closed():
+    clock = Clock()
+    late = FakeConn()
+
+    async def connect(path, busy_ms):
+        clock.t += 31.0  # e.g. OS I/O blocked past the busy timeout
+        return late
+
+    with pytest.raises(db_open.DatabaseOpenTimeout):
+        await db_open.open_with_retry(
+            "x.db", deadline_secs=30.0, connect=connect, sleep=clock.sleep, clock=clock.now
+        )
+    assert late.closed is True
+
+
+@pytest.mark.asyncio
+async def test_no_attempt_starts_without_remaining_budget():
+    clock = Clock()
+    clock.t = 0.0
+    connect, calls = _slow_script(clock, _op("database is locked"))
+    with pytest.raises(sqlite3.OperationalError):
+        await db_open.open_with_retry(
+            "x.db", deadline_secs=6.0, connect=connect, sleep=clock.sleep, clock=clock.now
+        )
+    assert clock.t <= 6.0 + 1e-9
+
+
+@pytest.mark.asyncio
+async def test_codex_counterexample_fixed_cost_attempts_stop_before_deadline():
+    """Codex P105-03: every connect takes 5 s; the 5th attempt (would end at 32.5 s) must not start."""
+    clock = Clock()
+    calls = []
+    conn = FakeConn()
+
+    async def connect(path, busy_ms):
+        calls.append(clock.t)
+        clock.t += 5
+        if len(calls) == 5:
+            return conn
+        raise _op("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError):
+        await db_open.open_with_retry(
+            "x.db", deadline_secs=30, connect=connect, sleep=clock.sleep, clock=clock.now
+        )
+    assert len(calls) == 4 and clock.t <= 30 and conn.closed is False
