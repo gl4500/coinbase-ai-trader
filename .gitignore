@@ -88,3 +88,6 @@ tools/__pycache__/
 
 # slow-trend research outputs (snapshots, ledger, reports; never committed)
 backend/data/research/
+
+# Startup guard instance locks (backend/startup_guard.py)
+backend/.locks/
