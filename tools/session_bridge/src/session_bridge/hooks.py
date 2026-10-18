@@ -7,12 +7,32 @@ from pathlib import Path
 from session_bridge.store import Store
 
 
+def _plain(path) -> str | None:
+    """Strip the Win32 extended-length prefix; None for device-namespace paths.
+
+    \\\\?\\C:\\x -> C:\\x and \\\\?\\UNC\\srv\\share -> \\\\srv\\share. Device forms (\\\\.\\...,
+    \\\\?\\GLOBALROOT, \\\\?\\Volume{...}) cannot be compared with a repo path, so they never match.
+    """
+    p = str(path).replace("/", "\\")
+    if p.startswith("\\\\.\\"):
+        return None
+    if p.startswith("\\\\?\\"):
+        rest = p[4:]
+        if rest[:4].upper() == "UNC\\":
+            return "\\\\" + rest[4:]
+        if len(rest) >= 3 and rest[0].isalpha() and rest[1] == ":" and rest[2] == "\\":
+            return rest
+        return None
+    return str(path)
+
+
 def _norm(path) -> str:
     return os.path.normcase(os.path.normpath(str(path))).rstrip("\\/")
 
 
 def in_scope(cwd: str, root: Path, home: Path) -> bool:
     """Polymarket peer mail belongs to sessions in the repo tree or the bare home directory."""
+    cwd = _plain(cwd) if cwd else cwd
     if not cwd or not os.path.isabs(cwd):
         return False
     here, base = _norm(cwd), _norm(root)

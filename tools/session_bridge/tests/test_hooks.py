@@ -32,6 +32,24 @@ class InScopeTests(unittest.TestCase):
         for cwd in ("temporary", "", "."):
             self.assertFalse(in_scope(cwd, ROOT, HOME))
 
+    def test_extended_length_drive_paths_are_normalized(self):
+        self.assertTrue(in_scope("\\\\?\\C:\\Users\\gl450\\polymarket_app", ROOT, HOME))
+        self.assertTrue(in_scope("\\\\?\\c:\\users\\gl450\\polymarket_app\\backend", ROOT, HOME))
+        self.assertTrue(in_scope("\\\\?\\C:\\Users\\gl450", ROOT, HOME))
+        self.assertFalse(in_scope("\\\\?\\C:\\Users\\gl450\\trading_app", ROOT, HOME))
+
+    def test_extended_length_unc_paths_are_normalized(self):
+        unc_root = Path(r"\\server\share\polymarket_app")
+        self.assertTrue(in_scope("\\\\?\\UNC\\server\\share\\polymarket_app\\backend", unc_root, HOME))
+        self.assertFalse(in_scope("\\\\?\\UNC\\server\\share\\other", unc_root, HOME))
+
+    def test_device_namespace_paths_are_rejected(self):
+        for cwd in ("\\\\.\\C:\\Users\\gl450\\polymarket_app",
+                    "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\Users\\gl450\\polymarket_app",
+                    "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\Users\\gl450\\polymarket_app",
+                    "//./C:/Users/gl450/polymarket_app"):
+            self.assertFalse(in_scope(cwd, ROOT, HOME), cwd)
+
 
 class HandleHookScopeTests(unittest.TestCase):
     def setUp(self):
