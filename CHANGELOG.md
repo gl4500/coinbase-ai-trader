@@ -34,6 +34,16 @@ Format: reverse-chronological by session date.
   test_launcher_watchdog (15).
   Design reviewed by Codex (v3 approved, conditions cde4301f).
 
+### Session 58.115 — 2026-10-17 — Session-link scope accepts extended-length paths
+
+`tools/session_bridge` only.
+
+- `hooks.in_scope` rejected a cwd written in Win32 extended-length form (`\\?\C:\...`), so a
+  session reporting its directory that way never received peer mail (Codex reproducer
+  `artifacts/hook_diagnostic_20261017/probe_scope.py`). `\\?\C:\x` and `\\?\UNC\srv\share\x`
+  are now compared in their plain form; device-namespace paths (`\\.\`, `\\?\GLOBALROOT`,
+  `\\?\Volume{...}`) never match. Bridge suite 92 → 95.
+
 ### Session 58.114 — 2026-10-17 — Session link connects itself
 
 `tools/session_bridge` only. No backend, agent, threshold or model change.
