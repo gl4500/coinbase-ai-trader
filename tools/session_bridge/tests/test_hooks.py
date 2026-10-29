@@ -43,6 +43,28 @@ class InScopeTests(unittest.TestCase):
         self.assertTrue(in_scope("\\\\?\\UNC\\server\\share\\polymarket_app\\backend", unc_root, HOME))
         self.assertFalse(in_scope("\\\\?\\UNC\\server\\share\\other", unc_root, HOME))
 
+    def test_extended_length_root_and_home_operands_are_normalized(self):
+        # Codex P104-CH01: root comes from Path(launcher).resolve(), which keeps a \\?\ prefix.
+        ext_root = Path("\\\\?\\C:\\Users\\gl450\\polymarket_app")
+        ext_home = Path("\\\\?\\C:\\Users\\gl450")
+        self.assertTrue(in_scope("C:\\Users\\gl450\\polymarket_app\\backend", ext_root, ext_home))
+        self.assertTrue(in_scope("C:\\Users\\gl450", ext_root, ext_home))
+        self.assertTrue(in_scope("\\\\?\\C:\\Users\\gl450\\polymarket_app", ext_root, HOME))
+        self.assertFalse(in_scope("C:\\Users\\gl450\\polymarket_app_old", ext_root, ext_home))
+        self.assertFalse(in_scope("C:\\Users\\gl450\\trading_app", ext_root, ext_home))
+
+    def test_extended_length_unc_root_operand_is_normalized(self):
+        ext_unc_root = Path("\\\\?\\UNC\\server\\share\\polymarket_app")
+        self.assertTrue(in_scope("\\\\server\\share\\polymarket_app\\backend", ext_unc_root, HOME))
+        self.assertFalse(in_scope("\\\\server\\share\\other", ext_unc_root, HOME))
+
+    def test_device_namespace_root_or_home_never_matches(self):
+        dev_root = Path("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\Users\\gl450\\polymarket_app")
+        dev_home = Path("\\\\.\\C:\\Users\\gl450")
+        self.assertFalse(in_scope("C:\\Users\\gl450\\polymarket_app", dev_root, HOME))
+        self.assertFalse(in_scope("C:\\Users\\gl450", ROOT, dev_home))
+        self.assertTrue(in_scope("C:\\Users\\gl450\\polymarket_app", ROOT, dev_home))
+
     def test_device_namespace_paths_are_rejected(self):
         for cwd in ("\\\\.\\C:\\Users\\gl450\\polymarket_app",
                     "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\Users\\gl450\\polymarket_app",

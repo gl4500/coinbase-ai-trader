@@ -7,6 +7,15 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.117 — 2026-10-29 — Scope check normalizes repo/home operands too
+
+`tools/session_bridge` only. Follow-up to 58.115 (Codex review note P104-CH01).
+
+- `hooks.in_scope` normalized only the session cwd. The repo root comes from
+  `Path(launcher).resolve()`, which keeps a `\\?\` prefix, so an extended-form root or home
+  never matched a plain cwd. Root and home now go through the same `_plain()` conversion;
+  a device-namespace root or home never matches. Bridge suite 95 → 98.
+
 ### Session 58.116 — 2026-10-17 — Backend start refuses instead of killing
 
 - Incident: starting the backend while 8001 was live killed the running instance (every entry
