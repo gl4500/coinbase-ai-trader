@@ -7,6 +7,131 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.117 — 2026-10-29 — Scope check normalizes repo/home operands too
+
+`tools/session_bridge` only. Follow-up to 58.115 (Codex review note P104-CH01).
+
+- `hooks.in_scope` normalized only the session cwd. The repo root comes from
+  `Path(launcher).resolve()`, which keeps a `\\?\` prefix, so an extended-form root or home
+  never matched a plain cwd. Root and home now go through the same `_plain()` conversion;
+  a device-namespace root or home never matches. Bridge suite 95 → 98.
+
+### Session 58.116 — 2026-10-17 — Backend start refuses instead of killing
+
+- Incident: starting the backend while 8001 was live killed the running instance (every entry
+  point ran `taskkill /F` on the port owner); the new process then hit `disk I/O error` opening
+  the DB. The handle-release explanation remains a hypothesis.
+- New `backend/startup_guard.py`, the only startup policy: single-instance lock
+  (`backend/.locks/backend-<port>.lock`), refuse an occupied port (exit 2) or held lock (3);
+  `--mode replace` (operator) / `replace-unhealthy` (launcher watchdog) replace only an
+  instance proven to be this guard's (lock PID + creation time + backend dir), after
+  revalidation, with a checked `taskkill`, a wait for exit AND port release, and a lock/port
+  recheck. Unverifiable owners (incl. today's pre-guard instance) are refused (4). Health
+  must be positively unhealthy for >= 30 s; ambiguous replies refuse (5).
+- `main.py`, `launcher.py`, `start_app.py`, `start_backend.ps1` no longer kill anything;
+  `start_backend.ps1` gains `-Replace` and a UTF-8 BOM (it had 4 parse errors under
+  Windows PowerShell 5.1).
+- New `backend/db_open.py`: init opens with a bounded retry (transient OperationalErrors
+  only, fresh connection each attempt, 30 s total); corruption is never retried; after a
+  `disk I/O error` recovery a 60 s-capped `quick_check` must return ok, else startup fails.
+- Launcher watchdog is a pure `_Watchdog` state machine: an unhealthy non-owned backend is handed
+  to `replace-unhealthy`; spawned starts/replacements are in flight (no restarts) until healthy,
+  exited or 180 s; a refused replacement starts a 600 s cooldown (Codex P105-01/02).
+- DB open retries start only if a full attempt fits the 30 s budget; a late success is closed and
+  refused (Codex P105-03).
+- Tests: test_startup_guard (41), test_db_open (21), test_startup_entrypoints (9),
+  test_launcher_watchdog (15).
+  Design reviewed by Codex (v3 approved, conditions cde4301f).
+
+### Session 58.115 — 2026-10-17 — Session-link scope accepts extended-length paths
+
+`tools/session_bridge` only.
+
+- `hooks.in_scope` rejected a cwd written in Win32 extended-length form (`\\?\C:\...`), so a
+  session reporting its directory that way never received peer mail (Codex reproducer
+  `artifacts/hook_diagnostic_20261017/probe_scope.py`). `\\?\C:\x` and `\\?\UNC\srv\share\x`
+  are now compared in their plain form; device-namespace paths (`\\.\`, `\\?\GLOBALROOT`,
+  `\\?\Volume{...}`) never match. Bridge suite 92 → 95.
+
+### Session 58.114 — 2026-10-17 — Session link connects itself
+
+`tools/session_bridge` only. No backend, agent, threshold or model change.
+
+- Three Codex messages sat unread for three days and a review request went unanswered,
+  because every delivery path needed a manual step: the Claude hook was project-local (a
+  session launched elsewhere never loaded it), Codex had no bridge hook, and the coordinator
+  only ran when started by hand with a thread ID.
+- `install_hooks.py` now installs the hook at user level for Claude and Codex and removes the
+  old project-local copies; `hooks.in_scope` limits it to this repo and the home dir.
+- `autostart.ensure_coordinator`: every MCP server start launches the one coordinator if none
+  holds its lock, unless the operator's stop file exists.
+- The coordinator discovers the Codex thread from hook-registered sessions (newest in this
+  repo, else the bare home dir, 24 h bound); `--codex-thread` still overrides. Pending-target
+  retry, in-flight recovery on restart, git-based worktree guard (Codex review of #102).
+  Bridge suite 50 → 92.
+
+### Session 58.113 — 2026-10-11 — Peer review required before merge
+
+- New CLAUDE.md rule (Commit Standards → "Peer review before merge"): every PR needs an explicit
+  sign-off, naming the reviewed head SHA, from the other agent via the session-link mailbox before it
+  is merged; any later commit or rebase needs the reviewer to reconfirm. Only the operator
+  can waive it. Prompted by PRs #96 and #98, which were merged without a completed Codex review.
+  Docs only.
+
+### Session 58.112 — 2026-10-11 — requirements-dev.txt installable again
+
+- **Bug:** Dependabot bumped pytest to 9.0.3 (fixing GHSA-6w46-j5rx-g56g), but `requirements-dev.txt` still
+  pinned `pytest-asyncio==0.24.0` and `pytest-cov==6.0.0` while the `requirements.txt` it includes pins
+  1.3.0 and 7.1.0. `pip install -r backend/requirements-dev.txt` failed with ResolutionImpossible. CI
+  installs `requirements.txt` only, so nothing caught it.
+- **Fix:** the testing packages are pinned once, in `requirements.txt`; the duplicates are removed from
+  `requirements-dev.txt`.
+- **Guard:** `backend/tests/test_requirements_pins.py` fails if any package is pinned to two different
+  versions across the two files (red on the old files, green now). A pip dry-run of the dev file resolves.
+  Names are PyPA-normalized (`pytest.asyncio` = `pytest-asyncio`) and conflicting duplicates inside one
+  file are kept, not overwritten (both holes found in Codex review). Exact `==` pins only.
+
+### Session 58.111 — 2026-10-11 — CLAUDE.md trim (from /doctor)
+
+- **Removed:** the stale "Current Test Coverage" table (it said ~970 tests; the suite now has 1,696).
+- **Replaced:** the two cleanup code snippets, called "the only sanctioned cleanup commands", with
+  kill-by-identity rules (port 8001 aware; never blanket-kill python).
+- **Moved:** the 7-step 8002 shadow → 8001 promotion procedure to the new project skill
+  `.claude/skills/promote-model/SKILL.md`; the port rules stay in CLAUDE.md with a pointer.
+- CLAUDE.md shrinks from 30,456 to 28,894 chars (about 390 fewer est. tokens per session). Docs only.
+
+### Session 58.110 — 2026-10-11 — Frontend security/build migration (Codex)
+
+- **Trigger:** the operator ran `npm audit fix --force`, which moved the frontend to Vite 8.3.4 and
+  Tailwind 4.3.3 and broke the CSS build and the React plugin's peer dependencies.
+- **Kept:** Vitest/UI/mocker 4.1.11, Vite 8.3.4, Tailwind 4.3.3.
+- **Changed:**
+  - updated the React plugin to 6.1.2 and added `@tailwindcss/postcss` 4.3.3;
+  - switched to an ESM package and migrated the CSS import and config;
+  - added a composable badge utility;
+  - restored Tailwind v3 control defaults (border, placeholder, button cursor);
+  - renamed the obsolete shrink/outline utilities in 4 components;
+  - added an `npm test` script.
+- **Verified (Codex):** the build is warning-free; 5 Vitest tests pass; 7 compiled-CSS regressions
+  pass (`backend/tests/test_frontend_css.py`, skipped when frontend deps are absent); npm audit
+  reports 0 issues and `npm ls` is valid. A Chrome smoke test rendered the app with no fatal error.
+- Transplanted unchanged from the uncommitted working tree on `fix/replay-closed-bar-filter` onto a fresh
+  branch off main (operator-approved).
+
+### Session 58.109 — 2026-10-11 — CI: Fortify workflow removed; CodeQL added
+
+- **CodeQL** (`.github/workflows/codeql.yml`, "CodeQL Advanced") was added by the operator via GitHub
+  (e5ee808). It analyses Python, TypeScript and the GitHub Actions workflows on push/PR to main and
+  weekly; Bandit covers Python only, so the frontend previously had no static analysis. Results go
+  to Security -> Code scanning. It is not part of the ci.yml Security gate.
+- **`fortify.yml` removed** (operator decision). It was the GitHub starter template added the same
+  day (704e221). Fortify on Demand is a paid OpenText service (15-day trial only) and no account or
+  `FOD_*` secrets exist, so every run failed at login (`Either FOD_CLIENT_ID or FOD_USER must be
+  declared`). CodeQL, Bandit, Snyk, pip-audit/npm audit and Gitleaks cover the same ground for this
+  project. To reinstate it: restore the file from 704e221, add the FoD secrets, and upgrade the action
+  from v1.7.0 to the current v3 release.
+- Context: `SNYK_TOKEN` was renewed by the operator on 2026-10-11, and Snyk passes again on main.
+
 ### Session 58.108 — 2026-10-10 — CoinPaprika identity fix: TREE and EDGE pointed at the wrong tokens
 
 `_PRODUCT_TO_CP_ID` mapped two Coinbase products to unrelated CoinPaprika coins, so their market
@@ -31,6 +156,384 @@ survive and mix two assets. When this code reaches 8001:
 Doing step 1 before deployment is useless: the old mapping would refetch the wrong token. Research
 datasets already quarantine both identities (`coinpaprika_clean_v3`). Test:
 `test_tree_and_edge_map_to_the_coinbase_listed_tokens`.
+
+### Session 58.107 — 2026-10-10 — Net-of-fee paper accounting
+
+**Why.** The paper book fills at the last-trade price and charges no fee, so every gross `pnl`
+figure overstated results. The account's verified Coinbase US Intro tier (2026-10-03,
+read-only `transaction_summary`) is 0.50% maker / 0.90% taker per side: a 1.8% taker round trip.
+`exit_thresholds.FEE_RATE` (0.006) is NOT a PnL deduction; it only sets the trail's minimum
+giveback and is deliberately left unchanged (changing it would change live exits untested).
+
+**Change (accounting only; no sizing, exit or paper-balance change):**
+- New pure `services/fees.py`: `PAPER_TAKER_FEE_RATE` 0.009, `PAPER_MAKER_FEE_RATE` 0.005,
+  `round_trip_fee(usd_open, usd_close, rate)` (each side on its own notional; impossible inputs
+  raise).
+- `trades` gains `fee_rate`, `fee_usd` and `pnl_net` (ALTER migration). `database.close_trade`
+  takes `fee_rate` (default taker) and records all three. Gross `pnl` and `balance_after` are
+  stored unchanged. The restart path, which has no open row, charges both sides on the close
+  notional.
+- Historical rows stay NULL: no retroactive fee attribution. `close_trade_by_id`
+  (reconcile, forced `pnl=0`) writes no fee.
+- New `database.get_fee_summary(since=None)`. `/api/performance` adds `net_of_fees` to `overall`
+  and `rolling_30d`: closed trades, fee-bearing trades, gross over fee-bearing rows, fees and net.
+  Net covers only fee-bearing rows; existing gross fields are unchanged.
+
+**Tests:** `test_fees.py` (7) + `test_trade_fee_accounting.py` (10, incl. the endpoint). Three
+mutations were caught: the open notional replaced by the close notional; net summed over all rows;
+the summary window broken. Pinned ruff 0.9.0 check + format are clean.
+
+**Takes effect on 8001 only after merge + restart** (operator).
+
+### Session 58.101 — 2026-10-03 — Stop freezing in-progress candles (writer inventory P1/P2)
+
+The operator approved this change to 8001's behaviour. It takes effect only after this branch is
+merged AND 8001 is restarted.
+
+**Measured defect (read-only, last 48 h, 288 closed hours, 6 products).** Coinbase's hourly
+candles include the in-progress hour, and both canonical writers kept that first partial
+version permanently:
+- stored SQLite volume was a **median 3.4%** of the final;
+- close was off by a median 26.5 bps (max 501 bps);
+- high/low was too narrow in **100%** of bars.
+
+**Fixes:**
+- **P1, `database.save_candles`:** `INSERT OR IGNORE` became an upsert on
+  `(product_id, start_time)`. A provisional bar is corrected on the next SUCCESSFUL scanner
+  refetch that contains it. The scanner requests 100 bars per tracked product each scan.
+  - This is not a hard time bound. Scan duration, sleeps, and per-product fetch or DB failures
+    all delay the correction.
+  - Live features still include the open hour, now refreshed instead of frozen.
+  - **Not repaired:** rows outside the 100-bar window, and rows of untracked products. During
+    the transition, a 336-bar consumer sees a mix of corrected and frozen rows.
+  - The change does not create point-in-time replay history.
+  - Regression test: all five OHLCV fields are replaced at the same key; other products and
+    timestamps are untouched; empty input is a no-op.
+- **P2, `history_backfill._backfill_to_path`** (hourly, 5m and 1m): only bars with
+  `start + bar_secs <= cutoff` are persisted (equality accepted).
+  - The cutoff is fixed once per operation, and the filter runs before a start is counted as
+    known.
+  - The next run fetches from the newest stored bar, so the closed version is stored.
+  - There is **no deliberate historical OHLCV repair**: existing stored OHLCV is untouched,
+    though the save helper may still stamp missing metadata on rewrite.
+  - Coverage and gap repair (P3) is out of scope.
+
+**Rollout gates** (Codex D3), before 8001 restarts on this code:
+1. Take a fresh baseline snapshot of the actual DB and history paths. The 19:50 snapshot misses
+   rows the old writer has written since.
+2. Keep that baseline and all originals immutable.
+3. Rollback = redeploy the previous commit. No retained evidence is overwritten.
+
+**Historical Parquet repair stays deferred.** Codex's review blocks the proposed criterion
+`ingest_ts < start+bar_secs`. It is neither proof of a provisional row nor a complete detector,
+because the save path stamps `ingest_ts` at file-save time and can keep an early stamp through
+a replacement. The repair must therefore:
+- run on a COPY;
+- compare against newly captured provider data;
+- record originals and replacements with their provenance;
+- publish a new dataset identity;
+- never reuse the old `ingest_ts` as the availability time of corrected values.
+
+No strategy-edge claim or research verdict follows from this fix.
+### Session 58.99 — 2026-10-03 — Standalone read-only market data recorder
+
+New package `backend/tools/recorder/` only. It runs as its own process, imports nothing from the
+app (AST-tested), and never touches `coinbase.db`, 8001 or 8002.
+
+**Why.** The Claude/Codex indicator comparison ranked missing DATA above models. The top
+missing items were execution truth (order book, trades) and clean derivatives crowding data.
+Neither can be backfilled, so collection has to start now.
+
+**What it records,** each as raw verbatim payloads in an as-of envelope (`received_at_ns`,
+status, error, `run_id`, `written_mono_ns`):
+- Coinbase public WS `level2`, `market_trades` and `heartbeats` for BTC-USD and ETH-USD;
+- OKX funding, funding history, OI, mark and index;
+- Coinbase International perp quotes;
+- Deribit futures and options summaries;
+- daily instrument definitions and the Coinbase spot and all-futures catalogues.
+
+Output goes to `C:\Users\gl450\market_recorder_data`, about 0.36 GB/day.
+
+**Probe findings:** Binance futures (HTTP 451) and Bybit (HTTP 403) are geo-blocked here.
+`services/macro_signals.py` calls Binance and has the defects Codex found: raw OI labelled USD,
+futures-volume share labelled dominance, and failures defaulted while `fetch_ok=True`. A source
+search of this branch and `origin/main` found **no consumer outside its own tests**, so it does
+not feed the live bot. An earlier draft of this entry wrongly said it likely did.
+
+**Integrity:**
+- immutable hourly per-run segments with sha256; crash salvage to `.incomplete` (never sealed);
+- sequence-gap and pause resubscribe for fresh snapshots;
+- storage failure is fatal (never disguised as a disconnect);
+- a single-writer lock and a STOP-file graceful stop.
+
+The plan was reviewed by Codex (4 blocking + 6 non-blocking), all applied under TDD; see the
+plan's dispositions table. 31 tests. Live pilot: all 28 streams, every poll `ok`, no gaps.
+Real-crash salvage recovered 10,114 records; clean STOP exit 0 with 28/28 segments sealed.
+
+**Acceptance round 3 (Codex review of `e985012`): 2 blocking + 1 non-blocking, all fixed under
+TDD; each fix was broken on purpose and its test went red.**
+- **B1 — Ctrl+C could report a failed finalisation as exit 0.** A cancellation is not a genuine
+  earlier error, so a storage failure during an operator stop now raises and the CLI exits 2.
+  Tested with a REAL in-process SIGINT through `cli`, not a stub.
+- **B2 — a seal failure left final-named data with no checksum, outside recovery.**
+  - Finalisation now publishes the seal first (temp + rename) and only then the data, so
+    final-named data never exists without its complete seal.
+  - Startup recovery also marks final data with a missing or malformed seal `.incomplete`
+    (bytes kept, reason recorded), and sets stray seals and seal temp files aside as `.orphan`.
+  - The startup seal check is structural (64 hex characters) and does not re-hash the data.
+    A consumer still verifies content against the seal.
+- **N1 —** the stop-event write and the store close are now independent steps. Errors are
+  aggregated, and the lock is always released.
+- **Codex accepted `cd24fcd`.** The non-blocking follow-up: a seal with non-text bytes crashed
+  startup instead of being quarantined. Seals are now read as ASCII bytes, and a decode failure
+  counts as malformed. Reading bytes exposed that text-mode seals on Windows end in CRLF, so
+  the pattern accepts an optional `
+`. All 109 real seals on disk were checked: none would be
+  quarantined.
+### Session 58.100 — 2026-10-03 — Data preservation: verified snapshot tool, known limitations, run isolation
+
+These are the first items of the Claude/Codex future-plans consensus (DO NOW package). No
+runtime, agent or DB-schema change.
+
+**`backend/tools/data_snapshot`** (`python -m tools.data_snapshot.snapshot`): a read-only,
+verified backup of `backend/data` plus `coinbase.db`, written to
+`C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`.
+- Per-file stability: (size, mtime_ns) unchanged across the copy AND a second source read hashes
+  identically to the copy; otherwise the file is marked `unstable`.
+- The sha256 is taken of the retained COPY.
+- Every Parquet copy is fully read.
+- The DB is copied with the SQLite online backup, then `integrity_check`.
+- A manifest records the capture interval with an explicit "not a globally consistent as-of
+  snapshot" note. The tool never overwrites a snapshot or writes to sources.
+- Six tests; the re-read check is mutation-verified.
+
+First real snapshot: `20261003T195004Z`, 809/809 files stable and valid, DB integrity ok, 14 s.
+Codex suggested the source re-read and the full Parquet read in review.
+
+**`docs/KNOWN_LIMITATIONS.md`** documents the frozen legacy bot's limits, so they are not used as
+evidence:
+- the `tiered_history` merge drops every live row (verified at `tiered_history.py:134-135`);
+- `macro_signals` has latent defects but no consumer;
+- the paper ledger is gross, with last-trade fills;
+- the shared `agent_state` row;
+- the replay closed-bar rule;
+- provisional candles (under inventory);
+- no demonstrated edge.
+
+**`CLAUDE.md`:** a new "Run isolation & data retention" section. Every parallel run gets its own
+DB copy, output root and run id. Historical data is never deleted. Originals, snapshots and
+corrected versions are immutable; routine top-ups publish only after the prior version is
+preserved; migrations run on copies with validation and rollback.
+### Session 58.102 — 2026-10-03 — Preregistered volatility-target screen: KILL (primary_failed)
+
+New offline research package `backend/tools/vol_target/`, stacked on the frozen
+`tools/slow_trend`. No backend, agent or 8001 change.
+
+**Preregistration and plan.** The preregistration was debated with Codex before any code: my
+proposal `c4c6827b` plus Codex's amendments `52c7e2ee`, archived at
+`C:\Users\gl450\analysis_archive\vol_target_prereg_2026-10-03\`. The plan was
+`docs/superpowers/plans/2026-10-03-vol-target-screen.md`.
+
+**The rule:**
+- each USD 500 BTC and ETH sleeve targets `min(1, 50% / σ̂)`;
+- σ̂ comes from the 20 daily log returns of 21 consecutive valid closes;
+- decisions are made weekly on Sunday and executed at Monday's open (D1: Tuesday's);
+- the order is a target-weight instruction with a strict 0.10 deadband;
+- the simulator is fractional and self-financing, with Intro-tier fees.
+
+**Plan review.** Codex review `80e87472` found no blocking items. All six non-blocking items
+were applied under TDD before import (see the plan's dispositions). One of them, N1, was a real
+gap: a malformed warm-up candle before the dev start went unaudited. Each Review Focus behaviour
+was checked by breaking the code on purpose.
+
+**The run.** The slow-trend snapshot was imported, not refetched, and verified against its lock
+`5215b520`. One run: experiment `97a4c7f2336008ab`, attempt 1, mode `first`, report
+`backend/data/research/vol_target/report_97a4c7f2336008ab_a1_first.json`.
+
+| Period, P0 | Vol-target return / max DD | Buy-and-hold | Fixed 50% (non-gating) | DCA-52 |
+|---|---|---|---|---|
+| dev 2016-08-30..2025-04-13 | +3,208% / 74.3% | +14,236% / 91.3% | +3,180% / 63.5% | +7,982% / 91.5% |
+| block 2025-04-14..2026-10-02 | +30.0% / 57.6% | +31.6% / 62.2% | +19.4% / 36.4% | −7.9% / 50.4% |
+
+**Verdict: KILL, primary_failed.**
+- G1 (beat cash) passes in both periods.
+- G2 fails in both: the return is below buy-and-hold, and the drawdown ratio is 0.81 (dev) and
+  0.93 (block) against the 2/3 bar.
+- The same holds under S10, S25, D1 and SM. Coverage is 77/77 valid block decisions per sleeve,
+  and nothing was affected.
+
+**Diagnostics, never gates:**
+- **Mostly invested:** block exposure was BTC 0.97 and ETH 0.79. BTC's target was capped at 1
+  on about 84% of its valid block decisions, because its BACKWARD-LOOKING 20-return volatility
+  ESTIMATE was at or below 50%. That is a property of the estimator. It does not mean realised
+  future risk or drawdown was bounded by 50%.
+- **Fees:** dev fees were $4,276 on a compounding bankroll.
+- **Fixed 50/50 vs vol-target, by period:**
+  - **dev:** fixed50 +3,180% / DD 63.5% against vol-target +3,208% / DD 74.3%. Vol-target
+    shows no demonstrated advantage here.
+  - **block:** vol-target +30.0% beat fixed50's +19.4%, but with a deeper drawdown (57.6% vs
+    36.4%).
+  - Different exposure, turnover and fees prevent a clean causal estimate of timing alpha.
+- **Fixed 50/50 is not a candidate.** Its dev drawdown ratio of about 0.695 also misses the 2/3
+  bar, and it is non-gating. Promoting it after seeing results is exactly what the
+  preregistration forbids.
+
+**What the KILL means.** It is an interpretable rejection under the declared simulator and
+utility gate. It is not proof of negative profit, nor of a fee-only failure: P0 terminal wealth
+was $33,078 (dev) and $1,300 (block) from $1,000, both beating cash. Both periods fail the
+return-or-drawdown comparison with buy-and-hold.
+
+**Independent verification.** Codex (`212ce8c6`) checked:
+- every snapshot and lock digest, the source digest `7443de5b`, the combined prereg digest
+  `f43f0829` and the experiment id;
+- all 5,260 decision targets, recomputed from the raw closes (maximum error 1.3e-14);
+- all ten G1/G2 comparisons.
+
+**Status.** This is the second candidate on the same previously observed block (the first was
+the SMA100 KILL), and the ledger and report record that sequence.
+
+The supported conclusion (Codex wording, agreed): *neither of the two preregistered BTC/ETH
+rules met the frozen utility requirement under the assumed costs on this reused history. We
+currently have no validated active timing candidate.* This does NOT show that no systematic
+rule earns its fees. DCA-52 returned −7.9% in the block against buy-and-hold's +31.6%, so DCA
+is not the empirically superior policy here either.
+
+**This screen family is now CLOSED.** No third candidate follows from these results. Any future
+hypothesis must:
+- be independently motivated;
+- be preregistered as ONE exact rule;
+- be scored only on BTC/ETH data arriving after its freeze, with a fixed terminal date.
+Pre-2026-10-03 history is labelled development data, not a holdout.
+
+### Session 58.98 — 2026-10-03 — Preregistered BTC/ETH slow-trend falsification screen
+
+New offline research package `backend/tools/slow_trend/` only. No backend, agent,
+threshold, model or DB change; nothing in the live path imports it.
+
+**Why.** The live short-hold alt bot loses before fees (CNN all-time 1,674 trades,
+−$135.31 gross; this week the average winner, +1.22%, was smaller than one taker
+round trip). The account's verified Intro tier is 0.50% maker / 0.90% taker
+(read-only `transaction_summary`), so a taker round trip costs ~1.82%. Claude and
+Codex debated the research and converged on ONE cheap falsification screen
+before any funding discussion.
+
+**What.** One frozen rule — hold BTC/ETH while the completed UTC daily close is
+above its 100-day SMA — against cash, buy-and-hold and a 52-week fee-inclusive
+DCA, at the verified fees with taker/taker as the primary case. It emits exactly
+one of `KILL`, `INCONCLUSIVE` or `PASS_TO_FORWARD`; none authorises funding.
+Every tunable lives in `prereg.py`, pinned by a test. The plan
+(`docs/superpowers/plans/2026-10-03-slow-trend-screen.md`) went through four
+Codex review rounds; 10 blocking defects were found and fixed before any code.
+
+**Measurement safeguards:**
+- Raw candles are audited before normalisation: conflicting vs identical
+  duplicates, finite positive consistent OHLC, alignment.
+- The first period day comes from data coverage, never from P&L.
+- A missing terminal close returns an inadequate-data verdict, never a stale price.
+- Drawdown is seeded with the initial capital.
+- Decisions are sliced to the period before the held state is filled, so no
+  pre-period position carries in.
+- Unsellable endpoint holdings make a comparison "affected", which can never PASS.
+- Freeze: no snapshot overwrite, a committed `snapshot.lock`, and an append-only
+  run ledger keyed by a stable experiment id, with retry / replay /
+  corrected-replay / new-preregistration modes.
+
+**Tests:** 82 in `backend/tests/tools/slow_trend/` (77, plus 5 from the final-review
+fix pass: public market endpoints, one-day page overlap, request counting, and
+line-ending-independent digests). Mutation-checked: reintroducing the carry-in
+bug, dropping the affected-gate check, and forward-filling the terminal close
+each turned a test red.
+
+**RESULT — `KILL` (`primary_failed`).** Single run, experiment `2252e434a40e11f6`
+attempt 1, HEAD `55c9323`, snapshot lock `sha256:5215b520…`. Data was adequate:
+ETH had 2 missing days in development, within the 3-day allowance. The
+development period was 2016-08-30 → 2025-04-13 (first common valid SMA day).
+
+| P0 (taker 0.90%/0.90%) | Trend SMA100 | Buy-and-hold | DCA-52 |
+|---|---|---|---|
+| Development: net return | +6,890% | +14,236% | +7,982% |
+| Development: max drawdown | 70.5% | 91.3% | 91.5% |
+| Development: round trips / fees | 122 / $48.6k | 0 / — | — |
+| Validation block 2025-04-14 → 2026-10-02: net return | +34.5% | +31.6% | −7.9% |
+| Validation block: max drawdown | 40.9% | 62.2% | 50.4% |
+
+- **Development fails G2.** The trend earned less than buy-and-hold, and its
+  drawdown was 0.77× buy-and-hold's, not ≤ 0.67×. The validation block passed
+  P0, though under S25 it failed G2 by a hair.
+- **Weekly excess vs buy-and-hold (development):** −0.44%/week, block-bootstrap
+  CI [−1.09, +0.17]. Versus cash: +1.36%/week, CI [+0.30, +2.64] (exploratory).
+- **Plain reading.** At retail taker fees, the 100-day-average timing rule cut
+  the worst BTC/ETH crash from ~91% to ~70% but gave up about half the
+  long-run gain. That misses the preregistered bar, so this candidate is
+  abandoned. KILL is not a verdict on trend following in general, and
+  buy-and-hold is a comparator, not a proven edge.
+- **The hourly overlap diagnostic** was `absent` (the worktree has no
+  gitignored `data/history`). It is informational only.
+### Session 58.97 — 2026-10-01 — Provenance, part 2: identity persisted on new rows
+
+Blocker 1 of the controlling document, completed for NEW rows. Every new `cnn_scans`
+row and every new `trades` entry row now carries `model_provenance`, a `sha256:` digest
+of the model artifacts that were actually loaded plus the decision config. Historical
+rows stay NULL — **unattributed, never guessed** — and an `UNKNOWN` close-insert stays
+NULL too. Part 1 (58.95) is cherry-picked onto this branch from
+`fix/replay-closed-bar-filter` so part 2 does not depend on that unmerged chain.
+
+**Four loosely coupled layers:**
+
+- `agents/xgb_signal.py` fingerprints exactly what each loader ADOPTED — v3 model and
+  features, plus the calibrator only when it was accepted (a calibrator rejected for a
+  feature-set mismatch is not part of the identity). The fingerprint is cleared at the
+  start of every load attempt, so `force_reload` after a model swap mints a new identity
+  and a failed reload leaves none rather than a stale one. The v4.5 shadow gets its own,
+  because it drives the `MODEL_DOWN` exit. `loaded_fingerprints()` reports both.
+- `agents/mc/registry.effective_filter_names()` reports the filters that RESOLVED. With
+  `MC_FILTERS=ci` and `ci` never registered, the identity records an empty chain — the
+  configured-vs-ran gap part 1 warned about.
+- `services/provenance.decision_provenance(fingerprints, config)` (pure) combines driver
+  digest, shadow digest (or "none") and the typed decision config into one digest, and
+  returns `None` when no driver is loaded. `validate_digest` accepts only
+  `sha256:<64 lowercase hex>`.
+- `database.py`: additive `model_provenance TEXT` on `cnn_scans` and `trades` (ALTER
+  migration), a `model_provenance` registry table (digest → detail, first write wins),
+  `record_provenance` / `get_model_provenance`, and `save_cnn_scan` / `open_trade`
+  **reject a malformed digest** instead of storing something that looks attributed.
+
+`cnn_agent` stamps the digest on each scan and passes it through
+`book.buy(..., model_provenance=)` to `open_trade`. `_current_provenance()` writes the
+registry once per new digest and never raises into the scan loop — a failure saves the
+row unattributed. Decision config fingerprinted: model backend, buy/sell thresholds,
+v4.5 thresholds, effective MC chain, max position fraction, stop / ATR-trail / max-hold
+constants, MODEL_DOWN threshold and staleness, and the `exit_thresholds` constants.
+
+**Review round (Codex + an independent reviewer, both on `9089fac`) — three real defects,
+all fixed here:**
+
+- **A reload could stamp an OLD prediction with the NEW model's digest.** The agent reuses
+  each product's probability for 300 s; `force_reload` did not clear that cache. Now the
+  scan snapshots the v3 identity at its start, clears the cache when it differs from the
+  identity that filled it (the cache stays a 3-tuple, invariant 2), and stamps a row only
+  if the identity at save time still matches the snapshot — a reload mid-scan leaves the
+  row NULL.
+- **Decision settings missing from the identity:** the MC filters' own parameters
+  (`MC_CI_K` changes what `ci` blocks) via new `BuyFilter.params()` /
+  `registry.effective_filter_params()`, plus `max_position_usd`, `MIN_PRICE` and
+  `_kelly_fraction`'s `max_frac` cap.
+- **Load-vs-hash race:** each artifact is digested BEFORE it is read; the fingerprint is
+  kept only if every adopted file still has that digest, otherwise the model is left
+  unattributed.
+
+Recorded, not fixed: exits are not attributed. A `MODEL_DOWN` exit is decided by
+whichever v4.5 model is loaded at exit time while the row keeps the opening identity;
+v4.5 has no in-process reload, so this matters only across a restart with swapped files.
+
+**Files:** `services/provenance.py`, `agents/xgb_signal.py`, `agents/mc/registry.py`,
+`database.py`, `agents/cnn_agent.py`. Tests: `test_xgb_signal.py` (+6),
+`tests/agents/mc/test_registry.py` (+3), `test_provenance.py` (+13),
+`test_provenance_persistence.py` (11), `test_cnn_agent.py` (+7).
+
+**Limits:** it identifies what was configured and loaded,
+not every code path — code identity is git's job. Not deployed: the live 8001 backend
+picks this up only after a merge and restart, which is an operator decision.
 
 ### Session 58.95 — 2026-09-29 — Provenance, part 1: the pure fingerprint
 
@@ -76,6 +579,81 @@ than what was asked for.
 
 ---
 
+### Session 58.96 — 2026-09-30 — Paper maker-entry shadow (measurement only)
+
+The controlling document names maker execution as the only untested lever with a
+large enough coefficient (breakeven hit rate 65.1% taker → 51.3% maker) and calls it
+**unmeasurable today because no fills exist** (`orders` has 0 rows). This adds a
+measurement of the price path a resting maker BUY would have faced, without placing
+a single order.
+
+**Estimand, stated so it is not over-read.** An *instantaneous virtual post-only BUY*
+resting at the WS best bid captured right after a successful paper BUY, observed for
+30 s (the window `execute_maker_signal` polls). It is a **price-path proxy, not a
+fill** — the ticker carries no queue position, displayed size or acknowledgement —
+and it is **conditional** on the BUYs the paper book took, not the live order path
+(which quotes and posts later).
+
+`services/maker_shadow.MakerShadow` resolves each intent from the ticker last-trade
+stream through `register_price_handler`, the hook `exit_watcher` already uses:
+
+- **`crossed`** (headline): an own-product trade printed strictly BELOW the limit
+  inside the window — the level was traded through. **`touched`**: at or below.
+- **`markout_bps`**: for crossed intents, the last own-product trade at or before
+  `cross_ts + 60 s` against the limit — a fixed horizon from the crossing, with
+  `mark_age_s` saying how stale that trade was. This is the adverse-selection read
+  and must be judged with the cross rate: crossing into a falling price is not savings.
+- **Deadline-driven finalisation**: an intent closes at its own deadline (window end,
+  or the markout horizon if crossed) via `sweep()`, run on every tick, on every
+  `register`, and from a 5 s sweeper — never by waiting for unrelated activity.
+  `finalised_late_s` records any delay.
+- **`feed_gap`**: `ws_subscriber.connect_count` (new) changed while the intent was
+  observed, so a crossing may have been missed. Such rows are excluded from rates.
+- Unmeasurable intents are recorded (`no_quote`, `duplicate`), not dropped; an
+  intent whose window has expired is finalised before a new BUY is checked, so it
+  is never miscounted as a duplicate.
+
+`tools/maker_shadow_report.py` reports `cross_rate`, `touch_rate`, medians of
+time-to-cross, spread and markout, and **`coverage`** (clean measured / all rows)
+plus gap, late, no-quote and duplicate counts — every rate is conditional and says so.
+
+**Review.** Codex's measurement-validity review of the first cut (`e0d1e9e`) found
+the original `drift_bps` endpoint was chosen by whichever tick finalised the row,
+that expiry waited on unrelated ticks (and could miscount a new BUY as a duplicate),
+that "fill" over-claimed, that feed gaps were invisible, and that my note about the
+ticker was wrong: the `ticker` channel reports on every match (`ticker_batch` is the
+5 s one). All addressed here.
+
+**Second review (Codex, on `266d7d6`).** The markout price is the last own-product
+trade *as of* the 60 s horizon, so in a quiet market it can be the crossing print
+itself. The report now applies a pre-fixed `MAX_MARK_AGE_S = 15` and reports
+`n_mark_fresh` / `n_mark_stale` / `n_mark_missing` and mark-age p50/p90; the markout
+median uses fresh marks only. `feed_gap` detects reconnects only — a silent stall is
+not detected — so rates are conditional on no *observed* reconnect. Codex accepted
+local receipt time for this exploratory run with one condition, recorded here: **these
+measurements are not decision-grade evidence for live maker execution without
+timestamped-event validation.** Results describe the 8002 copy's own paper
+trajectory after its snapshot, not later 8001 entries.
+
+**Files:** `services/maker_shadow.py`, `services/ws_subscriber.py` (`connect_count`),
+`database.py` (additive `maker_shadow` table + `save_maker_shadow` /
+`get_maker_shadow_rows`), `config.py` (`MAKER_SHADOW`, default false),
+`agents/cnn_agent.py` (`_shadow_register` after a successful paper buy), `main.py`
+(`maker_shadow.attach` when the flag is on), `tools/maker_shadow_report.py`. Tests:
+`test_maker_shadow.py` (18), `test_database_maker_shadow.py` (7),
+`test_maker_shadow_wiring.py` (6), `test_maker_shadow_report.py` (5),
+`test_ws_subscriber.py` (3).
+
+**Run it** on the 8002 dev backend per port discipline:
+`MAKER_SHADOW=true PORT=8002 python main.py`, then
+`python -m tools.maker_shadow_report --since-hours 24`.
+
+**Limits:** the handler receives local receipt time, not exchange event time or
+sequence, so a trade printed just before registration but delivered after it can be
+admitted (sub-second against a 30 s window; documented, not fixed — changing the
+handler signature touches `exit_watcher`). A crossing between reconnects is caught
+only as `feed_gap`, not recovered. Entry leg only; exit-leg maker fills are a
+follow-up.
 
 ### Session 58.94 — 2026-09-28/29 — Train and serve slice history by different mechanisms; 73% of the live feature vector differs
 

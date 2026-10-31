@@ -25,6 +25,11 @@ class BuyFilter(ABC):
 
     name: str = ""
 
+    def params(self) -> Dict[str, Any]:
+        """Effective parameters that change this filter's decision. Fingerprinted by
+        provenance, so a parameter change mints a new model identity."""
+        return {}
+
     @abstractmethod
     def evaluate(
         self,

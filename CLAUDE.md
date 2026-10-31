@@ -68,6 +68,22 @@ Rule:
 
 Reinforced 2026-05-24 after a Phase 2 collision where parallel agent's `git commit -a` swept my staged Phase 2 file into their GPU-kernel commit on my branch, AND one of my Phase 2 test commits accidentally landed on their branch and was pushed to origin. See `feedback_parallel_agent_coordination.md` for the full incident log.
 
+### Peer review before merge
+
+Every PR gets a peer review from the other agent (Claude ↔ Codex) BEFORE it is merged. Green CI
+and an operator "merge it" are not enough on their own.
+- Request the review through the session-link mailbox: PR link, commit SHA, what changed, how it was
+  verified, and the specific questions to check.
+- Hold the merge until the reviewer replies with an explicit sign-off that names the reviewed head
+  SHA. A mailbox acknowledgement is not a sign-off.
+- Any later commit or rebase (including review fixes) is reported to the reviewer with the new SHA
+  and the delta. The reviewer must confirm that approval still applies before merge. A mechanical
+  rebase or docs-only delta can get a brief check; it need not rerun unrelated tests.
+- Only the operator can waive the review, explicitly. Record the waiver in the PR description.
+
+Operator rule, 2026-10-11, after PRs #96 and #98 were merged without a completed Codex review.
+Mirrored in memory `feedback_codex_review_before_merge.md`.
+
 ---
 
 ## Security Gate — Pre-commit Checks
@@ -104,28 +120,14 @@ python -m pytest backend/tests/ -v            # full suite (run once before comm
 
 ### Shell cleanup — required after every test run
 
-Running tests repeatedly causes background python processes to stack up. After any test run:
-
-```powershell
-# PowerShell — SKIPS the live backend (port 8001) and the launcher exe
-$backendPid = (Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue).OwningProcess
-Get-Process python -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -ne $backendPid -and $_.ProcessName -ne 'Coinbase AI Trader' } |
-    Stop-Process -Force
-```
-
-```bash
-# Bash — same intent: only kill processes that are NOT the backend (port 8001)
-BACKEND_PID=$(ss -ltnp 2>/dev/null | awk '/:8001 /{match($0,/pid=[0-9]+/); if (RSTART) print substr($0,RSTART+4,RLENGTH-4)}' | head -1)
-ps aux | grep -E 'python|pytest' | grep -v grep | awk -v skip="$BACKEND_PID" '$2 != skip {print $2}' | xargs -r kill -9 2>/dev/null
-```
+Running tests repeatedly causes background python processes to stack up. After any test run, clean up your own test processes.
 
 Rules:
 - **Prefer per-module tests** over full suite during development — faster, stays foreground, no stacking
 - **Only run full suite once** before committing, not repeatedly
 - **Always clean up** after a test run completes or is interrupted
 - **Never** issue a blanket `Stop-Process python -Force` / `pkill -9 python` — it kills the live backend, breaking the scan loop and stopping MC telemetry accumulation.
-- **Port-8001 awareness is NOT sufficient, and the snippets above are not safe as written.** Verified on 2026-09-28: of 12 running `python.exe` processes, only one was the 8001 backend. A port-8001-aware sweep would also have killed **a second `main.py`** (an 8002 shadow is explicitly sanctioned by the port-discipline section below — killing it contradicts that rule), **both `.coordination-runtime` servers**, **the peer session's `bridge.py --role codex`**, the session-link **MCP server**, and two processes belonging to an **entirely different project** (`grain-marketing`), which the Scope rule forbids touching.
+- **Port-8001 awareness is NOT sufficient.** Verified on 2026-09-28: of 12 running `python.exe` processes, only one was the 8001 backend. A port-8001-aware sweep would also have killed **a second `main.py`** (an 8002 shadow is explicitly sanctioned by the port-discipline section below — killing it contradicts that rule), **both `.coordination-runtime` servers**, **the peer session's `bridge.py --role codex`**, the session-link **MCP server**, and two processes belonging to an **entirely different project** (`grain-marketing`), which the Scope rule forbids touching.
 - **Kill by identity, never by absence of a port.** Before terminating anything, resolve command lines — `Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Select ProcessId, CommandLine` — and terminate only processes you can name as your own test runs. Exclude, at minimum: any `main.py`; anything under `.coordination-runtime\` or `tools\session_bridge\`; anything whose path lies outside this repository.
 - **Verify and act as SEPARATE steps.** Identifying a process and killing it in the same command makes the verification theatre — there is no point at which the answer can change the decision.
 
@@ -133,7 +135,7 @@ Rules:
 
 ## Backend port discipline — dev on 8002+, promote to 8001
 
-**Port 8001 is reserved for the live trading backend.** Active paper/live trading runs there. Frontend (port 5174) is hardcoded to hit 8001. Never start a new/experimental/shadow backend on 8001 while the production backend is running — the `_free_port(8001)` helper will kill the production process, stopping live trading.
+**Port 8001 is reserved for the live trading backend.** Active paper/live trading runs there. Frontend (port 5174) is hardcoded to hit 8001. Never start a new/experimental/shadow backend on 8001 while the production backend is running. Since Session 58.116 every entry point goes through `backend/startup_guard.py`, which **refuses** an occupied port or a held instance lock (distinct exit codes) instead of killing it; `--mode replace` / `-Replace` replaces only an instance the guard itself registered (lock record PID + creation time + backend dir). Before 58.116, all entry points force-killed whatever held 8001 (the 2026-10-17 incident).
 
 Rule:
 - **Production / live trading** → port 8001 (default, set via `PORT` env or default in `main.py`)
@@ -142,16 +144,56 @@ Rule:
 
 Why this matters: SQLite (`coinbase.db`) is a shared file. Multiple backends can run simultaneously, all writing to the same `cnn_scans` / `trades` / `signal_outcomes` tables. A backend on 8002 with new code will populate v4 (or other) telemetry columns in those shared tables — you don't need 8001 to validate the new path's output. Only push to 8001 when you're ready to swap the *driver*.
 
-How to apply when shipping a new XGB model / inference path:
-1. Land code + migration (creates new telemetry column nullable).
-2. Operator-train the new model → unsuffixed artifacts (or horizon-suffixed during sweep).
-3. Operator-start the new backend on **port 8002**: `PORT=8002 python main.py` from `backend/` cwd.
-4. Verify new telemetry column populates in `cnn_scans` (rows from PID 8002 backend will have non-NULL).
-5. Compare new vs old metrics over a shadow week (or however long the cutover plan specifies).
-6. **If new model shows promise** → copy new-model artifacts to the unsuffixed paths the 8001 backend loads, then restart the 8001 backend (which will pick up the new artifacts). The promotion is just a file-copy + restart.
-7. If new model doesn't show promise → kill the 8002 backend, leave 8001 untouched, iterate on the model.
+The step-by-step procedure for shipping a new XGB model / inference path through the 8002 shadow lives in the `promote-model` skill (`.claude/skills/promote-model/SKILL.md`).
 
 Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met.
+
+---
+
+## Run isolation & data retention
+
+Agreed in the Claude/Codex consensus, 2026-10-03. See `docs/KNOWN_LIMITATIONS.md`.
+
+**Run isolation.**
+- Every parallel experiment, shadow backend or research run uses its OWN database copy, its own
+  output root and an explicit run id.
+- Never point a second **state-writing** backend or trading experiment at `backend/coinbase.db`.
+  The shared `agent_state` row is keyed only by agent, so a second backend overwrites the 8001
+  paper book. The 8002 shadow runs from a DB copy for exactly this reason.
+- Read-only diagnostics, and online backups through a read-only connection, ARE permitted.
+- Data-only screens and the recorder never open the app DB, so they need no database of their
+  own.
+- The market recorder (`backend/tools/recorder`) defaults to `C:\Users\gl450\market_recorder_data`
+  (`--out` overrides it) and imports nothing from the app.
+
+**Data retention.**
+- Historical data (hourly, 5m, 1m and auxiliary Parquet, and the DB) is never deleted or
+  collapsed.
+- Retained originals, snapshots and corrected dataset versions are immutable. A correction gets a
+  new dataset identity.
+- Routine collection and top-ups still publish to the mutable working files, but only after the
+  required prior version is preserved.
+- Any migration runs on a copy first, validates the replacement, keeps the originals until
+  validation completes, and has a rollback path.
+
+**Backups.** Pass explicit paths; the defaults resolve inside the current checkout, which in a
+worktree is NOT the 8001 runtime DB:
+
+```
+python -m tools.data_snapshot.snapshot --data-dir C:\Users\gl450\polymarket_app\backend\data --db C:\Users\gl450\polymarket_app\backend\coinbase.db
+```
+
+This writes a verified snapshot to `C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`.
+Missing inputs and an output inside the source tree are refused before anything is written.
+Snapshot details:
+- files are copied stable-per-file (stat check plus source re-read hash);
+- Parquet copies are fully read;
+- the DB is copied with the SQLite online backup and then integrity-checked;
+- a `manifest.json` records the capture interval.
+
+It is not a globally consistent as-of snapshot, and it covers only `included_roots`: worktree
+research outputs, model weights and caches, and the recorder archive are NOT included. A non-zero
+exit means a file was unstable, failed or invalid, or the DB integrity check failed.
 
 ---
 
@@ -294,26 +336,8 @@ A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list 
 21. **Maker-execution routing is opt-in + default-off.** `config.use_maker_execution` (env `USE_MAKER_EXECUTION`, default false) gates `cnn_agent._execute_live_order`. When false, live BUYs route through the taker `order_executor.execute_signal` exactly as before — no bid/ask fetch, byte-for-byte unchanged (mirrors the `MC_FILTERS=""` default-off contract, invariant #14). When true, the agent fetches best bid/ask via `coinbase_client.get_best_bid_ask`, attaches `bid`/`ask` to the signal (the maker path **aborts** without them — `order_executor.py:308`), and routes to `execute_maker_signal` (which owns the 30s fill poll + market fallback). Intended for the **8002 shadow** per port discipline; promote to 8001 only after the shadow confirms real maker fill rates. **Exit leg (Session 58.73):** the entire exit live-order path is gated behind the same flag — exits place NO live order today, so flag-off MUST stay paper-only (`book.sell` only, no bid/ask fetch). `agents/exit_execution.execute_live_exit` is the single source of truth for exit routing: maker (post-only) for `TRAIL_STOP`/`WS_TRAIL_STOP`/`MODEL_DOWN`/`WS_MODEL_DOWN`, taker for `STOP_LOSS`/`WS_STOP_LOSS`/`MAX_HOLD`/`LEGACY_EXIT`. Both exit paths (`_check_risk_exits` scan loop, `exit_watcher.on_price_tick` WS) close the paper book first, then call `execute_live_exit`, which no-ops unless the flag is on AND the executor is live (not dry-run). Sizing: SELL signal carries no `atr` key, so `order_executor` sizes from `quote_size = size*ask` (maker) / `size*price` (taker), recovering the held size via `base_size = quote_size/fill_price`. A live-exit failure is caught + logged, never re-raised (invariants #16/#18). Has zero effect on tracked paper PnL (paper book models no fees); purely a live-execution-path change for the 8002 shadow.
 
 22. **Historical replay must reconstruct features from CLOSED bars only.** `services/tiered_history.py` filters candles by bar **start** (`start < now_ts`), which admits a bar that had begun but not yet closed. Live this is correct and harmless — the store holds nothing beyond now, so that bar is genuinely partial. **In replay from a completed parquet the same bar carries its final high/low/close/volume**, so at a 15-minute scan cadence up to an hour of future information enters the features, and any metric computed that way is invalid. Pass `fetch_tiered(..., closed_only=True)` for every historical reconstruction; it keeps a bar only when `start + 3600 <= now_ts`, and raises if `now_ts` is absent because "closed" then has no referent. The flag is **opt-in** so no live path moves — flipping the default changes what the replay callsite (`xgb_signal.py`, the only caller that passes `now_ts`) computes, which is an operator decision. **This defect class is the one most likely to be reintroduced silently, because the production code reads correctly and only misbehaves in replay.**
+23. **The paper maker-entry shadow is measurement-only and default-off.** `services/maker_shadow.MakerShadow` (enabled by `MAKER_SHADOW`, default false; wired only through `maker_shadow.attach`) must never place, cancel or simulate orders in `order_executor`, never write any table other than `maker_shadow`, and never change the paper book. Flag off ⇒ `cnn_agent._shadow_register` returns before touching the shadow. `register`, `on_tick` and `sweep` must never raise into the scan loop or the WS receive loop (invariants #14/#18). Its output is a **price-path proxy** (`crossed` = own-product trade strictly below the resting bid), never a fill rate; every reported rate is conditional and excludes `feed_gap` rows. Unmeasurable intents are recorded as `no_quote` / `duplicate`, never dropped. Intents finalise at their own deadline; no endpoint may be chosen by another product's tick.
+24. **Model provenance is recorded, never guessed.** New `cnn_scans` rows and new `trades` entry rows carry `model_provenance` = `services/provenance.decision_provenance(xgb_signal.loaded_fingerprints(), agent._decision_config())`, a `sha256:` digest registered in the `model_provenance` table. Rules: fingerprints are taken from what the loader ADOPTED, cleared at the start of every load attempt (so `force_reload` can never leave a stale identity), and dropped if any file changed between pre-read digest and adoption; a scan snapshots the v3 identity at its start, clears `_cache` when it differs from the identity that filled it, and stamps NULL if the identity changed before save; the MC component is `registry.effective_filter_names()` plus `effective_filter_params()`, never `MC_FILTERS`; no driver loaded ⇒ NULL; historical rows are never backfilled; writers reject anything that is not `sha256:<64 hex>`; computing provenance must never raise into the scan loop. Adding a setting that changes decisions, sizing or exits means adding it to `_decision_config`.
 
----
+26. **Paper PnL is gross; net is recorded beside it, never instead of it.** `trades.pnl` and `balance_after` stay the paper book's gross values (fees never touch sizing, exits or the balance). `database.close_trade` records `fee_rate`, `fee_usd` = `services/fees.round_trip_fee(usd_open, usd_close, fee_rate)` and `pnl_net`. The default is the verified taker rate, because paper fills are market fills. Historical rows are never backfilled. Any net figure must state its coverage (`fee_bearing_trades`). `exit_thresholds.FEE_RATE` is a trail-floor parameter, not the accounting rate.
 
-## Current Test Coverage
-
-| Module | Test File | Status |
-|---|---|---|
-| `agents/cnn_agent.py` | `test_cnn_agent.py` | ✅ covered |
-| `agents/cnn_agent.py` (risk exits) | `test_cnn_risk_exits.py` | ✅ covered |
-| `agents/xgb_signal.py` | `test_xgb_signal.py` | ✅ covered |
-| `agents/mc/*` | `tests/agents/mc/*` | ✅ covered |
-| `agents/signal_generator.py` | `test_signal_improvements.py` | ✅ covered |
-| `data/cnn_model.py` | `test_cnn_model.py` | ✅ covered |
-| `data/history_backfill.py` | `test_history_backfill.py` | ✅ covered |
-| `data/macro_history.py` | `test_macro_history.py` | ✅ covered |
-| `database.py` | `test_database.py` + integration via agent tests | ✅ covered |
-| `services/marketcap_history_cache.py` | `test_marketcap_history_cache.py` | ✅ covered |
-| `services/coingecko_marketcap.py` | `test_coingecko_marketcap.py` | ✅ covered |
-| `services/coinpaprika_marketcap.py` | `test_coinpaprika_marketcap.py` | ✅ covered |
-| `services/tiered_history.py` | `test_tiered_history.py` | ✅ covered |
-| `tools/xgb_features.py` (v1/v2/v3) | `test_xgb_features.py`, `test_xgb_features_v3.py` | ✅ covered |
-
-(Test count: ~970 passing as of Session 58.71i.) Modules retired: `tech_agent_cb.py` (#311-refactor-c, 2026-05-16).

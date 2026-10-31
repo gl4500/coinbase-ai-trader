@@ -23,6 +23,9 @@ class CoinbaseWSSubscriber:
         self._task: Optional[asyncio.Task] = None
         self._products: List[str] = []
         self._price_handlers: List[Callable] = []  # async fn(pid, price) callbacks
+        # Incremented on every subscribed (re)connection. Consumers that observe
+        # the price stream over an interval compare it to detect feed gaps.
+        self.connect_count = 0
 
     def get_price(self, product_id: str) -> Optional[float]:
         return self.state.get(product_id, {}).get("price")
@@ -89,6 +92,7 @@ class CoinbaseWSSubscriber:
                     }
                 )
             )
+            self.connect_count += 1
             logger.info(f"Coinbase WS subscribed to: {products}")
 
             async for raw in ws:

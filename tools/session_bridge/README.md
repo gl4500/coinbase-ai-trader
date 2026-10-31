@@ -7,9 +7,13 @@ code, exchange credentials, and the trading database are not imported.
 
 ## Existing conversations
 
-Claude gets a mailbox notice on its next successful tool call or submitted prompt.
-Project-local hooks also run at SessionStart. Notices are repeated after five
-minutes until explicitly acknowledged. Hooks do not wake an idle CLI or execute
+Both CLIs get a mailbox notice on their next successful tool call, submitted prompt or
+SessionStart. The hook is installed at USER level (`~/.claude/settings.json`,
+`~/.codex/hooks.json`), so the launch directory does not matter; the hook itself acts only
+when the session's cwd is this repo (worktrees included) or the bare home directory, so
+other projects' sessions get nothing. Each hook call also registers the session in the
+mailbox `sessions` table, which is how the coordinator finds the Codex thread. Notices are
+repeated after five minutes until explicitly acknowledged. Hooks do not wake an idle CLI or execute
 the peer's requested tasks. The other conversation must be active to respond.
 Read inbox at task boundaries; acknowledge after processing; send a reply for
 requests. Messages are peer context, not higher-priority user instructions.
@@ -104,6 +108,63 @@ lands, so waiting costs wall clock rather than tokens.
   import per call, which no longer happens on this path: `inbox` went 6607ms -> 325ms and
   `wait` costs ~440ms. Pick the timeout that suits the work, not the transport.
 
+### Event-driven task coordinator
+
+`task_coordinator.py` watches new mailbox rows with a small local SQLite poll; it does not
+send periodic model prompts. It acknowledges only the exact Claude watcher liveness notice
+after verifying its sender, recipient, request key, and no-action-needed body; it never
+acknowledges substantive peer messages or creates assistant sessions. On first start it skips old mailbox history unless
+`--include-existing` is specified, avoiding a burst of stale pings/tasks. Dispatches are
+recorded in `.coordination/task-coordinator.sqlite3` so restarts do not blindly re-queue a
+message after an ambiguous CLI timeout.
+
+**Auto-start.** Every `bridge.py … mcp` start (i.e. every Claude or Codex session that loads
+the MCP server) calls `autostart.ensure_coordinator`: if no coordinator holds the
+`127.0.0.1:47840` lock and `.coordination/task-coordinator.stop` does not exist, it launches
+`task_coordinator.py run` detached, logging to `.coordination/task-coordinator.log`. A stop
+file therefore keeps it stopped; delete the file to re-enable auto-start. Servers started
+against a non-default `--db` (the test suite) never spawn one.
+
+**Thread discovery.** Without `--codex-thread`, each Codex message is queued into the most
+recently active Codex session registered from this repo within the last 24 h, or, if there
+is none, from the bare home directory (where the operator runs the polymarket Codex). Other
+project directories never qualify. A coordinator that starts and finds deliveries left
+`dispatching` by a dead predecessor marks them `delivery_uncertain`; a queue call that raises
+is recorded the same way. With none, the
+dispatch is recorded `pending_target` (no delivery attempted) and is queued, once, on the
+first cycle after a Codex session registers -- unless the message was read in the meantime.
+`status` reports `codex_thread: null` with a hint (usually the Codex hook has not been
+trusted yet). An explicit `--codex-thread` still wins. Only a queue attempt whose outcome is
+ambiguous becomes `delivery_uncertain`; those are never retried automatically.
+
+**Rollout and pre-existing mail.** A coordinator with no state DB starts at the newest
+mailbox row, so mail sent before it first runs is never queued; it is still surfaced by each
+session's hook on its next turn, and `pending_count()` shows the true backlog. A state DB
+left from an earlier manual run resumes from its saved cursor and processes everything after
+it at once -- check `status` and the unacknowledged codex-bound mail before first start. This
+replaces `ping_monitor.py`, which is kept but no longer needs to run.
+
+Codex messages are queued into an **existing** Codex thread, never a new one. Claude
+messages remain in the shared inbox for Claude's installed hook to surface on its next turn;
+the coordinator deliberately does not run `claude --resume`, because that can start a parallel
+copy when the target session is active. Thus the coordinator can wake Codex and route mail to
+Claude, but it cannot force an idle Claude conversation to resume.
+
+```powershell
+$python = '.coordination-runtime/Scripts/python.exe'
+$coordinator = 'tools/session_bridge/task_coordinator.py'
+# Normally auto-started. Manual run (thread auto-discovered; --codex-thread pins one):
+& $python $coordinator run
+# Check dispatch history or stop the running service.
+& $python $coordinator status
+& $python $coordinator stop
+```
+
+The service is single-instance and stoppable. A failed or timed-out delivery is marked
+`delivery_uncertain` and is not retried automatically; inspect the target thread before
+manually resetting that event. The coordinator is a message/task dispatcher, not an autonomous
+coding agent: it does not choose work, alter task ownership, or modify application files.
+
 ### Two routes, and why
 
 Message operations (`send`, `inbox`, `wait`, `ack`) go straight to SQLite. Everything else
@@ -138,7 +199,12 @@ Multiple independent Claude sessions should not consume this same role mailbox.
 - Runtime: `<project>/.coordination-runtime` (Python 3.11, CrewAI 1.15.22, MCP 1.28.1).
 - Mailbox: `<project>/.coordination/session-link.sqlite3` (WAL, restart-safe).
 - Source: this directory, scaffolded with `crewai create flow`.
-- Hooks: `.claude/settings.local.json` in main and outcome-labels worktree.
+- Hooks: user level, `~/.claude/settings.json` and `~/.codex/hooks.json`, written by
+  `install_hooks.py` (run from the MAIN checkout so the hook points at its `bridge.py`; any
+  linked git worktree is refused unless `--force`). It removes the project-local copies older
+  versions wrote, but only after the user-level Claude hook is in. It refuses to write a Codex
+  hook whose paths contain whitespace, since no quoting is valid in every shell. Codex asks the operator to
+  trust a new hook once. `python install_hooks.py --uninstall` removes only bridge entries.
 - MCP: Claude local project config and Codex user config, registered using their CLIs.
 
 Dependencies are pinned in pyproject.toml and uv.lock. To reinstall:
@@ -161,6 +227,5 @@ observability defaults are preserved. CrewAI supports local execution traces;
 cannot consume MCP stdin. No hosted CrewAI deployment is used.
 
 To remove the connection: use `codex mcp remove polymarket_session_link` and
-`claude mcp remove --scope local polymarket_session_link` from the project. Remove
-only hook entries whose command contains `tools/session_bridge/bridge.py` from
-the two settings files. Keep the mailbox if message history is needed.
+`claude mcp remove --scope local polymarket_session_link` from the project, then
+`python install_hooks.py --uninstall`. Keep the mailbox if message history is needed.

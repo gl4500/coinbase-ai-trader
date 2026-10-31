@@ -28,7 +28,7 @@ import threading
 import time as _time
 import webbrowser
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
@@ -138,37 +138,6 @@ _LOG_RE = _re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] ([\w.]+
 
 # Same DB path database.py uses for all read endpoints (get_trades, get_performance, etc.)
 _DIAG_DB_PATH = database.DB_PATH
-
-
-# ── Port cleanup ──────────────────────────────────────────────────────────────
-_TRADING_APP_PORTS = {8000, 5173}
-
-
-def _free_port(port: int) -> None:
-    if port in _TRADING_APP_PORTS:
-        return
-    try:
-        out = subprocess.check_output(
-            ["netstat", "-ano"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        for line in out.splitlines():
-            if f":{port}" in line and "LISTEN" in line:
-                parts = line.split()
-                pid = parts[-1]
-                if pid.isdigit() and int(pid) != os.getpid():
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", pid],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                    logger.info("Freed port %d (killed PID %s)", port, pid)
-    except Exception:
-        pass
 
 
 # ── Brave browser helpers ─────────────────────────────────────────────────────
@@ -470,6 +439,14 @@ async def lifespan(app: FastAPI):
         executor_fn=lambda: app_state.order_executor,
     )
     logger.info("WS exit watcher attached")
+
+    if config.maker_shadow:
+        from services.maker_shadow import attach as attach_maker_shadow
+
+        attach_maker_shadow(
+            app_state.ws_subscriber, app_state.cnn_agent, sink=database.save_maker_shadow
+        )
+        logger.info("Maker entry shadow attached (measurement only, no orders)")
 
     # Background scan — refreshes product list without blocking startup
     async def _background_scan():
@@ -1483,6 +1460,10 @@ async def get_performance():
         """)
         overall = dict(await cursor.fetchone())
 
+    since_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    fees_overall = await database.get_fee_summary()
+    fees_30d = await database.get_fee_summary(since=since_30d)
+
     curr_bal = overall["current_balance"] or 0
     overall["first_balance"] or curr_bal or 1
     total_t = overall["total_trades"] or 0
@@ -1513,6 +1494,7 @@ async def get_performance():
             "win_rate_pct": rolling_win_rate,
             "return_pct": rolling_return_pct,
             "total_pnl": round(r30["total_pnl"] or 0, 2),
+            "net_of_fees": fees_30d,
         },
         "overall": {
             "total_trades": total_t,
@@ -1521,6 +1503,7 @@ async def get_performance():
             "total_pnl": round(overall["total_pnl"] or 0, 2),
             "current_balance": round(curr_bal, 2),
             "peak_balance": round(overall["peak_balance"] or 0, 2),
+            "net_of_fees": fees_overall,
         },
         "projection": {
             "annual_goal_usd": annual_goal_usd,
@@ -1724,11 +1707,17 @@ if __name__ == "__main__":
 
     import uvicorn
 
+    import startup_guard
+
     # Honor PORT env so a second backend instance (e.g. Spyder dev kernel)
     # can run on a different port without conflicting with the launcher's
     # default 8001 instance. Frontend hits 8001 unchanged.
     _port = int(os.getenv("PORT", "8001"))
-    _free_port(_port)
+    # Refuses an occupied port or held instance lock (distinct exit codes) instead
+    # of killing it; the returned lock must stay referenced until the process exits.
+    _startup_lock = startup_guard.run_or_exit(
+        _port, os.path.dirname(os.path.abspath(__file__)), logger
+    )
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

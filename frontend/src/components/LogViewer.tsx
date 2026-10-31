@@ -147,7 +147,7 @@ export default function LogViewer() {
             placeholder="Search…"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs text-white placeholder-gray-600 w-40 focus:outline-none focus:border-gray-500"
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-xs text-white placeholder-gray-600 w-40 focus:outline-hidden focus:border-gray-500"
           />
 
           {/* Auto-refresh toggle */}
@@ -202,17 +202,17 @@ export default function LogViewer() {
             >
               <div className="flex items-start gap-2">
                 {/* Level badge */}
-                <span className={`flex-shrink-0 text-xs font-bold px-1.5 py-0.5 rounded ${levelBadge(e.level)}`}>
+                <span className={`shrink-0 text-xs font-bold px-1.5 py-0.5 rounded ${levelBadge(e.level)}`}>
                   {e.level === 'CRITICAL' ? 'CRIT' : e.level === 'WARNING' ? 'WARN' : e.level}
                 </span>
 
                 {/* Time */}
-                <span className="flex-shrink-0 text-gray-500 text-xs pt-0.5">
+                <span className="shrink-0 text-gray-500 text-xs pt-0.5">
                   {new Date(e.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
 
                 {/* Logger */}
-                <span className="flex-shrink-0 text-gray-500 text-xs pt-0.5 hidden sm:block">
+                <span className="shrink-0 text-gray-500 text-xs pt-0.5 hidden sm:block">
                   [{shortLogger(e.logger)}]
                 </span>
 

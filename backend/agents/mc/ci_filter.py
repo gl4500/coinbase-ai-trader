@@ -31,6 +31,9 @@ class CIFilter(BuyFilter):
         except (TypeError, ValueError):
             self._K = 1.0
 
+    def params(self) -> Dict[str, Any]:
+        return {"K": self._K}
+
     def evaluate(
         self,
         side: str,

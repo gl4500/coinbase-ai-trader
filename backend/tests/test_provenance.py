@@ -105,3 +105,55 @@ def test_a_directory_is_not_mistaken_for_an_artifact(tmp_path):
     d.mkdir()
     with pytest.raises(ValueError):
         artifact_fingerprint([str(d)], {})
+
+
+# ── Part 2: one identity for "what decided" ───────────────────────────────────
+
+from services.provenance import decision_provenance, validate_digest  # noqa: E402
+
+_V3 = {"digest": "sha256:" + "a" * 64, "artifacts": [{"path": "xgb_model.json"}], "config": {}}
+_V45 = {
+    "digest": "sha256:" + "b" * 64,
+    "artifacts": [{"path": "xgb_model_v4_5.json"}],
+    "config": {},
+}
+
+
+def test_no_driver_means_unattributed_not_unknown():
+    assert decision_provenance({"v3": None, "v4_5": _V45}, {"t": 0.6}) is None
+
+
+def test_decision_provenance_is_deterministic_and_well_formed():
+    a = decision_provenance({"v3": _V3, "v4_5": _V45}, {"t": 0.6, "mc": ("ci",)})
+    b = decision_provenance({"v4_5": _V45, "v3": _V3}, {"mc": ("ci",), "t": 0.6})
+    assert a["digest"] == b["digest"]
+    assert validate_digest(a["digest"]) == a["digest"]
+    assert a["components"] == {"v3": _V3["digest"], "v4_5": _V45["digest"]}
+
+
+@pytest.mark.parametrize(
+    "fps,cfg",
+    [
+        ({"v3": _V3, "v4_5": None}, {"t": 0.6}),  # shadow absent
+        ({"v3": _V3, "v4_5": _V45}, {"t": 0.61}),  # threshold moved
+        ({"v3": _V3, "v4_5": _V45}, {"t": True}),  # type change, True == 1 in Python
+    ],
+)
+def test_any_component_change_changes_the_digest(fps, cfg):
+    base = decision_provenance({"v3": _V3, "v4_5": _V45}, {"t": 0.6})["digest"]
+    assert decision_provenance(fps, cfg)["digest"] != base
+
+
+def test_shadow_change_changes_the_digest():
+    other = dict(_V45, digest="sha256:" + "c" * 64)
+    a = decision_provenance({"v3": _V3, "v4_5": _V45}, {})
+    b = decision_provenance({"v3": _V3, "v4_5": other}, {})
+    assert a["digest"] != b["digest"]
+
+
+@pytest.mark.parametrize(
+    "bad", ["unknown", "", "sha256:abc", "sha256:" + "A" * 64, "md5:" + "a" * 64, None, 7]
+)
+def test_validate_digest_rejects_anything_not_a_full_sha256(bad):
+    with pytest.raises(ValueError, match="model_provenance"):
+        validate_digest(bad)
