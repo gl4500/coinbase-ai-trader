@@ -35,8 +35,16 @@ def in_scope(cwd: str, root: Path, home: Path) -> bool:
     cwd = _plain(cwd) if cwd else cwd
     if not cwd or not os.path.isabs(cwd):
         return False
-    here, base = _norm(cwd), _norm(root)
-    return here == _norm(home) or here == base or here.startswith(base + os.sep)
+    here = _norm(cwd)
+    # root comes from Path(launcher).resolve(), which keeps a \\?\ prefix; a device-form
+    # root or home is not comparable and simply never matches.
+    root_plain, home_plain = _plain(root), _plain(home)
+    if home_plain is not None and here == _norm(home_plain):
+        return True
+    if root_plain is None:
+        return False
+    base = _norm(root_plain)
+    return here == base or here.startswith(base + os.sep)
 
 
 def handle_hook(database, role, launcher, root=None, home=None):
