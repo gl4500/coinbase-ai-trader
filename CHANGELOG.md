@@ -7,6 +7,26 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### Session 58.118 — 2026-11-03 — MC_FILTERS=ci had not run since August; filter kept off
+
+- **Cause:** the ruff F401 autofix in `589b571` (2026-08-01) turned `cnn_agent`'s side-effect import of
+  `agents.mc.ci_filter` into `pass`. `CIFilter` never registered, so `MC_FILTERS=ci` logged
+  "unknown filter 'ci'" at every start and the chain was empty. Before that, June/July telemetry shows
+  the filter blocking 78-88% of gate-passing BUYs.
+- **Fix:** `agents/mc/registry._build_chain` imports `_BUILTIN_FILTER_MODULES` by name (`importlib`)
+  whenever `MC_FILTERS` is non-empty; an empty `MC_FILTERS` still imports nothing (invariant 14).
+  `ci_filter` self-registers with `setdefault`, so an injected filter is not overwritten. The dead
+  `try: pass` in `generate_signal` is removed.
+- **Live behavior unchanged by operator decision:** `ci` was removed from `MC_FILTERS` in the 8001 `.env`
+  (2026-11-03) so the filter stays off as it has run since August. Re-enable only after comparing outcomes
+  with the filter on (Jun-Jul) and off (Aug-Oct).
+- **Calibrator warning:** the stale bare-isotonic `backend/xgb_calibration.pkl` (2026-05-10, fitted to an
+  older booster, skipped since `cff73a0`; sha256 851b570b…) was moved to the gitignored
+  `backend/data/xgb_calibration_bare_isotonic_20260510.retired.pkl` (kept, not deleted), so the
+  loader reports "no calibrator — raw passthrough". Live scores were already uncalibrated.
+- Tests: `test_builtin_ci_resolves_without_a_caller_import`, `test_empty_env_imports_no_filter_module`;
+  `test_unregistered_names_are_excluded` no longer codifies the unregistered-ci state.
+
 ### Session 58.117 — 2026-10-29 — Scope check normalizes repo/home operands too
 
 `tools/session_bridge` only. Follow-up to 58.115 (Codex review note P104-CH01).

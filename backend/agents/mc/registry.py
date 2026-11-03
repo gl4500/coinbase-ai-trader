@@ -8,6 +8,7 @@ the rest of the chain or the scan loop.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from typing import Any, Dict, List, Tuple, Type
@@ -20,6 +21,11 @@ logger = logging.getLogger(__name__)
 # here on import. Tests patch this dict to inject spies.
 _FILTER_CLASSES: Dict[str, Type[BuyFilter]] = {}
 
+# Modules whose import self-registers a filter. Loaded by name so no caller's
+# side-effect import is needed: 589b571's ruff F401 autofix removed exactly such
+# an import and MC_FILTERS=ci resolved to nothing from 2026-08-01.
+_BUILTIN_FILTER_MODULES = ("agents.mc.ci_filter",)
+
 _chain: List[BuyFilter] = []
 _chain_built: bool = False
 
@@ -27,6 +33,12 @@ _chain_built: bool = False
 def _build_chain() -> List[BuyFilter]:
     raw = os.getenv("MC_FILTERS", "") or ""
     names = [n.strip() for n in raw.split(",") if n.strip()]
+    if names:
+        for module in _BUILTIN_FILTER_MODULES:
+            try:
+                importlib.import_module(module)
+            except Exception:
+                logger.exception("MC filter module %s failed to import", module)
     chain: List[BuyFilter] = []
     for name in names:
         cls = _FILTER_CLASSES.get(name)
