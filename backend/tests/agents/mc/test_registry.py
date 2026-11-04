@@ -224,13 +224,30 @@ class TestEffectiveFilterNames:
         assert registry.effective_filter_names() == []
 
     def test_unregistered_names_are_excluded(self, fresh_registry, monkeypatch):
-        # Mirrors live: MC_FILTERS=ci while nothing imports ci_filter.
-        monkeypatch.setenv("MC_FILTERS", "ci,bogus")
+        monkeypatch.setenv("MC_FILTERS", "bogus,other")
         from agents.mc import registry
 
-        registry._FILTER_CLASSES.pop("ci", None)
         registry._reset_chain_cache()
         assert registry.effective_filter_names() == []
+
+    def test_builtin_ci_resolves_without_a_caller_import(self, fresh_registry, monkeypatch):
+        # 589b571's ruff autofix turned cnn_agent's side-effect import of ci_filter into
+        # `pass`, so MC_FILTERS=ci silently resolved to nothing from 2026-08-01.
+        monkeypatch.setenv("MC_FILTERS", "ci")
+        from agents.mc import registry
+
+        assert "agents.mc.ci_filter" not in sys.modules
+        registry._reset_chain_cache()
+        assert registry.effective_filter_names() == ["ci"]
+
+    def test_empty_env_imports_no_filter_module(self, fresh_registry, monkeypatch):
+        # Invariant 14: MC_FILTERS="" must stay bit-for-bit pre-MC.
+        monkeypatch.setenv("MC_FILTERS", "")
+        from agents.mc import registry
+
+        registry._reset_chain_cache()
+        assert registry.effective_filter_names() == []
+        assert "agents.mc.ci_filter" not in sys.modules
 
     def test_registered_filters_reported_in_order(self, fresh_registry, monkeypatch):
         monkeypatch.setenv("MC_FILTERS", "b,a")

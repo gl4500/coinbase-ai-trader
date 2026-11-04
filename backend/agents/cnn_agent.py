@@ -2249,10 +2249,6 @@ class CoinbaseCNNAgent:
         # side unchanged and {} telemetry when MC_FILTERS is empty.
         from agents.mc import registry as _mc
 
-        try:
-            pass  # registers ci into _FILTER_CLASSES
-        except Exception:
-            pass
         side, mc_telemetry = _mc.apply_buy_filters(
             side=side,
             model_prob=model_prob,

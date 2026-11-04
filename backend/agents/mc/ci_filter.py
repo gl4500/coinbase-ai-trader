@@ -90,6 +90,6 @@ class CIFilter(BuyFilter):
 try:
     from agents.mc.registry import _FILTER_CLASSES
 
-    _FILTER_CLASSES["ci"] = CIFilter
+    _FILTER_CLASSES.setdefault("ci", CIFilter)
 except Exception:
     pass
