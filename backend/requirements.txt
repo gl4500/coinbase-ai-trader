@@ -7,7 +7,7 @@ websockets==13.1
 pydantic==2.9.2
 python-multipart>=0.0.18
 PyJWT>=2.13.0
-cryptography>=48.0.1
+cryptography>=50.0.0
 numpy>=1.26.0
 pandas>=2.0.0
 xgboost>=2.0.0
