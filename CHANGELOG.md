@@ -7,7 +7,7 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
-### 2026-11-07 ? Test isolation for parallel CI
+### 2026-11-07 - Test isolation for parallel CI
 
 - Redirect the active model/best-loss path helpers and resume checkpoint to temporary
   storage for every test; the old constants no longer controlled persistence.
@@ -15,7 +15,7 @@ Format: reverse-chronological by session date.
   config singleton references in separately selected test groups.
 - Reproduce both isolation defects before the fix; add active-path regression coverage.
 
-### 2026-11-07 ? Parallel backend CI
+### 2026-11-07 - Parallel backend CI
 
 - Run the existing fast backend suite in four pytest-split jobs on GitHub-hosted runners.
 - Preserve the required `Backend tests` check and the combined `coverage-report` artifact.

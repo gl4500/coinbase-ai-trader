@@ -35,7 +35,7 @@ aggregate coverage with the baseline. Four shards repeat setup and can increase 
 no 4x speedup is promised. If total elapsed time does not improve, rebalance or reduce shard count.
 Rollback is a revert of this commit. Existing required check names remain available.
 
-## Local validation ? 2026-11-07
+## Local validation - 2026-11-07
 
 - Real suite collection: 1,870 selected tests (one slow/integration test deselected).
 - Shards: 468 / 468 / 467 / 467. Their node-ID sets are disjoint and their union equals
@@ -54,3 +54,11 @@ stale model-path mocks and configuration singleton replacement in tests. Active 
 path helpers and resume checkpoints are now redirected per test; configuration field
 tests instantiate Config without module reloads. Production code is unchanged.
 Both defects were reproduced before fixing the fixtures; targeted tests then passed.
+
+## CI lab and follow-up task
+
+- Private test repository: https://github.com/gl4500/coinbase-ci-sandbox
+- Refactoring task: https://github.com/gl4500/coinbase-ai-trader/issues/117
+- After the isolation fix, the full pre-commit suite passed: 1,797 passed, 72 skipped,
+  one deselected, one xfailed and two xpassed (no failures). Two new isolation tests
+  bring the fast-test selection to 1,872 tests.
