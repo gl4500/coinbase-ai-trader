@@ -265,6 +265,29 @@ def test_entry_failed_reaches_flat_only_with_affirmative_zero_proof():
     assert next_position_state(PositionState.OPENING, "entry_failed", ev) is PositionState.FLAT
 
 
+@pytest.mark.parametrize(
+    "remainder",
+    [{"remainder_live": True}, {"remaining_size": Decimal("1")}],
+)
+def test_entry_failed_with_a_live_remainder_is_reconciliation_not_flat(remainder):
+    """Found by the Codex exact-head review of #116: entry_failed checked only the
+    terminal STATUS, never whether anything was still working, so a cancel claim
+    with a live remainder reached FLAT. A working remainder can still fill."""
+    ev = {
+        "reason": "CANCELLED",
+        "terminal_status": "CANCELLED",
+        "filled_size": Decimal("0"),
+        "position_size": Decimal("0"),
+        "size_increment": Decimal("0.00000001"),
+        "order_id": "ex-1",
+        **remainder,
+    }
+    assert (
+        next_position_state(PositionState.OPENING, "entry_failed", ev)
+        is PositionState.RECONCILIATION_REQUIRED
+    )
+
+
 # ── Blocker 5: non-finite sizes and increments ───────────────────────────────
 
 

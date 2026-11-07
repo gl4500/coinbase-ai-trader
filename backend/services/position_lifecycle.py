@@ -687,13 +687,17 @@ def next_position_state(
         if reason.strip().lower() in _AMBIGUOUS_REASONS:
             return PositionState.RECONCILIATION_REQUIRED
         try:
-            _require_terminal_status(evidence, _REJECT_TERMINALS | _CANCEL_TERMINALS)
+            # _validated_terminal, not the bare status check: a cancel claim with a
+            # live remainder is not terminal, and that remainder can still fill.
+            _validated_terminal(evidence, allowed=_REJECT_TERMINALS | _CANCEL_TERMINALS)
             _require_str_id(evidence, "order_id")
             _require_exact_zero(evidence, "filled_size")
             if not _is_flat(evidence):
                 return PositionState.RECONCILIATION_REQUIRED
-        except InsufficientEvidence:
-            # No affirmative proof that nothing was filled. Do not erase exposure.
+        except (InsufficientEvidence, IllegalTransition):
+            # No affirmative proof that nothing was filled, or evidence that
+            # contradicts itself (a terminal status with a live remainder) -- a
+            # disagreement per spec §3. Either way, do not erase exposure.
             return PositionState.RECONCILIATION_REQUIRED
         return PositionState.FLAT
 
