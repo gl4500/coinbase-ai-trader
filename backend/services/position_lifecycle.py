@@ -692,6 +692,9 @@ def next_position_state(
             _validated_terminal(evidence, allowed=_REJECT_TERMINALS | _CANCEL_TERMINALS)
             _require_str_id(evidence, "order_id")
             _require_exact_zero(evidence, "filled_size")
+            if evidence.get("filled_value") is not None:
+                # Value filled with zero size filled contradicts itself.
+                _require_exact_zero(evidence, "filled_value")
             if not _is_flat(evidence):
                 return PositionState.RECONCILIATION_REQUIRED
         except (InsufficientEvidence, IllegalTransition):

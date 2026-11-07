@@ -267,9 +267,17 @@ def test_entry_failed_reaches_flat_only_with_affirmative_zero_proof():
 
 @pytest.mark.parametrize(
     "remainder",
-    [{"remainder_live": True}, {"remaining_size": Decimal("1")}],
+    [
+        {"remainder_live": True},
+        {"remaining_size": Decimal("1")},
+        {"remainder_live": True, "remaining_size": Decimal("1")},
+        # Malformed rather than live: a string is not proof of anything.
+        {"remainder_live": "false"},
+        # Value filled with no size filled is self-contradictory.
+        {"filled_value": Decimal("100")},
+    ],
 )
-def test_entry_failed_with_a_live_remainder_is_reconciliation_not_flat(remainder):
+def test_entry_failed_with_contradictory_evidence_is_reconciliation_not_flat(remainder):
     """Found by the Codex exact-head review of #116: entry_failed checked only the
     terminal STATUS, never whether anything was still working, so a cancel claim
     with a live remainder reached FLAT. A working remainder can still fill."""
