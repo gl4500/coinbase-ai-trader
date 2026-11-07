@@ -140,7 +140,18 @@ class TestExecuteMakerSignal:
                     {"order_id": "ord-3", "status": "OPEN"},
                 ]
             )
-            cb.cancel_orders = AsyncMock(return_value={"success": True})
+            cb.cancel_orders = AsyncMock(
+                return_value={"results": [{"order_id": "ord-3", "success": True}]}
+            )
+            cb.get_order = AsyncMock(
+                return_value={
+                    "order_id": "ord-3",
+                    "status": "CANCELLED",
+                    "pending_cancel": False,
+                    "filled_size": "0",
+                    "filled_value": "0",
+                }
+            )
             cb.place_market_order = AsyncMock(
                 return_value={
                     "success": True,
@@ -210,3 +221,165 @@ class TestMakerPriceHelper:
 
         assert _maker_price("buy", 10.0, 11.0) == 10.0
         assert _maker_price("sell", 10.0, 11.0) == 11.0
+
+
+@pytest.fixture
+def fallback_env():
+    ex = _make_live_executor()
+    ex._wait_for_fill = AsyncMock(return_value=False)
+    with (
+        patch("agents.order_executor.coinbase_client") as cb,
+        patch("agents.order_executor.database") as db,
+    ):
+        cb.place_limit_order = AsyncMock(
+            return_value={"success": True, "success_response": {"order_id": "limit-safe"}}
+        )
+        cb.cancel_orders = AsyncMock(
+            return_value={"results": [{"order_id": "limit-safe", "success": True}]}
+        )
+        cb.get_order = AsyncMock(
+            return_value={
+                "order_id": "limit-safe",
+                "status": "CANCELLED",
+                "pending_cancel": False,
+                "filled_size": "0",
+                "filled_value": "0",
+            }
+        )
+        cb.place_market_order = AsyncMock(
+            return_value={"success": True, "success_response": {"order_id": "market-safe"}}
+        )
+        db.save_order = AsyncMock()
+        db.mark_signal_acted = AsyncMock()
+        db.update_order_status = AsyncMock()
+        yield ex, cb, db
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        RuntimeError("transport failure"),
+        {},
+        {"success": True},
+        {"results": [{"order_id": "limit-safe", "success": False}]},
+        {"results": [{"order_id": "different", "success": True}]},
+        {"results": [{"order_id": "limit-safe", "success": "true"}]},
+    ],
+)
+async def test_cancel_failure_never_places_replacement(fallback_env, signal_buy, response):
+    ex, cb, db = fallback_env
+    if isinstance(response, Exception):
+        cb.cancel_orders.side_effect = response
+    else:
+        cb.cancel_orders.return_value = response
+    result = await ex.execute_maker_signal(signal_buy, timeout_secs=0)
+    assert not result["success"]
+    assert result["reconciliation_required"]
+    assert result["order_id"] == "limit-safe"
+    cb.place_market_order.assert_not_awaited()
+    db.update_order_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [
+        {},
+        {"status": "OPEN"},
+        {"status": "PENDING"},
+        {"pending_cancel": True},
+        {"pending_cancel": None},
+        {"order_id": "different"},
+        {"filled_size": "0.1", "filled_value": "9.95"},
+        {"filled_size": None},
+        {"filled_value": None},
+        {"filled_size": "NaN"},
+        {"filled_value": "Infinity"},
+        {"filled_size": "-1"},
+    ],
+)
+async def test_uncertain_or_partial_order_never_places_replacement(fallback_env, signal_buy, state):
+    ex, cb, _ = fallback_env
+    if state:
+        cb.get_order.return_value.update(state)
+    else:
+        cb.get_order.return_value = {}
+    result = await ex.execute_maker_signal(signal_buy, timeout_secs=0)
+    assert not result["success"]
+    assert result["reconciliation_required"]
+    assert result["order_id"] == "limit-safe"
+    cb.place_market_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_final_order_blocks_replacement(fallback_env, signal_buy):
+    ex, cb, _ = fallback_env
+    cb.get_order.side_effect = RuntimeError("status unavailable")
+    result = await ex.execute_maker_signal(signal_buy, timeout_secs=0)
+    assert not result["success"]
+    assert result["reconciliation_required"]
+    cb.place_market_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fill_during_cancel_returns_original_order(fallback_env, signal_buy):
+    ex, cb, _ = fallback_env
+    cb.get_order.return_value.update(status="FILLED", filled_size="0.50251256", filled_value="50")
+    result = await ex.execute_maker_signal(signal_buy, timeout_secs=0)
+    assert result["success"]
+    assert result["order_id"] == "limit-safe"
+    assert result["fill_mode"] == "MAKER"
+    cb.place_market_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sell_fallback_uses_original_base_quantity(fallback_env, signal_sell):
+    ex, cb, _ = fallback_env
+    result = await ex.execute_maker_signal(signal_sell, timeout_secs=0)
+    assert result["success"]
+    assert result["maker_order_id"] == "limit-safe"
+    cb.place_market_order.assert_awaited_once_with("BTC-USD", "SELL", base_size=0.49751244)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"success": False, "error_response": {"error": "REJECTED"}},
+        {"success": True, "success_response": {}},
+    ],
+)
+async def test_rejected_maker_order_never_enters_fallback(fallback_env, signal_buy, response):
+    ex, cb, db = fallback_env
+    cb.place_limit_order.return_value = response
+    result = await ex.execute_maker_signal(signal_buy, timeout_secs=0)
+    assert not result["success"]
+    cb.cancel_orders.assert_not_awaited()
+    cb.place_market_order.assert_not_awaited()
+    db.save_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"success": False, "error_response": {"error": "REJECTED"}},
+        {"success": True, "success_response": {}},
+        RuntimeError("ambiguous timeout"),
+    ],
+)
+async def test_failed_market_replacement_is_not_reported_as_success(
+    fallback_env, signal_buy, response
+):
+    ex, cb, db = fallback_env
+    if isinstance(response, Exception):
+        cb.place_market_order.side_effect = response
+    else:
+        cb.place_market_order.return_value = response
+    result = await ex.execute_maker_signal(signal_buy, timeout_secs=0)
+    assert not result["success"]
+    assert result["maker_order_id"] == "limit-safe"
+    assert result["reconciliation_required"]
+    cb.place_market_order.assert_awaited_once()
+    assert len(db.save_order.await_args_list) == 1
