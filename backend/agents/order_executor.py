@@ -18,7 +18,7 @@ import logging
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import database
 from clients import coinbase_client
@@ -41,6 +41,99 @@ def _maker_price(side: str, bid: float, ask: float) -> float:
     would auto-cancel the post_only order on Coinbase.
     """
     return bid if side.upper() == "BUY" else ask
+
+
+# An exchange may name an order, refuse it, or answer ambiguously. Those are
+# three outcomes, not two, and collapsing the third into either of the others is
+# the defect this module was repaired for: an ambiguous answer means an order MAY
+# exist, so it can neither be reported as success nor retried.
+_PLACEHOLDER_ORDER_IDS = frozenset({"unknown", "none", "null", "n/a", "na", "-", "?"})
+
+
+def _usable_order_id(value: Any) -> Optional[str]:
+    """Return a real exchange identifier, or None.
+
+    `"unknown"` is an error path wearing an identifier's clothes — it was the
+    literal default here, persisted to the orders table as though it named
+    something. A non-string, blank, or placeholder value identifies nothing.
+    """
+    if not isinstance(value, str):
+        return None
+    ident = value.strip()
+    if not ident or ident.lower() in _PLACEHOLDER_ORDER_IDS:
+        return None
+    return ident
+
+
+def _accepted_placement(resp: Any) -> Optional[str]:
+    """The order id of an AFFIRMATIVELY accepted placement, else None.
+
+    Requires the response to say `success is True` — an actual bool, since `1`
+    and `"true"` are not the exchange agreeing — and to name the order in its
+    success payload. Anything else returns None and the caller must decide
+    between rejection and ambiguity via `_explicit_rejection`.
+    """
+    if not isinstance(resp, dict) or resp.get("success") is not True:
+        return None
+    order = resp.get("success_response")
+    if not isinstance(order, dict):
+        return None
+    return _usable_order_id(order.get("order_id"))
+
+
+def _explicit_rejection(resp: Any) -> bool:
+    """True only when the exchange affirmatively said no.
+
+    A rejection is safe: nothing was placed. Silence, a malformed body, or a
+    success flag with no usable id are NOT rejections — an order may exist — so
+    they must never be reported as a clean failure or retried.
+    """
+    return isinstance(resp, dict) and resp.get("success") is False
+
+
+async def _persist_accepted_order(row: Dict, signal_id: Any = None) -> Optional[str]:
+    """Record an ACCEPTED placement. Returns None on success, else a failure reason.
+
+    Once a placement is accepted a real order exists at the exchange, so the
+    accepted identifier is the most valuable thing the caller can be given. An
+    unguarded write discarded it: the exception propagated and took the id with
+    it, leaving an order nothing names. Reporting "persistence failed, here is
+    the id" is strictly better than raising, because the id is what makes the
+    exposure reconcilable.
+    """
+    order_id = row["order_id"]
+    try:
+        await database.save_order(row)
+    except Exception as e:
+        logger.error("Order %s was accepted but could not be recorded: %s", order_id, e)
+        return f"Order was accepted but could not be recorded: {e}"
+    if signal_id:
+        try:
+            await database.mark_signal_acted(signal_id, order_id)
+        except Exception as e:
+            logger.error("Order %s recorded but signal link failed: %s", order_id, e)
+            return f"Order was accepted but the signal link failed: {e}"
+    return None
+
+
+def _acknowledged_cancel(resp: Any, order_id: str) -> bool:
+    """True when the exchange acknowledged the cancel request for THIS order.
+
+    Acknowledgement is not terminality: it says the request was received, not
+    that the order left the book. `_confirmed_unfilled_cancel` decides that,
+    from a follow-up snapshot.
+    """
+    if not isinstance(resp, dict):
+        return False
+    results = resp.get("results")
+    if not isinstance(results, list):
+        return False
+    matches = [
+        r
+        for r in results
+        if isinstance(r, dict) and _usable_order_id(r.get("order_id")) == order_id
+    ]
+    return len(matches) == 1 and matches[0].get("success") is True
 
 
 def _confirmed_unfilled_cancel(order: Dict, order_id: str) -> bool:
@@ -256,38 +349,63 @@ class OrderExecutor:
                 "simulated_balance": self._dry_run_balance,
             }
 
-        for attempt in range(3):
-            try:
-                resp = await coinbase_client.place_limit_order(pid, side, base_size, price)
-                order = resp.get("success_response", resp)
-                order_id = order.get("order_id") or order.get("client_order_id", "unknown")
-                status = "live" if resp.get("success") else "failed"
+        # NO RETRY LOOP. An exception can be raised after the request reached the
+        # exchange, so a retry may place a SECOND order for the same signal. The
+        # previous three-attempt loop treated every failure as "nothing
+        # happened"; an unconfirmed placement is reconciliation work, not a
+        # reason to submit again.
+        try:
+            resp = await coinbase_client.place_limit_order(pid, side, base_size, price)
+        except Exception as e:
+            logger.error("Order placement for %s is unconfirmed, not resubmitting: %s", pid, e)
+            return {
+                "success": False,
+                "reconciliation_required": True,
+                "reason": f"Order placement unconfirmed: {e}",
+            }
 
-                await database.save_order(
-                    {
-                        "order_id": order_id,
-                        "product_id": pid,
-                        "side": side,
-                        "order_type": "LIMIT",
-                        "price": price,
-                        "base_size": base_size,
-                        "quote_size": quote_size,
-                        "status": status,
-                        "strategy": signal.get("signal_type", "TA"),
-                    }
-                )
-                if signal.get("id"):
-                    await database.mark_signal_acted(signal["id"], order_id)
+        order_id = _accepted_placement(resp)
+        if order_id is None:
+            if _explicit_rejection(resp):
+                logger.warning("Exchange rejected the %s order for %s", side, pid)
+                return {"success": False, "reason": "Exchange rejected the order"}
+            logger.error(
+                "Order placement for %s was neither accepted nor rejected; "
+                "an order may exist and no replacement will be submitted",
+                pid,
+            )
+            return {
+                "success": False,
+                "reconciliation_required": True,
+                "reason": "Order placement was neither accepted nor rejected",
+            }
 
-                logger.info(f"ORDER: {side} {base_size} {pid} @ ${price:,.4f} → {order_id}")
-                return {"success": True, "order_id": order_id, "status": status}
+        failure = await _persist_accepted_order(
+            {
+                "order_id": order_id,
+                "product_id": pid,
+                "side": side,
+                "order_type": "LIMIT",
+                "price": price,
+                "base_size": base_size,
+                "quote_size": quote_size,
+                "status": "live",
+                "strategy": signal.get("signal_type", "TA"),
+            },
+            signal.get("id"),
+        )
+        if failure:
+            # The order exists. Hand back its id rather than an exception, and
+            # place nothing else.
+            return {
+                "success": False,
+                "order_id": order_id,
+                "reconciliation_required": True,
+                "reason": failure,
+            }
 
-            except Exception as e:
-                logger.error(f"Order attempt {attempt + 1} failed: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2**attempt)
-
-        return {"success": False, "reason": "Order failed after 3 attempts"}
+        logger.info(f"ORDER: {side} {base_size} {pid} @ ${price:,.4f} → {order_id}")
+        return {"success": True, "order_id": order_id, "status": "live"}
 
     # ── Maker (post-only LIMIT) entry with timeout fallback ────────────────────
 
@@ -411,15 +529,14 @@ class OrderExecutor:
                 "reconciliation_required": True,
             }
 
-        order = resp.get("success_response") or {}
-        order_id = order.get("order_id")
-        if resp.get("success") is not True or not isinstance(order_id, str) or not order_id:
+        order_id = _accepted_placement(resp)
+        if order_id is None:
             return {
                 "success": False,
                 "reason": "Maker placement was rejected or unconfirmed",
-                "reconciliation_required": resp.get("success") is not False,
+                "reconciliation_required": not _explicit_rejection(resp),
             }
-        await database.save_order(
+        failure = await _persist_accepted_order(
             {
                 "order_id": order_id,
                 "product_id": pid,
@@ -430,10 +547,20 @@ class OrderExecutor:
                 "quote_size": quote_size,
                 "status": "live",
                 "strategy": signal.get("signal_type", "TA"),
-            }
+            },
+            signal.get("id"),
         )
-        if signal.get("id"):
-            await database.mark_signal_acted(signal["id"], order_id)
+        if failure:
+            # Stop before the fill poll and the market fallback: replacing an
+            # order we could not record is how one signal becomes two positions.
+            return {
+                "success": False,
+                "order_id": order_id,
+                "maker_order_id": order_id,
+                "fill_mode": "RECONCILIATION_REQUIRED",
+                "reconciliation_required": True,
+                "reason": failure,
+            }
         logger.info(f"MAKER ORDER: {side} {base_size} {pid} @ ${maker_price:,.4f} → {order_id}")
 
         # 6 — Poll for fill within timeout
@@ -451,11 +578,20 @@ class OrderExecutor:
         }
         try:
             cancel = await coinbase_client.cancel_orders([order_id])
-            matches = [r for r in cancel.get("results", []) if r.get("order_id") == order_id]
-            if len(matches) != 1 or matches[0].get("success") is not True:
+            if not _acknowledged_cancel(cancel, order_id):
                 return {**unresolved, "reason": "Maker cancellation was not acknowledged"}
             final = await coinbase_client.get_order(order_id)
-            if final.get("order_id") == order_id and final.get("status") == "FILLED":
+            # Identity BEFORE evidence, as in cancel_order: a snapshot naming a
+            # different order says nothing about this one, and attaching its
+            # fills here would cite another order's quantities as this order's
+            # reconciliation evidence.
+            if not isinstance(final, dict) or _usable_order_id(final.get("order_id")) != order_id:
+                logger.error(
+                    "Maker cancellation status for %s named a different order; evidence discarded",
+                    order_id,
+                )
+                return {**unresolved, "reason": "Maker cancellation status named a different order"}
+            if final.get("status") == "FILLED":
                 await database.update_order_status(order_id, "filled")
                 return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
             if not _confirmed_unfilled_cancel(final, order_id):
@@ -479,9 +615,8 @@ class OrderExecutor:
                 mkt_resp = await coinbase_client.place_market_order(pid, side, base_size=base_size)
             else:
                 mkt_resp = await coinbase_client.place_market_order(pid, side, quote_size)
-            mkt_order = mkt_resp.get("success_response") or {}
-            mkt_id = mkt_order.get("order_id")
-            if mkt_resp.get("success") is not True or not isinstance(mkt_id, str) or not mkt_id:
+            mkt_id = _accepted_placement(mkt_resp)
+            if mkt_id is None:
                 return {**unresolved, "reason": "Market replacement rejected or unconfirmed"}
             await database.save_order(
                 {
@@ -554,38 +689,138 @@ class OrderExecutor:
 
         try:
             resp = await coinbase_client.place_market_order(product_id, side, quote_size)
-            order = resp.get("success_response", resp)
-            order_id = order.get("order_id", "unknown")
-            await database.save_order(
-                {
-                    "order_id": order_id,
-                    "product_id": product_id,
-                    "side": side.upper(),
-                    "order_type": "MARKET",
-                    "quote_size": quote_size,
-                    "status": "live",
-                    "strategy": "MANUAL_MARKET",
-                }
-            )
-            return {"success": True, "order_id": order_id}
         except Exception as e:
-            logger.error(f"Market order failed: {e}")
-            return {"success": False, "reason": str(e)}
+            logger.error("Market order for %s is unconfirmed: %s", product_id, e)
+            return {
+                "success": False,
+                "reconciliation_required": True,
+                "reason": f"Market order unconfirmed: {e}",
+            }
+
+        order_id = _accepted_placement(resp)
+        if order_id is None:
+            if _explicit_rejection(resp):
+                logger.warning("Exchange rejected the %s market order for %s", side, product_id)
+                return {"success": False, "reason": "Exchange rejected the order"}
+            # The old code read the FULL response as the order payload, so a
+            # failure body produced order_id "unknown" with status "live" and a
+            # success result. Nothing is persisted unless the exchange named it.
+            logger.error(
+                "Market order for %s was neither accepted nor rejected; an order may exist",
+                product_id,
+            )
+            return {
+                "success": False,
+                "reconciliation_required": True,
+                "reason": "Market order was neither accepted nor rejected",
+            }
+
+        failure = await _persist_accepted_order(
+            {
+                "order_id": order_id,
+                "product_id": product_id,
+                "side": side.upper(),
+                "order_type": "MARKET",
+                "quote_size": quote_size,
+                "status": "live",
+                "strategy": "MANUAL_MARKET",
+            }
+        )
+        if failure:
+            return {
+                "success": False,
+                "order_id": order_id,
+                "reconciliation_required": True,
+                "reason": failure,
+            }
+        return {"success": True, "order_id": order_id}
 
     # ── Cancel ─────────────────────────────────────────────────────────────────
 
     async def cancel_order(self, order_id: str) -> Dict:
+        """Cancel an order, recording "canceled" only on TERMINAL confirmation.
+
+        Three states must stay distinct (lifecycle contract §4): the request was
+        acknowledged, the order is terminally cancelled with no fills, and the
+        order reached some other terminal state. The previous implementation
+        persisted "canceled" whenever no exception was raised — it never read the
+        per-order results, so a refused cancel was recorded as a completed one
+        and a partially filled order had its fill erased.
+        """
         if self.dry_run:
             await database.update_order_status(order_id, "canceled")
             return {"success": True, "dry_run": True}
+
+        unresolved = {
+            "success": False,
+            "order_id": order_id,
+            "reconciliation_required": True,
+        }
+
         try:
             resp = await coinbase_client.cancel_orders([order_id])
-            await database.update_order_status(order_id, "canceled")
-            logger.info(f"Canceled order {order_id}")
-            return {"success": True, "response": resp}
         except Exception as e:
-            logger.error(f"Cancel failed: {e}")
-            return {"success": False, "reason": str(e)}
+            logger.error("Cancel request for %s failed: %s", order_id, e)
+            return {**unresolved, "reason": f"Cancel request failed: {e}"}
+
+        if not _acknowledged_cancel(resp, order_id):
+            # Not acknowledged for this exact order: it may still be live, or it
+            # may already be terminal. Either way the state is unknown.
+            logger.error("Cancellation of %s was not acknowledged for that order", order_id)
+            return {**unresolved, "reason": "Cancellation was not acknowledged", "response": resp}
+
+        try:
+            final = await coinbase_client.get_order(order_id)
+        except Exception as e:
+            logger.error("Cancellation of %s acknowledged but unverifiable: %s", order_id, e)
+            return {**unresolved, "reason": f"Cancellation status unavailable: {e}"}
+
+        if not isinstance(final, dict):
+            return {**unresolved, "reason": "Cancellation status was malformed"}
+
+        # Identity FIRST. A snapshot naming another order is not weak evidence
+        # about this one, it is evidence about something else: attaching its
+        # status or fills here would manufacture a reconciliation record citing
+        # quantities that belong to a different order.
+        if _usable_order_id(final.get("order_id")) != order_id:
+            logger.error(
+                "Cancellation status for %s named a different order; evidence discarded",
+                order_id,
+            )
+            return {**unresolved, "reason": "Cancellation status named a different order"}
+
+        fills = {
+            "filled_size": final.get("filled_size"),
+            "filled_value": final.get("filled_value"),
+        }
+        status = str(final.get("status", "")).upper()
+
+        if status == "FILLED":
+            # The cancel lost the race. The fill is the truth; recording a
+            # cancellation here would erase a real position.
+            await database.update_order_status(order_id, "filled")
+            logger.warning("Cancellation of %s lost the race to a fill", order_id)
+            return {
+                **unresolved,
+                "status": "FILLED",
+                "reason": "Cancellation lost the race to a fill",
+                **fills,
+            }
+
+        if not _confirmed_unfilled_cancel(final, order_id):
+            # Includes the partial fill: a settled partial is not a zero-fill
+            # cancellation, and its fill must survive in the result.
+            logger.error("Cancellation of %s is not terminally confirmed", order_id)
+            return {
+                **unresolved,
+                "status": status or None,
+                "reason": "Cancellation is not terminally confirmed",
+                **fills,
+            }
+
+        await database.update_order_status(order_id, "canceled")
+        logger.info("Canceled order %s (terminally confirmed, zero fills)", order_id)
+        return {"success": True, "order_id": order_id, "status": "CANCELLED", "response": resp}
 
     # ── Status ─────────────────────────────────────────────────────────────────
 
