@@ -46,3 +46,11 @@ Rollback is a revert of this commit. Existing required check names remain availa
 - Gate regression tests passed after demonstrating failure before implementation.
 - YAML parses and `git diff --check` passes. Actual hosted execution/speedup remains
   to be measured; equal test counts do not establish equal elapsed durations.
+
+## Isolation defects found in the first hosted run
+
+Run 42378963281 correctly failed its backend/security gates. Shards 3 and 4 exposed
+stale model-path mocks and configuration singleton replacement in tests. Active model
+path helpers and resume checkpoints are now redirected per test; configuration field
+tests instantiate Config without module reloads. Production code is unchanged.
+Both defects were reproduced before fixing the fixtures; targeted tests then passed.

@@ -1,4 +1,5 @@
 """Fail CI unless every declared prerequisite completed successfully."""
+
 import json
 import os
 import sys
