@@ -5,11 +5,11 @@
 # Stages:
 #   1. secret-scan      — Gitleaks full-history scan (blocks everything)
 #   2. sast-python      — Bandit static analysis         ┐ run in
-#   3. test-backend     — pytest (fast tests only)        ┤ parallel after 1
+#   3. test-backend     — pytest (four fast-test shards)        ┤ parallel after 1
 #   4. frontend-check   — TypeScript compile check        ┘
 #   5. frontend-build   — Vite production build (after 4)
 #   6. security-gate    — summarise; block on critical failures
-#   7. tag-release      — date-stamp tag on main push (after 2+3+5)
+#   7. tag-release      — date-stamp tag on main push (after security-gate)
 
 name: CI — DevSecOps Pipeline
 
@@ -82,24 +82,33 @@ jobs:
           path: backend/bandit-report.json
 
   # ── 3. Backend tests (pytest — fast tests only; CPU torch for test collection) ─
-  test-backend:
-    name: Backend tests
+  backend-shards:
+    name: Backend tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     needs: secret-scan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            .github/workflows/ci.yml
       - name: Install backend dependencies
         run: |
           pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install pyarrow hmmlearn lightgbm scikit-learn
+          pip install pyarrow hmmlearn lightgbm scikit-learn pytest-split==0.11.0 coverage==7.13.5
           pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run test suite
         env:
+          COVERAGE_FILE: ".coverage.shard-${{ matrix.shard }}"
           COINBASE_API_KEY_NAME:    "organizations/ci-test/apiKeys/ci-test-key"
           COINBASE_API_PRIVATE_KEY: "stub"
           APP_API_KEY:              "ci-test-api-key"
@@ -110,15 +119,57 @@ jobs:
         run: |
           pytest backend/tests \
             -m "not slow and not integration" \
+            --splits 4 \
+            --group ${{ matrix.shard }} \
+            --splitting-algorithm least_duration \
+            --durations=20 \
             --cov=backend \
-            --cov-report=xml:coverage.xml \
-            --cov-report=term-missing \
+            --cov-report= \
             -q
+      - name: Upload shard coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage-${{ matrix.shard }}
+          path: .coverage.shard-${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # Preserve the existing required check while combining coverage from every shard.
+  test-backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    needs: backend-shards
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Require every test shard to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python tools/ci/check_results.py
+      - name: Verify CI gate regression tests
+        run: python -m unittest discover -s tools/ci -p 'test_*.py' -v
+      - name: Download shard coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-coverage-*
+          path: coverage-data
+          merge-multiple: true
+      - name: Combine coverage
+        run: |
+          pip install coverage==7.13.5
+          python -m coverage combine --keep coverage-data
+          python -m coverage xml -o coverage.xml
+          python -m coverage report
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
+          if-no-files-found: error
 
   # ── 4. Frontend type-check ────────────────────────────────────────────────────
   frontend-typecheck:
@@ -277,31 +328,14 @@ jobs:
     needs: [secret-scan, sast-python, test-backend, frontend-build, lint-python, snyk]
     if: always()
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Check all critical jobs passed
-        run: |
-          echo "=== CI Security Gate ==="
-          echo "secret-scan:     ${{ needs.secret-scan.result }}"
-          echo "sast-python:     ${{ needs.sast-python.result }}"
-          echo "test-backend:    ${{ needs.test-backend.result }}"
-          echo "frontend-build:  ${{ needs.frontend-build.result }}"
-          echo "lint-python:     ${{ needs.lint-python.result }}"
-          echo "snyk:            ${{ needs.snyk.result }}"
-          # snyk concludes 'success' (all steps skipped) when SNYK_TOKEN is
-          # absent, so this gate only blocks when Snyk actually ran and found a
-          # high-severity issue — token-less runs (e.g. forks) stay green.
-          for result in \
-            "${{ needs.secret-scan.result }}" \
-            "${{ needs.sast-python.result }}" \
-            "${{ needs.test-backend.result }}" \
-            "${{ needs.frontend-build.result }}" \
-            "${{ needs.lint-python.result }}" \
-            "${{ needs.snyk.result }}"; do
-            if [ "$result" = "failure" ]; then
-              echo "SECURITY GATE FAILED"
-              exit 1
-            fi
-          done
-          echo "SECURITY GATE PASSED"
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python tools/ci/check_results.py
 
   # ── 7. Tag release (main push only) ──────────────────────────────────────────
   tag-release:
@@ -310,7 +344,7 @@ jobs:
     permissions:
       contents: write  # create the release tag ref (repo default token is read-only)
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [test-backend, sast-python, frontend-build, lint-python]
+    needs: security-gate
     steps:
       - uses: actions/checkout@v4
         with:

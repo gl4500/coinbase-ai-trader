@@ -7,6 +7,14 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-07 ? Parallel backend CI
+
+- Run the existing fast backend suite in four pytest-split jobs on GitHub-hosted runners.
+- Preserve the required `Backend tests` check and the combined `coverage-report` artifact.
+- Fail the backend/security gates on failed, skipped, cancelled or missing prerequisites;
+  release tagging waits for the security gate, including Snyk.
+- Record the 2026-11-04 baseline and validation/measurement instructions in `docs/ci-parallel.md`.
+
 ### Session 58.118 — 2026-11-03 — MC_FILTERS=ci had not run since August; filter kept off
 
 - **Cause:** the ruff F401 autofix in `589b571` (2026-08-01) turned `cnn_agent`'s side-effect import of
