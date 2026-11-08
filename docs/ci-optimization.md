@@ -38,6 +38,11 @@ shard, the same source revision, disjoint selections and complete finite measure
 It uploads a merged timing candidate for review. It never silently changes a shard's
 input during an active workflow run.
 
+The recorder is loaded as `timings` through `PYTHONPATH=tools/ci`, rather than as
+`tools.ci.timings`: the latter would pre-load a namespace that conflicts with the
+application's existing `backend/tools` package. A subprocess regression recreates
+that import ordering and verifies the application tools remain importable.
+
 A shared `.test_durations` baseline will be committed from a successful hosted run;
 all four shards then use that identical file with pytest-split's `least_duration`.
 New tests get the plugin's estimated average until the reviewed baseline is refreshed.

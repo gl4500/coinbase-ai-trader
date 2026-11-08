@@ -80,15 +80,27 @@ class TimingCaptureTests(unittest.TestCase):
         python = os.environ.get("CI_TEST_PYTHON", sys.executable)
         env = {
             **os.environ,
-            "PYTHONPATH": str(repo) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "PYTHONPATH": str(repo / "tools" / "ci")
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
             "PYTEST_ADDOPTS": "",
             "GITHUB_SHA": "fixture-sha",
         }
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            backend_tools = root / "backend" / "tools"
+            backend_tools.mkdir(parents=True)
+            (backend_tools / "__init__.py").write_text("", encoding="utf-8")
+            (backend_tools / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (root / "conftest.py").write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "sys.path.insert(0, str(Path(__file__).parent / 'backend'))\n",
+                encoding="utf-8",
+            )
             (root / "test_sample.py").write_text(
-                "import pytest\n@pytest.mark.parametrize('n', range(8))\n"
-                "def test_value(n):\n    assert n >= 0\n",
+                "import pytest\nfrom tools.helper import VALUE\n"
+                "@pytest.mark.parametrize('n', range(8))\n"
+                "def test_value(n):\n    assert n >= 0 and VALUE == 1\n",
                 encoding="utf-8",
             )
             paths = []
@@ -101,7 +113,7 @@ class TimingCaptureTests(unittest.TestCase):
                         "pytest",
                         "test_sample.py",
                         "-p",
-                        "tools.ci.timings",
+                        "timings",
                         "--splits",
                         "2",
                         "--group",

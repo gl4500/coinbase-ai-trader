@@ -17,6 +17,8 @@ Format: reverse-chronological by session date.
   coverage artifact, required check names and release/security gates.
 - Add timing recorder/merger regression checks and document benchmark limits in
   `docs/ci-optimization.md`. Hosted performance measurement precedes any speedup claim.
+- Load the CI recorder without occupying the application's `tools` namespace;
+  a subprocess regression protects collection of the existing backend tool tests.
 
 ### 2026-11-07 - Test isolation for parallel CI
 
