@@ -29,6 +29,22 @@ Format: reverse-chronological by session date.
 - Tests: `test_candle_vintage.py` (44). Label, tracker, store, database and scanner fixtures now carry
   a vintage.
 
+### 2026-11-07 - Test isolation for parallel CI
+
+- Redirect the active model/best-loss path helpers and resume checkpoint to temporary
+  storage for every test; the old constants no longer controlled persistence.
+- Test configuration field factories without reloading shared modules, preventing stale
+  config singleton references in separately selected test groups.
+- Reproduce both isolation defects before the fix; add active-path regression coverage.
+
+### 2026-11-07 - Parallel backend CI
+
+- Run the existing fast backend suite in four pytest-split jobs on GitHub-hosted runners.
+- Preserve the required `Backend tests` check and the combined `coverage-report` artifact.
+- Fail the backend/security gates on failed, skipped, cancelled or missing prerequisites;
+  release tagging waits for the security gate, including Snyk.
+- Record the 2026-11-04 baseline and validation/measurement instructions in `docs/ci-parallel.md`.
+
 ### Session 58.118 — 2026-11-03 — MC_FILTERS=ci had not run since August; filter kept off
 
 - **Cause:** the ruff F401 autofix in `589b571` (2026-08-01) turned `cnn_agent`'s side-effect import of
@@ -1018,6 +1034,52 @@ at all. `test_diagnostics.py` updated for the versioned contract (stale fixtures
 product bugs). Ruff clean under main's config.
 
 **Note:** the migration has NOT been applied to any production database.
+
+### Session 58.85 — 2026-09-26 — Position/order lifecycle contract + pure validator
+
+A written contract for order and position lifecycle state, plus a pure
+`(state, event, evidence) -> state` validator implementing it. Motivated by one
+systemic pattern found across four execution sites: **"accepted" treated as
+"confirmed"**.
+
+- `docs/specs/2026-09-26-position-lifecycle-contract.md`: two separate state
+  machines (order vs position), the evidence required per transition, invariants
+  I1–I10, the §8b trusted-caller boundary, and §9a recording the review history.
+- `backend/services/position_lifecycle.py`: the validator. No database, clock or
+  network, so the rules are provable before anything persists or acts on them.
+- `backend/tests/test_position_lifecycle.py` + `test_position_lifecycle_adversarial.py`:
+  208 tests. The adversarial file is kept separate because **every case in it was
+  reproduced against this implementation and accepted by it** before being fixed.
+
+**Four review rounds, four different root causes** — found by the parallel Codex
+session driving the module with hostile inputs, and the later rounds were caused
+by the fixes for the earlier ones:
+
+1. Presence checked instead of validity (`order_id="unknown"`, `NaN` quantities,
+   truthy non-booleans all passed).
+2. Evidence validated in isolation from the state — a cancel from
+   `WORKING_PARTIAL` claiming zero cumulative fill was accepted, erasing a fill.
+3. Branch-by-branch fixes diverged: a hand-written `is True` bypassed the
+   strict-bool validator, one branch omitted the overfill check, and two events
+   classified identical evidence differently.
+4. Only quantities were centralised, not terminality: `REJECTED` could prove a
+   fill, and a terminal outcome could leave a **live remainder** — including
+   zero-fill cancellations, where a cancel is recorded as confirmed while the
+   order still works at the exchange.
+
+Resolved structurally rather than case by case: `_validated_fill` owns quantity
+evidence, `_validated_terminal` + `_require_no_live_remainder` own terminality,
+`_classify_terminal_fill` states the one classification policy (quantity decides
+the state; the status need only be a non-reject terminal status), and
+`_reject_terminal_claim` fails the mirror contradiction closed. New tests are
+**parameterised across events** so the class is closed rather than one more
+instance, including an equivalence test that drives identical evidence through
+all four events and asserts a single verdict.
+
+**Scope limits.** No production behaviour changes; nothing is wired into live
+execution. Per §8b this rests on a trusted-caller boundary — the module cannot
+confirm a supplied identifier corresponds to anything the exchange issued. A
+green suite here is not evidence that execution is safe.
 
 ### Session 58.82 — 2026-09-26 — Macro-regime layer Phase 1 (offline) — gate verdict INCONCLUSIVE
 

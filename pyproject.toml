@@ -58,3 +58,8 @@ per-file-ignores = { "backend/tests/*" = ["B", "E402"], "backend/main.py" = ["E4
 
 [tool.ruff.lint.isort]
 known-first-party = ["config", "database", "agents", "clients", "services"]
+
+# Keep paths portable when combining coverage from separate CI runners.
+[tool.coverage.run]
+relative_files = true
+source = ["backend"]
