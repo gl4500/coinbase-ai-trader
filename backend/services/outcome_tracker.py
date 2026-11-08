@@ -187,6 +187,7 @@ class OutcomeTracker:
                     price_observed_at=result.price_observed_at,
                     price_source=result.price_source,
                     lesson_text=_lesson(row, result),
+                    finality_basis=result.finality_basis,
                 )
                 if changed:
                     resolved += 1

@@ -7,6 +7,28 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-08 — Outcome labels refuse provisional candles (F113-1, PR #113)
+
+- **Defect (Codex counterexample, PR #113 review):** label v2 resolved as soon as `now >= close`.
+  A bar stored by a fetch that ran before the exchange settled it was used as final. A synthetic
+  case turned a LOSS into a WIN.
+- **Fix:**
+  - `candles.requested_at` records the request start of the fetch that wrote each bar. The scanner
+    stamps it via the new `coinbase_client.get_candles_with_vintage`; `get_candles` is unchanged.
+  - `save_candles` requires and validates it. An older fetch can no longer overwrite a newer one, and
+    equal-vintage conflicts keep the first value and are logged.
+  - The label gate (`outcome_labels.is_final`) accepts a bar only if its fetch started at least
+    `FINALITY_MARGIN_SECS` (300 s, a policy) after close and not after `now`. It covers both the entry
+    and exit bars; failures retry, then become `UNAVAILABLE`.
+  - Each label stores `finality_basis`, and diagnostics group scored counts by it, tolerating a DB that
+    lacks the column.
+- **Live effect after merge + restart:** one nullable column on `candles` and one on `signal_outcomes`.
+  Labels resolve no earlier than close + 300 s; pending rows over legacy NULL-vintage bars end as
+  `UNAVAILABLE`. No trading decision changes; feature readers only gain the extra column.
+  The migration runs in `init_db`, so it is gated on the operator's copy-first DB decision.
+- Tests: `test_candle_vintage.py` (44). Label, tracker, store, database and scanner fixtures now carry
+  a vintage.
+
 ### Session 58.118 — 2026-11-03 — MC_FILTERS=ci had not run since August; filter kept off
 
 - **Cause:** the ruff F401 autofix in `589b571` (2026-08-01) turned `cnn_agent`'s side-effect import of

@@ -25,7 +25,15 @@ def _candle(start, open_, close):
         "low": min(open_, close),
         "close": close,
         "volume": 1.0,
+        # Fetched once the bar had settled under the vintage gate
+        # (test_candle_vintage.py owns the gate's own behaviour).
+        "requested_at": start + HOUR + ol.FINALITY_MARGIN_SECS,
     }
+
+
+def _settled(entry):
+    """Earliest instant the exit bar can be labelled: its close plus the margin."""
+    return ol.target_time(entry) + ol.FINALITY_MARGIN_SECS
 
 
 def _book(*candles):
@@ -91,7 +99,7 @@ def test_sell_signal_wins_when_price_falls():
     entry = ol.entry_candle_start(_BOUNDARY)
     book = _book(_candle(entry, 100.0, 100.0), _candle(entry + 3 * HOUR, 98.0, 98.0))
     r = ol.resolve(
-        signal_time=_BOUNDARY, side="SELL", candles=book, now=ol.target_time(entry), attempts=0
+        signal_time=_BOUNDARY, side="SELL", candles=book, now=_settled(entry), attempts=0
     )
     assert r.status == "RESOLVED"
     assert r.outcome == "WIN"
@@ -111,7 +119,7 @@ def test_delayed_processing_still_uses_the_target_time_price():
         _candle(entry + 200 * HOUR, 500.0, 500.0),  # a much later bar
     )
     on_time = ol.resolve(
-        signal_time=_BOUNDARY, side="BUY", candles=book, now=ol.target_time(entry), attempts=0
+        signal_time=_BOUNDARY, side="BUY", candles=book, now=_settled(entry), attempts=0
     )
     very_late = ol.resolve(
         signal_time=_BOUNDARY,
@@ -161,12 +169,20 @@ def test_exit_bar_present_but_not_yet_closed_is_not_resolvable():
     assert r.reason == "not_matured"
 
 
-def test_resolvable_at_the_exact_instant_the_exit_bar_closes():
+def test_not_resolvable_at_the_close_only_once_a_settled_fetch_has_started():
+    """Clock maturity alone no longer suffices: a fetch at the close may hold a
+    provisional bar. The earliest label is close + FINALITY_MARGIN_SECS."""
     entry = ol.entry_candle_start(_BOUNDARY)
-    book = _book(_candle(entry, 100.0, 100.0), _candle(entry + 3 * HOUR, 101.0, 101.0))
+    exit_bar = _candle(entry + 3 * HOUR, 101.0, 101.0)
+    at_close = dict(exit_bar, requested_at=ol.target_time(entry))
+    book = _book(_candle(entry, 100.0, 100.0), at_close)
     r = ol.resolve(
         signal_time=_BOUNDARY, side="BUY", candles=book, now=ol.target_time(entry), attempts=0
     )
+    assert (r.status, r.reason) == ("PENDING", "unverified_exit_vintage")
+
+    book = _book(_candle(entry, 100.0, 100.0), exit_bar)
+    r = ol.resolve(signal_time=_BOUNDARY, side="BUY", candles=book, now=_settled(entry), attempts=0)
     assert r.status == "RESOLVED"
 
 
@@ -205,9 +221,7 @@ def test_invalid_entry_price_is_terminal_immediately():
     """Retrying cannot fix a non-positive entry price."""
     entry = ol.entry_candle_start(_BOUNDARY)
     book = _book(_candle(entry, 0.0, 0.0), _candle(entry + 3 * HOUR, 101.0, 101.0))
-    r = ol.resolve(
-        signal_time=_BOUNDARY, side="BUY", candles=book, now=ol.target_time(entry), attempts=0
-    )
+    r = ol.resolve(signal_time=_BOUNDARY, side="BUY", candles=book, now=_settled(entry), attempts=0)
     assert r.status == "UNAVAILABLE"
     assert r.reason == "invalid_entry_price"
 
