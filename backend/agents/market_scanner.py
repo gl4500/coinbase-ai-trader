@@ -129,9 +129,11 @@ class MarketScanner:
 
             # Fetch and cache hourly candles (needed by signal generator + CNN)
             try:
-                candles = await coinbase_client.get_candles(pid, "ONE_HOUR", limit=100)
+                candles, requested_at = await coinbase_client.get_candles_with_vintage(
+                    pid, "ONE_HOUR", limit=100
+                )
                 if candles:
-                    await database.save_candles(pid, candles)
+                    await database.save_candles(pid, candles, requested_at=requested_at)
                     if candles:
                         [c["close"] for c in candles]
                         product["high_24h"] = max(c["high"] for c in candles[-24:])
