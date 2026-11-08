@@ -7,6 +7,17 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-08 - CI environment reuse and timing capture
+
+- Centralize Linux backend CI setup and test-only dependency manifests. Exact installed
+  environment cache hits avoid repeated package installation; cold caches retain the
+  normal installation path and refresh weekly for floating runtime constraints.
+- Capture complete per-shard test timings and selected IDs, validate their disjoint
+  union before producing a candidate duration baseline, and retain the existing
+  coverage artifact, required check names and release/security gates.
+- Add timing recorder/merger regression checks and document benchmark limits in
+  `docs/ci-optimization.md`. Hosted performance measurement precedes any speedup claim.
+
 ### 2026-11-07 - Test isolation for parallel CI
 
 - Redirect the active model/best-loss path helpers and resume checkpoint to temporary

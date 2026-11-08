@@ -93,19 +93,10 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up cached backend environment
+        uses: ./.github/actions/setup-backend
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            backend/requirements.txt
-            .github/workflows/ci.yml
-      - name: Install backend dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r backend/requirements.txt
-          pip install pyarrow hmmlearn lightgbm scikit-learn pytest-split==0.11.0 coverage==7.13.5
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run test suite
         env:
           COVERAGE_FILE: ".coverage.shard-${{ matrix.shard }}"
@@ -117,8 +108,10 @@ jobs:
           LOG_LEVEL:                "WARNING"
           OLLAMA_MODEL:             "llama3.1:8b"
         run: |
-          pytest backend/tests \
+          python -m pytest backend/tests \
             -m "not slow and not integration" \
+            -p tools.ci.timings \
+            --ci-timings ci-timings-${{ matrix.shard }}.json \
             --splits 4 \
             --group ${{ matrix.shard }} \
             --splitting-algorithm least_duration \
@@ -130,7 +123,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-coverage-${{ matrix.shard }}
-          path: .coverage.shard-${{ matrix.shard }}
+          path: |
+            .coverage.shard-${{ matrix.shard }}
+            ci-timings-${{ matrix.shard }}.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -151,16 +146,28 @@ jobs:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: python tools/ci/check_results.py
       - name: Verify CI gate regression tests
-        run: python -m unittest discover -s tools/ci -p 'test_*.py' -v
+        run: |
+          python -m pip install pytest==9.0.3 pytest-split==0.11.0 coverage==7.13.5
+          python -m unittest discover -s tools/ci -p 'test_*.py' -v
       - name: Download shard coverage
         uses: actions/download-artifact@v4
         with:
           pattern: backend-coverage-*
           path: coverage-data
           merge-multiple: true
+      - name: Validate and merge measured test timings
+        run: >-
+          python -m tools.ci.timings merge --output test-durations-candidate.json
+          --expected-shards 4 coverage-data/ci-timings-*.json
+      - name: Upload timing baseline candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-timings
+          path: test-durations-candidate*.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Combine coverage
         run: |
-          pip install coverage==7.13.5
           python -m coverage combine --keep coverage-data
           python -m coverage xml -o coverage.xml
           python -m coverage report
