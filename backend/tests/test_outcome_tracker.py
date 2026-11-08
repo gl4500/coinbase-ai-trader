@@ -32,6 +32,8 @@ _BOUNDARY = 1_767_225_600
 _ENTRY = ol.entry_candle_start(_BOUNDARY)
 _EXIT = ol.exit_candle_start(_ENTRY)
 _TARGET = ol.target_time(_ENTRY)
+# Earliest instant the exit bar passes the vintage gate; bars below are fetched then.
+_SETTLED = _TARGET + ol.FINALITY_MARGIN_SECS
 
 
 @pytest.fixture
@@ -50,6 +52,10 @@ def _bar(start, open_, close):
         "close": close,
         "volume": 1.0,
     }
+
+
+async def _save(db, product_id, bars):
+    return await db.save_candles(product_id, bars, requested_at=_SETTLED)
 
 
 async def _pending_row(db, side="BUY", signal_time=_BOUNDARY):
@@ -90,7 +96,8 @@ def no_live_price_fallback(monkeypatch):
 async def test_delayed_resolution_uses_the_target_bar_not_the_latest_bar(db):
     """A row processed 200h late must be labelled from the target bar."""
     row = await _pending_row(db)
-    await db.save_candles(
+    await _save(
+        db,
         "BTC-USD",
         [
             _bar(_ENTRY, 100.0, 100.0),
@@ -115,14 +122,15 @@ async def test_delayed_resolution_uses_the_target_bar_not_the_latest_bar(db):
 
 async def test_sell_direction_is_scored_as_a_short(db):
     row = await _pending_row(db, side="SELL")
-    await db.save_candles(
+    await _save(
+        db,
         "BTC-USD",
         [
             _bar(_ENTRY, 100.0, 100.0),
             _bar(_EXIT, 98.0, 97.0),  # price fell 3% -> SELL wins
         ],
     )
-    await ot.get_tracker().check_pending(now=_TARGET)
+    await ot.get_tracker().check_pending(now=_SETTLED)
 
     stored = await db.get_signal_outcome(row["id"])
     assert stored["outcome"] == "WIN"
@@ -131,7 +139,7 @@ async def test_sell_direction_is_scored_as_a_short(db):
 
 async def test_not_matured_rows_are_untouched(db):
     row = await _pending_row(db)
-    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 101.0)])
+    await _save(db, "BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 101.0)])
 
     resolved = await ot.get_tracker().check_pending(now=_TARGET - 1)
     assert resolved == 0
@@ -144,9 +152,9 @@ async def test_not_matured_rows_are_untouched(db):
 
 async def test_missing_target_bar_leaves_the_row_unresolved_and_counts_an_attempt(db):
     row = await _pending_row(db)
-    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0)])  # no exit bar
+    await _save(db, "BTC-USD", [_bar(_ENTRY, 100.0, 100.0)])  # no exit bar
 
-    resolved = await ot.get_tracker().check_pending(now=_TARGET)
+    resolved = await ot.get_tracker().check_pending(now=_SETTLED)
     assert resolved == 0
 
     stored = await db.get_signal_outcome(row["id"])
@@ -159,7 +167,7 @@ async def test_repeated_failures_end_as_unavailable(db):
     row = await _pending_row(db)
     tracker = ot.get_tracker()
     for _ in range(ol.MAX_RESOLVE_ATTEMPTS):
-        await tracker.check_pending(now=_TARGET)
+        await tracker.check_pending(now=_SETTLED)
 
     stored = await db.get_signal_outcome(row["id"])
     assert stored["outcome"] == "UNAVAILABLE"
@@ -170,10 +178,10 @@ async def test_repeated_failures_end_as_unavailable(db):
 async def test_a_backfilled_bar_still_resolves_correctly_after_earlier_failures(db):
     """Retry must produce the target-time label, not a now-price label."""
     row = await _pending_row(db)
-    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0)])
-    await ot.get_tracker().check_pending(now=_TARGET)  # fails, exit bar absent
+    await _save(db, "BTC-USD", [_bar(_ENTRY, 100.0, 100.0)])
+    await ot.get_tracker().check_pending(now=_SETTLED)  # fails, exit bar absent
 
-    await db.save_candles("BTC-USD", [_bar(_EXIT, 101.0, 90.0)])  # backfill: -10%
+    await _save(db, "BTC-USD", [_bar(_EXIT, 101.0, 90.0)])  # backfill: -10%
     resolved = await ot.get_tracker().check_pending(now=_TARGET + 5 * HOUR)
     assert resolved == 1
 
@@ -187,7 +195,7 @@ async def test_a_backfilled_bar_still_resolves_correctly_after_earlier_failures(
 
 async def test_reprocessing_does_not_duplicate_or_rewrite(db):
     row = await _pending_row(db)
-    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
+    await _save(db, "BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
 
     import aiosqlite
 
@@ -197,7 +205,7 @@ async def test_reprocessing_does_not_duplicate_or_rewrite(db):
             return (await cur.fetchone())[0]
 
     before = await _count()
-    assert await ot.get_tracker().check_pending(now=_TARGET) == 1
+    assert await ot.get_tracker().check_pending(now=_SETTLED) == 1
     assert await ot.get_tracker().check_pending(now=_TARGET + 99 * HOUR) == 0
     assert await _count() == before
 
@@ -211,7 +219,7 @@ async def test_reprocessing_does_not_duplicate_or_rewrite(db):
 
 async def test_lesson_text_states_the_real_horizon_not_a_false_4h_claim(db):
     row = await _pending_row(db)
-    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
+    await _save(db, "BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
     await ot.get_tracker().check_pending(now=_TARGET + 300 * HOUR)
 
     stored = await db.get_signal_outcome(row["id"])
@@ -239,7 +247,7 @@ async def test_legacy_pending_row_is_never_relabelled(db):
         )
         await conn.commit()
 
-    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
+    await _save(db, "BTC-USD", [_bar(_ENTRY, 100.0, 100.0), _bar(_EXIT, 101.0, 102.0)])
     before = await _all_rows(db)
     resolved = await ot.get_tracker().check_pending(now=_TARGET + HOUR)
     assert resolved == 0
@@ -257,14 +265,15 @@ async def _all_rows(db):
 
 async def test_small_asset_prices_preserve_the_measured_return(db):
     row = await _pending_row(db)
-    await db.save_candles(
+    await _save(
+        db,
         "BTC-USD",
         [
             _bar(_ENTRY, 0.00000012, 0.00000012),
             _bar(_EXIT, 0.00000012, 0.000000123456789),
         ],
     )
-    assert await ot.get_tracker().check_pending(now=_TARGET) == 1
+    assert await ot.get_tracker().check_pending(now=_SETTLED) == 1
     stored = await db.get_signal_outcome(row["id"])
     assert stored["entry_price_v2"] == 0.00000012
     assert stored["target_price"] == 0.000000123456789

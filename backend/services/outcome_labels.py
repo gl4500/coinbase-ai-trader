@@ -14,9 +14,10 @@ tested without a database, a clock, or the exchange.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from math import isfinite
-from typing import Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 LABEL_VERSION = 2
 
@@ -32,6 +33,16 @@ UNAVAILABLE_GRACE_SECS = 7 * 86400
 SCORING_OUTCOMES = ("WIN", "LOSS", "NEUTRAL")
 
 PRICE_SOURCE_LOCAL_CANDLES = "local_candles"
+
+# A stored bar is usable only if the fetch that wrote it STARTED at least this
+# long after the bar closed. A policy, not a measurement: the 2026-11-07 settle
+# run (public endpoint, one weekend evening) saw closed bars still change up to
+# (+60.6 s, +120.5 s] after close, so 300 s adds headroom over that one tail.
+# It assumes the response was a fresh aggregate, which no request time can prove.
+FINALITY_MARGIN_SECS = 300
+FINALITY_BASIS = (
+    f"request_start>=close+{FINALITY_MARGIN_SECS}s;assumes_fresh_aggregate;margin_unverified"
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,7 @@ class Resolution:
     target_time: Optional[int] = None
     price_observed_at: Optional[int] = None
     price_source: Optional[str] = None
+    finality_basis: Optional[str] = None
     reason: Optional[str] = None
 
 
@@ -98,6 +110,30 @@ def _is_complete(candle_start: int, now: float, bar_secs: int = BAR_SECS) -> boo
     return now >= candle_start + bar_secs
 
 
+def _valid_time(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def is_final(candle: Mapping, candle_start: int, now: float, bar_secs: int = BAR_SECS) -> bool:
+    """Whether a stored bar may be used for a label at `now` (policy, see FINALITY_BASIS).
+
+    The fetch that wrote it must have STARTED at least FINALITY_MARGIN_SECS after
+    the bar closed, and not after `now`: a replay at `now` cannot use a fetch that
+    had not begun. A missing or invalid vintage (legacy rows) is never final.
+    """
+    if not _is_complete(candle_start, now, bar_secs):
+        return False
+    requested_at = candle.get("requested_at")
+    if not _valid_time(requested_at):
+        return False
+    return candle_start + bar_secs + FINALITY_MARGIN_SECS <= requested_at <= now
+
+
 def _give_up(now: float, target: int, attempts: int) -> bool:
     return attempts + 1 >= MAX_RESOLVE_ATTEMPTS or now > target + UNAVAILABLE_GRACE_SECS
 
@@ -137,10 +173,14 @@ def resolve(
     entry_candle = candles.get(entry_start)
     if entry_candle is None or not _is_complete(entry_start, now, bar_secs):
         return _missing("missing_entry_candle")
+    if not is_final(entry_candle, entry_start, now, bar_secs):
+        return _missing("unverified_entry_vintage")
 
     exit_candle = candles.get(exit_start)
     if exit_candle is None or not _is_complete(exit_start, now, bar_secs):
         return _missing("missing_exit_candle")
+    if not is_final(exit_candle, exit_start, now, bar_secs):
+        return _missing("unverified_exit_vintage")
 
     try:
         entry_price = float(entry_candle["open"])
@@ -166,5 +206,6 @@ def resolve(
         target_price=target_price,
         price_observed_at=target,
         price_source=PRICE_SOURCE_LOCAL_CANDLES,
+        finality_basis=FINALITY_BASIS,
         **frame,
     )

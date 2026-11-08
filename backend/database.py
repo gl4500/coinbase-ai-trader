@@ -5,6 +5,7 @@ All timestamps stored as UTC ISO strings.
 
 import json
 import logging
+import math
 import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -379,6 +380,10 @@ async def init_db() -> None:
             "ALTER TABLE signal_outcomes ADD COLUMN price_source TEXT",
             "ALTER TABLE signal_outcomes ADD COLUMN resolve_attempts INTEGER DEFAULT 0",
             "ALTER TABLE signal_outcomes ADD COLUMN unresolved_reason TEXT",
+            # Candle vintage (F113-1): request START of the fetch that wrote the
+            # row. Legacy rows stay NULL, meaning unknown -- never inferred.
+            "ALTER TABLE candles ADD COLUMN requested_at REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN finality_basis TEXT",
         ]:
             try:
                 await db.execute(sql)
@@ -501,23 +506,76 @@ async def update_product_price(product_id: str, price: float, pct_change: float 
 # ── Candles ───────────────────────────────────────────────────────────────────
 
 
-async def save_candles(product_id: str, candles: List[Dict]) -> None:
-    # Upsert, not INSERT OR IGNORE: Coinbase returns the in-progress hour, and ignoring later
-    # fetches froze that first partial version forever (KNOWN_LIMITATIONS #6 / inventory P1).
+# Clock skew tolerated between the fetch's stamp and this write. Write-side only:
+# the label gate never lets a fetch count before it started (outcome_labels.is_final).
+REQUESTED_AT_FUTURE_SKEW_SECS = 5.0
+
+_CANDLE_FIELDS = ("open", "high", "low", "close", "volume")
+
+
+def _validate_requested_at(requested_at: object, now: float) -> float:
+    if (
+        not isinstance(requested_at, (int, float))
+        or isinstance(requested_at, bool)
+        or not math.isfinite(requested_at)
+        or requested_at <= 0
+    ):
+        raise ValueError(f"requested_at must be a finite positive epoch, got {requested_at!r}")
+    if requested_at > now + REQUESTED_AT_FUTURE_SKEW_SECS:
+        raise ValueError(f"requested_at {requested_at} is in the future (now {now})")
+    return float(requested_at)
+
+
+async def save_candles(
+    product_id: str,
+    candles: List[Dict],
+    *,
+    requested_at: float,
+    now: Optional[float] = None,
+) -> int:
+    """Upsert one fetch's candles with that fetch's request start as their vintage.
+
+    Upsert, not INSERT OR IGNORE: Coinbase returns the in-progress hour, and ignoring
+    later fetches froze that first partial version forever (KNOWN_LIMITATIONS #6).
+    A row is replaced only by a strictly newer fetch (or when its vintage is unknown),
+    so an older fetch that lands late cannot overwrite a newer one. On an equal
+    vintage the first write wins; differing values there are unexplained and are
+    logged and counted. Returns that conflict count.
+    """
+    requested_at = _validate_requested_at(requested_at, _time.time() if now is None else now)
+    rows = [
+        (product_id, c["start"], *(c[k] for k in _CANDLE_FIELDS), requested_at) for c in candles
+    ]
+    conflicts = 0
     async with _db() as db:
+        for row in rows:
+            cursor = await db.execute(
+                "SELECT open, high, low, close, volume FROM candles "
+                "WHERE product_id=? AND start_time=? AND requested_at=?",
+                (product_id, row[1], requested_at),
+            )
+            existing = await cursor.fetchone()
+            if existing is not None and tuple(existing) != tuple(row[2:7]):
+                conflicts += 1
         await db.executemany(
             """INSERT INTO candles
-               (product_id, start_time, open, high, low, close, volume)
-               VALUES (?,?,?,?,?,?,?)
+               (product_id, start_time, open, high, low, close, volume, requested_at)
+               VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(product_id, start_time) DO UPDATE SET
                  open=excluded.open, high=excluded.high, low=excluded.low,
-                 close=excluded.close, volume=excluded.volume""",
-            [
-                (product_id, c["start"], c["open"], c["high"], c["low"], c["close"], c["volume"])
-                for c in candles
-            ],
+                 close=excluded.close, volume=excluded.volume,
+                 requested_at=excluded.requested_at
+               WHERE candles.requested_at IS NULL
+                  OR excluded.requested_at > candles.requested_at""",
+            rows,
         )
         await db.commit()
+    if conflicts:
+        logger.warning(
+            f"save_candles({product_id}): {conflicts} bar(s) differ from a stored fetch "
+            f"with the same request start {requested_at}; kept the first"
+        )
+    return conflicts
 
 
 async def candle_count(product_id: str) -> int:
@@ -1258,6 +1316,7 @@ async def resolve_signal_outcome_v2(
     price_observed_at: float,
     price_source: str,
     lesson_text: str,
+    finality_basis: str,
 ) -> bool:
     """Write a version-2 label. Returns True only if this call set it.
 
@@ -1271,7 +1330,7 @@ async def resolve_signal_outcome_v2(
             """UPDATE signal_outcomes
                SET outcome=?, signed_return=?, entry_price_v2=?, target_price=?,
                    price_observed_at=?, price_source=?, processed_at=?,
-                   label_version=?, lesson_text=?,
+                   label_version=?, lesson_text=?, finality_basis=?,
                    exit_price=?, pct_change=?, checked_at=?
                WHERE id=? AND outcome IS NULL AND label_version=?""",
             (
@@ -1284,6 +1343,7 @@ async def resolve_signal_outcome_v2(
                 _now(),
                 ol.LABEL_VERSION,
                 lesson_text,
+                finality_basis,
                 target_price,
                 signed_return,
                 _now(),

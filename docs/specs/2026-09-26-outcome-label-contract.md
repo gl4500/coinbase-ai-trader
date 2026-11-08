@@ -60,6 +60,32 @@ candle stamped `S` covers the half-open interval `[S, S + 3600)` and its close i
 `coinbase_client.get_candles(pid, "ONE_HOUR", limit=1)` returns the newest bucket, which is normally
 the *in-progress* hour, so even a promptly resolved row could be labelled from an incomplete candle.
 
+### Candle vintage — clock maturity is not finality (F113-1, added 2026-11-08)
+
+`now >= S + 3600` says the bar has closed, not that the *stored copy* is the closed one: the scanner
+upserts a REST fetch, and a fetch that lands before the exchange settles the bar stores a
+provisional snapshot that nothing later replaces if no further fetch arrives.
+
+- `candles.requested_at` (REAL, nullable) is the local request **start** of the fetch that wrote the
+  row (`coinbase_client.get_candles_with_vintage`). It is not when the exchange built the response;
+  a cached aggregate can be older. Legacy rows are NULL = unknown, never inferred.
+- `database.save_candles(..., requested_at=)` is required, validated before any write (finite,
+  not bool, > 0, at most `REQUESTED_AT_FUTURE_SKEW_SECS` = 5 s ahead of the wall clock), and
+  replaces a stored row only from a strictly newer fetch or over a NULL vintage. On an equal vintage
+  the first write wins and differing values are logged and counted.
+- **A bar is usable only when** `now >= S + 3600` **and**
+  `S + 3600 + FINALITY_MARGIN_SECS <= requested_at <= now`. The upper bound is strict as-of
+  replay; the 5 s write skew does not apply. The rule covers the entry and the exit bar.
+  A bar that fails it gives `unverified_entry_vintage` / `unverified_exit_vintage`. That is retryable
+  under §6 and then becomes `UNAVAILABLE`.
+- `FINALITY_MARGIN_SECS = 300` is a **policy**, not a measurement. The 2026-11-07 public-endpoint
+  settle run (one weekend evening, 30 near-close bars) saw changes up to the interval
+  (+60.6 s, +120.5 s] after close. That run is right-censored and is not proof.
+- Every RESOLVED label stores `finality_basis` (currently
+  `request_start>=close+300s;assumes_fresh_aggregate;margin_unverified`). Diagnostics report scored
+  counts per basis. No label is ever "verified final".
+- **Known limit, pinned by a test:** a stale cached payload served to a late request passes the gate.
+
 ### Boundary behaviour
 
 - Entry uses `>` not `>=`: a signal landing exactly on an hour boundary `T` takes the candle at
@@ -82,7 +108,7 @@ Version 1's `checked_at` is a processing timestamp that the dashboard read as th
 timestamp. Version 2 keeps `checked_at` for legacy rows and adds the three fields above.
 
 Also persisted: `entry_candle_start`, `exit_candle_start`, `price_source`, `label_version`,
-`resolve_attempts`, `unresolved_reason`.
+`resolve_attempts`, `unresolved_reason`, `finality_basis`.
 
 ## 5. Return direction, units, thresholds
 
@@ -115,7 +141,8 @@ the entry or the exit candle is absent from the local store:
 2. It is retried on later passes, up to `MAX_RESOLVE_ATTEMPTS = 5`.
 3. A row becomes terminally **`UNAVAILABLE`** when *either* `resolve_attempts >= 5` *or*
    `now > target_time + UNAVAILABLE_GRACE_SECS` (7 days), with `unresolved_reason` set to
-   `missing_entry_candle`, `missing_exit_candle`, or `invalid_entry_price`.
+   `missing_entry_candle`, `missing_exit_candle`, `unverified_entry_vintage`,
+   `unverified_exit_vintage`, or `invalid_entry_price`.
 4. `UNAVAILABLE` is a terminal, **non-scoring** state. It is not WIN, LOSS, or NEUTRAL, and it is
    excluded from every accuracy denominator (Task 4).
 

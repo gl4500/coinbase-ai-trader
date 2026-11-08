@@ -146,35 +146,24 @@ class TestInputValidation:
 
 
 class TestDryRunLock:
-    def test_dry_run_reads_from_config_not_api(self):
-        """Verify dry_run is sourced from config (env var) and cannot be changed by the API caller."""
-        import importlib
+    def test_dry_run_reads_from_config_not_api(self, monkeypatch):
+        """Dry-run defaults are controlled by configuration, not API input."""
+        from config import Config
 
-        import config as cfg
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        assert Config().dry_run is True
 
-        importlib.reload(cfg)
-        assert cfg.config.dry_run is True
+    def test_dry_run_true_when_env_set_to_true(self, monkeypatch):
+        from config import Config
 
-    def test_dry_run_true_when_env_set_to_true(self):
-        os.environ["DRY_RUN"] = "true"
-        import importlib
+        monkeypatch.setenv("DRY_RUN", "true")
+        assert Config().dry_run is True
 
-        import config as cfg
+    def test_dry_run_false_only_when_explicitly_set(self, monkeypatch):
+        from config import Config
 
-        importlib.reload(cfg)
-        assert cfg.config.dry_run is True
-
-    def test_dry_run_false_only_when_explicitly_set(self):
-        os.environ["DRY_RUN"] = "false"
-        import importlib
-
-        import config as cfg
-
-        importlib.reload(cfg)
-        assert cfg.config.dry_run is False
-        # Reset
-        os.environ["DRY_RUN"] = "true"
-        importlib.reload(cfg)
+        monkeypatch.setenv("DRY_RUN", "false")
+        assert Config().dry_run is False
 
 
 # ── Balance endpoint ──────────────────────────────────────────────────────────

@@ -145,6 +145,26 @@ def signal_edge(
             }
         )
 
+    # A label's finality basis is a policy, never proof: report scored counts per
+    # basis so a reader sees what each figure rests on. NULL = resolved before
+    # the vintage gate existed.
+    # A DB that predates the column (a snapshot or copy) is reported, not failed.
+    has_basis = any(
+        r[1] == "finality_basis" for r in conn.execute("PRAGMA table_info(signal_outcomes)")
+    )
+    if has_basis:
+        by_finality_basis = {
+            (basis or "none_recorded"): cnt
+            for basis, cnt in conn.execute(
+                "SELECT finality_basis, COUNT(*) "
+                + current
+                + f" AND {scoring} GROUP BY finality_basis",
+                params + [now],
+            )
+        }
+    else:
+        by_finality_basis = {"column_absent": n} if n else {}
+
     ln, lwins, llosses, lneutrals, le_return = conn.execute(
         "SELECT COUNT(*), SUM(outcome='WIN'), SUM(outcome='LOSS'), "
         "SUM(outcome='NEUTRAL'), AVG(pct_change) " + legacy + f" AND {_scoring_clause()}",
@@ -168,6 +188,7 @@ def signal_edge(
             "unresolved": unresolved,
             "unavailable": unavailable,
         },
+        "by_finality_basis": by_finality_basis,
         # Deliberately empty: see _CALIBRATION_SUPPRESSED.
         "calibration": [],
         "calibration_available": False,
