@@ -88,7 +88,7 @@ def signal_edge(
     """
     now = time.time() if now is None else now
     clause, params = _where_since("created_at", cutoff)
-    scoring = _scoring_clause()
+    scoring = _scoring_clause() + " AND target_time <= ?"
 
     current = (
         f"FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
@@ -101,7 +101,7 @@ def signal_edge(
     n, wins, losses, neutrals, e_return = conn.execute(
         "SELECT COUNT(*), SUM(outcome='WIN'), SUM(outcome='LOSS'), "
         "SUM(outcome='NEUTRAL'), AVG(signed_return) " + current + f" AND {scoring}",
-        params,
+        params + [now],
     ).fetchone()
     n = n or 0
 
@@ -134,7 +134,7 @@ def signal_edge(
         "SUM(outcome='WIN'), SUM(outcome IN ('WIN','LOSS')), AVG(signed_return) "
         + current
         + f" AND {scoring} GROUP BY b ORDER BY b",
-        params,
+        params + [now],
     ):
         buckets.append(
             {
@@ -159,7 +159,7 @@ def signal_edge(
                 "SELECT finality_basis, COUNT(*) "
                 + current
                 + f" AND {scoring} GROUP BY finality_basis",
-                params,
+                params + [now],
             )
         }
     else:
@@ -167,7 +167,7 @@ def signal_edge(
 
     ln, lwins, llosses, lneutrals, le_return = conn.execute(
         "SELECT COUNT(*), SUM(outcome='WIN'), SUM(outcome='LOSS'), "
-        "SUM(outcome='NEUTRAL'), AVG(pct_change) " + legacy + f" AND {scoring}",
+        "SUM(outcome='NEUTRAL'), AVG(pct_change) " + legacy + f" AND {_scoring_clause()}",
         params,
     ).fetchone()
     ln = ln or 0
@@ -297,7 +297,9 @@ def regime_and_asset(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict[st
     return {"by_asset": by_asset, "by_regime": by_regime}
 
 
-def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
+def signal_funnel(
+    conn: sqlite3.Connection, cutoff: Optional[str], now: Optional[float] = None
+) -> Dict:
     """Compute signal funnel counts: scans, buy signals, executed trades, matured
     outcomes.
 
@@ -312,6 +314,7 @@ def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
         executed: trades opened (cutoff on opened_at)
         matured: signal_outcomes with outcome set (cutoff on created_at)
     """
+    now = time.time() if now is None else now
     sc_cl, sc_p = _where_since("scanned_at", cutoff)
     op_cl, op_p = _where_since("opened_at", cutoff)
     cr_cl, cr_p = _where_since("created_at", cutoff)
@@ -326,8 +329,9 @@ def signal_funnel(conn: sqlite3.Connection, cutoff: Optional[str]) -> Dict:
     # restate delayed labels as matured current-version signals.
     matured = conn.execute(
         "SELECT COUNT(*) FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
-        f"AND label_version = {ol.LABEL_VERSION} AND {_scoring_clause()}" + cr_cl,
-        cr_p,
+        f"AND label_version = {ol.LABEL_VERSION} AND {_scoring_clause()} AND target_time <= ?"
+        + cr_cl,
+        [now] + cr_p,
     ).fetchone()[0]
     legacy_matured = conn.execute(
         "SELECT COUNT(*) FROM signal_outcomes WHERE source='CNN' AND side='BUY' "
@@ -365,10 +369,10 @@ def compute_diagnostics(window: str, db_path: str, now: Optional[float] = None) 
         payload = {
             "window": window,
             "generated_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
-            "signal_edge": signal_edge(conn, cutoff),
+            "signal_edge": signal_edge(conn, cutoff, now=now),
             "exit_attribution": exit_attribution(conn, cutoff),
             "regime_and_asset": regime_and_asset(conn, cutoff),
-            "signal_funnel": signal_funnel(conn, cutoff),
+            "signal_funnel": signal_funnel(conn, cutoff, now=now),
         }
     finally:
         conn.close()

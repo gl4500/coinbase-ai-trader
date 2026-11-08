@@ -17,6 +17,7 @@ import asyncio
 import logging
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Optional
 
 import database
@@ -40,6 +41,20 @@ def _maker_price(side: str, bid: float, ask: float) -> float:
     would auto-cancel the post_only order on Coinbase.
     """
     return bid if side.upper() == "BUY" else ask
+
+
+def _confirmed_unfilled_cancel(order: Dict, order_id: str) -> bool:
+    if (
+        order.get("order_id") != order_id
+        or order.get("status") not in {"CANCELLED", "CANCELED"}
+        or order.get("pending_cancel") is not False
+    ):
+        return False
+    try:
+        sizes = [Decimal(str(order[key])) for key in ("filled_size", "filled_value")]
+    except (KeyError, InvalidOperation, ValueError):
+        return False
+    return all(size.is_finite() and size == 0 for size in sizes)
 
 
 class OrderExecutor:
@@ -304,12 +319,13 @@ class OrderExecutor:
         signal: Dict,
         timeout_secs: float = 30.0,
     ) -> Dict:
-        """Maker (post-only LIMIT) entry; falls back to MARKET on timeout.
+        """Maker order with a reconciled, zero-fill-only market replacement.
 
         Cuts the entry leg from taker (~0.60% on tier 0) to maker (~0.20%) by
         posting at the bid (BUY) / ask (SELL). If the resting limit doesn't
-        fill within `timeout_secs`, cancel and place a market order so the
-        entry isn't lost. Purely additive — no caller is migrated until the
+        fill within `timeout_secs`, request cancellation and reconcile its final
+        state. Only a confirmed zero-fill cancellation permits a market replacement.
+        Partial or unknown fills require reconciliation instead of an automatic top-up. Purely additive — no caller is migrated until the
         user opts in.
 
         Signal must have: product_id, side, bid, ask. Optional: atr,
@@ -389,10 +405,20 @@ class OrderExecutor:
             )
         except Exception as e:
             logger.error(f"Maker LIMIT placement failed: {e}")
-            return {"success": False, "reason": f"Limit placement failed: {e}"}
+            return {
+                "success": False,
+                "reason": f"Limit placement failed: {e}",
+                "reconciliation_required": True,
+            }
 
-        order = resp.get("success_response", resp)
-        order_id = order.get("order_id") or order.get("client_order_id", "unknown")
+        order = resp.get("success_response") or {}
+        order_id = order.get("order_id")
+        if resp.get("success") is not True or not isinstance(order_id, str) or not order_id:
+            return {
+                "success": False,
+                "reason": "Maker placement was rejected or unconfirmed",
+                "reconciliation_required": resp.get("success") is not False,
+            }
         await database.save_order(
             {
                 "order_id": order_id,
@@ -415,36 +441,72 @@ class OrderExecutor:
         if filled:
             return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
 
-        # 7 — Timeout: cancel + market fallback so the entry isn't lost
-        logger.info(
-            f"MAKER timeout after {timeout_secs}s — canceling {order_id} and falling back to MARKET"
-        )
+        # A cancel response acknowledges the request, not a final zero-fill state.
+        unresolved = {
+            "success": False,
+            "order_id": order_id,
+            "maker_order_id": order_id,
+            "fill_mode": "RECONCILIATION_REQUIRED",
+            "reconciliation_required": True,
+        }
         try:
-            await coinbase_client.cancel_orders([order_id])
+            cancel = await coinbase_client.cancel_orders([order_id])
+            matches = [r for r in cancel.get("results", []) if r.get("order_id") == order_id]
+            if len(matches) != 1 or matches[0].get("success") is not True:
+                return {**unresolved, "reason": "Maker cancellation was not acknowledged"}
+            final = await coinbase_client.get_order(order_id)
+            if final.get("order_id") == order_id and final.get("status") == "FILLED":
+                await database.update_order_status(order_id, "filled")
+                return {"success": True, "order_id": order_id, "fill_mode": "MAKER"}
+            if not _confirmed_unfilled_cancel(final, order_id):
+                logger.error(
+                    "Maker order %s requires reconciliation; no replacement submitted", order_id
+                )
+                return {
+                    **unresolved,
+                    "reason": "Maker cancellation/fills require reconciliation",
+                    "filled_size": final.get("filled_size"),
+                    "filled_value": final.get("filled_value"),
+                }
             await database.update_order_status(order_id, "canceled")
         except Exception as e:
-            logger.error(f"Cancel during maker timeout failed: {e}")
+            logger.error("Maker cancellation reconciliation failed for %s: %s", order_id, e)
+            return {**unresolved, "reason": f"Maker cancellation reconciliation failed: {e}"}
 
+        mkt_id = None
         try:
-            mkt_resp = await coinbase_client.place_market_order(pid, side, quote_size)
-            mkt_order = mkt_resp.get("success_response", mkt_resp)
-            mkt_id = mkt_order.get("order_id", "unknown")
+            if side == "SELL":
+                mkt_resp = await coinbase_client.place_market_order(pid, side, base_size=base_size)
+            else:
+                mkt_resp = await coinbase_client.place_market_order(pid, side, quote_size)
+            mkt_order = mkt_resp.get("success_response") or {}
+            mkt_id = mkt_order.get("order_id")
+            if mkt_resp.get("success") is not True or not isinstance(mkt_id, str) or not mkt_id:
+                return {**unresolved, "reason": "Market replacement rejected or unconfirmed"}
             await database.save_order(
                 {
                     "order_id": mkt_id,
                     "product_id": pid,
                     "side": side,
                     "order_type": "MARKET",
+                    "base_size": base_size if side == "SELL" else None,
                     "quote_size": quote_size,
                     "status": "live",
                     "strategy": signal.get("signal_type", "TA") + "_TAKER_FALLBACK",
                 }
             )
-            return {"success": True, "order_id": mkt_id, "fill_mode": "TAKER_FALLBACK"}
+            return {
+                "success": True,
+                "order_id": mkt_id,
+                "maker_order_id": order_id,
+                "fill_mode": "TAKER_FALLBACK",
+                "status": "submitted",
+            }
         except Exception as e:
             logger.error(f"Market fallback failed: {e}")
             return {
-                "success": False,
+                **unresolved,
+                "order_id": mkt_id or order_id,
                 "reason": f"Maker timed out and market fallback failed: {e}",
             }
 

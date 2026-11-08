@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any, Dict, Mapping, Optional
 
 LABEL_VERSION = 2
@@ -181,13 +182,21 @@ def resolve(
     if not is_final(exit_candle, exit_start, now, bar_secs):
         return _missing("unverified_exit_vintage")
 
-    entry_price = float(entry_candle["open"])
-    if entry_price <= 0:
-        # Deterministic: retrying cannot make a non-positive price valid.
+    try:
+        entry_price = float(entry_candle["open"])
+    except (KeyError, TypeError, ValueError, OverflowError):
         return Resolution(status="UNAVAILABLE", reason="invalid_entry_price", **frame)
-
-    target_price = float(exit_candle["close"])
+    if not isfinite(entry_price) or entry_price <= 0:
+        return Resolution(status="UNAVAILABLE", reason="invalid_entry_price", **frame)
+    try:
+        target_price = float(exit_candle["close"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return Resolution(status="UNAVAILABLE", reason="invalid_target_price", **frame)
+    if not isfinite(target_price) or target_price <= 0:
+        return Resolution(status="UNAVAILABLE", reason="invalid_target_price", **frame)
     value = signed_return(entry_price, target_price, side)
+    if not isfinite(value):
+        return Resolution(status="UNAVAILABLE", reason="invalid_return", **frame)
 
     return Resolution(
         status="RESOLVED",

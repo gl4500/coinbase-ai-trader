@@ -6,6 +6,8 @@ Spec: docs/specs/2026-09-26-outcome-label-contract.md
 import os
 import sys
 
+import pytest
+
 BACKEND = os.path.join(os.path.dirname(__file__), "..")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
@@ -247,3 +249,27 @@ def test_resolution_is_deterministic_across_repeated_calls():
     first = ol.resolve(**kwargs)
     second = ol.resolve(**kwargs)
     assert first == second
+
+
+@pytest.mark.parametrize("field,start", [("open", 1767229200), ("close", 1767240000)])
+@pytest.mark.parametrize("bad_price", [None, "invalid", float("nan"), float("inf"), -1, 0])
+def test_invalid_candle_prices_never_become_scoring_labels(field, start, bad_price):
+    book = {
+        1767229200: {"open": 100.0, "requested_at": 1767229200 + HOUR + ol.FINALITY_MARGIN_SECS},
+        1767240000: {"close": 102.0, "requested_at": 1767240000 + HOUR + ol.FINALITY_MARGIN_SECS},
+    }
+    book[start][field] = bad_price
+    result = ol.resolve(1767225600, "BUY", book, now=1767243600 + ol.FINALITY_MARGIN_SECS)
+    assert result.status == "UNAVAILABLE"
+    assert result.outcome is None
+    assert result.signed_return is None
+
+
+def test_overflowing_return_never_becomes_a_win():
+    book = {
+        1767229200: {"open": 1e-300, "requested_at": 1767229200 + HOUR + ol.FINALITY_MARGIN_SECS},
+        1767240000: {"close": 1e300, "requested_at": 1767240000 + HOUR + ol.FINALITY_MARGIN_SECS},
+    }
+    result = ol.resolve(1767225600, "BUY", book, now=1767243600 + ol.FINALITY_MARGIN_SECS)
+    assert result.status == "UNAVAILABLE"
+    assert result.outcome is None
