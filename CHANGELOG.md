@@ -7,6 +7,25 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-08 - CI environment reuse and timing capture
+
+- Balance all four shards from one committed Linux duration baseline covering all
+  2,085 selected tests; retain source-run provenance and a SHA-256 for review.
+  Hash provenance uses LF-normalized Git bytes so Windows and Linux agree.
+  The timing seed describes its source revision; newly added tests retain average
+  estimated durations until a reviewed seed refresh.
+
+- Centralize Linux backend CI setup and test-only dependency manifests. Exact installed
+  environment cache hits avoid repeated package installation; cold caches retain the
+  normal installation path and refresh weekly for floating runtime constraints.
+- Capture complete per-shard test timings and selected IDs, validate their disjoint
+  union before producing a candidate duration baseline, and retain the existing
+  coverage artifact, required check names and release/security gates.
+- Add timing recorder/merger regression checks and document benchmark limits in
+  `docs/ci-optimization.md`. Hosted performance measurement precedes any speedup claim.
+- Load the CI recorder without occupying the application's `tools` namespace;
+  a subprocess regression protects collection of the existing backend tool tests.
+
 ### 2026-11-08 — Outcome labels refuse provisional candles (F113-1, PR #113)
 
 - **Defect (Codex counterexample, PR #113 review):** label v2 resolved as soon as `now >= close`.

@@ -1,0 +1,2 @@
+# Installed separately from the CPU wheel index, not an extra package index.
+torch==2.15.0+cpu

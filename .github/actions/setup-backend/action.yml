@@ -1,0 +1,47 @@
+name: Set up Linux backend CI environment
+description: Restore a complete Linux test environment or build it from the CI manifests
+outputs:
+  cache-hit:
+    description: Whether the exact installed environment was restored
+    value: ${{ steps.environment.outputs.cache-hit }}
+inputs:
+  python-version:
+    description: Python version for the CI environment
+    default: "3.11"
+  cache-generation:
+    description: Increment to discard an installed environment without deleting caches
+    default: "1"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      id: python
+      with:
+        python-version: ${{ inputs.python-version }}
+    # Runtime requirements contain lower bounds; refresh the resolved graph weekly.
+    - name: Cache refresh window
+      id: refresh
+      shell: bash
+      run: |
+        echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+        echo "image=${ImageOS:?Runner image identifier is required}" >> "$GITHUB_OUTPUT"
+    - name: Restore installed backend environment
+      id: environment
+      uses: actions/cache@v4
+      with:
+        path: .ci-venv
+        key: backend-env-${{ inputs.cache-generation }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.refresh.outputs.image }}-${{ steps.python.outputs.python-version }}-${{ steps.refresh.outputs.week }}-${{ hashFiles('backend/requirements*.txt', '.github/actions/setup-backend/action.yml') }}
+    - name: Install backend dependencies on cache miss
+      if: steps.environment.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        python -m venv .ci-venv
+        .ci-venv/bin/python -m pip install --upgrade pip==26.3
+        .ci-venv/bin/python -m pip install -r backend/requirements-ci.txt
+        .ci-venv/bin/python -m pip install -r backend/requirements-ci-torch.txt --index-url https://download.pytorch.org/whl/cpu
+    - name: Activate and validate backend environment
+      shell: bash
+      run: |
+        echo "$GITHUB_WORKSPACE/.ci-venv/bin" >> "$GITHUB_PATH"
+        .ci-venv/bin/python -m pip check
+        .ci-venv/bin/python -m pip freeze

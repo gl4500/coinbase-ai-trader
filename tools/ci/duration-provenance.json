@@ -1,0 +1,40 @@
+{
+  "source": "4cdf0d5f9b7a75541b053b3c3251b538457cb894",
+  "selected_tests": 2085,
+  "shards": [
+    {
+      "shard": 1,
+      "tests": 522,
+      "seconds": 107.78241132499959
+    },
+    {
+      "shard": 2,
+      "tests": 521,
+      "seconds": 66.892238661
+    },
+    {
+      "shard": 3,
+      "tests": 521,
+      "seconds": 143.20679390900006
+    },
+    {
+      "shard": 4,
+      "tests": 521,
+      "seconds": 96.8588579910004
+    }
+  ],
+  "schema": 1,
+  "source_run": "https://github.com/gl4500/coinbase-ai-trader/actions/runs/42503873499/attempts/1",
+  "source_attempt": 1,
+  "python": "3.11",
+  "platform": "ubuntu-latest",
+  "selection": "backend/tests -m \"not slow and not integration\"",
+  "algorithm": "least_duration",
+  "splits": 4,
+  "file": ".test_durations",
+  "sha256": "442dc24d436020005c0dc78eb7c5afc1cf2364296b9b237f691f86e3e1d159f8",
+  "refresh": "Review a complete successful hosted timing candidate and replace this common input between workflow runs; never per shard during a run.",
+  "hash_bytes": "UTF-8 with LF newlines, matching the committed Git blob; normalize CRLF before hashing a Windows checkout.",
+  "matches_unsharded_collection_at_source": true,
+  "collection_scope": "The 2,085 timed IDs matched unsharded collection at source4cdf0d5 only. Main54ff337 adds tests beyond this historical seed; unmeasured tests are still selected and receive pytest-split average estimated durations until a reviewed refresh."
+}
