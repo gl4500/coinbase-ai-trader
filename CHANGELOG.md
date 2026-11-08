@@ -7,6 +7,13 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-08 - Refresh CI shard timing seed
+
+- Replace `.test_durations` with the measured candidate from main CI run 42512379057
+  (`5bd93af`): all 2,339 selected tests, up from 2,085; one obsolete ID removed.
+  Provenance and `docs/ci-optimization.md` updated. In-sample replay predicts ~89 s per
+  shard versus 58-112 s under the previous seed.
+
 ### 2026-11-08 - CI environment reuse and timing capture
 
 - Balance all four shards from one committed Linux duration baseline covering all

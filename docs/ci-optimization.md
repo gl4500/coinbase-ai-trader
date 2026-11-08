@@ -43,18 +43,18 @@ The recorder is loaded as `timings` through `PYTHONPATH=tools/ci`, rather than a
 application's existing `backend/tools` package. A subprocess regression recreates
 that import ordering and verifies the application tools remain importable.
 
-The shared `.test_durations` baseline comes from successful hosted run
-[42503873499, attempt 1](https://github.com/gl4500/coinbase-ai-trader/actions/runs/42503873499/attempts/1),
-source `4cdf0d5f9b7a75541b053b3c3251b538457cb894`. Its 2,085 IDs exactly match
+The shared `.test_durations` baseline comes from successful hosted main run
+[42512379057, attempt 1](https://github.com/gl4500/coinbase-ai-trader/actions/runs/42512379057/attempts/1),
+source `5bd93af2dd36ee57ab18845aba86f094d2b545d5`. Its 2,339 IDs exactly match
 unsharded collection at that source revision. `tools/ci/duration-provenance.json` records the source, marker,
 shard counts and SHA-256 of the LF-normalized committed Git blob. Windows
 checkouts must normalize CRLF before comparing that hash. All four jobs explicitly read that identical committed file
 with pytest-split's `least_duration`.
 New tests get the plugin's estimated average until the reviewed baseline is refreshed.
-Main `54ff337` adds tests beyond this historical seed. The provenance equality
-claim is scoped to the recorded source, not the updated branch; the new tests
-remain selected and use that estimated average. A new complete hosted profile
-can be reviewed to refresh the seed after this merge.
+The recorded shard counts and seconds describe the source run's grouping under the previous
+2,085-ID seed (from run 42503873499 at `4cdf0d5`); they are not a prediction for this seed.
+Replaying `least_duration` over the 2,339 measured times predicts about 89 s per group versus
+58-112 s under the previous seed, an in-sample estimate that the next hosted run must confirm.
 This cannot split one individually long test or guarantee perfect balance when fixture
 costs or machine load change. The fast-test marker, test assertions, CPU Torch,
 combined coverage, stable required checks and release gate remain in place.
