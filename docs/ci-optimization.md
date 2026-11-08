@@ -43,8 +43,12 @@ The recorder is loaded as `timings` through `PYTHONPATH=tools/ci`, rather than a
 application's existing `backend/tools` package. A subprocess regression recreates
 that import ordering and verifies the application tools remain importable.
 
-A shared `.test_durations` baseline will be committed from a successful hosted run;
-all four shards then use that identical file with pytest-split's `least_duration`.
+The shared `.test_durations` baseline comes from successful hosted run
+[42503873499, attempt 1](https://github.com/gl4500/coinbase-ai-trader/actions/runs/42503873499/attempts/1),
+source `4cdf0d5f9b7a75541b053b3c3251b538457cb894`. Its 2,085 IDs exactly match
+unsharded collection. `tools/ci/duration-provenance.json` records the source, marker,
+shard counts and SHA-256. All four jobs explicitly read that identical committed file
+with pytest-split's `least_duration`.
 New tests get the plugin's estimated average until the reviewed baseline is refreshed.
 This cannot split one individually long test or guarantee perfect balance when fixture
 costs or machine load change. The fast-test marker, test assertions, CPU Torch,
@@ -60,3 +64,8 @@ combined coverage, stable required checks and release gate remain in place.
   combined coverage, slowest shard, whole-pipeline elapsed time and summed job time.
 - Preserve existing checks on deliberate shard failure, and obtain exact-head peer
   review before merge. No performance result is claimed before hosted measurement.
+
+The first app cache-fill run passed with 80.13% line coverage versus 80.12% in
+the baseline. It took 275s overall, versus 264s baseline; cold setup is not a
+speedup claim. Subsequent cache and balancing measurements are recorded in the
+HTML report and raw GitHub evidence.

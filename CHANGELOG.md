@@ -9,6 +9,9 @@ Format: reverse-chronological by session date.
 
 ### 2026-11-08 - CI environment reuse and timing capture
 
+- Balance all four shards from one committed Linux duration baseline covering all
+  2,085 selected tests; retain source-run provenance and a SHA-256 for review.
+
 - Centralize Linux backend CI setup and test-only dependency manifests. Exact installed
   environment cache hits avoid repeated package installation; cold caches retain the
   normal installation path and refresh weekly for floating runtime constraints.

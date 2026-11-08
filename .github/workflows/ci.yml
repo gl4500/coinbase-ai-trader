@@ -117,6 +117,7 @@ jobs:
             --splits 4 \
             --group ${{ matrix.shard }} \
             --splitting-algorithm least_duration \
+            --durations-path .test_durations \
             --durations=20 \
             --cov=backend \
             --cov-report= \

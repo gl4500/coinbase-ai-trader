@@ -1,0 +1,38 @@
+{
+  "source": "4cdf0d5f9b7a75541b053b3c3251b538457cb894",
+  "selected_tests": 2085,
+  "shards": [
+    {
+      "shard": 1,
+      "tests": 522,
+      "seconds": 107.78241132499959
+    },
+    {
+      "shard": 2,
+      "tests": 521,
+      "seconds": 66.892238661
+    },
+    {
+      "shard": 3,
+      "tests": 521,
+      "seconds": 143.20679390900006
+    },
+    {
+      "shard": 4,
+      "tests": 521,
+      "seconds": 96.8588579910004
+    }
+  ],
+  "schema": 1,
+  "source_run": "https://github.com/gl4500/coinbase-ai-trader/actions/runs/42503873499/attempts/1",
+  "source_attempt": 1,
+  "python": "3.11",
+  "platform": "ubuntu-latest",
+  "selection": "backend/tests -m \"not slow and not integration\"",
+  "algorithm": "least_duration",
+  "splits": 4,
+  "file": ".test_durations",
+  "sha256": "5e36332a894740815826b46ba5183a74f1d2fdd424e7ec0adf376689177dda4c",
+  "matches_unsharded_collection": true,
+  "refresh": "Review a complete successful hosted timing candidate and replace this common input between workflow runs; never per shard during a run."
+}
