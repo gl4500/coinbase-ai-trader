@@ -21,6 +21,9 @@ os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "stub")
 os.environ.setdefault("APP_API_KEY", "test-key")
 os.environ.setdefault("DRY_RUN", "true")
 
+# Request start stamped on test candle writes: a fixed past epoch, after the bars.
+_REQ = 1_700_100_000
+
 
 @pytest.fixture
 def db_module(tmp_path):
@@ -209,7 +212,7 @@ class TestCandles:
                 {"product_id": "BTC-USD", "base_currency": "BTC", "quote_currency": "USD"}
             )
         )
-        run(db.save_candles("BTC-USD", self._candles(5)))
+        run(db.save_candles("BTC-USD", self._candles(5), requested_at=_REQ))
         candles = run(db.get_candles("BTC-USD"))
         assert len(candles) == 5
 
@@ -219,7 +222,7 @@ class TestCandles:
                 {"product_id": "ETH-USD", "base_currency": "ETH", "quote_currency": "USD"}
             )
         )
-        run(db.save_candles("ETH-USD", self._candles(3, "ETH-USD")))
+        run(db.save_candles("ETH-USD", self._candles(3, "ETH-USD"), requested_at=_REQ))
         candles = run(db.get_candles("ETH-USD"))
         assert candles[0]["start_time"] <= candles[-1]["start_time"]
 
@@ -229,8 +232,9 @@ class TestCandles:
                 {"product_id": "SOL-USD", "base_currency": "SOL", "quote_currency": "USD"}
             )
         )
-        run(db.save_candles("SOL-USD", self._candles(3, "SOL-USD")))
-        run(db.save_candles("SOL-USD", self._candles(3, "SOL-USD")))  # same timestamps
+        run(db.save_candles("SOL-USD", self._candles(3, "SOL-USD"), requested_at=_REQ))
+        # same timestamps, later fetch
+        run(db.save_candles("SOL-USD", self._candles(3, "SOL-USD"), requested_at=_REQ + 60))
         candles = run(db.get_candles("SOL-USD"))
         assert len(candles) == 3
 
@@ -258,8 +262,8 @@ class TestCandles:
             "close": 1.1,
             "volume": 50.0,
         }
-        run(db.save_candles("ADA-USD", [partial]))
-        run(db.save_candles("ADA-USD", [final]))
+        run(db.save_candles("ADA-USD", [partial], requested_at=1_700_000_000 + 600))
+        run(db.save_candles("ADA-USD", [final], requested_at=1_700_000_000 + 3600 + 600))
         candles = run(db.get_candles("ADA-USD"))
         assert len(candles) == 1
         c = candles[0]
@@ -895,12 +899,14 @@ class TestCandleUpsert:
             )
         run(
             db.save_candles(
-                "XRP-USD", [self._bar(1_700_000_000, 1.0), self._bar(1_700_003_600, 5.0)]
+                "XRP-USD",
+                [self._bar(1_700_000_000, 1.0), self._bar(1_700_003_600, 5.0)],
+                requested_at=_REQ,
             )
         )
-        run(db.save_candles("DOT-USD", [self._bar(1_700_000_000, 7.0)]))
-        run(db.save_candles("XRP-USD", [self._bar(1_700_000_000, 3.0)]))
-        run(db.save_candles("XRP-USD", []))  # empty input is a no-op
+        run(db.save_candles("DOT-USD", [self._bar(1_700_000_000, 7.0)], requested_at=_REQ))
+        run(db.save_candles("XRP-USD", [self._bar(1_700_000_000, 3.0)], requested_at=_REQ + 60))
+        run(db.save_candles("XRP-USD", [], requested_at=_REQ + 120))  # empty input is a no-op
         xrp = {c["start_time"]: c for c in run(db.get_candles("XRP-USD"))}
         assert [xrp[1_700_000_000][k] for k in ("open", "high", "low", "close", "volume")] == [
             3.0,

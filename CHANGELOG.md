@@ -12,6 +12,8 @@ Format: reverse-chronological by session date.
 - Balance all four shards from one committed Linux duration baseline covering all
   2,085 selected tests; retain source-run provenance and a SHA-256 for review.
   Hash provenance uses LF-normalized Git bytes so Windows and Linux agree.
+  The timing seed describes its source revision; newly added tests retain average
+  estimated durations until a reviewed seed refresh.
 
 - Centralize Linux backend CI setup and test-only dependency manifests. Exact installed
   environment cache hits avoid repeated package installation; cold caches retain the
@@ -23,6 +25,28 @@ Format: reverse-chronological by session date.
   `docs/ci-optimization.md`. Hosted performance measurement precedes any speedup claim.
 - Load the CI recorder without occupying the application's `tools` namespace;
   a subprocess regression protects collection of the existing backend tool tests.
+
+### 2026-11-08 — Outcome labels refuse provisional candles (F113-1, PR #113)
+
+- **Defect (Codex counterexample, PR #113 review):** label v2 resolved as soon as `now >= close`.
+  A bar stored by a fetch that ran before the exchange settled it was used as final. A synthetic
+  case turned a LOSS into a WIN.
+- **Fix:**
+  - `candles.requested_at` records the request start of the fetch that wrote each bar. The scanner
+    stamps it via the new `coinbase_client.get_candles_with_vintage`; `get_candles` is unchanged.
+  - `save_candles` requires and validates it. An older fetch can no longer overwrite a newer one, and
+    equal-vintage conflicts keep the first value and are logged.
+  - The label gate (`outcome_labels.is_final`) accepts a bar only if its fetch started at least
+    `FINALITY_MARGIN_SECS` (300 s, a policy) after close and not after `now`. It covers both the entry
+    and exit bars; failures retry, then become `UNAVAILABLE`.
+  - Each label stores `finality_basis`, and diagnostics group scored counts by it, tolerating a DB that
+    lacks the column.
+- **Live effect after merge + restart:** one nullable column on `candles` and one on `signal_outcomes`.
+  Labels resolve no earlier than close + 300 s; pending rows over legacy NULL-vintage bars end as
+  `UNAVAILABLE`. No trading decision changes; feature readers only gain the extra column.
+  The migration runs in `init_db`, so it is gated on the operator's copy-first DB decision.
+- Tests: `test_candle_vintage.py` (44). Label, tracker, store, database and scanner fixtures now carry
+  a vintage.
 
 ### 2026-11-07 - Test isolation for parallel CI
 
@@ -966,7 +990,127 @@ Bridge suite 35 passed in its own runtime (`.coordination-runtime`, which needed
 `pytest` installed to run `test_mcp` at all).
 
 ---
+### Fail-closed order placement and cancellation - 2026-09-26
 
+Three call sites in `agents/order_executor.py` reported success for outcomes the
+exchange never confirmed - the same accepted-versus-confirmed pattern the
+position-lifecycle contract exists to prevent, in the module that places money at
+risk. Registered as findings 5-8 in `docs/handoffs/2026-09-26-execution-findings.md`.
+
+- `execute_market_order` read `resp.get("success_response", resp)`, so a failure
+  body produced `order_id="unknown"`, persisted `status="live"`, and returned
+  success. `resp.get("success")` was never read.
+- `cancel_order` persisted `"canceled"` whenever no exception was raised, never
+  inspecting the per-order `results`. A refused cancel was recorded as completed,
+  and a partially filled order had its fill erased.
+- `execute_signal` had the same fallback and default. It computed the row status
+  correctly as live-or-failed and then returned success regardless, so the
+  database and the caller disagreed about whether an order existed.
+- `execute_signal` also retried placement three times on exception. An exception
+  can be raised after the request reached the exchange, so a blind retry can
+  place a second order for one signal.
+
+One shared validator now serves all three placement paths: `_accepted_placement`
+requires `success is True` as an actual bool plus a usable non-placeholder string
+id, and `_explicit_rejection` is true only for `success is False`. Anything else
+is ambiguous - an order may exist - so it returns `reconciliation_required` and is
+never retried. The retry loop is gone. `cancel_order` requires an affirmative
+per-order acknowledgement plus a terminal snapshot, reusing the existing
+`_confirmed_unfilled_cancel` helper rather than a second copy of the rule; a
+partial fill, a FILLED race or an unknown state keeps the fill evidence, stays
+`reconciliation_required`, and never writes a cancellation row.
+
+95 new tests in `backend/tests/test_order_executor_false_success.py`, parameterised
+across response shapes so the class is covered rather than one example each. The
+33-test maker regression suite passes unchanged. CLAUDE.md gains invariant 28
+(numbered 25 deliberately: 24 arrives with the stacked strategy-validation work).
+
+**Scope limits.** This changes how responses are interpreted and recorded. It adds
+no ledger closure, no reconciliation worker and no live integration, and leaves
+invariant 21's routing semantics untouched. Live promotion remains a separate
+operator decision.
+
+### Session 58.84 - 2026-09-26 - Review fixes and reconciled maker fallback
+
+- Preserve all non-current outcome rows: the pending query and every v2 mutation
+  now enforce label_version, including legacy rows that never resolved.
+- Store the actual endpoint prices and return without six-decimal truncation;
+  malformed, nonfinite or nonpositive prices and overflowing returns are unavailable.
+- Exclude outcomes before target_time from scored totals, confidence buckets and
+  funnel counts; propagate the diagnostics caller's as-of clock.
+- After maker timeout, require a successful cancellation result for the exact
+  order plus final CANCELLED state, no pending cancel and explicit zero filled
+  size/value before sending a replacement. Partial/uncertain states return
+  reconciliation_required; a full-fill race returns the original maker order.
+- Validate maker and fallback placement responses; preserve order IDs on uncertain
+  outcomes and never automatically retry ambiguous replacement placement.
+- Market SELL replacement uses the original base quantity; BUY keeps quote sizing.
+- Added regression coverage and updated finding-4 characterisation assertions to
+  the repaired contract. Findings 1-3 remain documented and unfixed in this patch.
+- Work is isolated on fix/validated-labels-maker-fallback, stacked on 7bd327c.
+  No live migration, backend restart, push, merge or deployment.
+
+### Session 58.83 — 2026-09-26 — Outcome-label contract v2 + diagnostics separation + execution findings
+
+Prerequisite work for any further model or strategy experiment, driven by
+`docs/audits/2026-09-26-strategy-audit-report.md`. **No strategy threshold, model,
+or live-execution semantic was changed.**
+
+**Task 2 — label contract specified.** `docs/specs/2026-09-26-outcome-label-contract.md`
+pins the target, horizon, entry convention, candle-completeness and boundary rules,
+the three distinct timestamps, return units and thresholds, the missing-data/retry
+policy, and — critically — how the label relates to each model's actual training
+target. It does not.
+
+**Task 3 — versioned, correctly timed outcomes.**
+- New `backend/services/outcome_labels.py`: pure, I/O-free label math. Entry = open of
+  the first bar starting strictly after the signal; target = close of the 4th bar;
+  `target_time` = that bar's close instant. A bar is usable only at `start + 3600`.
+- `OutcomeTracker.check_pending` rewritten: resolves from the *target-time* bars and
+  **never** reads a live price. Version 1 fetched `get_candles(limit=1)` (often the
+  in-progress bar) or the current product price, producing labels a mean 45.75 h late.
+- `database.py`: additive `signal_outcomes` migration (12 nullable columns —
+  `label_version`, `target_time`, `entry_candle_start`, `exit_candle_start`,
+  `entry_price_v2`, `target_price`, `signed_return`, `price_observed_at`,
+  `processed_at`, `price_source`, `resolve_attempts`, `unresolved_reason`) plus
+  `get_signal_outcome`, `get_candles_at`, `resolve_signal_outcome_v2`,
+  `mark_signal_outcome_unavailable`, `bump_signal_outcome_attempts`.
+- Idempotent: every resolution writes `WHERE id=? AND outcome IS NULL`, so retries
+  cannot duplicate or overwrite a finished label. Legacy rows keep NULL
+  `label_version` and are never recomputed.
+- Missing bars stay unresolved and count an attempt; after 5 attempts or 7 days past
+  target the row becomes terminal `UNAVAILABLE`, which is never scored.
+
+**Task 4 — diagnostics no longer mislead.** `signal_edge` scores **only** the current
+label version, reports `counts` (eligible / matured / unresolved / unavailable),
+excludes UNAVAILABLE and unmatured rows from denominators, reports legacy rows
+separately under `legacy`, and **suppresses calibration** with an explicit reason —
+the models train on a path-dependent triple-barrier target while this label is a
+4-bar endpoint return, so a confidence-decile table is descriptive only
+(`confidence_buckets`), not a calibration curve. `signal_funnel.matured` is likewise
+version-scoped. `is_profitability: False` and `return_units: "fraction"` are explicit.
+
+**Task 5 — all four execution findings CONFIRMED, none changed.**
+`docs/handoffs/2026-09-26-execution-findings.md` + characterisation tests in
+`backend/tests/test_execution_findings.py`. Finding 4 is broader than reported: the
+market fallback also runs when the cancel *reports* failure without raising, and a
+partial fill is treated as no fill, so a full-size market order can land on top of it.
+
+**Task 6 — accounting reconciled read-only.**
+`docs/handoffs/2026-09-26-accounting-reconciliation.md`. The $5.98 CNN discrepancy is
+reproduced to the cent (ledger −$82.6357 vs state −$76.6569). Also found: 1,905 closed
+rows where `pnl != usd_close − usd_open` (Σ −$13.36), dominated by rows whose
+`exit_price` echoes `entry_price`; 0 rows in `orders`; no signal→trade→fill link
+anywhere; 52 open trade rows against 3 `positions` rows and an empty CNN
+`positions_json`; and TECH state frozen since 2026-05-17 still holding 38 positions.
+
+**Tests:** +59 new (`test_outcome_labels.py` 17, `test_outcome_store_v2.py` 15,
+`test_outcome_tracker.py` 9, `test_diagnostics_label_versions.py` 9,
+`test_execution_findings.py` 9). `outcome_tracker.py` previously had no test coverage
+at all. `test_diagnostics.py` updated for the versioned contract (stale fixtures, not
+product bugs). Ruff clean under main's config.
+
+**Note:** the migration has NOT been applied to any production database.
 
 ### Session 58.85 — 2026-09-26 — Position/order lifecycle contract + pure validator
 

@@ -1,0 +1,35 @@
+{
+  "reviewed_head": "c72ac911c9d464e9fe783050127abe2262d42224",
+  "scope": "Exact PR113 resolver exported directly with git show",
+  "exit_snapshot_obtained_at": 15000,
+  "exit_bar_end": 18000,
+  "resolution_now": 18001,
+  "stored_snapshot_resolution": {
+    "status": "RESOLVED",
+    "outcome": "WIN",
+    "signed_return": 0.01,
+    "entry_price": 100.0,
+    "target_price": 101.0,
+    "entry_candle_start": 3600,
+    "exit_candle_start": 14400,
+    "target_time": 18000,
+    "price_observed_at": 18000,
+    "price_source": "local_candles",
+    "reason": null
+  },
+  "counterfactual_final_resolution": {
+    "status": "RESOLVED",
+    "outcome": "LOSS",
+    "signed_return": -0.01,
+    "entry_price": 100.0,
+    "target_price": 99.0,
+    "entry_candle_start": 3600,
+    "exit_candle_start": 14400,
+    "target_time": 18000,
+    "price_observed_at": 18000,
+    "price_source": "local_candles",
+    "reason": null
+  },
+  "conclusion": "Clock maturity alone cannot certify the stored OHLCV version was observed after close.",
+  "limitation": "Synthetic mechanism proof; no prevalence, actual label error, or parquet ground truth claim."
+}

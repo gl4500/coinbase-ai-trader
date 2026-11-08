@@ -20,7 +20,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -222,6 +222,21 @@ async def get_candles(
                          ONE_HOUR TWO_HOUR SIX_HOUR ONE_DAY
     Returns list sorted oldest → newest with keys: start, open, high, low, close, volume.
     """
+    candles, _ = await get_candles_with_vintage(product_id, granularity, limit)
+    return candles
+
+
+async def get_candles_with_vintage(
+    product_id: str,
+    granularity: str = "ONE_HOUR",
+    limit: int = 100,
+) -> Tuple[List[Dict], float]:
+    """`get_candles` plus the local time the request STARTED.
+
+    The request start is the vintage stored with each bar (database.save_candles).
+    It is not when the exchange built the response -- a cached aggregate can be
+    older -- only the earliest instant a fresh one could reflect.
+    """
     secs = {
         "ONE_MINUTE": 60,
         "FIVE_MINUTE": 300,
@@ -232,7 +247,8 @@ async def get_candles(
         "SIX_HOUR": 21600,
         "ONE_DAY": 86400,
     }
-    end = int(time.time())
+    requested_at = time.time()
+    end = int(requested_at)
     start = end - secs.get(granularity, 3600) * min(limit, 300)
     try:
         data = await _get(
@@ -251,10 +267,10 @@ async def get_candles(
                     "volume": float(c["volume"]),
                 }
             )
-        return sorted(candles, key=lambda x: x["start"])
+        return sorted(candles, key=lambda x: x["start"]), requested_at
     except Exception as e:
         logger.warning(f"get_candles({product_id}): {e}")
-        return []
+        return [], requested_at
 
 
 # ── Order book ────────────────────────────────────────────────────────────────
@@ -341,21 +357,32 @@ async def place_limit_order(
 async def place_market_order(
     product_id: str,
     side: str,
-    quote_size: float,
+    quote_size: Optional[float] = None,
+    *,
+    base_size: Optional[float] = None,
 ) -> Dict:
+    if (quote_size is None) == (base_size is None):
+        raise ValueError("Specify exactly one of quote_size or base_size")
+    size = (
+        {"base_size": str(base_size)}
+        if base_size is not None
+        else {"quote_size": str(round(quote_size, 2))}
+    )
     return await _post(
         "/orders",
         {
             "client_order_id": str(uuid.uuid4()),
             "product_id": product_id,
             "side": side.upper(),
-            "order_configuration": {
-                "market_market_ioc": {
-                    "quote_size": str(round(quote_size, 2)),
-                }
-            },
+            "order_configuration": {"market_market_ioc": size},
         },
     )
+
+
+async def get_order(order_id: str) -> Dict:
+    """Read the exact order; propagate errors so unknown state is never an empty fill."""
+    data = await _get(f"/orders/historical/{order_id}")
+    return data["order"]
 
 
 async def cancel_orders(order_ids: List[str]) -> Dict:
