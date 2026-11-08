@@ -20,7 +20,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -222,6 +222,21 @@ async def get_candles(
                          ONE_HOUR TWO_HOUR SIX_HOUR ONE_DAY
     Returns list sorted oldest → newest with keys: start, open, high, low, close, volume.
     """
+    candles, _ = await get_candles_with_vintage(product_id, granularity, limit)
+    return candles
+
+
+async def get_candles_with_vintage(
+    product_id: str,
+    granularity: str = "ONE_HOUR",
+    limit: int = 100,
+) -> Tuple[List[Dict], float]:
+    """`get_candles` plus the local time the request STARTED.
+
+    The request start is the vintage stored with each bar (database.save_candles).
+    It is not when the exchange built the response -- a cached aggregate can be
+    older -- only the earliest instant a fresh one could reflect.
+    """
     secs = {
         "ONE_MINUTE": 60,
         "FIVE_MINUTE": 300,
@@ -232,7 +247,8 @@ async def get_candles(
         "SIX_HOUR": 21600,
         "ONE_DAY": 86400,
     }
-    end = int(time.time())
+    requested_at = time.time()
+    end = int(requested_at)
     start = end - secs.get(granularity, 3600) * min(limit, 300)
     try:
         data = await _get(
@@ -251,10 +267,10 @@ async def get_candles(
                     "volume": float(c["volume"]),
                 }
             )
-        return sorted(candles, key=lambda x: x["start"])
+        return sorted(candles, key=lambda x: x["start"]), requested_at
     except Exception as e:
         logger.warning(f"get_candles({product_id}): {e}")
-        return []
+        return [], requested_at
 
 
 # ── Order book ────────────────────────────────────────────────────────────────

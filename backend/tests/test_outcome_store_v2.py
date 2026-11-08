@@ -184,6 +184,7 @@ async def test_get_candles_at_returns_only_requested_buckets(db):
                 "volume": 1.0,
             },
         ],
+        requested_at=_BOUNDARY + 4 * HOUR,
     )
     got = await db.get_candles_at("BTC-USD", [_BOUNDARY, _BOUNDARY + 2 * HOUR])
     assert set(got) == {_BOUNDARY, _BOUNDARY + 2 * HOUR}
@@ -210,6 +211,7 @@ async def test_resolution_writes_all_provenance(db):
         price_observed_at=entry + 4 * HOUR,
         price_source=ol.PRICE_SOURCE_LOCAL_CANDLES,
         lesson_text="test lesson",
+        finality_basis=ol.FINALITY_BASIS,
     )
     assert changed is True
 
@@ -222,6 +224,7 @@ async def test_resolution_writes_all_provenance(db):
     assert stored["price_source"] == ol.PRICE_SOURCE_LOCAL_CANDLES
     assert stored["processed_at"] is not None
     assert stored["label_version"] == ol.LABEL_VERSION
+    assert stored["finality_basis"] == ol.FINALITY_BASIS
 
 
 async def test_a_second_resolution_cannot_overwrite_a_completed_label(db):
@@ -236,6 +239,7 @@ async def test_a_second_resolution_cannot_overwrite_a_completed_label(db):
         price_observed_at=1,
         price_source="local_candles",
         lesson_text="first",
+        finality_basis=ol.FINALITY_BASIS,
     )
     changed = await db.resolve_signal_outcome_v2(
         row_id=row["id"],
@@ -246,6 +250,7 @@ async def test_a_second_resolution_cannot_overwrite_a_completed_label(db):
         price_observed_at=2,
         price_source="local_candles",
         lesson_text="second",
+        finality_basis=ol.FINALITY_BASIS,
     )
     assert changed is False
 
@@ -265,6 +270,7 @@ async def test_resolved_rows_leave_the_pending_queue(db):
         price_observed_at=1,
         price_source="local_candles",
         lesson_text="x",
+        finality_basis=ol.FINALITY_BASIS,
     )
     pending_ids = {r["id"] for r in await db.get_pending_outcomes()}
     assert row["id"] not in pending_ids
@@ -307,6 +313,7 @@ async def test_unavailable_cannot_clobber_an_already_resolved_label(db):
         price_observed_at=1,
         price_source="local_candles",
         lesson_text="x",
+        finality_basis=ol.FINALITY_BASIS,
     )
     changed = await db.mark_signal_outcome_unavailable(row["id"], "missing_exit_candle")
     assert changed is False
@@ -353,7 +360,15 @@ async def test_current_resolver_cannot_modify_other_versions(db, version):
     before = await db.get_signal_outcome(row["id"])
     assert row["id"] not in {r["id"] for r in await db.get_pending_outcomes()}
     assert not await db.resolve_signal_outcome_v2(
-        row["id"], "WIN", 0.02, 100.0, 102.0, 1, "local_candles", "incorrect conversion"
+        row["id"],
+        "WIN",
+        0.02,
+        100.0,
+        102.0,
+        1,
+        "local_candles",
+        "incorrect conversion",
+        ol.FINALITY_BASIS,
     )
     assert not await db.mark_signal_outcome_unavailable(row["id"], "missing_exit_candle")
     await db.bump_signal_outcome_attempts(row["id"])

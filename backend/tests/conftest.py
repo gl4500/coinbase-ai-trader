@@ -52,6 +52,18 @@ def _redirect_cnn_dataset_cache(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _redirect_cnn_model_paths(tmp_path_factory, monkeypatch):
+    """Redirect the active persistence helpers, not obsolete path constants."""
+    import agents.cnn_agent as ca
+
+    tmp_dir = tmp_path_factory.mktemp("cnn_models_isolated")
+    monkeypatch.setattr(ca, "_model_path_for", lambda: str(tmp_dir / "model.pt"))
+    monkeypatch.setattr(ca, "_best_loss_path_for", lambda: str(tmp_dir / "best_loss.txt"))
+    monkeypatch.setattr(ca, "_CKPT_PATH", str(tmp_dir / "resume.pt"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _redirect_database_path(tmp_path_factory, monkeypatch):
     """Safety net: prevent any test from writing to the production coinbase.db.
 

@@ -1,16 +1,9 @@
-"""TDD tests for MODEL_BACKEND env var + _cnn_prob branching (#135 Phase 5).
+"""Test environment field factories and model-backend routing.
 
-Two pieces:
-    1. config.model_backend reads MODEL_BACKEND env var, default "cnn"
-    2. CoinbaseCNNAgent._cnn_prob delegates to xgb_signal.xgb_prob iff
-       config.model_backend == "xgb"
-
-Default behavior MUST remain unchanged (Phase 5 ships behind a default
-"cnn" so no live trading change). Phase 6 (#136) flips MODEL_BACKEND=xgb
-in shadow mode.
+Construct fresh Config values without replacing the shared config singleton.
+The supported drivers are xgb and xgb_v45; the legacy CNN driver is rejected.
 """
 
-import importlib
 import os
 import sys
 
@@ -28,16 +21,12 @@ class TestConfigField:
     def test_model_backend_defaults_to_xgb(self, monkeypatch):
         """MODEL_BACKEND unset → config.model_backend == 'xgb' (CNN deprecated 2026-05-23).
 
-        importlib.reload(config) re-runs load_dotenv() which re-injects any
-        MODEL_BACKEND value present in .env. Clear it again post-reload and
-        instantiate Config() directly so we test the dataclass default rather
-        than the singleton, which load_dotenv has already polluted.
+        Instantiate Config directly: field factories read the patched environment.
+        Reloading config would replace its singleton while cnn_agent retains the old one.
         """
         monkeypatch.delenv("MODEL_BACKEND", raising=False)
         import config as cfg_mod
 
-        importlib.reload(cfg_mod)
-        monkeypatch.delenv("MODEL_BACKEND", raising=False)
         fresh = cfg_mod.Config()
         assert fresh.model_backend == "xgb"
 
@@ -46,16 +35,14 @@ class TestConfigField:
         monkeypatch.setenv("MODEL_BACKEND", "xgb")
         import config as cfg_mod
 
-        importlib.reload(cfg_mod)
-        assert cfg_mod.config.model_backend == "xgb"
+        assert cfg_mod.Config().model_backend == "xgb"
 
     def test_model_backend_lowercased(self, monkeypatch):
         """MODEL_BACKEND=XGB normalized to 'xgb' so comparisons are stable."""
         monkeypatch.setenv("MODEL_BACKEND", "XGB")
         import config as cfg_mod
 
-        importlib.reload(cfg_mod)
-        assert cfg_mod.config.model_backend == "xgb"
+        assert cfg_mod.Config().model_backend == "xgb"
 
 
 # ── Scan-loop interval (#227) ─────────────────────────────────────────────────
@@ -70,8 +57,6 @@ class TestScanIntervalConfig:
         monkeypatch.delenv("SCAN_INTERVAL_SECS", raising=False)
         import config as cfg_mod
 
-        importlib.reload(cfg_mod)
-        monkeypatch.delenv("SCAN_INTERVAL_SECS", raising=False)
         fresh = cfg_mod.Config()
         assert fresh.scan_interval_secs == 900
 
@@ -80,17 +65,15 @@ class TestScanIntervalConfig:
         monkeypatch.setenv("SCAN_INTERVAL_SECS", "300")
         import config as cfg_mod
 
-        importlib.reload(cfg_mod)
-        assert cfg_mod.config.scan_interval_secs == 300
+        assert cfg_mod.Config().scan_interval_secs == 300
 
     def test_scan_interval_secs_is_int(self, monkeypatch):
         """Stored as int — used directly as asyncio.sleep argument."""
         monkeypatch.setenv("SCAN_INTERVAL_SECS", "180")
         import config as cfg_mod
 
-        importlib.reload(cfg_mod)
-        assert isinstance(cfg_mod.config.scan_interval_secs, int)
-        assert cfg_mod.config.scan_interval_secs == 180
+        assert isinstance(cfg_mod.Config().scan_interval_secs, int)
+        assert cfg_mod.Config().scan_interval_secs == 180
 
 
 # ── _cnn_prob branching ───────────────────────────────────────────────────────
@@ -121,24 +104,10 @@ class TestCnnProbBranching:
 
     def test_xgb_backend_calls_xgb_prob(self, monkeypatch):
         """config.model_backend == 'xgb' → _cnn_prob returns xgb_prob's value."""
-        monkeypatch.setenv("MODEL_BACKEND", "xgb")
-        import config as cfg_mod
+        from agents import cnn_agent, xgb_signal
 
-        importlib.reload(cfg_mod)
-        if "agents.cnn_agent" in sys.modules:
-            importlib.reload(sys.modules["agents.cnn_agent"])
-
-        if "agents.xgb_signal" in sys.modules:
-            del sys.modules["agents.xgb_signal"]
-        import agents.xgb_signal as xs
-
-        monkeypatch.setattr(xs, "xgb_prob", lambda _channels, pid=None: 0.73)
-
-        # Re-import cnn_agent AFTER patching xgb_signal so the agent's
-        # `from agents.xgb_signal import xgb_prob` (if it does that) sees
-        # our spy. Safer: patch the symbol the agent actually uses.
-        # The agent should call xgb_signal.xgb_prob via attribute lookup,
-        # so monkeypatching the module attr above is the right hook.
+        monkeypatch.setattr(cnn_agent.config, "model_backend", "xgb")
+        monkeypatch.setattr(xgb_signal, "xgb_prob", lambda _channels, pid=None: 0.73)
 
         agent = self._make_agent()
         channels = [[0.5] * 60 for _ in range(27)]

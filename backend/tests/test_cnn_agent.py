@@ -1424,19 +1424,17 @@ class TestTrainingFramework:
         assert "n_channels" in ckpt, "Checkpoint must contain n_channels key"
         assert ckpt["n_channels"] == ca.N_CHANNELS
 
-    def test_best_loss_read_write_roundtrip(self, tmp_path):
-        """_read_best_loss / _write_best_loss survive a roundtrip."""
+    def test_best_loss_read_write_roundtrip(self, tmp_path, monkeypatch):
+        """_read_best_loss / _write_best_loss survive an isolated roundtrip."""
         import agents.cnn_agent as ca
 
-        orig = ca._BEST_LOSS_PATH
-        ca._BEST_LOSS_PATH = str(tmp_path / "best_loss.txt")
-        try:
-            agent = CoinbaseCNNAgent()
-            assert agent._read_best_loss() == float("inf"), "Missing file should return inf"
-            agent._write_best_loss(0.4321)
-            assert abs(agent._read_best_loss() - 0.4321) < 1e-6
-        finally:
-            ca._BEST_LOSS_PATH = orig
+        loss_path = tmp_path / "best_loss.txt"
+        monkeypatch.setattr(ca, "_best_loss_path_for", lambda: str(loss_path))
+        agent = CoinbaseCNNAgent()
+        assert agent._read_best_loss() == float("inf"), "Missing file should return inf"
+        agent._write_best_loss(0.4321)
+        assert abs(agent._read_best_loss() - 0.4321) < 1e-6
+        assert float(loss_path.read_text()) == pytest.approx(0.4321)
 
     def test_best_loss_stale_tiny_value_treated_as_unset(self, tmp_path, monkeypatch):
         """A stale tiny value (< 0.1) in cnn_best_loss.txt must be treated as unset.

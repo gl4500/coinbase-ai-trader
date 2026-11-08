@@ -76,7 +76,8 @@ class TestScannerPriceFilter:
                 new=AsyncMock(return_value=self._mock_bba(products)),
             ),
             patch(
-                "agents.market_scanner.coinbase_client.get_candles", new=AsyncMock(return_value=[])
+                "agents.market_scanner.coinbase_client.get_candles_with_vintage",
+                new=AsyncMock(return_value=([], 0.0)),
             ),
             patch("agents.market_scanner.database.upsert_product", new=AsyncMock()),
             patch("agents.market_scanner.database.save_candles", new=AsyncMock()),
@@ -105,7 +106,8 @@ class TestScannerPriceFilter:
                 new=AsyncMock(return_value=self._mock_bba(products)),
             ),
             patch(
-                "agents.market_scanner.coinbase_client.get_candles", new=AsyncMock(return_value=[])
+                "agents.market_scanner.coinbase_client.get_candles_with_vintage",
+                new=AsyncMock(return_value=([], 0.0)),
             ),
             patch("agents.market_scanner.database.upsert_product", new=AsyncMock()),
             patch("agents.market_scanner.database.save_candles", new=AsyncMock()),
@@ -133,7 +135,8 @@ class TestScannerPriceFilter:
                 new=AsyncMock(return_value=self._mock_bba(products)),
             ),
             patch(
-                "agents.market_scanner.coinbase_client.get_candles", new=AsyncMock(return_value=[])
+                "agents.market_scanner.coinbase_client.get_candles_with_vintage",
+                new=AsyncMock(return_value=([], 0.0)),
             ),
             patch("agents.market_scanner.database.upsert_product", new=AsyncMock()),
             patch("agents.market_scanner.database.save_candles", new=AsyncMock()),
