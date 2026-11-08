@@ -47,7 +47,8 @@ The shared `.test_durations` baseline comes from successful hosted run
 [42503873499, attempt 1](https://github.com/gl4500/coinbase-ai-trader/actions/runs/42503873499/attempts/1),
 source `4cdf0d5f9b7a75541b053b3c3251b538457cb894`. Its 2,085 IDs exactly match
 unsharded collection. `tools/ci/duration-provenance.json` records the source, marker,
-shard counts and SHA-256. All four jobs explicitly read that identical committed file
+shard counts and SHA-256 of the LF-normalized committed Git blob. Windows
+checkouts must normalize CRLF before comparing that hash. All four jobs explicitly read that identical committed file
 with pytest-split's `least_duration`.
 New tests get the plugin's estimated average until the reviewed baseline is refreshed.
 This cannot split one individually long test or guarantee perfect balance when fixture

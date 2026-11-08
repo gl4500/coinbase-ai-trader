@@ -11,6 +11,7 @@ Format: reverse-chronological by session date.
 
 - Balance all four shards from one committed Linux duration baseline covering all
   2,085 selected tests; retain source-run provenance and a SHA-256 for review.
+  Hash provenance uses LF-normalized Git bytes so Windows and Linux agree.
 
 - Centralize Linux backend CI setup and test-only dependency manifests. Exact installed
   environment cache hits avoid repeated package installation; cold caches retain the

@@ -32,7 +32,8 @@
   "algorithm": "least_duration",
   "splits": 4,
   "file": ".test_durations",
-  "sha256": "5e36332a894740815826b46ba5183a74f1d2fdd424e7ec0adf376689177dda4c",
+  "sha256": "442dc24d436020005c0dc78eb7c5afc1cf2364296b9b237f691f86e3e1d159f8",
   "matches_unsharded_collection": true,
-  "refresh": "Review a complete successful hosted timing candidate and replace this common input between workflow runs; never per shard during a run."
+  "refresh": "Review a complete successful hosted timing candidate and replace this common input between workflow runs; never per shard during a run.",
+  "hash_bytes": "UTF-8 with LF newlines, matching the committed Git blob; normalize CRLF before hashing a Windows checkout."
 }
