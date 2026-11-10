@@ -1,30 +1,30 @@
 {
-  "source": "4cdf0d5f9b7a75541b053b3c3251b538457cb894",
-  "selected_tests": 2085,
+  "source": "5bd93af2dd36ee57ab18845aba86f094d2b545d5",
+  "selected_tests": 2339,
   "shards": [
     {
       "shard": 1,
-      "tests": 522,
-      "seconds": 107.78241132499959
+      "tests": 583,
+      "seconds": 84.70316508900044
     },
     {
       "shard": 2,
-      "tests": 521,
-      "seconds": 66.892238661
+      "tests": 585,
+      "seconds": 102.13749107799961
     },
     {
       "shard": 3,
-      "tests": 521,
-      "seconds": 143.20679390900006
+      "tests": 585,
+      "seconds": 57.61901710200004
     },
     {
       "shard": 4,
-      "tests": 521,
-      "seconds": 96.8588579910004
+      "tests": 586,
+      "seconds": 112.43033287000051
     }
   ],
   "schema": 1,
-  "source_run": "https://github.com/gl4500/coinbase-ai-trader/actions/runs/42503873499/attempts/1",
+  "source_run": "https://github.com/gl4500/coinbase-ai-trader/actions/runs/42512379057/attempts/1",
   "source_attempt": 1,
   "python": "3.11",
   "platform": "ubuntu-latest",
@@ -32,9 +32,9 @@
   "algorithm": "least_duration",
   "splits": 4,
   "file": ".test_durations",
-  "sha256": "442dc24d436020005c0dc78eb7c5afc1cf2364296b9b237f691f86e3e1d159f8",
+  "sha256": "bc547897dd67d0adb8eff9901f3795c5209ee09674e564a50d01f51d16abf5ff",
   "refresh": "Review a complete successful hosted timing candidate and replace this common input between workflow runs; never per shard during a run.",
   "hash_bytes": "UTF-8 with LF newlines, matching the committed Git blob; normalize CRLF before hashing a Windows checkout.",
   "matches_unsharded_collection_at_source": true,
-  "collection_scope": "The 2,085 timed IDs matched unsharded collection at source4cdf0d5 only. Main54ff337 adds tests beyond this historical seed; unmeasured tests are still selected and receive pytest-split average estimated durations until a reviewed refresh."
+  "collection_scope": "The 2,339 timed IDs matched unsharded collection at source 5bd93af. The shard counts and seconds above are the source run's grouping under the previous 2,085-ID seed, not a prediction for this seed. Tests added after 5bd93af receive pytest-split average estimated durations until the next reviewed refresh."
 }
