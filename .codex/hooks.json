@@ -1,5 +1,5 @@
 {
-  "description": "Live-backend guard: blocks tests, Python commits and process kills while the 8001 backend or training runs. See tools/agent_guard/live_guard.py.",
+  "description": "Live-backend guard (tools/agent_guard/live_guard.py from this checkout's git root): blocks tests, risky commits and process kills while the backend is live.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe\" \"C:/Users/gl450/polymarket_app/tools/agent_guard/live_guard.py\" --port 8001 --training-marker train_worker.py --commit-needs-staged-py",
+            "command": "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe -c \"import os,runpy,subprocess,sys;r=subprocess.run(['git','rev-parse','--show-toplevel'],capture_output=True,text=True).stdout.strip();p=os.path.join(r,'tools','agent_guard','live_guard.py');sys.argv=[p]+sys.argv[1:];runpy.run_path(p,run_name='__main__')\" --port 8001 --training-marker train_worker.py --commit-needs-staged-py",
             "timeout": 30,
             "statusMessage": "Checking the live backend"
           }

@@ -20,9 +20,11 @@ This is a guardrail against mistakes, not a security boundary: commands can be p
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -38,9 +40,81 @@ _PATTERNS = {
     "commit": re.compile(r"\bgit\b[^|;&]*?\bcommit\b"),
     "kill": re.compile(r"\bStop-Process\b|\btaskkill\b|\bpkill\b|\bkillall\b|(?:^|[\s;&|(])kill\s+-?\w",
                        re.IGNORECASE),
-    "restart": re.compile(r"python\S*\s+(?:-\S+\s+)*\S*main\.py\b|\buvicorn\b|\bstartup_guard\b|\s-Replace\b",
-                          re.IGNORECASE),
+    # Direct starts plus the repositories' own launchers (start_backend.ps1/.bat, start_app.py,
+    # start.bat, launcher.py). start_frontend.* is deliberately not a backend start.
+    "restart": re.compile(r"python\S*\s+(?:-\S+\s+)*\S*main\.py\b|\buvicorn\b|\bstartup_guard\b|\s-Replace\b"
+                          r"|\bstart_backend\.(?:ps1|bat|cmd)\b|\bstart_app\.py\b|(?:^|[\\/\s])start\.bat\b"
+                          r"|\blauncher\.py\b", re.IGNORECASE),
 }
+
+# Splits a shell line into commands; any of these separators may hide a second git operation.
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n]")
+_DIR_CHANGE = re.compile(r"(?:^|\s)(?:cd|pushd|chdir|Set-Location|sl)(?:\s|$)", re.IGNORECASE)
+_INDEX_CHANGE = re.compile(r"\bgit\b[^|;&]*?\b(?:add|stage|rm|mv|restore|apply|checkout|stash|reset)\b")
+_COMMIT_OPTS_WITH_VALUE = frozenset({
+    "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message", "--author",
+    "--date", "-t", "--template", "--fixup", "--squash", "--cleanup", "--trailer", "--pathspec-from-file"})
+_COMMIT_STAGING_LONG = frozenset({"--all", "--include", "--interactive", "--patch", "--pathspec-from-file"})
+_COMMIT_STAGING_SHORT = frozenset("aip")
+
+
+def _pathspec_may_be_python(path: str) -> bool:
+    if any(ch in path for ch in "*?["):
+        return True
+    ext = os.path.splitext(os.path.basename(path.rstrip("/")))[1].lower()
+    return ext in ("", ".py", ".pyw")  # no extension: could be a directory
+
+
+def _commit_segment_may_include_py(segment: str, staged_py: Callable[[str], bool]) -> bool:
+    try:
+        tokens = shlex.split(segment.replace("\\", "/"))
+    except ValueError:
+        return True  # unbalanced quotes: cannot tell
+    git_at = next((i for i, t in enumerate(tokens) if os.path.basename(t).lower() in ("git", "git.exe")), None)
+    if git_at is None or "commit" not in tokens[git_at:]:
+        return True
+    target, i = ".", git_at + 1
+    while tokens[i] != "commit":  # global options between `git` and `commit`
+        if tokens[i] == "-C" and i + 1 < len(tokens):
+            target = tokens[i + 1]
+            i += 1
+        elif tokens[i] == "-c":
+            i += 1
+        i += 1
+    paths, i, after_dd = [], i + 1, False
+    while i < len(tokens):
+        t = tokens[i]
+        if after_dd or not t.startswith("-") or t == "-":
+            paths.append(t)
+        elif t == "--":
+            after_dd = True
+        elif t.split("=", 1)[0] in _COMMIT_STAGING_LONG:
+            return True
+        elif t in _COMMIT_OPTS_WITH_VALUE:
+            i += 1
+        elif not t.startswith("--"):
+            flags = t[1:]
+            value_at = min((flags.find(c) for c in "mFCct" if c in flags), default=-1)
+            leading = flags if value_at < 0 else flags[:value_at]
+            if set(leading) & _COMMIT_STAGING_SHORT:
+                return True
+            if value_at >= 0 and value_at == len(flags) - 1:
+                i += 1  # e.g. -qm "msg": the message is the next token
+        i += 1
+    return staged_py(target) or any(_pathspec_may_be_python(p) for p in paths)
+
+
+def commit_may_include_py(command: str, staged_py: Callable[[str], bool]) -> bool:
+    """Conservatively decide whether a command's commit can contain .py files (which makes the
+    pre-commit hook run tests). Only a plain commit of explicit non-Python files with nothing
+    Python staged, in a command that neither changes directory nor touches the index, is harmless."""
+    segments = [s.strip() for s in _SEGMENT_SPLIT.split(command) if s.strip()]
+    commits = [s for s in segments if _PATTERNS["commit"].search(s)]
+    if not commits:
+        return False
+    if any(_DIR_CHANGE.search(s) or _INDEX_CHANGE.search(s) for s in segments):
+        return True
+    return any(_commit_segment_may_include_py(s, staged_py) for s in commits)
 
 
 @dataclass(frozen=True)
@@ -67,15 +141,16 @@ def decide(
     *,
     port_open: Callable[[int], bool],
     training_running: Callable[[Tuple[str, ...]], bool],
-    staged_py: Callable[[], bool],
+    staged_py: Callable[[str], bool],
     window_open: Callable[[], bool],
 ) -> Decision:
-    """Decide whether to block a command. Probes are only called for risky commands."""
+    """Decide whether to block a command. Probes are only called for risky commands.
+    `staged_py(target)` reports staged .py files in the repo at `target` (relative to the event cwd)."""
     risks = classify(command)
     if not risks:
         return Decision(False)
     try:
-        if "commit" in risks and not (cfg.commit_needs_staged_py and staged_py()):
+        if "commit" in risks and not (cfg.commit_needs_staged_py and commit_may_include_py(command, staged_py)):
             risks = risks - {"commit"}
         if not risks:
             return Decision(False)
@@ -111,10 +186,25 @@ def window_is_open(path: str, now: datetime) -> bool:
     return expiry.tzinfo is not None and expiry > now
 
 
-def _port_open(port: int) -> bool:
+# Only an actively refused connection proves nothing is listening (POSIX ECONNREFUSED, WSAECONNREFUSED).
+REFUSED_ERRNOS = frozenset({errno.ECONNREFUSED, 10061})
+
+
+def _connect_ex(port: int) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.3)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
+        sock.settimeout(0.5)
+        return sock.connect_ex(("127.0.0.1", port))
+
+
+def port_listening(port: int, connect: Callable[[int], int] = _connect_ex) -> bool:
+    """True if something listens on 127.0.0.1:port, False if the connection is refused.
+    Any other outcome (timeout, permission denied, ...) is unknown and raises, so risky commands block."""
+    code = connect(port)
+    if code == 0:
+        return True
+    if code in REFUSED_ERRNOS:
+        return False
+    raise OSError(code, f"port {port} probe returned error {code}")
 
 
 ProcessRecord = Tuple[str, str]  # (executable name, full command line on one line)
@@ -173,9 +263,9 @@ def _staged_py(cwd: str) -> bool:
 
 def _default_probes(cwd: str) -> dict:
     return dict(
-        port_open=_port_open,
+        port_open=port_listening,
         training_running=_training_running,
-        staged_py=lambda: _staged_py(cwd),
+        staged_py=lambda target: _staged_py(os.path.join(cwd, target)),
         window_open=lambda: window_is_open(os.path.join(_repo_root(cwd), WINDOW_FILENAME),
                                            datetime.now(timezone.utc)),
     )
@@ -191,10 +281,10 @@ def _parse_args(argv: Sequence[str]) -> Config:
 
 
 def main(argv: Sequence[str], stdin: TextIO = sys.stdin, stderr: TextIO = sys.stderr,
-         probes: Optional[dict] = None) -> int:
+         probes: Optional[dict] = None, stdout: TextIO = sys.stdout) -> int:
     cfg = _parse_args(argv)
     try:
-        event = json.loads(stdin.read() or "{}")
+        event = json.loads(stdin.read().lstrip("﻿") or "{}")  # Windows PowerShell pipes add a BOM
         tool = event.get("tool_name", "")
         command = (event.get("tool_input") or {}).get("command", "")
         cwd = event.get("cwd") or os.getcwd()
@@ -205,6 +295,10 @@ def main(argv: Sequence[str], stdin: TextIO = sys.stdin, stderr: TextIO = sys.st
         return 0
     decision = decide(command, cfg, **(probes or _default_probes(cwd)))
     if decision.block:
+        # Both signals: exit 2 + reason on stderr, and the JSON deny decision both agents accept on
+        # stdout, so the block survives a shell wrapper that loses the exit code.
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": decision.reason}}), file=stdout)
         print(decision.reason, file=stderr)
         return 2
     return 0

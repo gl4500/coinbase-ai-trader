@@ -27,7 +27,7 @@ def decide(command, *, port_open=False, training=False, staged_py=False, window=
         command, cfg,
         port_open=lambda port: port_open,
         training_running=lambda markers: training,
-        staged_py=lambda: staged_py,
+        staged_py=lambda *a: staged_py,
         window_open=lambda: window,
     )
 
@@ -55,6 +55,14 @@ class Classify(unittest.TestCase):
         for cmd in ("python main.py", "PORT=8002 python main.py", "uvicorn main:app --port 8001",
                     "python -m backend.startup_guard --mode replace", "start_backend.ps1 -Replace"):
             self.assertIn("restart", g.classify(cmd), cmd)
+
+    def test_repo_launchers_are_restarts(self):  # review R4
+        for cmd in ("powershell -File .\\start_backend.ps1", "python start_app.py", "python launcher.py",
+                    "scripts\\start.bat", "scripts\\start_backend.bat", "python scripts/launcher.py"):
+            self.assertIn("restart", g.classify(cmd), cmd)
+
+    def test_frontend_launcher_is_not_a_restart(self):
+        self.assertNotIn("restart", g.classify("powershell -File .\\start_frontend.ps1"))
 
     def test_harmless_commands_have_no_risk(self):
         for cmd in ("git status", "git log -1 --stat", "ls backend/tests", "gh pr view 122", "cat main.py"):
@@ -111,9 +119,71 @@ class Decide(unittest.TestCase):
         def broken(*_a):
             raise OSError("cannot list processes")
         d = g.decide("python -m pytest", CFG, port_open=lambda p: False, training_running=broken,
-                     staged_py=lambda: False, window_open=lambda: False)
+                     staged_py=lambda *a: False, window_open=lambda: False)
         self.assertTrue(d.block)
         self.assertIn("could not check", d.reason)
+
+
+class CommitContents(unittest.TestCase):  # review R3: judge what the commit can include, not just the index
+    def may(self, command, staged=False):
+        return g.commit_may_include_py(command, staged_py=lambda target: staged)
+
+    def test_docs_pathspec_commit_with_clean_index_is_harmless(self):
+        self.assertFalse(self.may('git commit -m "docs" -- AGENTS.md CLAUDE.md'))
+
+    def test_python_pathspec_with_clean_index_is_risky(self):
+        self.assertTrue(self.may('git commit -m "fix" -- backend/example.py'))
+
+    def test_pathspec_without_double_dash_is_still_checked(self):
+        self.assertTrue(self.may('git commit -m "fix" backend/example.py'))
+
+    def test_directory_or_glob_pathspec_is_risky(self):
+        self.assertTrue(self.may('git commit -m x -- backend/'))
+        self.assertTrue(self.may('git commit -m x -- "*.md"'))
+
+    def test_add_then_commit_in_one_command_is_risky(self):
+        self.assertTrue(self.may('git add backend/example.py && git commit -m "fix" -- backend/example.py'))
+        self.assertTrue(self.may('git add -A; git commit -m x'))
+
+    def test_all_flags_are_risky(self):
+        for cmd in ('git commit -a -m x', 'git commit -am x', 'git commit --all -m x', 'git commit -qam x',
+                    'git commit -i -m x -- AGENTS.md', 'git commit --include -m x -- AGENTS.md'):
+            self.assertTrue(self.may(cmd), cmd)
+
+    def test_changing_directory_first_is_risky(self):
+        self.assertTrue(self.may('cd ../other && git commit -m x -- AGENTS.md'))
+
+    def test_staged_python_in_the_target_repo_is_risky(self):
+        self.assertTrue(self.may('git commit -m "docs" -- AGENTS.md', staged=True))
+
+    def test_git_dash_C_targets_that_repo(self):
+        seen = []
+        g.commit_may_include_py('git -C ../repo2 commit -m x -- AGENTS.md', staged_py=lambda t: seen.append(t) or False)
+        self.assertEqual(seen, ["../repo2"])
+
+    def test_message_text_mentioning_py_is_not_a_pathspec(self):
+        self.assertFalse(self.may('git commit -m "update foo.py docs" -- README.md'))
+
+
+class PortProbe(unittest.TestCase):  # review R5: only a refused connection means "not live"
+    def test_connected_means_live(self):
+        self.assertTrue(g.port_listening(8001, connect=lambda port: 0))
+
+    def test_refused_means_not_live(self):
+        for code in g.REFUSED_ERRNOS:
+            self.assertFalse(g.port_listening(8001, connect=lambda port, c=code: c))
+
+    def test_other_error_codes_are_unknown_and_raise(self):
+        for code in (10060, 10013, 110, 13):  # timeouts and permission denied, Windows and POSIX
+            with self.assertRaises(OSError):
+                g.port_listening(8001, connect=lambda port, c=code: c)
+
+    def test_unknown_port_state_blocks_a_risky_command(self):
+        def unknown(port):
+            raise OSError("probe timed out")
+        d = g.decide("pytest -q", CFG, port_open=unknown, training_running=lambda m: False,
+                     staged_py=lambda *a: False, window_open=lambda: False)
+        self.assertTrue(d.block)
 
 
 class TrainingDetection(unittest.TestCase):
@@ -164,19 +234,33 @@ class Window(unittest.TestCase):
 
 
 class Main(unittest.TestCase):
-    def run_main(self, payload, port_open=True):
+    def run_main(self, payload, port_open=True, stdout=None):
         stdin = io.StringIO(payload if isinstance(payload, str) else json.dumps(payload))
         stderr = io.StringIO()
         code = g.main(["--port", "8001", "--training-marker", "train_worker.py", "--commit-needs-staged-py"],
-                      stdin=stdin, stderr=stderr,
+                      stdin=stdin, stderr=stderr, stdout=stdout if stdout is not None else io.StringIO(),
                       probes=dict(port_open=lambda p: port_open, training_running=lambda m: False,
-                                  staged_py=lambda: True, window_open=lambda: False))
+                                  staged_py=lambda *a: True, window_open=lambda: False))
         return code, stderr.getvalue()
 
     def test_blocked_shell_command_exits_2_with_reason_on_stderr(self):
         code, err = self.run_main({"tool_name": "Bash", "tool_input": {"command": "pytest -q"}, "cwd": "."})
         self.assertEqual(code, 2)
         self.assertIn("8001", err)
+
+    def test_block_also_prints_a_json_deny_decision_on_stdout(self):
+        # A shell wrapper can lose exit code 2; both agents also honor this JSON decision.
+        out = io.StringIO()
+        self.run_main({"tool_name": "Bash", "tool_input": {"command": "pytest -q"}}, stdout=out)
+        decision = json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual(decision["hookEventName"], "PreToolUse")
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("8001", decision["permissionDecisionReason"])
+
+    def test_allowed_command_prints_nothing_on_stdout(self):
+        out = io.StringIO()
+        self.run_main({"tool_name": "Bash", "tool_input": {"command": "git status"}}, stdout=out)
+        self.assertEqual(out.getvalue(), "")
 
     def test_powershell_tool_is_guarded_too(self):
         code, _ = self.run_main({"tool_name": "PowerShell", "tool_input": {"command": "Stop-Process -Id 1"}})
@@ -189,6 +273,12 @@ class Main(unittest.TestCase):
     def test_other_tools_are_ignored(self):
         code, _ = self.run_main({"tool_name": "Edit", "tool_input": {"file_path": "main.py"}})
         self.assertEqual(code, 0)
+
+    def test_payload_with_utf8_byte_order_mark_is_parsed(self):
+        # Windows PowerShell pipes stdin with a BOM; the guard must still read the command.
+        payload = "﻿" + json.dumps({"tool_name": "Bash", "tool_input": {"command": "pytest -q"}})
+        code, _ = self.run_main(payload)
+        self.assertEqual(code, 2)
 
     def test_unparseable_payload_fails_open_with_a_warning(self):
         code, err = self.run_main("not json")
