@@ -1,7 +1,10 @@
 # CLAUDE.md — Coinbase AI Trader Coordination Contract
 
-This file is read by all Claude Code agents working on this repository.
-It defines responsibilities, workflows, and rules that every agent must follow.
+This file is read by all Claude Code agents working on this repository. Codex reads `AGENTS.md`,
+which tells it to read this whole file too. It defines responsibilities, workflows, and rules that
+every agent must follow.
+
+@AGENTS.md
 
 ---
 
@@ -9,6 +12,8 @@ It defines responsibilities, workflows, and rules that every agent must follow.
 
 **Only modify files inside `C:\Users\gl450\polymarket_app\`.**
 Never touch `radioconda\`, `.spyder-py3\`, or any other directory in the user's home folder.
+Two exceptions: the shared Claude memory folder (`C:\Users\gl450\.claude\projects\C--Users-gl450\memory\`),
+and cross-project work the operator has explicitly authorized for that task.
 
 ---
 
@@ -32,10 +37,17 @@ No fix is made silently.
 2. Implement the code change
 3. Run tests:  cd backend && python -m pytest tests/test_<module>.py -v
 4. Verify GREEN before committing
-5. Commit:  git add tests/<file> <module.py> && git commit
+5. Commit:  git commit -m "<msg>" -- tests/<file> <module.py>
 ```
 
 No code change is committed without a corresponding test. No exceptions for "small" fixes.
+Documentation-only changes (markdown, comments, CLAUDE.md/AGENTS.md wording) need link and
+consistency checks instead of behavioral tests.
+
+**Test windows.** While the live 8001 backend or a training subprocess is running, running pytest,
+committing staged `.py` files (the pre-commit hook then runs the backend tests) and the shell-cleanup
+step all need the operator's permission first (memory `feedback_no_pytest_during_trading.md`). When
+neither is running, no window is needed. Prefer CI for full-suite runs.
 
 ---
 
@@ -50,9 +62,12 @@ refactor: internal cleanup, no behavior change
 security: security hardening, secret scanning
 ```
 
-All commits include both the implementation file and its test file.
+Every commit that changes behavior includes both the implementation file and its test file;
+`docs:` commits are exempt (see TDD Workflow).
 `Co-Authored-By` line required (added automatically by Claude Code).
-Update `CHANGELOG.md` in the same commit as the feature or fix.
+Update `CHANGELOG.md` in the same commit as the feature or fix. One exception: when a parallel
+agent's staged work makes the shared `CHANGELOG.md` unsafe to stage, commit it in the immediately
+following commit and say so in the code commit's message. Never leave it for an arbitrary later commit.
 
 ### Branch discipline — always use a fresh clean branch
 
@@ -142,11 +157,11 @@ Rule:
 - **Dev / shadow / new-model validation** → port 8002 (or any other unused port). Start with `PORT=8002 python main.py`.
 - **Promotion to 8001 is gated on the new model showing promise** — wait for validation evidence (held-out AUC, shadow telemetry, post-week live trade outcomes) before swapping artifacts to the unsuffixed paths (`xgb_*_v4.*` etc.) and restarting the 8001 backend.
 
-Why this matters: SQLite (`coinbase.db`) is a shared file. Multiple backends can run simultaneously, all writing to the same `cnn_scans` / `trades` / `signal_outcomes` tables. A backend on 8002 with new code will populate v4 (or other) telemetry columns in those shared tables — you don't need 8001 to validate the new path's output. Only push to 8001 when you're ready to swap the *driver*.
+Why this matters: you don't need 8001 to validate a new path's output. A shadow backend on 8002 runs from its **own copy** of the database, with its own output root and run id (see "Run isolation" below), and its v4 (or other) telemetry lands in that copy. It must never write to `backend/coinbase.db`: the shared `agent_state` row would overwrite the 8001 paper book. Only push to 8001 when you're ready to swap the *driver*.
 
 The step-by-step procedure for shipping a new XGB model / inference path through the 8002 shadow lives in the `promote-model` skill (`.claude/skills/promote-model/SKILL.md`).
 
-Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met.
+Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met. Even then, never while a training subprocess is running: wait for it to finish (memory `feedback_no_restart_during_retrain.md`). Exception (b) is the only restart an agent may do without asking.
 
 ---
 
@@ -254,8 +269,8 @@ Operating detail, including the suite command and why it must run under
 
 ### After every code change — required steps
 1. Architecture change (agents, endpoints, file structure) → update `coinbase_trader_architecture.md`.
-2. Bug fixed → append the bug + fix to `trading_app_bugs_fixed.md`.
-3. Threshold changed → update `trading_app_thresholds.md`.
+2. Bug fixed → append the bug + fix to `coinbase_trader_bugs_fixed.md`.
+3. Threshold changed → update `coinbase_trader_thresholds.md`.
 4. Rule added or modified → update the matching memory file AND this `CLAUDE.md` in the same response.
 5. Never commit code without committing any corresponding `CLAUDE.md` update in the same or immediately following commit.
 
