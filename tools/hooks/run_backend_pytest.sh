@@ -18,6 +18,7 @@ main_root="$(dirname "$common")"
 
 PYTHON=""
 if [[ -n "${PYTEST_PYTHON:-}" ]]; then
+    [[ "$PYTEST_PYTHON" == /* || "$PYTEST_PYTHON" =~ ^[A-Za-z]:[/\\] ]] || fail "PYTEST_PYTHON must be an absolute path, got '$PYTEST_PYTHON'"
     [[ -f "$PYTEST_PYTHON" ]] || fail "PYTEST_PYTHON='$PYTEST_PYTHON' does not exist"
     PYTHON="$PYTEST_PYTHON"
 else

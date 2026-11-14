@@ -15,7 +15,8 @@ Format: reverse-chronological by session date.
   - The FAILED banner now prints; previously `set -e` swallowed it.
 - `CLAUDE.md` now states what runs locally, and how to activate the framework and roll it back.
   - Until a machine activates the framework, the secret scan and Bandit run only in CI.
-  - Activation uses a dedicated `.hook-venv/` (gitignored), never the app `.venv`.
+  - Activation copies the tracked shim `tools/hooks/pre-commit` into `.git/hooks`. The shim uses the dedicated `.hook-venv/` and a repo-local `.hook-cache/` (both gitignored), never the app `.venv`.
+  - `pre-commit install` is not used, so no `.legacy` hook runs.
 - No CI change. `.secrets.baseline` follows in this branch after individual finding review.
 ### 2026-11-14 - Per-label request starts on v2 outcome labels (WS1)
 

@@ -108,16 +108,23 @@ Sensitive files that must never be committed:
 - Bandit 1.8.3, at medium severity, over non-test backend code;
 - `pytest-backend`, the fast suite via `tools/hooks/run_backend_pytest.sh`. That script resolves the project interpreter: `PYTEST_PYTHON` first, then the main checkout's `.venv` (found via `git-common-dir`, so it works in worktrees), then this checkout's `.venv`. If none exists it refuses the commit; it never falls back to a PATH python.
 
-**Per-machine activation.** Nothing above runs locally until a machine activates it. Until then, the secret scan and Bandit run only in CI (Gitleaks, Bandit, Snyk, CodeQL). The framework is the sole owner of `.git/hooks/pre-commit`; the old hand-written hook is retired and not kept as `pre-commit.legacy`, so pytest runs once per commit.
+**Current machine state (until activation).** `.git/hooks/pre-commit` is still the OLD hand-written hook. It runs only the fast pytest suite, and only when a `.py` file is staged. It uses `<checkout>/.venv` and otherwise falls back to PATH python. The secret scan, hygiene, ruff and Bandit therefore do NOT run locally; they run only in CI (Gitleaks, Bandit, Snyk, CodeQL), and CI is not a required merge check.
+
+**After activation**, `.git/hooks/pre-commit` is a copy of the tracked shim `tools/hooks/pre-commit`. The shim:
+- runs the framework from the dedicated tooling venv `<main checkout>/.hook-venv`;
+- sets `PRE_COMMIT_HOME=<main checkout>/.hook-cache`, which is repo-local and gitignored, before the framework starts;
+- refuses the commit if the tooling venv is missing.
+
+`pre-commit install` is NOT used. It would migrate the old hook to `pre-commit.legacy` and keep running it, so pytest would run twice. Any manual framework command must set the same `PRE_COMMIT_HOME` first.
 
 Activate in this order (agreed with Codex, 2026-11-14):
-1. **Back up.** Copy the current `.git/hooks/pre-commit` to a hashed backup OUTSIDE `.git/hooks`. Record its SHA-256 and mode.
-2. **Install the tooling.** Create a dedicated tooling venv, `.hook-venv/` (gitignored). Install only `pre-commit==4.0.1` and `detect-secrets==1.5.0` there. Never install hook tooling into the app `.venv` that 8001 runs from without operator timing approval.
-3. **Prove it in a scratch clone first.** Run the RED/GREEN proofs there, and only in an operator-approved window. Running any test while 8001 is live needs the operator's OK.
-4. **Activate.** Only then activate the shared hook: `.hook-venv/Scripts/pre-commit install`.
-5. **Rollback.** Run `.hook-venv/Scripts/pre-commit uninstall` FIRST. Then restore the backup into `.git/hooks/pre-commit` and verify its SHA-256 and mode.
-
-pre-commit keeps hook environments under `PRE_COMMIT_HOME`, which defaults to `~/.cache/pre-commit`, outside the repository.
+1. **Back up.** Copy the current `.git/hooks/pre-commit` to a hashed backup OUTSIDE `.git/hooks`. Verify the copy's SHA-256 and record its mode.
+2. **Install the tooling.** Create `.hook-venv/` and install only `pre-commit==4.0.1` and `detect-secrets==1.5.0` there, with `PRE_COMMIT_HOME` set to `.hook-cache/`. Never install hook tooling into the app `.venv` that 8001 runs from without operator timing approval.
+3. **Prove it in a scratch clone first.** Run the RED/GREEN proofs in an isolated scratch clone, in an operator-approved window. Running any test while 8001 is live needs the operator's OK.
+4. **Retire and activate.** Only after the verified backup and the proofs:
+   - Refuse to continue if `.git/hooks/pre-commit.legacy` exists.
+   - Remove the old hook, copy `tools/hooks/pre-commit` to `.git/hooks/pre-commit`, and verify it.
+5. **Rollback.** Remove the shim FIRST. Then restore the backup to `.git/hooks/pre-commit` and verify its SHA-256 and mode.
 
 The `.secrets.baseline` covers tracked files only (`git ls-files`) and is generated without network verification. Each finding is reviewed individually before the baseline is committed. A finding that may be a live or unknown credential goes to the operator; it is never baselined.
 

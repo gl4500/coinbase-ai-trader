@@ -1,7 +1,7 @@
 # ── Pre-commit hooks — run automatically on every `git commit` ─────────────────
-# Install: see CLAUDE.md "Security Gate — local pre-commit hooks" (dedicated .hook-venv,
-#          never the app .venv; replaces the old hand-written .git/hooks/pre-commit).
-# Manual run:    .hook-venv/Scripts/pre-commit run --all-files
+# Activation: see CLAUDE.md "Local pre-commit hooks" - copy tools/hooks/pre-commit to
+#   .git/hooks/pre-commit (no `pre-commit install`; dedicated .hook-venv, never the app .venv).
+# Manual run: PRE_COMMIT_HOME=.hook-cache .hook-venv/Scripts/pre-commit run --all-files
 
 repos:
   # ── Secrets / credential detection ────────────────────────────────────────────
