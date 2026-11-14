@@ -7,6 +7,22 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-14 - Market alert review fixes (PR #90, Codex review of 5ebbaa6)
+
+- **One bad product no longer stops the run.** Product metadata is now validated inside the per-product error boundary. Malformed expiries, missing ids and non-object products are recorded and skipped; every other product and the spot checks still run and are persisted.
+- **Eligibility fails closed.** A product qualifies only with venue FCM/`cde`, `contract_expiry_type == EXPIRING`, and no funding fields, and anything unknown is excluded with a reason.
+  - Live data showed CDE perp-style products (BIP/ETP) labelled `EXPIRING` with a 2089 placeholder expiry; they are excluded by their funding fields.
+  - The product listing follows pagination up to a bound.
+  - `carry_coverage` is COMPLETE / INCOMPLETE / FAILED, and INCOMPLETE is never reported as a clean no-alert run.
+- **Moves are anchored by timestamp.** They use the latest CLOSED 5-minute bar (fresh within 600 s) and the bars exactly 1 h and 24 h earlier, with `asof`, `ref_1h` and `ref_24h` recorded.
+  - A missing anchor gives no value, with no fallback.
+  - Identical duplicates collapse; conflicting duplicates or a stale series make the product unavailable.
+  - Before this fix, row offsets were used, so a single missing bar silently stretched "1 h" to 65 min.
+- **Economic inputs are validated.** Short margin must be finite and non-negative; fees, cash rate and reserve finite and non-negative; capital, and the per-contract capital, positive. `--capital` must be positive and finite.
+- **Tests.** 27 alert tests, including a mocked PublicSource client for regular, gap, duplicate, stale and in-progress bars and for pagination.
+  - Mutation checks, each caught: dropping the funding exclusion, positional anchors, accepting conflicting duplicates.
+  - Single-writer `state.json` is documented.
+
 ### 2026-11-14 - Per-label request starts on v2 outcome labels (WS1)
 
 - RESOLVED label-version-2 rows now record `entry_requested_at` / `exit_requested_at`, the

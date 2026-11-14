@@ -87,3 +87,35 @@ def test_no_alert_too_close_to_expiry_or_on_bad_quotes():
     for bad in (dict(spot_ask=0.0, fut_bid=103.0), dict(spot_ask=100.0, fut_bid=float("nan"))):
         r = evaluate_dated(contract_size=1.0, short_margin=0.25, days_to_expiry=30.0, p=P, **bad)
         assert r["alert"] is False and r["valid"] is False
+
+
+def _eval(**over):
+    kw = dict(
+        spot_ask=100.0,
+        fut_bid=102.0,
+        contract_size=1.0,
+        short_margin=0.25,
+        days_to_expiry=30.0,
+        p=P,
+    )
+    kw.update(over)
+    return evaluate_dated(**kw)
+
+
+def test_a_negative_short_margin_is_invalid_but_zero_is_allowed():
+    assert _eval(short_margin=-0.1)["valid"] is False
+    assert _eval(short_margin=0.0)["valid"] is True
+
+
+def test_non_positive_capital_or_negative_costs_are_invalid():
+    from dataclasses import replace
+
+    for bad in (
+        replace(P, capital=0.0),
+        replace(P, capital=float("nan")),
+        replace(P, spot_maker_fee=-0.001),
+        replace(P, fut_fee_min=-1.0),
+        replace(P, reserve_rally=-0.1),
+        replace(P, cash_rate=float("inf")),
+    ):
+        assert _eval(p=bad)["valid"] is False

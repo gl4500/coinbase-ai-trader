@@ -26,6 +26,10 @@ class CarryParams:
     min_days: float = 7.0  # ignore contracts about to expire
 
 
+def _finite(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def fut_fee(notional: float, p: CarryParams) -> float:
     return max(p.fut_fee_rate * notional, p.fut_fee_min)
 
@@ -40,15 +44,19 @@ def evaluate_dated(
     p: CarryParams,
 ) -> dict:
     vals = (spot_ask, fut_bid, contract_size, short_margin, days_to_expiry)
+    costs_in = (p.spot_maker_fee, p.fut_fee_rate, p.fut_fee_min, p.cash_rate, p.reserve_rally)
     valid = (
-        all(isinstance(v, (int, float)) and math.isfinite(v) for v in vals)
-        and min(spot_ask, fut_bid, contract_size, days_to_expiry) > 0
+        all(_finite(v) for v in vals + costs_in + (p.capital,))
+        and min(spot_ask, fut_bid, contract_size, days_to_expiry, p.capital) > 0
+        and min(short_margin, *costs_in) >= 0
     )
     if not valid:
         return {"valid": False, "alert": False}
     ns, nf = contract_size * spot_ask, contract_size * fut_bid
     capital = ns * (1 + p.spot_maker_fee) + short_margin * nf
     capital += p.reserve_rally * nf * (1 + short_margin) + 2 * fut_fee(nf, p)
+    if not (_finite(capital) and capital > 0):
+        return {"valid": False, "alert": False}
     premium = (fut_bid - spot_ask) * contract_size
     costs = 2 * p.spot_maker_fee * ns + 2 * fut_fee(nf, p)
     forgone = capital * p.cash_rate * days_to_expiry / 365
