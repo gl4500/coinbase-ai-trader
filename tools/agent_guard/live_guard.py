@@ -190,9 +190,14 @@ def window_is_open(path: str, now: datetime) -> bool:
 REFUSED_ERRNOS = frozenset({errno.ECONNREFUSED, 10061})
 
 
+# Windows retries a refused localhost connect for about 2 s before reporting WSAECONNREFUSED; a shorter
+# timeout returns WSAEWOULDBLOCK (10035), which is "unknown" and would block every risky command.
+PROBE_TIMEOUT_SECS = 5.0
+
+
 def _connect_ex(port: int) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
+        sock.settimeout(PROBE_TIMEOUT_SECS)
         return sock.connect_ex(("127.0.0.1", port))
 
 

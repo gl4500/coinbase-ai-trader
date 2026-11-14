@@ -20,7 +20,7 @@ Either agent can be author or reviewer. Roles are fixed here; who fills them is 
 
 | Role | Must | Must not |
 |---|---|---|
-| **Author** | Claim the task; work on its own branch or worktree; write the failing test first; request review with the head SHA, what changed and the evidence | Approve its own work; verify its own decision-critical claims; merge |
+| **Author** | Claim the task; work on its own branch or worktree; write the failing test first; request review with the head SHA, what changed and the evidence | Approve its own work; be the sole verifier of its own decision-critical claims; merge |
 | **Reviewer** | Inspect the exact head SHA; check each decision-critical claim itself; give the strongest objection; reply APPROVE naming the SHA, or numbered defects, plus a forum status | Push to the author's branch (it proposes fixes instead); approve a SHA it did not inspect |
 | **Operator** | Clicks merge; approves test windows and anything irreversible; decides disputes, NO_CONSENSUS and role swaps; approves every 8001 restart except CLAUDE.md "Backend port discipline" (b): a promotion-gated artifact swap with no training running | — |
 

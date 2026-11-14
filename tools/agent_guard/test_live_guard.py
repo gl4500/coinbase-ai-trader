@@ -178,6 +178,10 @@ class PortProbe(unittest.TestCase):  # review R5: only a refused connection mean
             with self.assertRaises(OSError):
                 g.port_listening(8001, connect=lambda port, c=code: c)
 
+    def test_real_probe_reports_a_closed_local_port_as_not_live(self):
+        # Windows retries a refused localhost connect for ~2 s; a short timeout turned it into "unknown".
+        self.assertFalse(g.port_listening(9))
+
     def test_unknown_port_state_blocks_a_risky_command(self):
         def unknown(port):
             raise OSError("probe timed out")
@@ -284,6 +288,56 @@ class Main(unittest.TestCase):
         code, err = self.run_main("not json")
         self.assertEqual(code, 0)
         self.assertIn("live_guard", err)
+
+
+class CodexLauncher(unittest.TestCase):
+    """Runs the exact launcher from this repo's .codex/hooks.json as a real subprocess (review R6)."""
+
+    REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def launcher_code(self):
+        import shlex
+        with open(os.path.join(self.REPO, ".codex", "hooks.json"), encoding="utf-8") as fh:
+            command = json.load(fh)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        return shlex.split(command, posix=True)[2]  # [python, -c, <code>, --port, ...]
+
+    def run_launcher(self, cwd, command="pytest -q"):
+        import subprocess
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd})
+        # Port 9 (discard) is never listening here, so a healthy guard allows; failures must deny.
+        return subprocess.run([sys.executable, "-c", self.launcher_code(), "--port", "9"], cwd=cwd,
+                              input=payload, capture_output=True, text=True, timeout=60)
+
+    def assert_denied(self, result):
+        self.assertEqual(result.returncode, 2, result.stderr)
+        decision = json.loads(result.stdout.strip().splitlines()[-1])["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+
+    def make_repo(self, guard_source=None):
+        import subprocess
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        subprocess.run(["git", "init", "-q", d], check=True)
+        if guard_source is not None:
+            os.makedirs(os.path.join(d, "tools", "agent_guard"))
+            with open(os.path.join(d, "tools", "agent_guard", "live_guard.py"), "w", encoding="utf-8") as fh:
+                fh.write(guard_source)
+        return d
+
+    def test_healthy_repo_runs_the_guard_and_allows(self):
+        r = self.run_launcher(self.REPO)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_outside_any_git_repo_denies(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, d)
+        self.assert_denied(self.run_launcher(d))
+
+    def test_missing_guard_file_denies(self):
+        self.assert_denied(self.run_launcher(self.make_repo()))
+
+    def test_broken_guard_file_denies(self):
+        self.assert_denied(self.run_launcher(self.make_repo("def broken(:\n")))
 
 
 if __name__ == "__main__":
