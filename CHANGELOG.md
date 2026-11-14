@@ -7,6 +7,18 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-14 - Per-label request starts on v2 outcome labels (WS1)
+
+- RESOLVED label-version-2 rows now record `entry_requested_at` / `exit_requested_at`, the
+  request starts of the two bars the label used. A refetch that replaces those bars no longer
+  erases which fetch satisfied the 300 s finality policy. This is policy audit metadata, not
+  proof of finality or a unique response identity. `finality_basis` is unchanged.
+- Additive nullable migration on `signal_outcomes`; existing rows stay NULL, never backfilled.
+- `database.resolve_signal_outcome_v2` requires both values and validates them before opening
+  the DB. `outcome_tracker.check_pending` passes them through from `outcome_labels.resolve`.
+- Tests: `test_outcome_labels.py`, `test_outcome_store_v2.py`, `test_outcome_tracker.py`
+  (including a real temp-DB refetch case and h_bars=1).
+
 ### 2026-11-08 - Refresh CI shard timing seed
 
 - Replace `.test_durations` with the measured candidate from main CI run 42512379057

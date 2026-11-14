@@ -85,6 +85,15 @@ provisional snapshot that nothing later replaces if no further fetch arrives.
   `request_start>=close+300s;assumes_fresh_aggregate;margin_unverified`). Diagnostics report scored
   counts per basis. No label is ever "verified final".
 - **Known limit, pinned by a test:** a stale cached payload served to a late request passes the gate.
+- **Per-label request starts (WS1, added 2026-11-14).** Every RESOLVED v2 label also stores
+  `entry_requested_at` and `exit_requested_at`: the `requested_at` of the exact entry and exit bar
+  rows that passed the gate when it was resolved. A later, strictly newer refetch replaces the stored
+  bars but never the label's copy. These are **policy audit metadata only**: they show which request
+  start satisfied the margin. They are not a unique identity of the response (two distinct payloads
+  can share a request start), not proof of finality, and freshness of the aggregate stays assumed.
+  `finality_basis` is unchanged. The writer validates both like `save_candles` does (finite, not
+  bool, > 0, not in the future) before opening the database. Rows resolved earlier stay NULL
+  (unknown) and are never backfilled.
 
 ### Boundary behaviour
 

@@ -65,6 +65,10 @@ class Resolution:
     price_observed_at: Optional[int] = None
     price_source: Optional[str] = None
     finality_basis: Optional[str] = None
+    # Request START of the fetch behind each bar used: policy audit metadata,
+    # not a unique response identity and not proof of finality.
+    entry_requested_at: Optional[float] = None
+    exit_requested_at: Optional[float] = None
     reason: Optional[str] = None
 
 
@@ -207,5 +211,7 @@ def resolve(
         price_observed_at=target,
         price_source=PRICE_SOURCE_LOCAL_CANDLES,
         finality_basis=FINALITY_BASIS,
+        entry_requested_at=float(entry_candle["requested_at"]),
+        exit_requested_at=float(exit_candle["requested_at"]),
         **frame,
     )

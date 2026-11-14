@@ -384,6 +384,10 @@ async def init_db() -> None:
             # row. Legacy rows stay NULL, meaning unknown -- never inferred.
             "ALTER TABLE candles ADD COLUMN requested_at REAL",
             "ALTER TABLE signal_outcomes ADD COLUMN finality_basis TEXT",
+            # Per-label request starts of the two bars a v2 label used (WS1).
+            # Pre-existing rows stay NULL: never backfilled.
+            "ALTER TABLE signal_outcomes ADD COLUMN entry_requested_at REAL",
+            "ALTER TABLE signal_outcomes ADD COLUMN exit_requested_at REAL",
         ]:
             try:
                 await db.execute(sql)
@@ -1317,13 +1321,20 @@ async def resolve_signal_outcome_v2(
     price_source: str,
     lesson_text: str,
     finality_basis: str,
+    entry_requested_at: float,
+    exit_requested_at: float,
 ) -> bool:
     """Write a version-2 label. Returns True only if this call set it.
 
     Guarded by `outcome IS NULL` so a retry or a concurrent pass can never
-    overwrite a completed label.
+    overwrite a completed label. The two request starts are validated before
+    the database is opened, so an invalid one writes nothing.
     """
     from services import outcome_labels as ol
+
+    now = _time.time()
+    entry_requested_at = _validate_requested_at(entry_requested_at, now)
+    exit_requested_at = _validate_requested_at(exit_requested_at, now)
 
     async with _db() as db:
         cursor = await db.execute(
@@ -1331,6 +1342,7 @@ async def resolve_signal_outcome_v2(
                SET outcome=?, signed_return=?, entry_price_v2=?, target_price=?,
                    price_observed_at=?, price_source=?, processed_at=?,
                    label_version=?, lesson_text=?, finality_basis=?,
+                   entry_requested_at=?, exit_requested_at=?,
                    exit_price=?, pct_change=?, checked_at=?
                WHERE id=? AND outcome IS NULL AND label_version=?""",
             (
@@ -1344,6 +1356,8 @@ async def resolve_signal_outcome_v2(
                 ol.LABEL_VERSION,
                 lesson_text,
                 finality_basis,
+                entry_requested_at,
+                exit_requested_at,
                 target_price,
                 signed_return,
                 _now(),

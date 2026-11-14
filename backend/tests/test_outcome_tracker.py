@@ -279,3 +279,74 @@ async def test_small_asset_prices_preserve_the_measured_return(db):
     assert stored["target_price"] == 0.000000123456789
     reconstructed = stored["target_price"] / stored["entry_price_v2"] - 1
     assert stored["signed_return"] == pytest.approx(reconstructed, abs=1e-12)
+
+
+# ── Per-label request-start audit metadata (WS1) ──────────────────────────────
+
+
+async def test_label_keeps_its_request_starts_and_prices_after_a_newer_refetch(db):
+    """Real temp DB: a strictly newer fetch replaces the stored bars, but the
+    finished label keeps the request starts and prices it was resolved from."""
+    row = await _pending_row(db)
+    entry_req = _ENTRY + HOUR + ol.FINALITY_MARGIN_SECS + 11.0
+    exit_req = _SETTLED + 37.0
+    await db.save_candles("BTC-USD", [_bar(_ENTRY, 100.0, 100.0)], requested_at=entry_req)
+    await db.save_candles("BTC-USD", [_bar(_EXIT, 101.0, 102.0)], requested_at=exit_req)
+
+    assert await ot.get_tracker().check_pending(now=exit_req + 1) == 1
+
+    refetch = exit_req + 3600
+    await db.save_candles(
+        "BTC-USD", [_bar(_ENTRY, 50.0, 50.0), _bar(_EXIT, 60.0, 40.0)], requested_at=refetch
+    )
+    bars = await db.get_candles_at("BTC-USD", [_ENTRY, _EXIT])
+    assert bars[_ENTRY]["requested_at"] == bars[_EXIT]["requested_at"] == refetch
+
+    stored = await db.get_signal_outcome(row["id"])
+    assert stored["entry_requested_at"] == entry_req
+    assert stored["exit_requested_at"] == exit_req
+    assert stored["entry_price_v2"] == 100.0
+    assert stored["target_price"] == 102.0
+    assert stored["outcome"] == "WIN"
+    assert stored["finality_basis"] == ol.FINALITY_BASIS
+
+
+async def test_check_pending_hands_the_resolved_request_starts_to_the_writer(monkeypatch):
+    """Mocked handoff: exactly the values from resolve() reach the writer."""
+    entry_req = _ENTRY + HOUR + ol.FINALITY_MARGIN_SECS + 5.5
+    exit_req = _SETTLED + 9.25
+    row = {
+        "id": 7,
+        "product_id": "BTC-USD",
+        "side": "BUY",
+        "signal_time": _BOUNDARY,
+        "resolve_attempts": 0,
+        "entry_price": 1.0,
+        "confidence": 0.7,
+        "source": "CNN",
+        "check_after": _BOUNDARY + ol.H_BARS * HOUR,
+    }
+    candles = {
+        _ENTRY: {"open": 100.0, "close": 100.0, "requested_at": entry_req},
+        _EXIT: {"open": 101.0, "close": 102.0, "requested_at": exit_req},
+    }
+    calls = []
+
+    async def _pending():
+        return [row]
+
+    async def _candles(pid, starts):
+        return {s: candles[s] for s in starts if s in candles}
+
+    async def _write(**kw):
+        calls.append(kw)
+        return True
+
+    monkeypatch.setattr(database, "get_pending_outcomes", _pending)
+    monkeypatch.setattr(database, "get_candles_at", _candles)
+    monkeypatch.setattr(database, "resolve_signal_outcome_v2", _write)
+
+    assert await ot.get_tracker().check_pending(now=exit_req) == 1
+    assert len(calls) == 1
+    assert calls[0]["entry_requested_at"] == entry_req
+    assert calls[0]["exit_requested_at"] == exit_req
