@@ -7,6 +7,16 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-14 - Local pre-commit hooks made real and worktree-safe (TD-1/TD-2/TD-3)
+
+- `pytest-backend` now runs `tools/hooks/run_backend_pytest.sh`.
+  - It resolves the project interpreter in this order: `PYTEST_PYTHON`, then the main checkout's `.venv` via `git-common-dir`, then this checkout's `.venv`.
+  - If none of those exists, it refuses the commit. It never uses PATH python; in worktrees that was system Py3.14 without torch.
+  - The FAILED banner now prints; previously `set -e` swallowed it.
+- `CLAUDE.md` now states what runs locally, and how to activate the framework and roll it back.
+  - Until a machine activates the framework, the secret scan and Bandit run only in CI.
+  - Activation uses a dedicated `.hook-venv/` (gitignored), never the app `.venv`.
+- No CI change. `.secrets.baseline` follows in this branch after individual finding review.
 ### 2026-11-14 - Per-label request starts on v2 outcome labels (WS1)
 
 - RESOLVED label-version-2 rows now record `entry_requested_at` / `exit_requested_at`, the

@@ -1,6 +1,7 @@
 # ── Pre-commit hooks — run automatically on every `git commit` ─────────────────
-# Install once:  pip install pre-commit && pre-commit install
-# Manual run:    pre-commit run --all-files
+# Install: see CLAUDE.md "Security Gate — local pre-commit hooks" (dedicated .hook-venv,
+#          never the app .venv; replaces the old hand-written .git/hooks/pre-commit).
+# Manual run:    .hook-venv/Scripts/pre-commit run --all-files
 
 repos:
   # ── Secrets / credential detection ────────────────────────────────────────────
@@ -52,14 +53,15 @@ repos:
 
   # ── Backend unit tests ────────────────────────────────────────────────────────
   # Runs on any change to backend Python files or test files.
-  # Uses the project .venv — run `pre-commit install` while the venv is active,
-  # or set PYTEST_PYTHON to point to your venv python.exe explicitly.
+  # tools/hooks/run_backend_pytest.sh resolves the PROJECT interpreter (PYTEST_PYTHON,
+  # then the main checkout's .venv via git-common-dir, then this checkout's .venv) and
+  # refuses the commit if none exists — it never falls back to PATH python.
   - repo: local
     hooks:
       - id: pytest-backend
         name: pytest (backend)
-        entry: python -m pytest backend/tests/ -x -q --tb=short -m "not slow and not integration"
-        language: system
+        entry: tools/hooks/run_backend_pytest.sh
+        language: script
         pass_filenames: false
         types: [python]
         files: "^backend/"

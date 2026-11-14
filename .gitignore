@@ -16,6 +16,7 @@ build/
 *.egg
 .venv/
 .ci-venv/
+.hook-venv/
 ci-timings-*.json
 test-durations-candidate*.json
 venv/

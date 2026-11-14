@@ -99,6 +99,30 @@ Sensitive files that must never be committed:
 - `backend/coinbase.db` (live trading database)
 - `backend/*.pt` / `backend/*.pth` (model weights — large binary)
 
+### Local pre-commit hooks — what actually runs
+
+**Repository state.** `.pre-commit-config.yaml` defines:
+- the secret scan (detect-secrets, against `.secrets.baseline`);
+- file hygiene, including `no-commit-to-branch` for main and master;
+- ruff 0.9.0 lint and format;
+- Bandit 1.8.3, at medium severity, over non-test backend code;
+- `pytest-backend`, the fast suite via `tools/hooks/run_backend_pytest.sh`. That script resolves the project interpreter: `PYTEST_PYTHON` first, then the main checkout's `.venv` (found via `git-common-dir`, so it works in worktrees), then this checkout's `.venv`. If none exists it refuses the commit; it never falls back to a PATH python.
+
+**Per-machine activation.** Nothing above runs locally until a machine activates it. Until then, the secret scan and Bandit run only in CI (Gitleaks, Bandit, Snyk, CodeQL). The framework is the sole owner of `.git/hooks/pre-commit`; the old hand-written hook is retired and not kept as `pre-commit.legacy`, so pytest runs once per commit.
+
+Activate in this order (agreed with Codex, 2026-11-14):
+1. **Back up.** Copy the current `.git/hooks/pre-commit` to a hashed backup OUTSIDE `.git/hooks`. Record its SHA-256 and mode.
+2. **Install the tooling.** Create a dedicated tooling venv, `.hook-venv/` (gitignored). Install only `pre-commit==4.0.1` and `detect-secrets==1.5.0` there. Never install hook tooling into the app `.venv` that 8001 runs from without operator timing approval.
+3. **Prove it in a scratch clone first.** Run the RED/GREEN proofs there, and only in an operator-approved window. Running any test while 8001 is live needs the operator's OK.
+4. **Activate.** Only then activate the shared hook: `.hook-venv/Scripts/pre-commit install`.
+5. **Rollback.** Run `.hook-venv/Scripts/pre-commit uninstall` FIRST. Then restore the backup into `.git/hooks/pre-commit` and verify its SHA-256 and mode.
+
+pre-commit keeps hook environments under `PRE_COMMIT_HOME`, which defaults to `~/.cache/pre-commit`, outside the repository.
+
+The `.secrets.baseline` covers tracked files only (`git ls-files`) and is generated without network verification. Each finding is reviewed individually before the baseline is committed. A finding that may be a live or unknown credential goes to the operator; it is never baselined.
+
+`git commit --no-verify` still needs explicit operator authorization.
+
 ---
 
 ## Test Conventions
