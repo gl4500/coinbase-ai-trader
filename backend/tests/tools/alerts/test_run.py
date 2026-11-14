@@ -306,3 +306,37 @@ def test_products_stop_at_the_page_bound_and_report_incomplete():
     res = R.PublicSource(_Client(handler)).products()
     assert res["complete"] is False and res["pages"] == R.MAX_PRODUCT_PAGES
     assert math.isfinite(len(res["products"]))
+
+
+def _paged(pages):
+    def handler(url, p):
+        off = int(p.get("offset", 0))
+        seen = 0
+        for rows, has_next in pages:
+            if seen == off:
+                return {"products": rows, "pagination": {"has_next": has_next}}
+            seen += len(rows)
+        raise AssertionError(f"unexpected offset {off}")
+
+    return R.PublicSource(_Client(handler)).products()
+
+
+def test_an_empty_page_that_claims_more_is_incomplete_not_complete():
+    assert _paged([([], True)])["complete"] is False
+    assert _paged([([PRODUCTS[0]], True), ([], True)])["complete"] is False
+
+
+def test_an_ordinary_empty_last_page_completes():
+    assert _paged([([PRODUCTS[0]], True), ([], False)])["complete"] is True
+
+
+def test_cli_summary_reports_carry_coverage_for_every_status(monkeypatch, tmp_path, capsys):
+    for status in ("COMPLETE", "INCOMPLETE", "FAILED"):
+
+        def fake_run_once(out, src, *, now, params, _s=status):
+            return {"time": "t", "alerts": [], "notified": [], "carry_coverage": _s}
+
+        monkeypatch.setattr(R, "run_once", fake_run_once)
+        assert R.cli(["--out", str(tmp_path)]) == 0
+        line = capsys.readouterr().out.strip().splitlines()[-1]
+        assert json.loads(line)["carry_coverage"] == status

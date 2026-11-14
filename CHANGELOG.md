@@ -19,7 +19,8 @@ Format: reverse-chronological by session date.
   - Identical duplicates collapse; conflicting duplicates or a stale series make the product unavailable.
   - Before this fix, row offsets were used, so a single missing bar silently stretched "1 h" to 65 min.
 - **Economic inputs are validated.** Short margin must be finite and non-negative; fees, cash rate and reserve finite and non-negative; capital, and the per-contract capital, positive. `--capital` must be positive and finite.
-- **Tests.** 27 alert tests, including a mocked PublicSource client for regular, gap, duplicate, stale and in-progress bars and for pagination.
+- **Coverage is never overstated.** An empty product page that still claims `has_next` ends the listing as INCOMPLETE, and the CLI's one-line summary now includes `carry_coverage`. Exit code 0 means the run completed, not that coverage was healthy.
+- **Tests.** 30 alert tests, including a mocked PublicSource client for regular, gap, duplicate, stale and in-progress bars and for pagination.
   - Mutation checks, each caught: dropping the funding exclusion, positional anchors, accepting conflicting duplicates.
   - Single-writer `state.json` is documented.
 

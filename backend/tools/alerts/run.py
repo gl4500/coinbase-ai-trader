@@ -58,7 +58,7 @@ class PublicSource:
 
     def products(self) -> dict:
         """All FUTURE products, paged by limit/offset. `complete` is False if the page bound was hit."""
-        out, pages, has_next = [], 0, True
+        out, pages, has_next, contradictory = [], 0, True, False
         while has_next and pages < MAX_PRODUCT_PAGES:
             page = self._get("/products", product_type="FUTURE", limit=PAGE_LIMIT, offset=len(out))
             rows = page["products"]
@@ -67,8 +67,9 @@ class PublicSource:
             pag = page.get("pagination") or {}
             has_next = bool(pag["has_next"]) if "has_next" in pag else len(rows) >= PAGE_LIMIT
             if not rows:
+                contradictory = has_next  # an empty page that claims more: listing is truncated
                 has_next = False
-        return {"products": out, "complete": not has_next, "pages": pages}
+        return {"products": out, "complete": not has_next and not contradictory, "pages": pages}
 
     def top(self, pid):
         book = self._get("/product_book", product_id=pid, limit=1)["pricebook"]
@@ -259,6 +260,8 @@ def _positive_finite(text: str) -> float:
 
 
 def cli(argv=None) -> int:
+    """Run once and print a one-line summary. Exit 0 means the run COMPLETED, not that it was healthy:
+    check `carry_coverage` (COMPLETE / INCOMPLETE / FAILED) in the summary or the JSONL record."""
     import httpx
 
     ap = argparse.ArgumentParser(description="Read-only market alert (BTC, ETH, SOL, XRP)")
@@ -272,7 +275,8 @@ def cli(argv=None) -> int:
             now=time.time(),
             params=CarryParams(capital=args.capital),
         )
-    _emit(json.dumps({"time": rec["time"], "alerts": rec["alerts"], "notified": rec["notified"]}))
+    summary = {k: rec[k] for k in ("time", "carry_coverage", "alerts", "notified")}
+    _emit(json.dumps(summary))
     return 0
 
 
