@@ -9,7 +9,7 @@ repos:
     rev: v1.5.0
     hooks:
       - id: detect-secrets
-        args: ["--baseline", ".secrets.baseline"]
+        args: ["--baseline", ".secrets.baseline", "--no-verify"]  # offline: never verify secrets over the network
         exclude: >
           (?x)^(
             \.env\.example|

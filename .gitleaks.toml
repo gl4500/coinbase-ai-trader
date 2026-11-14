@@ -6,7 +6,7 @@
 useDefault = true
 
 [allowlist]
-description = "backend/tests/conftest.py holds an all-zero dummy EC key (pytest fixture), not a real credential"
+description = "backend/tests/conftest.py holds a malformed/truncated dummy EC key encoding (pytest fixture; private scalar 1, not loadable), not a real credential"
 paths = [
     '''backend/tests/conftest\.py''',
 ]

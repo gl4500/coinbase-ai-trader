@@ -126,7 +126,7 @@ Activate in this order (agreed with Codex, 2026-11-14):
    - Remove the old hook, copy `tools/hooks/pre-commit` to `.git/hooks/pre-commit`, and verify it.
 5. **Rollback.** Remove the shim FIRST. Then restore the backup to `.git/hooks/pre-commit` and verify its SHA-256 and mode.
 
-The `.secrets.baseline` covers tracked files only (`git ls-files`) and is generated without network verification. Each finding is reviewed individually before the baseline is committed. A finding that may be a live or unknown credential goes to the operator; it is never baselined.
+The `.secrets.baseline` covers tracked files only and is generated OFFLINE: `git ls-files -z | xargs -0 detect-secrets scan --no-verify > .secrets.baseline` (run from `.hook-venv`). The detect-secrets hook also passes `--no-verify`, so neither the scan nor the hook verifies a secret over the network. Each finding is reviewed individually before the baseline is committed. A finding that may be a live or unknown credential goes to the operator; it is never baselined.
 
 `git commit --no-verify` still needs explicit operator authorization.
 
