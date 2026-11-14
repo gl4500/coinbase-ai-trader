@@ -38,6 +38,16 @@ agent's user-level instructions).
 3. Shadow or experiment runs use their own DB copy, output root and run id, never `backend/coinbase.db`.
 4. Clean up only processes you can name as your own, by command line (CLAUDE.md, Shell cleanup).
 
+**Live-backend guard (enforced, not just a checklist)**
+`tools/agent_guard/live_guard.py` runs before every shell command for both agents (`.claude/settings.json`,
+`.codex/hooks.json`). While port 8001 is listening or a `train_worker.py` process runs, it blocks test runs,
+commits with staged `.py` files (the pre-commit hook then runs tests) and process kills, and it blocks backend
+starts during training. Test runs and those commits are let through only during an operator test window: a
+gitignored `.agent-test-window` file at the repo root holding an ISO-8601 expiry with timezone (e.g.
+`2026-11-14T22:00:00-05:00`). Kills always need the operator. Starting the 8002 shadow is left to
+`startup_guard`. It is a guardrail against mistakes, not a security boundary. Codex skips new project hooks
+until they are trusted (`/hooks`). Tests: `tools/agent_guard/test_live_guard.py`.
+
 **Author: before requesting review**
 1. Fresh branch off `main`; commit with `git commit -m "<msg>" -- <paths>`; check `git log -1 --stat`.
 2. Evidence: the commands you ran and their output, or why a check did not apply.

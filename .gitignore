@@ -94,3 +94,6 @@ backend/data/research/
 
 # Startup guard instance locks (backend/startup_guard.py)
 backend/.locks/
+
+# Operator-written test window for tools/agent_guard/live_guard.py (never committed)
+.agent-test-window

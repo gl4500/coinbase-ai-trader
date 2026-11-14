@@ -1,0 +1,214 @@
+"""PreToolUse guard for Claude Code and Codex: protect a live backend from agent shell commands.
+
+Standard library only, so any Python 3.8+ interpreter can run it. Both agents send the same
+payload on stdin ({"tool_name": "Bash" | "PowerShell", "tool_input": {"command": ...}, "cwd": ...}),
+and both treat exit code 2 with a reason on stderr as "block this tool call".
+
+While the live backend port is listening or a training process runs, it blocks:
+  * test runs (pytest, run_tests.py, python -m unittest), unless the operator opened a test window;
+  * commits with staged .py files, where the repo's pre-commit hook then runs tests (same window rule);
+  * process kills (Stop-Process, taskkill, kill, pkill, killall), window or not;
+  * backend starts and restarts while training runs (startup_guard already refuses an occupied port).
+
+A test window is a file `.agent-test-window` at the repository root holding an ISO-8601 expiry with a
+timezone, e.g. `2026-11-14T22:00:00-05:00`. It is gitignored and written by the operator.
+
+Failure policy: if a check needed for a risky command fails, the command is blocked. A payload that
+cannot be parsed is let through with a warning, so a malformed event never locks an agent out.
+This is a guardrail against mistakes, not a security boundary: commands can be phrased to evade it.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Callable, FrozenSet, Iterable, Optional, Sequence, TextIO, Tuple
+
+WINDOW_FILENAME = ".agent-test-window"
+SHELL_TOOLS = ("Bash", "PowerShell")
+
+_PATTERNS = {
+    "test": re.compile(r"\bpytest\b|\brun_tests\.py\b|-m\s+unittest\b", re.IGNORECASE),
+    "commit": re.compile(r"\bgit\b[^|;&]*?\bcommit\b"),
+    "kill": re.compile(r"\bStop-Process\b|\btaskkill\b|\bpkill\b|\bkillall\b|(?:^|[\s;&|(])kill\s+-?\w",
+                       re.IGNORECASE),
+    "restart": re.compile(r"python\S*\s+(?:-\S+\s+)*\S*main\.py\b|\buvicorn\b|\bstartup_guard\b|\s-Replace\b",
+                          re.IGNORECASE),
+}
+
+
+@dataclass(frozen=True)
+class Config:
+    port: int
+    training_markers: Tuple[str, ...]
+    commit_needs_staged_py: bool
+
+
+@dataclass(frozen=True)
+class Decision:
+    block: bool
+    reason: str = ""
+
+
+def classify(command: str) -> FrozenSet[str]:
+    """Return the risk categories a shell command falls into (empty if harmless)."""
+    return frozenset(name for name, pattern in _PATTERNS.items() if pattern.search(command))
+
+
+def decide(
+    command: str,
+    cfg: Config,
+    *,
+    port_open: Callable[[int], bool],
+    training_running: Callable[[Tuple[str, ...]], bool],
+    staged_py: Callable[[], bool],
+    window_open: Callable[[], bool],
+) -> Decision:
+    """Decide whether to block a command. Probes are only called for risky commands."""
+    risks = classify(command)
+    if not risks:
+        return Decision(False)
+    try:
+        if "commit" in risks and not (cfg.commit_needs_staged_py and staged_py()):
+            risks = risks - {"commit"}
+        if not risks:
+            return Decision(False)
+        live = port_open(cfg.port)
+        training = bool(cfg.training_markers) and training_running(cfg.training_markers)
+        window = window_open() if (risks & {"test", "commit"}) and (live or training) else False
+    except Exception as exc:  # fail closed: a risky command we cannot check is blocked
+        return Decision(True, f"live_guard: blocked; could not check the live backend ({exc}). Ask the operator.")
+
+    state = " and ".join(part for part in (
+        f"port {cfg.port} is live" if live else "",
+        "a training process is running" if training else "",
+    ) if part)
+    if "kill" in risks and (live or training):
+        return Decision(True, f"live_guard: blocked a process kill because {state}. Ask the operator first.")
+    if "restart" in risks and training:
+        return Decision(True, "live_guard: blocked a backend start/restart because a training process is "
+                              "running. Wait for training to finish.")
+    if (risks & {"test", "commit"}) and (live or training) and not window:
+        what = "a test run" if "test" in risks else "a commit with staged .py files (the hook runs tests)"
+        return Decision(True, f"live_guard: blocked {what} because {state}. Ask the operator for a test "
+                              f"window: an ISO-8601 expiry with timezone in <repo>/{WINDOW_FILENAME}.")
+    return Decision(False)
+
+
+def window_is_open(path: str, now: datetime) -> bool:
+    """True if `path` holds a timezone-aware ISO-8601 expiry later than `now`."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            expiry = datetime.fromisoformat(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+    return expiry.tzinfo is not None and expiry > now
+
+
+def _port_open(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+ProcessRecord = Tuple[str, str]  # (executable name, full command line on one line)
+
+# One record per line: "<name>\t<command line>", with newlines inside a command line flattened.
+_PS_LIST = ("Get-CimInstance Win32_Process | ForEach-Object { "
+            "$_.Name + \"`t\" + (($_.CommandLine -as [string]) -replace '[\\r\\n]+', ' ') }")
+
+
+def parse_process_records(out: str) -> list:
+    records = []
+    for line in out.splitlines():
+        name, _, cmd = line.partition("\t")
+        if name:
+            records.append((name.strip(), cmd.strip()))
+    return records
+
+
+def _process_records() -> list:
+    if os.name == "nt":
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", _PS_LIST],
+                             capture_output=True, text=True, timeout=15, check=True).stdout
+    else:
+        out = subprocess.run(["ps", "-eo", "comm=,args="], capture_output=True, text=True,
+                             timeout=15, check=True).stdout
+        out = "\n".join("\t".join(part.split(None, 1)) for part in out.splitlines() if part.strip())
+    return parse_process_records(out)
+
+
+def training_in(records: Iterable[ProcessRecord], markers: Tuple[str, ...]) -> bool:
+    """True if a Python process names a training marker. Shells that merely mention the marker and
+    this guard's own invocations (which carry `--training-marker <marker>`) do not count."""
+    for name, cmd in records:
+        if not name.lower().startswith("python") or "live_guard" in cmd:
+            continue
+        if any(m in cmd for m in markers):
+            return True
+    return False
+
+
+def _training_running(markers: Tuple[str, ...]) -> bool:
+    return training_in(_process_records(), markers)
+
+
+def _repo_root(cwd: str) -> str:
+    out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    return out or cwd
+
+
+def _staged_py(cwd: str) -> bool:
+    out = subprocess.run(["git", "-C", cwd, "diff", "--cached", "--name-only"],
+                         capture_output=True, text=True, timeout=10, check=True).stdout
+    return any(name.strip().endswith(".py") for name in out.splitlines())
+
+
+def _default_probes(cwd: str) -> dict:
+    return dict(
+        port_open=_port_open,
+        training_running=_training_running,
+        staged_py=lambda: _staged_py(cwd),
+        window_open=lambda: window_is_open(os.path.join(_repo_root(cwd), WINDOW_FILENAME),
+                                           datetime.now(timezone.utc)),
+    )
+
+
+def _parse_args(argv: Sequence[str]) -> Config:
+    p = argparse.ArgumentParser(description="PreToolUse live-backend guard")
+    p.add_argument("--port", type=int, required=True)
+    p.add_argument("--training-marker", action="append", default=[])
+    p.add_argument("--commit-needs-staged-py", action="store_true")
+    a = p.parse_args(list(argv))
+    return Config(a.port, tuple(a.training_marker), a.commit_needs_staged_py)
+
+
+def main(argv: Sequence[str], stdin: TextIO = sys.stdin, stderr: TextIO = sys.stderr,
+         probes: Optional[dict] = None) -> int:
+    cfg = _parse_args(argv)
+    try:
+        event = json.loads(stdin.read() or "{}")
+        tool = event.get("tool_name", "")
+        command = (event.get("tool_input") or {}).get("command", "")
+        cwd = event.get("cwd") or os.getcwd()
+    except (ValueError, AttributeError) as exc:
+        print(f"live_guard: could not read the hook payload ({exc}); allowing.", file=stderr)
+        return 0
+    if tool not in SHELL_TOOLS or not isinstance(command, str) or not command:
+        return 0
+    decision = decide(command, cfg, **(probes or _default_probes(cwd)))
+    if decision.block:
+        print(decision.reason, file=stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
