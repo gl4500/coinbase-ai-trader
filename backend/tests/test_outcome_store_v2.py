@@ -24,6 +24,9 @@ from services import outcome_labels as ol  # noqa: E402
 
 HOUR = 3600
 _BOUNDARY = 1_767_225_600
+# Request starts of the two bars a label used; deliberately distinct.
+_ENTRY_REQ = float(_BOUNDARY + 2 * HOUR + 300 + 11)
+_EXIT_REQ = float(_BOUNDARY + 5 * HOUR + 300 + 37)
 
 
 @pytest.fixture
@@ -212,6 +215,8 @@ async def test_resolution_writes_all_provenance(db):
         price_source=ol.PRICE_SOURCE_LOCAL_CANDLES,
         lesson_text="test lesson",
         finality_basis=ol.FINALITY_BASIS,
+        entry_requested_at=_ENTRY_REQ,
+        exit_requested_at=_EXIT_REQ,
     )
     assert changed is True
 
@@ -225,6 +230,8 @@ async def test_resolution_writes_all_provenance(db):
     assert stored["processed_at"] is not None
     assert stored["label_version"] == ol.LABEL_VERSION
     assert stored["finality_basis"] == ol.FINALITY_BASIS
+    assert stored["entry_requested_at"] == _ENTRY_REQ
+    assert stored["exit_requested_at"] == _EXIT_REQ
 
 
 async def test_a_second_resolution_cannot_overwrite_a_completed_label(db):
@@ -240,6 +247,8 @@ async def test_a_second_resolution_cannot_overwrite_a_completed_label(db):
         price_source="local_candles",
         lesson_text="first",
         finality_basis=ol.FINALITY_BASIS,
+        entry_requested_at=_ENTRY_REQ,
+        exit_requested_at=_EXIT_REQ,
     )
     changed = await db.resolve_signal_outcome_v2(
         row_id=row["id"],
@@ -251,12 +260,16 @@ async def test_a_second_resolution_cannot_overwrite_a_completed_label(db):
         price_source="local_candles",
         lesson_text="second",
         finality_basis=ol.FINALITY_BASIS,
+        entry_requested_at=_ENTRY_REQ + 999,
+        exit_requested_at=_EXIT_REQ + 999,
     )
     assert changed is False
 
     stored = await db.get_signal_outcome(row["id"])
     assert stored["outcome"] == "WIN"
     assert stored["signed_return"] == 0.02
+    assert stored["entry_requested_at"] == _ENTRY_REQ
+    assert stored["exit_requested_at"] == _EXIT_REQ
 
 
 async def test_resolved_rows_leave_the_pending_queue(db):
@@ -271,6 +284,8 @@ async def test_resolved_rows_leave_the_pending_queue(db):
         price_source="local_candles",
         lesson_text="x",
         finality_basis=ol.FINALITY_BASIS,
+        entry_requested_at=_ENTRY_REQ,
+        exit_requested_at=_EXIT_REQ,
     )
     pending_ids = {r["id"] for r in await db.get_pending_outcomes()}
     assert row["id"] not in pending_ids
@@ -314,6 +329,8 @@ async def test_unavailable_cannot_clobber_an_already_resolved_label(db):
         price_source="local_candles",
         lesson_text="x",
         finality_basis=ol.FINALITY_BASIS,
+        entry_requested_at=_ENTRY_REQ,
+        exit_requested_at=_EXIT_REQ,
     )
     changed = await db.mark_signal_outcome_unavailable(row["id"], "missing_exit_candle")
     assert changed is False
@@ -369,7 +386,80 @@ async def test_current_resolver_cannot_modify_other_versions(db, version):
         "local_candles",
         "incorrect conversion",
         ol.FINALITY_BASIS,
+        _ENTRY_REQ,
+        _EXIT_REQ,
     )
     assert not await db.mark_signal_outcome_unavailable(row["id"], "missing_exit_candle")
     await db.bump_signal_outcome_attempts(row["id"])
+    assert await db.get_signal_outcome(row["id"]) == before
+
+
+# ── Per-label request-start audit metadata (WS1) ──────────────────────────────
+
+
+async def test_migration_adds_the_request_start_columns(db):
+    cols = await _columns(db)
+    assert {"entry_requested_at", "exit_requested_at"} <= cols
+
+
+async def test_migration_is_idempotent_on_a_pre_migration_schema(tmp_path, monkeypatch):
+    """A table created before WS1 gains both columns; existing rows stay NULL."""
+    import aiosqlite
+
+    monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "old.db"))
+    await database.init_db()
+    async with aiosqlite.connect(database.DB_PATH) as conn:
+        await conn.execute("ALTER TABLE signal_outcomes DROP COLUMN entry_requested_at")
+        await conn.execute("ALTER TABLE signal_outcomes DROP COLUMN exit_requested_at")
+        await conn.commit()
+    assert not {"entry_requested_at", "exit_requested_at"} & await _columns(database)
+    row = await _insert(database)
+
+    await database.init_db()
+    await database.init_db()
+
+    assert {"entry_requested_at", "exit_requested_at"} <= await _columns(database)
+    stored = await database.get_signal_outcome(row["id"])
+    assert stored["entry_requested_at"] is None
+    assert stored["exit_requested_at"] is None
+
+
+_BAD_REQUESTED_AT = [None, True, False, float("nan"), float("inf"), float("-inf"), 0, -1.0, "1"]
+
+
+def _resolve_kwargs(row_id, **override):
+    kw = dict(
+        row_id=row_id,
+        outcome="WIN",
+        signed_return=0.02,
+        entry_price_v2=100.0,
+        target_price=102.0,
+        price_observed_at=1,
+        price_source=ol.PRICE_SOURCE_LOCAL_CANDLES,
+        lesson_text="t",
+        finality_basis=ol.FINALITY_BASIS,
+        entry_requested_at=_ENTRY_REQ,
+        exit_requested_at=_EXIT_REQ,
+    )
+    kw.update(override)
+    return kw
+
+
+@pytest.mark.parametrize("field", ["entry_requested_at", "exit_requested_at"])
+@pytest.mark.parametrize("bad", _BAD_REQUESTED_AT)
+async def test_invalid_request_start_is_rejected_before_the_db_is_opened(monkeypatch, field, bad):
+    def _no_db():
+        raise AssertionError("opened the database before validating")
+
+    monkeypatch.setattr(database, "_db", _no_db)
+    with pytest.raises(ValueError):
+        await database.resolve_signal_outcome_v2(**_resolve_kwargs(1, **{field: bad}))
+
+
+@pytest.mark.parametrize("field", ["entry_requested_at", "exit_requested_at"])
+async def test_invalid_request_start_leaves_the_row_pending(db, field):
+    row = await _insert(db)
+    before = await db.get_signal_outcome(row["id"])
+    with pytest.raises(ValueError):
+        await db.resolve_signal_outcome_v2(**_resolve_kwargs(row["id"], **{field: float("nan")}))
     assert await db.get_signal_outcome(row["id"]) == before

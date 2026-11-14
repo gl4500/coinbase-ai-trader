@@ -273,3 +273,70 @@ def test_overflowing_return_never_becomes_a_win():
     result = ol.resolve(1767225600, "BUY", book, now=1767243600 + ol.FINALITY_MARGIN_SECS)
     assert result.status == "UNAVAILABLE"
     assert result.outcome is None
+
+
+# ── Per-label request-start audit metadata (WS1) ──────────────────────────────
+# These record which fetch's request START justified each bar under the
+# finality policy. They are policy audit metadata, not proof of finality and
+# not a unique identity of the response content.
+
+
+def _requested(candle, at):
+    return {**candle, "requested_at": at}
+
+
+def test_resolved_label_records_the_request_start_of_each_bar_used():
+    entry = ol.entry_candle_start(_BOUNDARY)
+    exit_ = ol.exit_candle_start(entry)
+    entry_req = entry + HOUR + ol.FINALITY_MARGIN_SECS + 11.5
+    exit_req = _settled(entry) + 37.25
+    book = _book(
+        _requested(_candle(entry, 100.0, 100.0), entry_req),
+        _requested(_candle(exit_, 101.0, 102.0), exit_req),
+    )
+    r = ol.resolve(signal_time=_BOUNDARY, side="BUY", candles=book, now=exit_req + 1)
+    assert r.status == "RESOLVED"
+    assert r.entry_requested_at == entry_req
+    assert r.exit_requested_at == exit_req
+    assert r.entry_requested_at != r.exit_requested_at
+    assert r.finality_basis == ol.FINALITY_BASIS
+
+
+def test_recorded_request_starts_satisfy_the_finality_policy():
+    entry = ol.entry_candle_start(_BOUNDARY)
+    exit_ = ol.exit_candle_start(entry)
+    now = _settled(entry) + 500
+    book = _book(
+        _requested(_candle(entry, 100.0, 100.0), entry + HOUR + ol.FINALITY_MARGIN_SECS),
+        _requested(_candle(exit_, 101.0, 102.0), now),
+    )
+    r = ol.resolve(signal_time=_BOUNDARY, side="BUY", candles=book, now=now)
+    assert r.status == "RESOLVED"
+    for start, at in ((entry, r.entry_requested_at), (exit_, r.exit_requested_at)):
+        assert start + HOUR + ol.FINALITY_MARGIN_SECS <= at <= now
+
+
+def test_single_bar_horizon_records_that_bar_for_both_ends():
+    entry = ol.entry_candle_start(_BOUNDARY)
+    req = entry + HOUR + ol.FINALITY_MARGIN_SECS + 3
+    book = _book(_requested(_candle(entry, 100.0, 102.0), req))
+    r = ol.resolve(signal_time=_BOUNDARY, side="BUY", candles=book, now=req, h_bars=1)
+    assert r.status == "RESOLVED"
+    assert r.entry_requested_at == r.exit_requested_at == req
+
+
+def test_unresolved_results_carry_no_request_starts():
+    entry = ol.entry_candle_start(_BOUNDARY)
+    exit_ = ol.exit_candle_start(entry)
+    entry_only = _book(_candle(entry, 100.0, 100.0))
+    bad_price = _book(_candle(entry, 0.0, 100.0), _candle(exit_, 101.0, 102.0))
+    results = [
+        ol.resolve(_BOUNDARY, "BUY", entry_only, now=_settled(entry) - 1),  # not matured
+        ol.resolve(_BOUNDARY, "BUY", entry_only, now=_settled(entry)),  # PENDING
+        ol.resolve(_BOUNDARY, "BUY", entry_only, now=_settled(entry), attempts=99),
+        ol.resolve(_BOUNDARY, "BUY", bad_price, now=_settled(entry)),  # invalid price
+    ]
+    assert [r.status for r in results] == ["PENDING", "PENDING", "UNAVAILABLE", "UNAVAILABLE"]
+    for r in results:
+        assert r.entry_requested_at is None
+        assert r.exit_requested_at is None

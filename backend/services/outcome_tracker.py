@@ -188,6 +188,8 @@ class OutcomeTracker:
                     price_source=result.price_source,
                     lesson_text=_lesson(row, result),
                     finality_basis=result.finality_basis,
+                    entry_requested_at=result.entry_requested_at,
+                    exit_requested_at=result.exit_requested_at,
                 )
                 if changed:
                     resolved += 1
