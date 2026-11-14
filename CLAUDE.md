@@ -108,7 +108,7 @@ Sensitive files that must never be committed:
 - Bandit 1.8.3, at medium severity, over non-test backend code;
 - `pytest-backend`, the fast suite via `tools/hooks/run_backend_pytest.sh`. That script resolves the project interpreter: `PYTEST_PYTHON` first, then the main checkout's `.venv` (found via `git-common-dir`, so it works in worktrees), then this checkout's `.venv`. If none exists it refuses the commit; it never falls back to a PATH python.
 
-**Current machine state (until activation).** `.git/hooks/pre-commit` is still the OLD hand-written hook. It runs only the fast pytest suite, and only when a `.py` file is staged. It uses `<checkout>/.venv` and otherwise falls back to PATH python. The secret scan, hygiene, ruff and Bandit therefore do NOT run locally; they run only in CI (Gitleaks, Bandit, Snyk, CodeQL), and CI is not a required merge check.
+**Current machine state (until activation).** `.git/hooks/pre-commit` is still the OLD hand-written hook. It runs only the fast pytest suite, and only when a `.py` file is staged. It uses `<checkout>/.venv` and otherwise falls back to PATH python. The secret scan, hygiene, ruff and Bandit therefore do NOT run locally; they run only in CI (Gitleaks, Bandit, Snyk, CodeQL). Since 2026-11-14, branch protection on `main` requires the `Security gate` check (which includes Gitleaks, Bandit and Snyk; CodeQL and dep-audit are not required); the branch need not be up to date with `main`.
 
 **After activation**, `.git/hooks/pre-commit` is a copy of the tracked shim `tools/hooks/pre-commit`. The shim:
 - runs the framework from the dedicated tooling venv `<main checkout>/.hook-venv`;

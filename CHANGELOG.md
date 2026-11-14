@@ -17,7 +17,7 @@ Format: reverse-chronological by session date.
   - Until a machine activates the framework, the secret scan and Bandit run only in CI.
   - Activation copies the tracked shim `tools/hooks/pre-commit` into `.git/hooks`. The shim uses the dedicated `.hook-venv/` and a repo-local `.hook-cache/` (both gitignored), never the app `.venv`.
   - `pre-commit install` is not used, so no `.legacy` hook runs.
-- No CI change. `.secrets.baseline` follows in this branch after individual finding review.
+- Reviewed offline `.secrets.baseline` (11 false positives). Gitleaks gets one narrow exception: rule `generic-api-key`, file `.secrets.baseline`, and only `"hashed_secret": "<40 hex>"` lines, which hold SHA-1 fingerprints rather than secrets. It is a rule-level allowlist, compatible with the pinned gitleaks 8.24.3; everything else is still scanned. No CI workflow change.
 ### 2026-11-14 - Per-label request starts on v2 outcome labels (WS1)
 
 - RESOLVED label-version-2 rows now record `entry_requested_at` / `exit_requested_at`, the
