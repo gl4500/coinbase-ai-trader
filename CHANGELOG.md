@@ -7,6 +7,23 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-14 - Market alert review fixes (PR #90, Codex review of 5ebbaa6)
+
+- **One bad product no longer stops the run.** Product metadata is now validated inside the per-product error boundary. Malformed expiries, missing ids and non-object products are recorded and skipped; every other product and the spot checks still run and are persisted.
+- **Eligibility fails closed.** A product qualifies only with venue FCM/`cde`, `contract_expiry_type == EXPIRING`, and no funding fields, and anything unknown is excluded with a reason.
+  - Live data showed CDE perp-style products (BIP/ETP) labelled `EXPIRING` with a 2089 placeholder expiry; they are excluded by their funding fields.
+  - The product listing follows pagination up to a bound.
+  - `carry_coverage` is COMPLETE / INCOMPLETE / FAILED, and INCOMPLETE is never reported as a clean no-alert run.
+- **Moves are anchored by timestamp.** They use the latest CLOSED 5-minute bar (fresh within 600 s) and the bars exactly 1 h and 24 h earlier, with `asof`, `ref_1h` and `ref_24h` recorded.
+  - A missing anchor gives no value, with no fallback.
+  - Identical duplicates collapse; conflicting duplicates or a stale series make the product unavailable.
+  - Before this fix, row offsets were used, so a single missing bar silently stretched "1 h" to 65 min.
+- **Economic inputs are validated.** Short margin must be finite and non-negative; fees, cash rate and reserve finite and non-negative; capital, and the per-contract capital, positive. `--capital` must be positive and finite.
+- **Coverage is never overstated.** An empty product page that still claims `has_next` ends the listing as INCOMPLETE, and the CLI's one-line summary now includes `carry_coverage`. Exit code 0 means the run completed, not that coverage was healthy.
+- **Tests.** 30 alert tests, including a mocked PublicSource client for regular, gap, duplicate, stale and in-progress bars and for pagination.
+  - Mutation checks, each caught: dropping the funding exclusion, positional anchors, accepting conflicting duplicates.
+  - Single-writer `state.json` is documented.
+
 ### 2026-11-14 - Per-label request starts on v2 outcome labels (WS1)
 
 - RESOLVED label-version-2 rows now record `entry_requested_at` / `exit_requested_at`, the
@@ -280,6 +297,26 @@ mutations were caught: the open notional replaced by the close notional; net sum
 the summary window broken. Pinned ruff 0.9.0 check + format are clean.
 
 **Takes effect on 8001 only after merge + restart** (operator).
+
+### Session 58.106 — 2026-10-05 — Read-only market alert (BTC, ETH, SOL, XRP)
+
+New standalone tool `backend/tools/alerts` (`python -m tools.alerts.run`). It places **no orders**,
+reads only Coinbase public market data, imports nothing from the app and never opens the DB.
+Scope is the operator's four coins: BTC, ETH, SOL, XRP.
+
+- **Carry check** (`carry.py`, pure): for every dated CDE future of the four coins (perps
+  excluded), buy spot at the ask and sell the future at the bid. Capital per contract = spot
+  outlay + short margin on futures notional + a 30% rally reserve + futures fees. It alerts only
+  if at least one contract fits the operator's capital (default $1,000, `--capital`), the contract
+  has ≥ 7 days left, and the premium beats costs plus the cash yield forgone on all capital by
+  ≥ 1%/yr. The futures fee ($0.15 minimum / 0.02%) and the 4.17% cash rate are stated
+  assumptions.
+- **Move check** (`moves.py`, pure): spot moves of ≥ 5% over 1 hour or ≥ 10% over 24 hours.
+- **Output**: every run appends a line to `C:\Users\gl450\market_alerts\alerts.jsonl` and
+  rewrites `latest.json`. A new alert raises a Windows notification, with a 6-hour cooldown per
+  alert key. A failure for one product is recorded and never stops the others.
+- **First live run (2026-10-05)**: no alerts. Every dated contract sits 2.8–9.8%/yr **below** the
+  cash hurdle. Only ETH contracts (~$460 per contract) fit in $1,000.
 
 ### Session 58.101 — 2026-10-03 — Stop freezing in-progress candles (writer inventory P1/P2)
 
