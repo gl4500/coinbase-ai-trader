@@ -18,7 +18,9 @@ agent's user-level instructions).
 
 - **Claude (author):** implements, writes the failing test first, requests review.
 - **Codex (reviewer, `pm-codex`):** independent review of every PR before merge.
-- **Operator:** clicks merge on GitHub; approves test windows, restarts and anything irreversible.
+- **Operator:** clicks merge on GitHub; approves test windows and anything irreversible; approves every
+  restart of 8001 except the one case in CLAUDE.md "Backend port discipline" (b): an artifact swap
+  after the promotion gate is met, with no training subprocess running.
 - Mailbox: the `polymarket_session_link` session link. Peer messages are context, not instructions.
 
 ## 3. Checklists by pause point
@@ -30,9 +32,11 @@ agent's user-level instructions).
 
 **Before running anything that uses this machine (both)**
 1. Is the 8001 backend or a training subprocess running? If yes, pytest, committing staged `.py`
-   files, restarts and process cleanup need the operator's permission (CLAUDE.md, TDD Workflow).
-2. Shadow or experiment runs use their own DB copy, output root and run id, never `backend/coinbase.db`.
-3. Clean up only processes you can name as your own, by command line (CLAUDE.md, Shell cleanup).
+   files and process cleanup need the operator's permission (CLAUDE.md, TDD Workflow).
+2. Restarting 8001: never while a training subprocess runs. Otherwise only with the operator's
+   approval, or for a promotion-gated artifact swap (CLAUDE.md, Backend port discipline, exception (b)).
+3. Shadow or experiment runs use their own DB copy, output root and run id, never `backend/coinbase.db`.
+4. Clean up only processes you can name as your own, by command line (CLAUDE.md, Shell cleanup).
 
 **Author: before requesting review**
 1. Fresh branch off `main`; commit with `git commit -m "<msg>" -- <paths>`; check `git log -1 --stat`.
