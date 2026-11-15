@@ -27,7 +27,7 @@ Either agent can be author or reviewer. Roles are fixed here; who fills them is 
 |---|---|---|
 | **Author** | Claim the task; work on its own branch or worktree; write the failing test first; request review with the head SHA, what changed and the evidence | Approve its own work; be the sole verifier of its own decision-critical claims; merge |
 | **Reviewer** | Inspect the exact head SHA; check each decision-critical claim itself; give the strongest objection; reply APPROVE naming the SHA, or numbered defects, plus a forum status | Push to the author's branch (it proposes fixes instead); approve a SHA it did not inspect |
-| **Operator** | Clicks merge; approves test windows and anything irreversible; decides disputes, NO_CONSENSUS and role swaps; approves every 8001 restart except "Backend port discipline" (b) below: a promotion-gated artifact swap with no training running | — |
+| **Operator** | Clicks merge; approves test windows and anything irreversible; decides disputes, NO_CONSENSUS and role swaps; approves every 8001 restart, promotion included ("Backend port discipline") | — |
 
 **Assignment.** Each task has one record, set when it starts. In this repo it is the session link's
 task registry (`claim_task`): the claimant is the author, the other agent is the reviewer. Record it as:
@@ -228,13 +228,13 @@ Rules:
 Rule:
 - **Production / live trading** → port 8001 (default, set via `PORT` env or default in `main.py`)
 - **Dev / shadow / new-model validation** → port 8002 (or any other unused port). Start with `PORT=8002 python main.py`.
-- **Promotion to 8001 is gated on the new model showing promise** — wait for validation evidence (held-out AUC at least the production model's or an operator-set threshold, shadow telemetry with no crash signal, post-week live trade outcomes) before swapping artifacts to the unsuffixed paths (`xgb_*_v4.*` etc.) and restarting the 8001 backend.
+- **Promotion to 8001 is gated on the new model showing promise** — wait for validation evidence (held-out AUC at least the production model's or an operator-set threshold, shadow telemetry with no crash signal, post-week live trade outcomes) and then for the operator's explicit approval before swapping artifacts to the unsuffixed paths (`xgb_*_v4.*` etc.) and restarting the 8001 backend.
 
 Why this matters: you don't need 8001 to validate a new path's output. A shadow backend on 8002 runs from its **own copy** of the database, with its own output root and run id (see "Run isolation" below), and its v4 (or other) telemetry lands in that copy. It must never write to `backend/coinbase.db`: the shared `agent_state` row would overwrite the 8001 paper book. Only push to 8001 when you're ready to swap the *driver*.
 
 The step-by-step procedure for shipping a new XGB model / inference path through the 8002 shadow lives in the `promote-model` skill (`.claude/skills/promote-model/SKILL.md`).
 
-Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met. Even then, never while a training subprocess is running: wait for it to finish. Exception (b) is the only restart an agent may do without asking.
+Never kill or restart 8001 without the operator's explicit approval, a promotion that meets the gate included (operator decision 2026-11-15). Even then, never while a training subprocess is running: wait for it to finish.
 
 ---
 
@@ -330,7 +330,7 @@ Operating detail, including the suite command and why it must run under
 1. Is the 8001 backend or a training subprocess running? If yes, pytest, committing staged `.py`
    files and process cleanup need the operator's permission (TDD Workflow).
 2. Restarting 8001: never while a training subprocess runs. Otherwise only with the operator's
-   approval, or for a promotion-gated artifact swap (Backend port discipline, exception (b)).
+   explicit approval, promotions included (Backend port discipline).
 3. Shadow or experiment runs use their own DB copy, output root and run id, never `backend/coinbase.db`.
 4. Clean up only processes you can name as your own, by command line (Shell cleanup).
 
