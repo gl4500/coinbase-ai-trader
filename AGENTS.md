@@ -84,10 +84,14 @@ No code change is committed without a corresponding test. No exceptions for "sma
 Documentation-only changes (markdown, comments, CLAUDE.md/AGENTS.md wording) need link and
 consistency checks instead of behavioral tests.
 
-**Test windows.** While the live 8001 backend or a training subprocess is running, running pytest,
-committing staged `.py` files (the pre-commit hook then runs the backend tests) and the shell-cleanup
-step all need the operator's permission first (memory `feedback_no_pytest_during_trading.md`). When
-neither is running, no window is needed. Prefer CI for full-suite runs.
+**Test windows.** Test runs and commits of staged `.py` files (the pre-commit hook then runs the
+backend tests) may run as separate processes while the live 8001 backend runs (operator, 2026-11-15).
+Run one heavy job (a full suite or training) at a time; CPU is the contention. While a training
+subprocess runs, tests, those commits and the shell-cleanup
+step need the operator's permission first (a test window); process cleanup while 8001 is live needs it
+too. Never, whatever is running: end or restart 8001 or any process that is not your own (Shell
+cleanup), start a backend on 8001, or let a second process write `backend/coinbase.db` (Run
+isolation). Prefer CI for full-suite runs.
 
 ---
 
@@ -323,8 +327,9 @@ Operating detail, including the suite command and why it must run under
 3. Confirm the task stays inside this repo (Scope).
 
 **Before running anything that uses this machine (both)**
-1. Is the 8001 backend or a training subprocess running? If yes, pytest, committing staged `.py`
-   files and process cleanup need the operator's permission (TDD Workflow).
+1. Is a training subprocess running? If yes, pytest, committing staged `.py` files and process
+   cleanup need the operator's permission. With only 8001 live, tests and `.py` commits are fine,
+   one heavy job at a time; cleanup still needs permission (TDD Workflow).
 2. Restarting 8001: never while a training subprocess runs. Otherwise only with the operator's
    approval, or for a promotion-gated artifact swap (Backend port discipline, exception (b)).
 3. Shadow or experiment runs use their own DB copy, output root and run id, never `backend/coinbase.db`.
@@ -333,11 +338,13 @@ Operating detail, including the suite command and why it must run under
 **Live-backend guard**
 `tools/agent_guard/live_guard.py` is a PreToolUse hook for both agents (`.claude/settings.json`,
 `.codex/hooks.json`). While port 8001 is listening (or its state can't be determined) or a `train_worker.py`
-process runs, it blocks test runs, commits that can include `.py` files (the pre-commit hook then runs tests)
-and process kills, and it blocks backend starts and the repo launchers during training. Test runs and those
-commits pass only during an operator test window: a gitignored `.agent-test-window` file at the repo root
-holding an ISO-8601 expiry with timezone (e.g. `2026-11-14T22:00:00-05:00`). Kills always need the operator.
-Starting the 8002 shadow while 8001 is live is left to `startup_guard`.
+process runs, it blocks process kills. While a `train_worker.py` process runs, it also blocks test runs,
+commits that can include `.py` files (the pre-commit hook then runs tests), backend starts and the repo
+launchers (flag `--tests-allowed-while-live`). Test runs and those
+commits pass during training only in an operator test window: a gitignored `.agent-test-window` file at the
+repo root holding an ISO-8601 expiry with timezone (e.g. `2026-11-14T22:00:00-05:00`). Kills always need the
+operator. Starting the 8002 shadow while 8001 is live is left to `startup_guard`. Risky words inside a quoted
+argument (a message or commit subject) are ignored unless a shell wrapper runs that text.
 
 - **Claude:** active whenever this checkout's `.claude/settings.json` loads; a failing hook blocks the command.
 - **Codex:** active only after the operator trusts the project hooks (`/hooks`); untrusted hooks are skipped.
