@@ -47,8 +47,10 @@ Claude-only rules in this `CLAUDE.md`. The memory folder `C:\Users\gl450\.claude
 holds what the repo does not: why a rule exists, incident history, operator quotes, rules that apply
 across projects, and project state (architecture, bugs, thresholds, session log). Where memory covers a
 repo rule it holds a pointer to the section, a one-line summary and the why, never a second full copy.
-If memory and this repo disagree on a rule, this repo (in the task's own checkout) wins: follow it and
-fix the memory pointer in the same session.
+If a memory pointer's one-line summary disagrees with the repo section it points to, that section (in
+the task's own checkout) wins: follow it and fix the summary in the same session. Any other conflict (a
+general or cross-project rule kept in memory, an operator instruction, or a pointer whose target is
+missing or stale) is not settled by this precedence: stop the affected action and ask the operator.
 
 ### After every code change — required steps
 1. Architecture change (agents, endpoints, file structure) → update `coinbase_trader_architecture.md`.
