@@ -16,11 +16,11 @@ A test window is a file `.agent-test-window` at the repository root holding an I
 timezone, e.g. `2026-11-14T22:00:00-05:00`. It is gitignored and written by the operator.
 
 Risky words inside a provably inert message argument are ignored by the kill, test and commit checks:
-the message of `herdr agent prompt`, `git commit -m/--message`, `gh --title/--body`, or an argument of
-echo/printf/Write-Output/Write-Host, when single-quoted or double-quoted without `$(` or a backtick.
-Any other quoted text (operands, wrapper arguments, substitutions) is scanned as written; unbalanced
-quotes and any unquoted pipe fall back to the raw text, and a printer whose output is redirected
-with `>` is never treated as inert. Backend-start detection always uses the raw text.
+the message of `herdr agent prompt`, `git commit -m/--message` or `gh --title/--body`, when
+single-quoted or double-quoted without `$(` or a backtick. Any other quoted text (operands, printed
+text, wrapper arguments, substitutions) is scanned as written. Unbalanced quotes, any unquoted pipe,
+and any unquoted eval/iex/Invoke-Expression/source in the command fall back to the raw text.
+Backend-start detection always uses the raw text.
 
 Failure policy: if a check needed for a risky command fails, the command is blocked. A payload that
 cannot be parsed is let through with a warning, so a malformed event never locks an agent out.
@@ -71,7 +71,8 @@ _MESSAGE_OPTIONS = {
     "git": ("-m", "--message"),
     "gh": ("--title", "--body", "-t", "-b"),
 }
-_PRINTERS = frozenset({"echo", "printf", "write-output", "write-host"})
+# Any of these anywhere in the command can turn earlier text into code: no redaction at all.
+_EVALUATORS = re.compile(r"(?i)(?<![\w-])(?:eval|iex|Invoke-Expression|source)(?![\w-])")
 
 
 def _quote_spans(command: str) -> Optional[list]:
@@ -143,10 +144,6 @@ def _message_words(command: str, words: list, spans: set) -> list:
         and len(texts) > 4
     ):
         picked = [4]
-    elif head in _PRINTERS:
-        if any(">" in texts[k] for k in range(len(texts)) if not quoted[k]):
-            return []  # printed into a file, which could be run later
-        picked = list(range(1, len(texts)))
     elif head in _MESSAGE_OPTIONS:
         if head == "git" and "commit" not in texts:
             return []
@@ -157,16 +154,17 @@ def _message_words(command: str, words: list, spans: set) -> list:
 
 def _scan_text(command: str) -> str:
     """The command with provably inert message arguments blanked (see _message_words); everything
-    else, including any quoted text a shell could run, is kept. Unbalanced quotes or any unquoted pipe:
-    raw text."""
+    else, including any quoted text a shell could run, is kept. Unbalanced quotes, an unquoted pipe or
+    an unquoted evaluator (eval/iex/Invoke-Expression/source): raw text."""
     spans = _quote_spans(command)
     if spans is None:
         return command
     inside = _inside_mask(command, spans)
     if any(ch == "|" and not inside[i] for i, ch in enumerate(command)):
-        return (
-            command  # piped text may be executed downstream (e.g. `| Invoke-Expression`, `| bash`)
-        )
+        return command  # piped text may run downstream (`| Invoke-Expression`, `| bash`)
+    unquoted = "".join(" " if inside[i] else ch for i, ch in enumerate(command))
+    if _EVALUATORS.search(unquoted):
+        return command  # captured text may be evaluated later in the chain (eval "$cmd")
     span_set = set(spans)
     out = []
     for start, end in _segments(command, spans):

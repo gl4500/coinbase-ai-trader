@@ -247,8 +247,6 @@ class QuotedText(unittest.TestCase):
             'herdr agent prompt rules-codex "never taskkill or Stop-Process the backend" --wait',
             'git commit -m "test: kill -9 handling" -- a.md',
             'git -C repo commit --message "pkill is forbidden" -- a.md',
-            "echo 'pkill -f python is forbidden'",
-            'Write-Output "never Stop-Process the backend"',
             'gh pr comment 5 --body "do not taskkill 8001"',
             'herdr agent prompt x "line one\nthen; kill -9 123\nend"',
         ):
@@ -296,6 +294,28 @@ class QuotedText(unittest.TestCase):
         ):
             self.assertIn("kill", g.classify(cmd), cmd)
         d = decide("echo 'pkill -f dummy_marker' | bash", port_open=True, training=True, cfg=PM_CFG)
+        self.assertTrue(d.block)
+
+    def test_printed_text_is_always_scanned(
+        self,
+    ):  # G4 follow-up: printers are not message positions
+        for cmd in (
+            "echo 'pkill -f python is forbidden'",
+            'Write-Output "never Stop-Process the backend"',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_variable_capture_chains_still_count(self):  # G4 follow-up
+        for cmd in (
+            "printf -v cmd '%s' 'pkill -f dummy_marker'; eval \"$cmd\"",
+            "Write-Output 'Stop-Process -Id 424242' -OutVariable cmd; Invoke-Expression $cmd",
+            "git commit -m 'kill -9 1' -- a.md; eval \"$(git log -1 --format=%s)\"",
+            "herdr agent prompt x 'taskkill /F /PID 3'; iex $m",
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+        d = decide(
+            "printf -v c '%s' 'pkill -f x'; eval \"$c\"", port_open=True, training=True, cfg=PM_CFG
+        )
         self.assertTrue(d.block)
 
     def test_message_with_only_stream_redirects_is_still_inert(self):

@@ -343,7 +343,7 @@ launchers (flag `--tests-allowed-while-live`). Test runs and those
 commits pass during training only in an operator test window: a gitignored `.agent-test-window` file at the
 repo root holding an ISO-8601 expiry with timezone (e.g. `2026-11-14T22:00:00-05:00`). Kills always need the
 operator. Starting the 8002 shadow while 8001 is live is left to `startup_guard`. Risky words inside an inert
-message (herdr prompt, commit or PR text, unpiped printed text) are ignored; see the guard's docstring.
+message (a herdr prompt, commit or PR text) are ignored; see the guard's docstring.
 
 - **Claude:** active whenever this checkout's `.claude/settings.json` loads; a failing hook blocks the command.
 - **Codex:** active only after the operator trusts the project hooks (`/hooks`); untrusted hooks are skipped.
