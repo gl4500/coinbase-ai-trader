@@ -7,6 +7,18 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-14 - Local pre-commit hooks made real and worktree-safe (TD-1/TD-2/TD-3)
+
+- `pytest-backend` now runs `tools/hooks/run_backend_pytest.sh`.
+  - It resolves the project interpreter in this order: `PYTEST_PYTHON`, then the main checkout's `.venv` via `git-common-dir`, then this checkout's `.venv`.
+  - If none of those exists, it refuses the commit. It never uses PATH python; in worktrees that was system Py3.14 without torch.
+  - The FAILED banner now prints; previously `set -e` swallowed it.
+- `CLAUDE.md` now states what runs locally, and how to activate the framework and roll it back.
+  - Until a machine activates the framework, the secret scan and Bandit run only in CI.
+  - Activation copies the tracked shim `tools/hooks/pre-commit` into `.git/hooks`. The shim uses the dedicated `.hook-venv/` and a repo-local `.hook-cache/` (both gitignored), never the app `.venv`.
+  - `pre-commit install` is not used, so no `.legacy` hook runs.
+- Reviewed offline `.secrets.baseline` (11 false positives). Gitleaks gets one narrow exception: rule `generic-api-key`, file `.secrets.baseline`, and only `"hashed_secret": "<40 hex>"` lines, which hold SHA-1 fingerprints rather than secrets. It is a rule-level allowlist, compatible with the pinned gitleaks 8.24.3; everything else is still scanned. No CI workflow change.
+
 ### 2026-11-14 - Market alert review fixes (PR #90, Codex review of 5ebbaa6)
 
 - **One bad product no longer stops the run.** Product metadata is now validated inside the per-product error boundary. Malformed expiries, missing ids and non-object products are recorded and skipped; every other product and the spot checks still run and are persisted.
