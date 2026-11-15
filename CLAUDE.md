@@ -2,6 +2,11 @@
 
 @AGENTS.md
 
+**If the `AGENTS.md` text is not in your context, read `AGENTS.md` in the repository root (the folder
+that holds this `CLAUDE.md`) in full before doing anything else.** Claude Code skips the import above
+when a session starts in a subdirectory (e.g. `tools/session_bridge/`): the root file then counts as an external
+import that needs approval, and a non-interactive session never asks. Start sessions at the repository root.
+
 `AGENTS.md` (imported above) is the shared project contract for Claude Code and Codex: scope, roles,
 workflow, commits and peer review, security gate, tests, port discipline, run isolation, the session
 link, checklists and the mandatory reference `docs/agents/architecture-and-invariants.md`. This file
