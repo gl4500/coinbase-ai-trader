@@ -286,6 +286,23 @@ class QuotedText(unittest.TestCase):
         d = decide('git "commit" -m "fix" -- a.py', training=True, staged_py=True, cfg=PM_CFG)
         self.assertTrue(d.block)
 
+    def test_printer_text_piped_or_redirected_still_counts(self):  # G4
+        for cmd in (
+            "Write-Output 'Stop-Process -Id 424242' | Invoke-Expression",
+            "echo 'pkill -f dummy_marker' | bash",
+            "printf 'kill -9 1' | sh",
+            "echo 'kill -9 1' > x.sh",
+            'herdr agent prompt x "never taskkill" | Invoke-Expression',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+        d = decide("echo 'pkill -f dummy_marker' | bash", port_open=True, training=True, cfg=PM_CFG)
+        self.assertTrue(d.block)
+
+    def test_message_with_only_stream_redirects_is_still_inert(self):
+        self.assertNotIn(
+            "kill", g.classify('herdr agent prompt x "never taskkill" --wait >/dev/null 2>&1')
+        )
+
     def test_shell_wrappers_still_expose_their_quoted_commands(self):
         for cmd in (
             'powershell -Command "Stop-Process -Id 5"',
