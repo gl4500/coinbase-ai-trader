@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Tracked pre-commit shim. Activation COPIES this file to .git/hooks/pre-commit (see CLAUDE.md
+# "Local pre-commit hooks"). It replaces `pre-commit install`, so no pre-commit.legacy is ever
+# created or invoked.
+#
+# - Runs the pre-commit framework from the dedicated tooling venv <main checkout>/.hook-venv,
+#   never from the app .venv that the live backend uses.
+# - Sets PRE_COMMIT_HOME to the repo-local, gitignored <main checkout>/.hook-cache BEFORE the
+#   framework starts.
+# - <main checkout> = parent of `git rev-parse --git-common-dir`, so worktrees share one venv
+#   and one cache.
+# - If the tooling venv is missing, the commit is refused; it never falls back silently.
+set -uo pipefail
+
+fail() { echo "pre-commit shim: $*" >&2; exit 1; }
+
+common="$(git rev-parse --path-format=absolute --git-common-dir)" || fail "cannot resolve git common dir"
+main_root="$(dirname "$common")"
+top="$(git rev-parse --show-toplevel)" || fail "cannot resolve checkout top level"
+
+export PRE_COMMIT_HOME="$main_root/.hook-cache"
+
+pc=""
+for cand in "$main_root/.hook-venv/Scripts/pre-commit.exe" "$main_root/.hook-venv/bin/pre-commit"; do
+    if [[ -f "$cand" ]]; then
+        pc="$cand"
+        break
+    fi
+done
+[[ -n "$pc" ]] || fail "no tooling venv at '$main_root/.hook-venv'; commit refused (see CLAUDE.md 'Local pre-commit hooks')"
+
+exec "$pc" run --hook-stage pre-commit --config "$top/.pre-commit-config.yaml"

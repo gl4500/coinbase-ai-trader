@@ -1,12 +1,31 @@
-# Gitleaks configuration.
-# Extends the full default ruleset (so real secrets are still detected
-# everywhere) and allowlists the pytest fixtures file, which intentionally holds
-# an all-zero DUMMY EC private key so tests never need real credentials.
+# Gitleaks configuration (CI pins gitleaks 8.24.3 via gitleaks-action).
+# Extends the full default ruleset, so real secrets are still detected everywhere.
+# Two narrow exceptions:
+#  1. The pytest fixtures file holds a malformed/truncated DUMMY EC key encoding
+#     (private scalar 1, not loadable), so tests never need real credentials.
+#  2. .secrets.baseline (detect-secrets) stores SHA-1 fingerprints of reviewed false
+#     positives in "hashed_secret" fields. The default generic-api-key rule matches those
+#     hashes. Only that rule, only that file, and only lines of exactly that shape are
+#     exempt; any other line in the baseline, and every other file, is still scanned.
 [extend]
 useDefault = true
 
 [allowlist]
-description = "backend/tests/conftest.py holds an all-zero dummy EC key (pytest fixture), not a real credential"
+description = "backend/tests/conftest.py holds a malformed/truncated dummy EC key encoding (pytest fixture; private scalar 1, not loadable), not a real credential"
 paths = [
     '''backend/tests/conftest\.py''',
+]
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "detect-secrets baseline hashed_secret fingerprints (SHA-1 of reviewed false positives), not secrets"
+condition = "AND"
+paths = [
+    '''^\.secrets\.baseline$''',
+]
+regexTarget = "line"
+regexes = [
+    '''^\s*"hashed_secret": "[0-9a-f]{40}",?\s*$''',
 ]
