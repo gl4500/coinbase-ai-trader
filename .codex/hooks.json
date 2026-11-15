@@ -1,0 +1,18 @@
+{
+  "description": "Live-backend guard (tools/agent_guard/live_guard.py from this checkout's git root): blocks tests, risky commits and process kills while the backend is live.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe -c \"import json,os,runpy,subprocess,sys;D=lambda m:(print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':m}})),print(m,file=sys.stderr),sys.stdout.flush(),sys.stderr.flush(),os._exit(2));sys.excepthook=lambda t,v,b:D('live_guard launcher failed ('+t.__name__+': '+str(v)+'); blocking. Operator: check tools/agent_guard.');r=subprocess.run(['git','rev-parse','--show-toplevel'],capture_output=True,text=True,timeout=10,check=True).stdout.strip();p=os.path.join(r,'tools','agent_guard','live_guard.py');open(p).close();sys.argv=[p]+sys.argv[1:];runpy.run_path(p,run_name='__main__')\" --port 8001 --training-marker train_worker.py --commit-needs-staged-py",
+            "timeout": 30,
+            "statusMessage": "Checking the live backend"
+          }
+        ]
+      }
+    ]
+  }
+}
