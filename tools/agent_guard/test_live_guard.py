@@ -237,22 +237,54 @@ class TestsAllowedWhileLive(unittest.TestCase):
 
 
 class QuotedText(unittest.TestCase):
-    """A risky word inside a quoted argument (a message, a commit subject) is text, not a command —
-    unless the quoted text is itself run by a shell wrapper or sits in command position."""
+    """A risky word is ignored only inside a provably inert message argument: the message of
+    `herdr agent prompt`, `git commit -m/--message`, `gh --title/--body`, or an argument of
+    echo/printf/Write-Output/Write-Host, and only if the span is single-quoted or double-quoted
+    without `$(` or a backtick. Everything else is scanned raw (review G1/G2 on 1ce79cf)."""
 
-    def test_quoted_message_mentioning_a_kill_is_not_a_kill(self):
+    def test_inert_message_arguments_are_not_kills(self):
         for cmd in (
             'herdr agent prompt rules-codex "never taskkill or Stop-Process the backend" --wait',
             'git commit -m "test: kill -9 handling" -- a.md',
+            'git -C repo commit --message "pkill is forbidden" -- a.md',
             "echo 'pkill -f python is forbidden'",
+            'Write-Output "never Stop-Process the backend"',
+            'gh pr comment 5 --body "do not taskkill 8001"',
             'herdr agent prompt x "line one\nthen; kill -9 123\nend"',
         ):
             self.assertNotIn("kill", g.classify(cmd), cmd)
 
-    def test_quoted_message_mentioning_pytest_is_not_a_test_run(self):
+    def test_inert_message_mentioning_pytest_is_not_a_test_run(self):
         self.assertNotIn(
             "test", g.classify('herdr agent prompt x "please run pytest later" --wait')
         )
+
+    def test_command_substitution_inside_double_quotes_still_counts(self):  # G1
+        for cmd in (
+            'Write-Output "$(Stop-Process -Id 424242)"',
+            'echo "$(kill -9 424242)"',
+            'herdr agent prompt x "$(taskkill /F /PID 3)"',
+            'git commit -m "`kill -9 1`" -- a.md',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_quoted_operands_of_other_commands_still_count(self):  # G2
+        for cmd in (
+            "& powershell '-Command' 'Stop-Process -Id 424242'",
+            "& ('Stop-Process') -Id 424242",
+            "env 'pkill' -f train_worker.py",
+            'herdr pane run w1:p1 "taskkill /F /PID 3"',
+            'FOO=1 echo "x"; kill -9 5',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_quoted_command_words_keep_their_category(self):  # G2 follow-up
+        self.assertIn("commit", g.classify('git "commit" -m "fix" -- a.py'))
+        self.assertIn("test", g.classify('python -m "pytest" -q'))
+        self.assertIn("kill", g.classify("bash -lc 'pkill -f dummy_marker'"))
+        self.assertIn("kill", g.classify('powershell -Command:"Stop-Process -Id 424242"'))
+        d = decide('git "commit" -m "fix" -- a.py', training=True, staged_py=True, cfg=PM_CFG)
+        self.assertTrue(d.block)
 
     def test_shell_wrappers_still_expose_their_quoted_commands(self):
         for cmd in (
@@ -266,14 +298,11 @@ class QuotedText(unittest.TestCase):
             self.assertIn("kill", g.classify(cmd), cmd)
 
     def test_quoted_executable_in_command_position_still_counts(self):
-        self.assertIn("kill", g.classify('& "C:\\Windows\\System32\\taskkill.exe" /F /PID 3'))
+        self.assertIn("kill", g.classify(r'& "C:\Windows\System32\taskkill.exe" /F /PID 3'))
         self.assertIn("restart", g.classify('& "C:/x/.venv/Scripts/python.exe" main.py'))
 
     def test_unquoted_kill_after_a_quoted_argument_still_counts(self):
         self.assertIn("kill", g.classify('echo "done"; kill -9 5'))
-
-    def test_powershell_backtick_escaped_quote_stays_inside_the_string(self):
-        self.assertNotIn("kill", g.classify('herdr agent prompt x "say `"taskkill`" never" --wait'))
 
     def test_unbalanced_quotes_fall_back_to_the_raw_text(self):
         self.assertIn("kill", g.classify('herdr agent prompt x "taskkill /F /PID 3'))

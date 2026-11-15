@@ -15,10 +15,11 @@ While the live backend port is listening or a training process runs, it blocks:
 A test window is a file `.agent-test-window` at the repository root holding an ISO-8601 expiry with a
 timezone, e.g. `2026-11-14T22:00:00-05:00`. It is gitignored and written by the operator.
 
-Risky words inside a quoted argument (a message, a commit subject) are text, not commands, so the
-kill, test and commit checks ignore them. Quoted text still counts when it sits in command position
-(`& "...\taskkill.exe"`) or when the segment runs it through a shell wrapper (`-c`, `/c`, `-Command`,
-`Invoke-Expression`); unbalanced quotes fall back to the raw text. Backend-start detection uses the raw text.
+Risky words inside a provably inert message argument are ignored by the kill, test and commit checks:
+the message of `herdr agent prompt`, `git commit -m/--message`, `gh --title/--body`, or an argument of
+echo/printf/Write-Output/Write-Host, when single-quoted or double-quoted without `$(` or a backtick.
+Any other quoted text (operands, wrapper arguments, substitutions) is scanned as written; unbalanced
+quotes fall back to the raw text. Backend-start detection always uses the raw text.
 
 Failure policy: if a check needed for a risky command fails, the command is blocked. A payload that
 cannot be parsed is let through with a warning, so a malformed event never locks an agent out.
@@ -47,7 +48,7 @@ _PATTERNS = {
     "test": re.compile(r"\bpytest\b|\brun_tests\.py\b|-m\s+unittest\b", re.IGNORECASE),
     "commit": re.compile(r"\bgit\b[^|;&]*?\bcommit\b"),
     "kill": re.compile(
-        r"\bStop-Process\b|\btaskkill\b|\bpkill\b|\bkillall\b|(?:^|[\s;&|('\"])kill\s+-?\w",
+        r"\bStop-Process\b|\btaskkill\b|\bpkill\b|\bkillall\b|(?:^|[\s;&|('\"`])kill\s+-?\w",
         re.IGNORECASE,
     ),
     # Direct starts plus the repositories' own launchers (start_backend.ps1/.bat, start_app.py,
@@ -60,13 +61,16 @@ _PATTERNS = {
     ),
 }
 
-# Categories matched against the command with non-executed quoted text removed (see _scan_text).
+# Categories matched against the command with inert message text removed (see _scan_text).
 _QUOTE_AWARE = frozenset({"test", "commit", "kill"})
-# A segment that runs quoted text as code: its quoted arguments stay visible.
-_WRAPPER = re.compile(
-    r"(?<!\S)(?:-c|/c|/C)(?!\S)|(?i:(?<!\S)-Command(?!\S)|\b(?:iex|Invoke-Expression)\b)"
-)
 _SEPARATORS = ";|&\n"
+# Commands whose quoted message arguments are text, not code: (command word, option that takes the
+# message, or None if every fully quoted argument is a message). `herdr agent prompt` is special-cased.
+_MESSAGE_OPTIONS = {
+    "git": ("-m", "--message"),
+    "gh": ("--title", "--body", "-t", "-b"),
+}
+_PRINTERS = frozenset({"echo", "printf", "write-output", "write-host"})
 
 
 def _quote_spans(command: str) -> Optional[list]:
@@ -88,37 +92,80 @@ def _quote_spans(command: str) -> Optional[list]:
     return spans
 
 
-def _segments(command: str, spans: list) -> list:
-    """(start, end) ranges of the command split on separators that are outside quotes."""
+def _tokens(command: str, start: int, end: int, spans: list) -> list:
+    """(start, end) ranges of the whitespace-separated words in command[start:end], quotes respected."""
+    inside = _inside_mask(command, spans)
+    words, i = [], start
+    while i < end:
+        if command[i].isspace() and not inside[i]:
+            i += 1
+            continue
+        j = i
+        while j < end and not (command[j].isspace() and not inside[j]):
+            j += 1
+        words.append((i, j))
+        i = j
+    return words
+
+
+def _inside_mask(command: str, spans: list) -> list:
     inside = [False] * len(command)
     for a, b in spans:
         inside[a : b + 1] = [True] * (b + 1 - a)
+    return inside
+
+
+def _segments(command: str, spans: list) -> list:
+    """(start, end) ranges of the command split on separators that are outside quotes."""
+    inside = _inside_mask(command, spans)
     cuts = [i for i, ch in enumerate(command) if ch in _SEPARATORS and not inside[i]]
     starts = [0] + [c + 1 for c in cuts]
     ends = cuts + [len(command)]
     return [(starts[k], ends[k]) for k in range(len(ends))]
 
 
+def _inert(text: str) -> bool:
+    """A fully quoted word the shell cannot execute: single-quoted, or double-quoted without a
+    command substitution (`$(`) or a backtick (bash command substitution)."""
+    return text[0] == "'" or ("$(" not in text and "`" not in text)
+
+
+def _message_words(command: str, words: list, spans: set) -> list:
+    """The words of one segment that are provably inert message text."""
+    texts = [command[a:b] for a, b in words]
+    quoted = [(a, b - 1) in spans for a, b in words]
+    head = texts[0].lower() if texts and not quoted[0] else ""
+    picked = []
+    if (
+        head == "herdr"
+        and [t.lower() for t in texts[1:3]] == ["agent", "prompt"]
+        and len(texts) > 4
+    ):
+        picked = [4]
+    elif head in _PRINTERS:
+        picked = list(range(1, len(texts)))
+    elif head in _MESSAGE_OPTIONS:
+        if head == "git" and "commit" not in texts:
+            return []
+        opts = _MESSAGE_OPTIONS[head]
+        picked = [k + 1 for k in range(1, len(texts) - 1) if not quoted[k] and texts[k] in opts]
+    return [words[k] for k in picked if quoted[k] and _inert(texts[k])]
+
+
 def _scan_text(command: str) -> str:
-    """The command with quoted arguments blanked, keeping quoted text that is executed: a quoted
-    command word, or anything in a segment that uses a shell wrapper. Unbalanced quotes: raw text."""
+    """The command with provably inert message arguments blanked (see _message_words); everything
+    else, including any quoted text a shell could run, is kept. Unbalanced quotes: raw text."""
     spans = _quote_spans(command)
     if spans is None:
         return command
+    span_set = set(spans)
     out = []
     for start, end in _segments(command, spans):
-        mine = [(a, b) for a, b in spans if start <= a < end]
-        unquoted = command[start:end]
-        for a, b in reversed(mine):
-            unquoted = unquoted[: a - start] + " " * (b + 1 - a) + unquoted[b + 1 - start :]
-        if _WRAPPER.search(unquoted):
-            out.append(command[start:end])
-            continue
+        blank = _message_words(command, _tokens(command, start, end, spans), span_set)
         pieces, k = [], start
-        for a, b in mine:
-            in_command_position = not command[start:a].strip()
-            pieces += [command[k:a], command[a : b + 1] if in_command_position else '""']
-            k = b + 1
+        for a, b in blank:
+            pieces += [command[k:a], '""']
+            k = b
         pieces.append(command[k:end])
         out.append("".join(pieces))
     return "\n".join(out)
