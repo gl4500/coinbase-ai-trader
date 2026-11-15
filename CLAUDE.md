@@ -1,245 +1,16 @@
-# CLAUDE.md — Coinbase AI Trader Coordination Contract
-
-This file is read by all Claude Code agents working on this repository. Codex reads `AGENTS.md`,
-which tells it to read this whole file too. It defines responsibilities, workflows, and rules that
-every agent must follow.
+# CLAUDE.md — polymarket_app (Claude adapter)
 
 @AGENTS.md
 
----
+**If the `AGENTS.md` text is not in your context, read `AGENTS.md` in the repository root (the folder
+that holds this `CLAUDE.md`) in full before doing anything else.** Claude Code skips the import above
+when a session starts in a subdirectory (e.g. `tools/session_bridge/`): the root file then counts as an external
+import that needs approval, and a non-interactive session never asks. Start sessions at the repository root.
 
-## Scope
-
-**Only modify files inside `C:\Users\gl450\polymarket_app\`.**
-Never touch `radioconda\`, `.spyder-py3\`, or any other directory in the user's home folder.
-Two exceptions: the shared Claude memory folder (`C:\Users\gl450\.claude\projects\C--Users-gl450\memory\`),
-and cross-project work the operator has explicitly authorized for that task.
-
----
-
-## Find-List-Fix Workflow — Required whenever issues are identified
-
-When bugs, test failures, stale assertions, or needed refactors are found:
-
-1. **STOP** — don't fix inline. Use `TaskCreate` for every distinct issue; each task names the file, the problem, the intended fix.
-2. **Fix in order.** Mark `in_progress` when starting, `completed` immediately when done. No batching.
-3. **Run tests after each fix**, not just at the end. If a test fails, resolve before moving on.
-4. **No fix without a task.** Discover a new problem mid-fix? Create the task first.
-
-No fix is made silently.
-
----
-
-## TDD Workflow — Required for every change
-
-```
-1. Write a failing test in  backend/tests/test_<module>.py
-2. Implement the code change
-3. Run tests:  cd backend && python -m pytest tests/test_<module>.py -v
-4. Verify GREEN before committing
-5. Commit:  git commit -m "<msg>" -- tests/<file> <module.py>
-```
-
-No code change is committed without a corresponding test. No exceptions for "small" fixes.
-Documentation-only changes (markdown, comments, CLAUDE.md/AGENTS.md wording) need link and
-consistency checks instead of behavioral tests.
-
-**Test windows.** While the live 8001 backend or a training subprocess is running, running pytest,
-committing staged `.py` files (the pre-commit hook then runs the backend tests) and the shell-cleanup
-step all need the operator's permission first (memory `feedback_no_pytest_during_trading.md`). When
-neither is running, no window is needed. Prefer CI for full-suite runs.
-
----
-
-## Commit Standards
-
-```
-feat:     short description of new feature
-fix:      short description of bug fixed
-test:     add/update tests for X
-docs:     update CHANGELOG.md, CLAUDE.md, or README
-refactor: internal cleanup, no behavior change
-security: security hardening, secret scanning
-```
-
-Every commit that changes behavior includes both the implementation file and its test file;
-`docs:` commits are exempt (see TDD Workflow).
-`Co-Authored-By` line required (added automatically by Claude Code).
-Update `CHANGELOG.md` in the same commit as the feature or fix. One exception: when a parallel
-agent's staged work makes the shared `CHANGELOG.md` unsafe to stage, commit it in the immediately
-following commit and say so in the code commit's message. Never leave it for an arbitrary later commit.
-
-### Branch discipline — always use a fresh clean branch
-
-For ANY work that will produce > 1 commit, create a fresh branch off `main` before the first commit. Never commit on top of an existing feature branch that another agent (or session) might have touched. Reusing an existing branch is how parallel-agent collisions happen — `git commit -a`-style races bundle a parallel agent's staged files into your commit (or vice versa), producing commits with misleading messages or files on the wrong branch.
-
-Rule:
-- Fresh branch name format: `feat/<scope>-<short-desc>` (e.g. `feat/strategy-discovery-phase2`, `fix/exit-watcher-race`).
-- Branch from `main` (or the parent feature branch if explicitly stacking), never from another in-progress agent's branch.
-- Every commit MUST use surgical pathspec: `git commit -m "msg" -- <explicit paths>`. NEVER `git commit -a` / `git commit -am`.
-- Before every `git add`: `git rev-parse --abbrev-ref HEAD` to confirm you're on YOUR branch.
-- After every `git commit`: `git log -1 --stat` to confirm only intended files landed.
-- If pre-commit hook fails because of another agent's unrelated WIP in the working tree, use `git stash push -m "<other-agent>-WIP"` to relocate it, retry commit, then `git stash pop`. Never `--no-verify` without explicit operator authorization.
-
-Reinforced 2026-05-24 after a Phase 2 collision where parallel agent's `git commit -a` swept my staged Phase 2 file into their GPU-kernel commit on my branch, AND one of my Phase 2 test commits accidentally landed on their branch and was pushed to origin. See `feedback_parallel_agent_coordination.md` for the full incident log.
-
-### Peer review before merge
-
-Every PR gets a peer review from the other agent (Claude ↔ Codex) BEFORE it is merged. Green CI
-and an operator "merge it" are not enough on their own.
-- Request the review through the session-link mailbox: PR link, commit SHA, what changed, how it was
-  verified, and the specific questions to check.
-- Hold the merge until the reviewer replies with an explicit sign-off that names the reviewed head
-  SHA. A mailbox acknowledgement is not a sign-off.
-- Any later commit or rebase (including review fixes) is reported to the reviewer with the new SHA
-  and the delta. The reviewer must confirm that approval still applies before merge. A mechanical
-  rebase or docs-only delta can get a brief check; it need not rerun unrelated tests.
-- Only the operator can waive the review, explicitly. Record the waiver in the PR description.
-
-Operator rule, 2026-10-11, after PRs #96 and #98 were merged without a completed Codex review.
-Mirrored in memory `feedback_codex_review_before_merge.md`.
-
----
-
-## Security Gate — Pre-commit Checks
-
-Before every `git push`:
-
-1. **Block staged `.env`** — prevents API keys reaching GitHub (enforced by `.gitignore`)
-2. **Verify `.env` is gitignored** — confirm before any commit touching credentials
-3. **No plaintext secrets** — never hardcode API keys, private keys, or tokens in `.py`, `.ts`, or `.json` files
-
-Sensitive files that must never be committed:
-- `.env` (Coinbase API key + private key)
-- `backend/coinbase.db` (live trading database)
-- `backend/*.pt` / `backend/*.pth` (model weights — large binary)
-
-### Local pre-commit hooks — what actually runs
-
-**Repository state.** `.pre-commit-config.yaml` defines:
-- the secret scan (detect-secrets, against `.secrets.baseline`);
-- file hygiene, including `no-commit-to-branch` for main and master;
-- ruff 0.9.0 lint and format;
-- Bandit 1.8.3, at medium severity, over non-test backend code;
-- `pytest-backend`, the fast suite via `tools/hooks/run_backend_pytest.sh`. That script resolves the project interpreter: `PYTEST_PYTHON` first, then the main checkout's `.venv` (found via `git-common-dir`, so it works in worktrees), then this checkout's `.venv`. If none exists it refuses the commit; it never falls back to a PATH python.
-
-**Current machine state (until activation).** `.git/hooks/pre-commit` is still the OLD hand-written hook. It runs only the fast pytest suite, and only when a `.py` file is staged. It uses `<checkout>/.venv` and otherwise falls back to PATH python. The secret scan, hygiene, ruff and Bandit therefore do NOT run locally; they run only in CI (Gitleaks, Bandit, Snyk, CodeQL). Since 2026-11-14, branch protection on `main` requires the `Security gate` check (which includes Gitleaks, Bandit and Snyk; CodeQL and dep-audit are not required); the branch need not be up to date with `main`.
-
-**After activation**, `.git/hooks/pre-commit` is a copy of the tracked shim `tools/hooks/pre-commit`. The shim:
-- runs the framework from the dedicated tooling venv `<main checkout>/.hook-venv`;
-- sets `PRE_COMMIT_HOME=<main checkout>/.hook-cache`, which is repo-local and gitignored, before the framework starts;
-- refuses the commit if the tooling venv is missing.
-
-`pre-commit install` is NOT used. It would migrate the old hook to `pre-commit.legacy` and keep running it, so pytest would run twice. Any manual framework command must set the same `PRE_COMMIT_HOME` first.
-
-Activate in this order (agreed with Codex, 2026-11-14):
-1. **Back up.** Copy the current `.git/hooks/pre-commit` to a hashed backup OUTSIDE `.git/hooks`. Verify the copy's SHA-256 and record its mode.
-2. **Install the tooling.** Create `.hook-venv/` and install only `pre-commit==4.0.1` and `detect-secrets==1.5.0` there, with `PRE_COMMIT_HOME` set to `.hook-cache/`. Never install hook tooling into the app `.venv` that 8001 runs from without operator timing approval.
-3. **Prove it in a scratch clone first.** Run the RED/GREEN proofs in an isolated scratch clone, in an operator-approved window. Running any test while 8001 is live needs the operator's OK.
-4. **Retire and activate.** Only after the verified backup and the proofs:
-   - Refuse to continue if `.git/hooks/pre-commit.legacy` exists.
-   - Remove the old hook, copy `tools/hooks/pre-commit` to `.git/hooks/pre-commit`, and verify it.
-5. **Rollback.** Remove the shim FIRST. Then restore the backup to `.git/hooks/pre-commit` and verify its SHA-256 and mode.
-
-The `.secrets.baseline` covers tracked files only and is generated OFFLINE: `git ls-files -z | xargs -0 detect-secrets scan --no-verify > .secrets.baseline` (run from `.hook-venv`). The detect-secrets hook also passes `--no-verify`, so neither the scan nor the hook verifies a secret over the network. Each finding is reviewed individually before the baseline is committed. A finding that may be a live or unknown credential goes to the operator; it is never baselined.
-
-`git commit --no-verify` still needs explicit operator authorization.
-
----
-
-## Test Conventions
-
-- Framework: `pytest` with `pytest-asyncio`
-- Async tests: `@pytest.mark.asyncio`
-- **No live API calls** — mock `coinbase_client`, `database`, `httpx`, `ollama`
-- **No real DB writes** — patch `database.*` with `AsyncMock`
-- **No real file I/O** — mock progress files and model checkpoints
-- Shared fixtures live in `tests/conftest.py` — don't duplicate setup across files
-- One test file per module: `agents/cnn_agent.py` → `tests/test_cnn_agent.py`
-
-### Running tests
-```bash
-cd C:\Users\gl450\polymarket_app\backend
-python -m pytest tests/test_<module>.py -v    # per-module (preferred during dev)
-python -m pytest backend/tests/ -v            # full suite (run once before commit)
-```
-
-### Shell cleanup — required after every test run
-
-Running tests repeatedly causes background python processes to stack up. After any test run, clean up your own test processes.
-
-Rules:
-- **Prefer per-module tests** over full suite during development — faster, stays foreground, no stacking
-- **Only run full suite once** before committing, not repeatedly
-- **Always clean up** after a test run completes or is interrupted
-- **Never** issue a blanket `Stop-Process python -Force` / `pkill -9 python` — it kills the live backend, breaking the scan loop and stopping MC telemetry accumulation.
-- **Port-8001 awareness is NOT sufficient.** Verified on 2026-09-28: of 12 running `python.exe` processes, only one was the 8001 backend. A port-8001-aware sweep would also have killed **a second `main.py`** (an 8002 shadow is explicitly sanctioned by the port-discipline section below — killing it contradicts that rule), **both `.coordination-runtime` servers**, **the peer session's `bridge.py --role codex`**, the session-link **MCP server**, and two processes belonging to an **entirely different project** (`grain-marketing`), which the Scope rule forbids touching.
-- **Kill by identity, never by absence of a port.** Before terminating anything, resolve command lines — `Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Select ProcessId, CommandLine` — and terminate only processes you can name as your own test runs. Exclude, at minimum: any `main.py`; anything under `.coordination-runtime\` or `tools\session_bridge\`; anything whose path lies outside this repository.
-- **Verify and act as SEPARATE steps.** Identifying a process and killing it in the same command makes the verification theatre — there is no point at which the answer can change the decision.
-
----
-
-## Backend port discipline — dev on 8002+, promote to 8001
-
-**Port 8001 is reserved for the live trading backend.** Active paper/live trading runs there. Frontend (port 5174) is hardcoded to hit 8001. Never start a new/experimental/shadow backend on 8001 while the production backend is running. Since Session 58.116 every entry point goes through `backend/startup_guard.py`, which **refuses** an occupied port or a held instance lock (distinct exit codes) instead of killing it; `--mode replace` / `-Replace` replaces only an instance the guard itself registered (lock record PID + creation time + backend dir). Before 58.116, all entry points force-killed whatever held 8001 (the 2026-10-17 incident).
-
-Rule:
-- **Production / live trading** → port 8001 (default, set via `PORT` env or default in `main.py`)
-- **Dev / shadow / new-model validation** → port 8002 (or any other unused port). Start with `PORT=8002 python main.py`.
-- **Promotion to 8001 is gated on the new model showing promise** — wait for validation evidence (held-out AUC, shadow telemetry, post-week live trade outcomes) before swapping artifacts to the unsuffixed paths (`xgb_*_v4.*` etc.) and restarting the 8001 backend.
-
-Why this matters: you don't need 8001 to validate a new path's output. A shadow backend on 8002 runs from its **own copy** of the database, with its own output root and run id (see "Run isolation" below), and its v4 (or other) telemetry lands in that copy. It must never write to `backend/coinbase.db`: the shared `agent_state` row would overwrite the 8001 paper book. Only push to 8001 when you're ready to swap the *driver*.
-
-The step-by-step procedure for shipping a new XGB model / inference path through the 8002 shadow lives in the `promote-model` skill (`.claude/skills/promote-model/SKILL.md`).
-
-Never kill 8001 mid-session unless: (a) the operator explicitly approves, OR (b) you're swapping artifacts after the promotion-gate criteria are met. Even then, never while a training subprocess is running: wait for it to finish (memory `feedback_no_restart_during_retrain.md`). Exception (b) is the only restart an agent may do without asking.
-
----
-
-## Run isolation & data retention
-
-Agreed in the Claude/Codex consensus, 2026-10-03. See `docs/KNOWN_LIMITATIONS.md`.
-
-**Run isolation.**
-- Every parallel experiment, shadow backend or research run uses its OWN database copy, its own
-  output root and an explicit run id.
-- Never point a second **state-writing** backend or trading experiment at `backend/coinbase.db`.
-  The shared `agent_state` row is keyed only by agent, so a second backend overwrites the 8001
-  paper book. The 8002 shadow runs from a DB copy for exactly this reason.
-- Read-only diagnostics, and online backups through a read-only connection, ARE permitted.
-- Data-only screens and the recorder never open the app DB, so they need no database of their
-  own.
-- The market recorder (`backend/tools/recorder`) defaults to `C:\Users\gl450\market_recorder_data`
-  (`--out` overrides it) and imports nothing from the app.
-
-**Data retention.**
-- Historical data (hourly, 5m, 1m and auxiliary Parquet, and the DB) is never deleted or
-  collapsed.
-- Retained originals, snapshots and corrected dataset versions are immutable. A correction gets a
-  new dataset identity.
-- Routine collection and top-ups still publish to the mutable working files, but only after the
-  required prior version is preserved.
-- Any migration runs on a copy first, validates the replacement, keeps the originals until
-  validation completes, and has a rollback path.
-
-**Backups.** Pass explicit paths; the defaults resolve inside the current checkout, which in a
-worktree is NOT the 8001 runtime DB:
-
-```
-python -m tools.data_snapshot.snapshot --data-dir C:\Users\gl450\polymarket_app\backend\data --db C:\Users\gl450\polymarket_app\backend\coinbase.db
-```
-
-This writes a verified snapshot to `C:\Users\gl450\polymarket_data_snapshots\<UTC stamp>\`.
-Missing inputs and an output inside the source tree are refused before anything is written.
-Snapshot details:
-- files are copied stable-per-file (stat check plus source re-read hash);
-- Parquet copies are fully read;
-- the DB is copied with the SQLite online backup and then integrity-checked;
-- a `manifest.json` records the capture interval.
-
-It is not a globally consistent as-of snapshot, and it covers only `included_roots`: worktree
-research outputs, model weights and caches, and the recorder archive are NOT included. A non-zero
-exit means a file was unstable, failed or invalid, or the DB integrity check failed.
+`AGENTS.md` (imported above) is the shared project contract for Claude Code and Codex: scope, roles,
+workflow, commits and peer review, security gate, tests, port discipline, run isolation, the session
+link, checklists and the mandatory reference `docs/agents/architecture-and-invariants.md`. This file
+adds only what applies to Claude. Where they disagree, stop and ask the operator.
 
 ---
 
@@ -262,28 +33,6 @@ How to apply:
 
 ---
 
-## Session-link coordination — the peer mailbox is windowed
-
-Review from the peer Codex session arrives through `tools/session_bridge`. Two rules belong
-here because breaking them silently corrupts what this session believes:
-
-1. **`inbox()` returns a WINDOW, not the mailbox.** Bounded twice — at most
-   `Store.INBOX_WINDOW` (50) messages and at most `Store.INBOX_MAX_BYTES` (16000) of body,
-   because a count alone bounds the wrong quantity: real bodies run median 614 bytes but p90
-   3.6KB, so fifty of them is ~7.7k tokens of context and 57k in the worst case measured.
-   Call `pending_count()` for the true total; `wait()` reports `pending_total` and
-   `truncated`. Acking what you read is what keeps the window inert — an unacknowledged
-   backlog is the only thing that pushes mail out of it.
-2. **Silence is a reading, not an observation.** Before reporting that the peer has not
-   replied, verify your own reader, then the transport, then the peer. On 2026-09-27 that
-   order was reversed and this session reported a question as unanswered for hours while the
-   answer sat outside its window.
-
-Operating detail, including the suite command and why it must run under
-`.coordination-runtime`, lives in `tools/session_bridge/CLAUDE.md`.
-
----
-
 ## Memory
 
 - Update relevant memory files immediately after every code change.
@@ -293,40 +42,32 @@ Operating detail, including the suite command and why it must run under
 
 ## CLAUDE.md ↔ Memory Sync Rule
 
-**Both must always be updated together, and memory must be updated after every code change.**
+**The repo contract and memory must always be updated together, and memory must be updated after every code change.**
 
-`CLAUDE.md` (this file, in the repo) and the persistent memory files at
+The repo contract (`AGENTS.md` for shared rules, this `CLAUDE.md` for Claude-only rules) and the persistent memory files at
 `C:\Users\gl450\.claude\projects\C--Users-gl450\memory\` are the two halves of the same contract.
 
 ### After every code change — required steps
 1. Architecture change (agents, endpoints, file structure) → update `coinbase_trader_architecture.md`.
 2. Bug fixed → append the bug + fix to `coinbase_trader_bugs_fixed.md`.
 3. Threshold changed → update `coinbase_trader_thresholds.md`.
-4. Rule added or modified → update the matching memory file AND this `CLAUDE.md` in the same response.
-5. Never commit code without committing any corresponding `CLAUDE.md` update in the same or immediately following commit.
+4. Rule added or modified → update the matching memory file AND the matching `AGENTS.md` section (or this `CLAUDE.md`, for a Claude-only rule) in the same response.
+5. Never commit code without committing any corresponding `AGENTS.md` / `CLAUDE.md` update in the same or immediately following commit.
 
 Relevant memory files for this repo (`coinbase-ai-trader` / polymarket_app):
 | Memory file | Mirrors |
 |---|---|
-| `feedback_tdd_workflow.md` | TDD Workflow section |
-| `feedback_scope_restriction.md` | Scope section |
-| `feedback_shell_cleanup.md` | Shell cleanup section |
+| `feedback_tdd_workflow.md` | `AGENTS.md` TDD Workflow section |
+| `feedback_scope_restriction.md` | `AGENTS.md` Scope section |
+| `feedback_shell_cleanup.md` | `AGENTS.md` Shell cleanup section |
 | `feedback_sync_rule.md` | Memory sync rule |
-| `feedback_python_clean_functions.md` | Code Style + new-code authoring rules |
-| `feedback_verify_your_own_reader.md` | Session-link coordination section |
+| `feedback_python_clean_functions.md` | `AGENTS.md` Code Style + new-code authoring rules |
+| `feedback_verify_your_own_reader.md` | `AGENTS.md` Session-link coordination section |
 | `feedback_xgb_focus_not_cnn.md` | XGB-only scope; CNN frozen for new feature work |
-| `coinbase_trader_architecture.md` | This file's Architecture Quick Reference + per-session change log |
+| `coinbase_trader_architecture.md` | `docs/agents/architecture-and-invariants.md` Architecture Quick Reference + per-session change log |
 | `coinbase_trader_schema.md` | DB column lists + code landmarks |
 
 Note: `trading_app_*.md` memory files belong to a different project (not polymarket_app) and should be ignored when working in this repo.
-
----
-
-## Code Style
-
-- Edit existing files rather than creating new ones.
-- Do not add features, refactoring, or abstractions beyond the task scope.
-- No comments unless the *why* is non-obvious.
 
 ---
 
@@ -344,58 +85,3 @@ These trigger clauses are binding. Invoke the matching skill via the `Skill` too
 | Before requesting review on a completed change | `superpowers:requesting-code-review` |
 
 A global `SessionStart` hook in `~/.claude/settings.json` also echoes this list at the start of every session so it is always in context.
-
----
-
-## Architecture Quick Reference
-
-- **Backend:** FastAPI + asyncio, port **8001**
-- **Frontend:** React + Vite + Tailwind, port **5174**
-- **DB:** SQLite via aiosqlite (`backend/coinbase.db`)
-- **Market data:** Coinbase Advanced Trade API (REST + WebSocket)
-- **AI agents:** CoinbaseCNNAgent only (XGBoost driver via `MODEL_BACKEND=xgb`; CNN model path still exists but xgb has been the live backend for months — see `agents/xgb_signal.py`). Historical: TechAgent retired #311-refactor-c (2026-05-16); Ollama LLM blend deleted #311-refactor-f; rows remain in DB.
-- **Config:** `.env` → environment variables read directly in modules
-- **Training:** `train_worker.py` spawned as subprocess to avoid blocking scan loop
-- **Macro-regime layer:** `backend/services/regime/` + `backend/tools/regime/` — **offline only** (daily cadence). Evaluates an `exposure_scalar` from MVRV cycle position x correlation-gated macro risk into the `regime_state` table. It is NOT wired to the scan loop or sizing: Phase 2 stays closed while the Phase-1 gate reads INCONCLUSIVE (the 2026-04..08 trade window never exercised the protective branch — see CHANGELOG 58.82).
-
-### Key invariants (never break these)
-1. `_CNNBook.positions[pid]` must always contain `entry_time` and `peak_price` on new entries
-2. CNN cache is a 3-tuple: `(cnn_prob, timestamp, indicators_dict)` — never 2-tuple
-3. `_CNN_STOP_LOSS_PCT = 0.08` (8%) — required for $50k capital-at-risk math
-4. `_CNN_MAX_HOLD_SECS = 7 * 24 * 3600` (7 days) — trailing stop is primary exit; this is safety net
-5. `database.upsert_product` ON CONFLICT must include `is_tracked=excluded.is_tracked` — omitting it freezes CNN scanning
-6. Auto-train must run in subprocess, never block the async scan loop
-7. `OLLAMA_MODEL` must be read from env in every module — never hardcode a model name
-8. `__MACRO__.parquet` uses `__`-prefixed filename — `symbols_with_data()` must filter `__`-prefixed entries
-9. **Dataset cache is per-product append-only** — entry schema `{first_ts, last_ts, last_n, X, y, indices}`. Schema changes to seq_len/forward_hours/label_thresh/n_channels require bumping `_DATASET_CACHE_VERSION`.
-10. **Training BCE uses smoothed labels; validation BCE uses hard labels** — changing either breaks run-to-run val_loss comparability.
-11. **Inference must mask `_TRAINING_CONSTANT_CHANNELS` before forward pass** — `_cnn_prob` calls `_mask_training_constant_channels` to prevent train/serve distribution skew. **Tier A optimization (Session 58.71w):** `FeatureBuilder.build` also emits zero arrays directly for these channels (ch17/18/19), skipping the underlying `_rsi`/velocity/vol_z computations. The masking call is preserved as a safety net but now operates on already-zero values — bit-exact behavior preserved (test: `test_ch17_18_19_emit_zeros_even_with_5m_data`). Removing the mask still requires retraining without affected channels.
-12. **BCE uses `reduction="none"` + uniqueness-weighted mean** — never `reduction="mean"` on overlapping forward-window samples.
-13. **XGB feature_set v3** uses 3 tiers (micro 60 / meso 168 / macro 336), 350 feature_names (320 live + 30 zero-slot for masked ch17/18/19), feature_weights (micro 1.0 / meso 2.0 / macro 3.0 / masked 0.0) set on `DMatrix` via `set_info` with `colsample_bytree=0.8`. Tier assignment lives in `tools/xgb_features.py:MESO_CHANNELS={15,24,25,26}` and `MACRO_CHANNELS={20,21,27}`. Per-tier candle slices come from `services/tiered_history.py:fetch_tiered` (sync). Calibrator pickle is `{"calibrator","feature_set"}` dict; bare isotonic still treated as v1 for back-compat. `xgb_signal` auto-detects via `_m060_/_m168_/_m336_` infix in feature_names. v3 inference REQUIRES `pid` kwarg through `_cnn_prob -> xgb_signal.xgb_prob(channels, pid=pid)`.
-14. **MC filter chain** lives under `backend/agents/mc/` and is the ONLY place Monte Carlo math touches the decision pipeline. `cnn_agent.generate_signal` has exactly one MC hook (`mc.apply_buy_filters` between side computation and save_cnn_scan); embedding MC math inside cnn_agent core is forbidden. Each filter is opt-in via `MC_FILTERS` env (comma-separated). `MC_FILTERS=""` (default) MUST produce bit-for-bit pre-MC behavior. Telemetry persists to `cnn_scans.xgb_prob_stdev` (CIFilter only) and `cnn_scans.mc_telemetry` (JSON blob, any filter). Filter exceptions MUST be caught + logged, never re-raised into the scan loop. Filter classes self-register with `agents.mc.registry._FILTER_CLASSES` on import; the registry imports its own built-in filter modules (`_BUILTIN_FILTER_MODULES`, by name via `importlib`) whenever `MC_FILTERS` is non-empty, so no caller needs a side-effect import. A ruff F401 autofix (589b571) deleted exactly such an import and `MC_FILTERS=ci` silently resolved to nothing from 2026-08-01 to 2026-11-03.
-15. **Env vars MUST trace to a live consumer.** Every entry in `backend/config.py` and `.env` must be read by production code in `backend/`. Dead entries are deleted on sight per refactor sweep policy (#311-refactor). The `test_no_dead_llm_blend_fields` regression test in `backend/tests/test_config.py` enforces this for known offenders; future deletions extend that test.
-16. **Shadow telemetry isolation** — Inference shadow paths (v4 alongside v3) must NEVER affect the driver path. Failures in any shadow inference are caught + logged + recorded as NULL, never re-raised. `xgb_signal.xgb_prob_shadow` is the only function that may be called from `cnn_agent` during shadow validation; it returns `(driver_prob, shadow_prob_or_None)`. Mirrors invariant #14's MC chain rule.
-17. **v4.5 3-class telemetry contract.** The three v4.5 probability columns (`xgb_prob_v4_5_down`, `xgb_prob_v4_5_neutral`, `xgb_prob_v4_5_up`) are written atomically: either all three are populated and sum to ~1.0 (after clip [0.01, 0.99] + renormalize), or all three are NULL. A v4.5 failure must NEVER affect the v3 driver path or v4 shadow path. Implemented via isolated try/except in `xgb_signal.xgb_prob_shadow_v4_5`.
-18. **WS exit-handler isolation.** `agents/exit_watcher.on_price_tick` MUST catch every exception in its body and log it at ERROR. Exceptions in handlers spawned via `asyncio.create_task` (which is how `CoinbaseWSSubscriber._handle` fires registered price handlers) do not crash the WS receive loop — the task captures them — but unretrieved-Task warnings hide errors from logs. Explicit `try/except + logger.exception` is required so failures stay visible. Mirrors invariant #14's MC chain rule and invariant #16's shadow-telemetry isolation rule. Also: the per-pid `_CNNBook._sell_locks: Dict[str, asyncio.Lock]` (consumed via `_lock_for(pid)`) is the single source of truth for serializing the WS exit handler against scan-loop `_check_risk_exits`; do not duplicate the lock at call sites.
-19. **PnL-anchored trail exit.** `_compute_exit_threshold` in `agents/exit_thresholds.py` is the single source of truth for the trail / step-up profit-floor exit. Both `_check_risk_exits` (scan loop) and `exit_watcher.on_price_tick` (WS path) compute `exit_threshold` from `peak_pnl_pct + atr_pct + position_dollars + total_capital`, then fire `TRAIL_STOP` / `WS_TRAIL_STOP` when `pct_entry < exit_threshold`. Do not bypass to the raw `pct_from_peak <= -trail_pct` check that this replaced. `peak_pnl_pct` ratchets upward only and is seeded on `_CNNBook.load()` via `_migrate_position_state` for legacy positions that pre-date the field. `position_dollars` is owned by the scan loop (refreshed each scan); the WS path reads it but does not write, to avoid per-tick mutation contention.
-20. **v4.5 MODEL_DOWN exit.** When the v4.5 shadow indicates `p_down > _P_DOWN_EXIT_THRESHOLD` (0.55 in `cnn_agent`) for a held position, fire `MODEL_DOWN` (scan loop) or `WS_MODEL_DOWN` (WS path). `generate_signal` caches `p_down` AND `p_down_ts_ms` on `book.positions[pid]` after a successful shadow call, so both exit paths read the same value without re-running inference. The trigger sits between `STOP_LOSS` (capital protection) and `TRAIL_STOP` (profit protection) in the exit ladder. **Staleness gate (task #80):** cached `p_down` is only honored when `p_down_ts_ms` is within `_P_DOWN_STALE_MS` (90s) of `now`. Missing or expired `p_down_ts_ms` is treated as 0.0 (no fire). This prevents spurious MODEL_DOWN/WS_MODEL_DOWN exits from a cached high p_down on a position whose underlying market reversed between scans (WS ticks fire ~5-10/sec/pid; scans are 60s apart). Failures must be isolated per invariant #16 — a missing/None v4.5 result must NEVER re-raise into the scan loop or WS handler; absent `p_down` defaults to 0.0 (no MODEL_DOWN fire).
-21. **Maker-execution routing is opt-in + default-off.** `config.use_maker_execution` (env `USE_MAKER_EXECUTION`, default false) gates `cnn_agent._execute_live_order`. When false, live BUYs route through the taker `order_executor.execute_signal` exactly as before — no bid/ask fetch, byte-for-byte unchanged (mirrors the `MC_FILTERS=""` default-off contract, invariant #14). When true, the agent fetches best bid/ask via `coinbase_client.get_best_bid_ask`, attaches `bid`/`ask` to the signal (the maker path **aborts** without them — `order_executor.py:308`), and routes to `execute_maker_signal` (which owns the 30s fill poll + market fallback). Intended for the **8002 shadow** per port discipline; promote to 8001 only after the shadow confirms real maker fill rates. **Exit leg (Session 58.73):** the entire exit live-order path is gated behind the same flag — exits place NO live order today, so flag-off MUST stay paper-only (`book.sell` only, no bid/ask fetch). `agents/exit_execution.execute_live_exit` is the single source of truth for exit routing: maker (post-only) for `TRAIL_STOP`/`WS_TRAIL_STOP`/`MODEL_DOWN`/`WS_MODEL_DOWN`, taker for `STOP_LOSS`/`WS_STOP_LOSS`/`MAX_HOLD`/`LEGACY_EXIT`. Both exit paths (`_check_risk_exits` scan loop, `exit_watcher.on_price_tick` WS) close the paper book first, then call `execute_live_exit`, which no-ops unless the flag is on AND the executor is live (not dry-run). Sizing: SELL signal carries no `atr` key, so `order_executor` sizes from `quote_size = size*ask` (maker) / `size*price` (taker), recovering the held size via `base_size = quote_size/fill_price`. A live-exit failure is caught + logged, never re-raised (invariants #16/#18). Has zero effect on tracked paper PnL (paper book models no fees); purely a live-execution-path change for the 8002 shadow.
-
-22. **Historical replay must reconstruct features from CLOSED bars only.** `services/tiered_history.py` filters candles by bar **start** (`start < now_ts`), which admits a bar that had begun but not yet closed. Live this is correct and harmless — the store holds nothing beyond now, so that bar is genuinely partial. **In replay from a completed parquet the same bar carries its final high/low/close/volume**, so at a 15-minute scan cadence up to an hour of future information enters the features, and any metric computed that way is invalid. Pass `fetch_tiered(..., closed_only=True)` for every historical reconstruction; it keeps a bar only when `start + 3600 <= now_ts`, and raises if `now_ts` is absent because "closed" then has no referent. The flag is **opt-in** so no live path moves — flipping the default changes what the replay callsite (`xgb_signal.py`, the only caller that passes `now_ts`) computes, which is an operator decision. **This defect class is the one most likely to be reintroduced silently, because the production code reads correctly and only misbehaves in replay.**
-23. **The paper maker-entry shadow is measurement-only and default-off.** `services/maker_shadow.MakerShadow` (enabled by `MAKER_SHADOW`, default false; wired only through `maker_shadow.attach`) must never place, cancel or simulate orders in `order_executor`, never write any table other than `maker_shadow`, and never change the paper book. Flag off ⇒ `cnn_agent._shadow_register` returns before touching the shadow. `register`, `on_tick` and `sweep` must never raise into the scan loop or the WS receive loop (invariants #14/#18). Its output is a **price-path proxy** (`crossed` = own-product trade strictly below the resting bid), never a fill rate; every reported rate is conditional and excludes `feed_gap` rows. Unmeasurable intents are recorded as `no_quote` / `duplicate`, never dropped. Intents finalise at their own deadline; no endpoint may be chosen by another product's tick.
-24. **Model provenance is recorded, never guessed.** New `cnn_scans` rows and new `trades` entry rows carry `model_provenance` = `services/provenance.decision_provenance(xgb_signal.loaded_fingerprints(), agent._decision_config())`, a `sha256:` digest registered in the `model_provenance` table. Rules: fingerprints are taken from what the loader ADOPTED, cleared at the start of every load attempt (so `force_reload` can never leave a stale identity), and dropped if any file changed between pre-read digest and adoption; a scan snapshots the v3 identity at its start, clears `_cache` when it differs from the identity that filled it, and stamps NULL if the identity changed before save; the MC component is `registry.effective_filter_names()` plus `effective_filter_params()`, never `MC_FILTERS`; no driver loaded ⇒ NULL; historical rows are never backfilled; writers reject anything that is not `sha256:<64 hex>`; computing provenance must never raise into the scan loop. Adding a setting that changes decisions, sizing or exits means adding it to `_decision_config`.
-25. **Outcome-label version contract.** `signal_outcomes` rows carry a `label_version`. Version 2 (`backend/services/outcome_labels.py`, spec `docs/specs/2026-09-26-outcome-label-contract.md`) is the endpoint return between two **completed** hourly bars fixed at record time: entry = open of the first bar starting *strictly after* the signal, target = close of the 4th bar, `target_time` = that bar's close instant. A bar is usable only when `now >= start_time + 3600` **and** its stored copy came from a fetch that started at least `FINALITY_MARGIN_SECS` after close and not after `now` (`outcome_labels.is_final`, over `candles.requested_at`; NULL = unknown = never final). That margin is a policy, not proof; every RESOLVED label records its `finality_basis`. `database.save_candles` requires `requested_at`, and a stored bar is replaced only by a strictly newer fetch. The resolver MUST NOT read a live price — `coinbase_client.get_candles` and `database.get_product` are both forbidden in `check_pending`; a missing bar leaves the row unresolved (attempt counted) and becomes terminal `UNAVAILABLE` after `MAX_RESOLVE_ATTEMPTS` or `UNAVAILABLE_GRACE_SECS`. `UNAVAILABLE` is never a scoring outcome. Resolution writes `WHERE id=? AND outcome IS NULL` so retries can never overwrite a finished label. **Legacy (version-1, NULL) rows are never recomputed and never pooled with version 2** in any diagnostic; `services/diagnostics.signal_edge` reports them separately under `legacy`. **Probability calibration may only be reported when the evaluated label matches the scoring model's own training target** — it currently does not (models use a path-dependent triple-barrier target; this label is a path-independent endpoint return), so `signal_edge` returns `calibration: []` with `calibration_available: False` and emits descriptive `confidence_buckets` instead. Reason: the 2026-09-26 audit measured version-1 labels resolving a mean 45.75 h after the nominal 4 h horizon, making the dashboard's BUY WIN fraction indefensible as a predictive score.
-
-26. **Paper PnL is gross; net is recorded beside it, never instead of it.** `trades.pnl` and `balance_after` stay the paper book's gross values (fees never touch sizing, exits or the balance). `database.close_trade` records `fee_rate`, `fee_usd` = `services/fees.round_trip_fee(usd_open, usd_close, fee_rate)` and `pnl_net`. The default is the verified taker rate, because paper fills are market fills. Historical rows are never backfilled. Any net figure must state its coverage (`fee_bearing_trades`). `exit_thresholds.FEE_RATE` is a trail-floor parameter, not the accounting rate.
-
-27. **Maker replacement requires reconciliation.** A cancellation acknowledgment alone is not permission to submit another order. `execute_maker_signal` must confirm the exact order is terminally CANCELLED, has no pending cancellation, and has explicit zero filled size and value. Partial fills, missing fill fields, cancel failures and unknown status return `reconciliation_required` without a replacement; a FILLED race returns the original maker order. SELL replacements use the original base quantity. Placement success requires an affirmative API success result and a real order ID. These safeguards do not repair the stale executor, exit gating or paper/live accounting issues; live promotion remains a separate operator decision.
-
-28. **Placement and cancellation are three-valued, never two.** `agents/order_executor.py` exposes one shared placement validator used by **every** placement path (`execute_signal`, `execute_market_order`, `execute_maker_signal`): `_accepted_placement(resp)` returns the order id only when `resp["success"] is True` (an actual `bool` — `1` and `"true"` are not the exchange agreeing) **and** the success payload names the order with a usable non-placeholder string; `_explicit_rejection(resp)` is true only when `success is False`. Everything else — a missing or malformed `success`, or `success is True` with no usable id — is **ambiguous**: an order may exist, so it returns `reconciliation_required` and **must never be retried or resubmitted**. `execute_signal` therefore has NO retry loop: an exception can be raised after the request reached the exchange, so "no response" never means "no order" (mirrors lifecycle invariant I4). `"unknown"` is an error path and must never be persisted as an `order_id` (`_PLACEHOLDER_ORDER_IDS`). `cancel_order` requires an affirmative **per-order** acknowledgement from the batch-cancel `results` **and** a follow-up terminal snapshot via `get_order`, reusing `_confirmed_unfilled_cancel` (exact order, `CANCELLED`, `pending_cancel is False`, Decimal-exact zero `filled_size` and `filled_value`). `"canceled"` is persisted only on that terminal confirmation: a partial fill, a FILLED race, or any unknown state stays `reconciliation_required`, keeps the known fill evidence and order id in the result, and never writes a cancellation row — a settled partial is not a zero-fill cancel. This repairs interpretation and recording ONLY; it adds no ledger closure, no reconciliation worker, and no live integration, and it leaves invariant #21's routing semantics untouched.
-
-WS1 addition to #25 (2026-11-14): RESOLVED v2 rows also store `entry_requested_at` /
-`exit_requested_at`, copied from the exact bars that passed `is_final`. They are policy audit
-metadata only, never proof of finality or a response identity. They are required and validated
-by `resolve_signal_outcome_v2` before any DB access, and never backfilled.
-
-Review correction to #25: pending selection and all v2 write accessors must also guard `label_version = LABEL_VERSION`; pending legacy rows must remain unchanged. Preserve endpoint price/return precision and reject invalid prices instead of producing scoring labels. Current diagnostics must exclude target_time later than their as-of time. Details and verification: `docs/handoffs/2026-09-26-codex-review-and-maker-fix.md`.
-

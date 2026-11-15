@@ -4,3 +4,7 @@
 # The fingerprint pins the commit that introduced it, so any real secret anywhere else,
 # including later edits to this same file, is still reported.
 c31abb47d83dfd479d90027d235baf54664896c3:tools/session_bridge/AGENTS.md:curl-auth-header:1071
+# Same placeholder after the 2026-11-15 consolidation moved the guide verbatim to
+# docs/agents/session-bridge-crewai-reference.md (6 framing lines added, so line 1071 -> 1077).
+# Pinned to the commit that introduced the moved file; the entry above stays for history scans.
+5c1c4dc9c53cc7d4e2ffab32df17b32c0681859d:docs/agents/session-bridge-crewai-reference.md:curl-auth-header:1077

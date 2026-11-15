@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 Claude Code loads this file and ignores `AGENTS.md`. The import below pulls in the
-shared CrewAI guidance so every coding assistant works from the same instructions.
+shared directory instructions (which point to the CrewAI reference in `docs/agents/`) so every coding assistant works from the same instructions.
 Keep shared conventions in `AGENTS.md`; add Claude-specific notes under the import.
 
 @AGENTS.md
@@ -64,4 +64,3 @@ PYTHONPATH=tools/session_bridge/src .coordination-runtime/Scripts/python.exe -m 
 
 35 tests as of 2026-09-27. Running it under `.venv` silently skips the CrewAI-route and MCP
 coverage -- which is exactly the coverage that caught the MCP event-loop hang.
-
