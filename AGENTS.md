@@ -87,8 +87,9 @@ consistency checks instead of behavioral tests.
 **Test windows.** Test runs and commits of staged `.py` files (the pre-commit hook then runs the
 backend tests) may run as separate processes while the live 8001 backend runs (operator, 2026-11-15).
 Run one heavy job (a full suite or training) at a time; CPU is the contention. While a training
-subprocess runs, tests, those commits and the shell-cleanup step need the operator's permission first
-(a test window); process cleanup while 8001 is live needs it too. A test run never ends a process that
+subprocess runs, tests and those commits need the operator's permission first (a test window).
+Process cleanup while 8001 or training runs needs the operator's explicit OK; a test window never
+covers it. A test run never ends a process that
 is not your own (Shell cleanup), restarts or starts a backend on 8001 (Backend port discipline), or
 writes `backend/coinbase.db` (Run isolation). Prefer CI for full-suite runs.
 
