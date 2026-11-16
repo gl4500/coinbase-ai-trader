@@ -180,7 +180,7 @@ Sensitive files that must never be committed:
 Activate in this order (agreed with Codex, 2026-11-14):
 1. **Back up.** Copy the current `.git/hooks/pre-commit` to a hashed backup OUTSIDE `.git/hooks`. Verify the copy's SHA-256 and record its mode.
 2. **Install the tooling.** Create `.hook-venv/` and install only `pre-commit==4.0.1` and `detect-secrets==1.5.0` there, with `PRE_COMMIT_HOME` set to `.hook-cache/`. Never install hook tooling into the app `.venv` that 8001 runs from without operator timing approval.
-3. **Prove it in a scratch clone first.** Run the RED/GREEN proofs in an isolated scratch clone, in an operator-approved window. Running any test while 8001 is live needs the operator's OK.
+3. **Prove it in a scratch clone first.** Run the RED/GREEN proofs in an isolated scratch clone, in an operator-approved window.
 4. **Retire and activate.** Only after the verified backup and the proofs:
    - Refuse to continue if `.git/hooks/pre-commit.legacy` exists.
    - Remove the old hook, copy `tools/hooks/pre-commit` to `.git/hooks/pre-commit`, and verify it.
