@@ -140,3 +140,32 @@ def test_slot_utilization_telemetry():
     assert 0.0 <= metrics.mean_concurrent <= 2.0
     # With cap=2 and 3 always-firing pids, we expect cap to be hit some of the time
     assert metrics.pct_slots_full > 0.3
+
+
+@pytest.mark.parametrize("horizon", [1, 24])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("different_rules", [False, True])
+def test_horizon_collision_preserves_selected_rule_label_and_exit(
+    horizon, reverse, different_rules
+):
+    selected = _make_profile("BTC-USD", 0, horizon, "price_over_ema20 > 1.0", deflated=0.2)
+    other = _make_profile(
+        "BTC-USD",
+        0,
+        24 if horizon == 1 else 1,
+        "price_over_ema20 > 2.0" if different_rules else "price_over_ema20 > 1.0",
+        deflated=0.1,
+    )
+    profiles = [selected, other]
+    if reverse:
+        profiles.reverse()
+    features = _make_pid_features("BTC-USD", n_hours=26, ema_ratio=0.0, label=0.0)
+    features.loc[0, "price_over_ema20"] = 1.5
+    features["label_h1"] = 0.1
+    features["label_h24"] = -0.2
+    metrics, telemetry = simulate_portfolio(profiles, cap=1, pid_features={"BTC-USD": features})
+    closes = [row for row in telemetry if row.closed_profile_id is not None]
+    assert metrics.trade_count == 1
+    assert closes[0].ts == horizon * 3_600_000
+    assert closes[0].realized_pnl == pytest.approx(0.1 if horizon == 1 else -0.2)
+    assert closes[0].closed_profile_id == selected.profile_id

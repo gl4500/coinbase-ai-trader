@@ -11,7 +11,7 @@ TaskCreate is unavailable; this register records the required find-list-fix sequ
 2. Completed (14 miner tests pass): mine_profiles.py trusts parquet ordering and can fit empty inner folds. Validate hourly timestamps and duplicates, sort before tensors, skip insufficient folds, preserve label/feature index alignment.
 3. Completed (11 scorecard/driver tests pass): scorecard.py / build_phase4.py call reused research data a deployment verdict. Emit research-only status and deployment blockers in Markdown and JSON.
 4. Deferred: miner combines only passing-fold trades and direction-only identities across changing thresholds. Metrics need all-fold reporting and a frozen-policy holdout.
-5. Deferred: profile identities omit horizon; mixed-horizon simulation may collide. Require horizon-qualified identities before multi-horizon evaluation.
+5. Completed in 043f064 (draft PR #64), full suite 1509 passed / 65 skipped: loaded profile identities now include horizon; simulator rule lookups use the same complete ID. Regression tests reproduced wrong labels, exit horizons and overwritten entry rules under input-order changes. All 35 targeted loader/simulator/selection/driver tests pass. Existing per-horizon sidecar keys remain compatible.
 6. Deferred: additive return drawdown is not funded portfolio drawdown. Replace with a capital/position ledger before treating the 30% gate as risk evidence.
 
 7. Completed, targeted tests pass (Claude review): a variable count of usable folds makes the four-pass gate ambiguous and permits tiny training sets. Require five evaluable outer folds, three inner folds each, and minimum training rows max(horizon, twice the smallest min_leaf). Record evaluated fold count/version on profiles; report insufficient history explicitly.
@@ -99,3 +99,14 @@ then reproduced two remaining branch-specific bypasses (non-boolean remainder
 flags and overfill in partial cancellation) plus inconsistent cancelled/full-fill
 classification. Sent these to Claude with a request for one shared classifier
 and cross-event regression coverage. PR #63 remains blocked on that review.
+
+Horizon identity repair published at https://github.com/gl4500/coinbase-ai-trader/pull/64,
+stacked on PR #62 (a80e6be). CI-pinned Ruff 0.9.0 lint and format pass on all
+253 backend files. Full suite: 1509 passed, 65 skipped, one deselected, one
+xfailed, two xpassed; 14 existing warnings, 377.30 seconds.
+
+Claude round-5 pure validator independently passed 208 tests, and the latest
+terminal consistency/overfill/strict-boolean probes now reject invalid evidence.
+No blocker remains for those reported cases in the reviewed source; final
+commit/full suite still pending. Persisted exchange correlation remains outside
+this pure validator and is required before live integration.

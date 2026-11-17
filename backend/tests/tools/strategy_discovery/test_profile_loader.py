@@ -153,8 +153,11 @@ def test_loads_all_horizon_parquets(tmp_path: Path):
     assert len(profiles) == 3
     # All carry their (pid, horizon, leaf_id) identifiers + their rule_path
     by_id = {p.profile_id: p for p in profiles}
-    assert "BTC-USD__0" in by_id  # appears for both h1 and h24
-    assert by_id["BTC-USD__0"].horizon in (1, 24)
+    assert len(by_id) == 3
+    assert by_id["BTC-USD__h1__0"].horizon == 1
+    assert by_id["BTC-USD__h24__0"].horizon == 24
+    assert by_id["BTC-USD__h1__0"].rule_path == "vol_over_mc > 0.05"
+    assert by_id["BTC-USD__h24__0"].rule_path == "price_over_ema20 > 1.02"
     assert all(isinstance(p, LoadedProfile) for p in profiles)
 
 
