@@ -9,7 +9,7 @@ import that needs approval, and a non-interactive session never asks. Start sess
 
 `AGENTS.md` (imported above) is the shared project contract for Claude Code and Codex: scope, roles,
 workflow, commits and peer review, security gate, tests, port discipline, run isolation, the session
-link, checklists and the mandatory reference `docs/agents/architecture-and-invariants.md`. This file
+link, checklists and the mandatory references in `docs/agents/`. This file
 adds only what applies to Claude. Where they disagree, stop and ask the operator.
 
 ---
@@ -40,32 +40,38 @@ How to apply:
 
 ---
 
-## CLAUDE.md ↔ Memory Sync Rule
+## Memory ↔ repo rule (pointers, not copies)
 
-**The repo contract and memory must always be updated together, and memory must be updated after every code change.**
-
-The repo contract (`AGENTS.md` for shared rules, this `CLAUDE.md` for Claude-only rules) and the persistent memory files at
-`C:\Users\gl450\.claude\projects\C--Users-gl450\memory\` are the two halves of the same contract.
+**A rule's text lives once, in this repo:** shared rules in `AGENTS.md` and its mandatory references,
+Claude-only rules in this `CLAUDE.md`. The memory folder `C:\Users\gl450\.claude\projects\C--Users-gl450\memory\`
+holds what the repo does not: why a rule exists, incident history, operator quotes, rules that apply
+across projects, and project state (architecture, bugs, thresholds, session log). Where memory covers a
+repo rule it holds a pointer to the section, a one-line summary and the why, never a second full copy.
+If a memory pointer's one-line summary disagrees with the repo section it points to, that section (in
+the task's own checkout) wins: follow it and fix the summary in the same session. Any other conflict (a
+general or cross-project rule kept in memory, an operator instruction, or a pointer whose target is
+missing or stale) is not settled by this precedence: stop the affected action and ask the operator.
 
 ### After every code change — required steps
 1. Architecture change (agents, endpoints, file structure) → update `coinbase_trader_architecture.md`.
 2. Bug fixed → append the bug + fix to `coinbase_trader_bugs_fixed.md`.
 3. Threshold changed → update `coinbase_trader_thresholds.md`.
-4. Rule added or modified → update the matching memory file AND the matching `AGENTS.md` section (or this `CLAUDE.md`, for a Claude-only rule) in the same response.
+4. Rule added or modified → change it in the matching `AGENTS.md` section or mandatory reference (or this `CLAUDE.md`, for a Claude-only rule). In the same response, update the memory pointer, summary line and why/history; don't copy the rule text into memory.
 5. Never commit code without committing any corresponding `AGENTS.md` / `CLAUDE.md` update in the same or immediately following commit.
 
-Relevant memory files for this repo (`coinbase-ai-trader` / polymarket_app):
-| Memory file | Mirrors |
+Memory files that point into this repo (`coinbase-ai-trader` / polymarket_app):
+| Memory file | Points to (memory keeps why/history) |
 |---|---|
-| `feedback_tdd_workflow.md` | `AGENTS.md` TDD Workflow section |
-| `feedback_scope_restriction.md` | `AGENTS.md` Scope section |
-| `feedback_shell_cleanup.md` | `AGENTS.md` Shell cleanup section |
-| `feedback_sync_rule.md` | Memory sync rule |
-| `feedback_python_clean_functions.md` | `AGENTS.md` Code Style + new-code authoring rules |
-| `feedback_verify_your_own_reader.md` | `AGENTS.md` Session-link coordination section |
-| `feedback_xgb_focus_not_cnn.md` | XGB-only scope; CNN frozen for new feature work |
-| `coinbase_trader_architecture.md` | `docs/agents/architecture-and-invariants.md` Architecture Quick Reference + per-session change log |
-| `coinbase_trader_schema.md` | DB column lists + code landmarks |
+| `feedback_no_pytest_during_trading.md` | `AGENTS.md` TDD Workflow → Test windows; Live-backend guard |
+| `feedback_backend_port_isolation.md` | `AGENTS.md` Backend port discipline; `promote-model` skill |
+| `feedback_no_restart_during_retrain.md` | `AGENTS.md` Backend port discipline; checklists |
+| `feedback_codex_review_before_merge.md` | `AGENTS.md` Roles; Commit Standards → Peer review before merge |
+| `feedback_xgb_focus_not_cnn.md` | `AGENTS.md` Code Style (XGB-only) |
+| `feedback_python_clean_functions.md` | `docs/agents/coding-standards.md` (memory keeps the cross-project copy) |
+| `feedback_tdd_workflow.md`, `feedback_scope_restriction.md`, `feedback_shell_cleanup.md`, `feedback_verify_your_own_reader.md` | General rules in memory; this repo's procedure in the matching `AGENTS.md` section |
+| `feedback_sync_rule.md` | This section |
+| `coinbase_trader_architecture.md` | Project state; normative invariants are in `docs/agents/architecture-and-invariants.md` |
+| `coinbase_trader_schema.md` | DB column lists + code landmarks (project state) |
 
 Note: `trading_app_*.md` memory files belong to a different project (not polymarket_app) and should be ignored when working in this repo.
 
