@@ -6,6 +6,7 @@ Pure functions on torch.Tensor inputs (caller loads the parquet). No filesystem.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -25,6 +26,7 @@ _Q0_AVG_LOSS = -0.10  # avg_loss must be >= -0.10 to pass
 _Q0_MAX_DD = 0.30
 _Q0_MIN_FOLDS = 4
 _BOOTSTRAP_N = 1000
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +50,8 @@ class LeafProfile:
     bootstrap_ci_upper: Optional[float] = None
     chosen_depth: int = 0
     chosen_min_leaf: int = 0
+    n_folds_evaluated: int = 0
+    validation_version: str = "legacy_unverified"
 
 
 def apply_deflation(raw: float, inner_cv_se: float, n_combos: int) -> Tuple[float, float]:
@@ -280,14 +284,25 @@ def mine_profiles_for_pid_horizon(
     from collections import defaultdict
 
     import pyarrow.parquet as _pq
+    from pandas.api.types import is_integer_dtype
 
     df = _pq.read_table(parquet_path).to_pandas()
     label_col = f"label_h{int(horizon)}"
     if label_col not in df.columns:
         return []
+    # Positional purging assumes bars are at least one hour apart. Validate
+    # before dropping unlabeled rows so invalid source rows cannot be hidden.
+    if "ts" not in df or not is_integer_dtype(df["ts"].dtype) or df["ts"].isna().any():
+        raise ValueError("timestamps must be non-null integer milliseconds")
+    df = df.sort_values("ts", kind="stable")
+    if df["ts"].duplicated().any() or (df["ts"].diff().dropna() < 3_600_000).any():
+        raise ValueError("timestamps must be unique and at least one hour apart")
     df = df.dropna(subset=[label_col]).reset_index(drop=True)
     n = len(df)
     if n < 200:
+        _logger.warning(
+            "Insufficient history for %s h%s: fewer than 200 labeled rows", pid, horizon
+        )
         return []
     dev = torch.device(device if (device == "cpu" or torch.cuda.is_available()) else "cpu")
     ts_ms = torch.tensor(df["ts"].to_numpy(dtype="int64"), device=dev)
@@ -296,6 +311,20 @@ def mine_profiles_for_pid_horizon(
     next_eligible = build_next_eligible(ts_ms, horizon_bars=int(horizon))
 
     outer = outer_folds(n, n_folds=5, embargo_bars=int(horizon))
+    nested = [inner_folds(train, n_folds=3, embargo_bars=int(horizon)) for train, _ in outer]
+    minimum_train_rows = max(int(horizon), 2 * min(_MIN_LEAF_GRID))
+    if len(outer) != 5 or any(
+        len(inner) != 3 or any(len(train) < minimum_train_rows for train, _ in inner)
+        for inner in nested
+    ):
+        _logger.warning(
+            "Insufficient history for %s h%s: require 5 outer and 3 inner folds "
+            "with at least %s training rows each; no strategy verdict",
+            pid,
+            horizon,
+            minimum_train_rows,
+        )
+        return []
     fold_pass_count: Dict[str, int] = defaultdict(int)
     fold_trade_lists: Dict[str, list] = defaultdict(list)
     fold_summaries: Dict[str, dict] = {}
@@ -303,8 +332,10 @@ def mine_profiles_for_pid_horizon(
     next_eligible_np = next_eligible.cpu().numpy()
     labels_np = labels.cpu().numpy()
 
-    for outer_train_idx, outer_test_idx in outer:
-        inner = inner_folds(outer_train_idx, n_folds=3, embargo_bars=int(horizon))
+    for (outer_train_idx, outer_test_idx), inner in zip(outer, nested, strict=True):
+        # Both levels are prefixes of the sorted frame. fit_tree uses local
+        # row IDs against the full labels/next_eligible arrays, so the prefix
+        # invariant is required for correct feature/label alignment.
         inner_scores: Dict[tuple, list] = defaultdict(list)
         for depth in _DEPTH_GRID:
             for min_leaf in _MIN_LEAF_GRID:
@@ -417,6 +448,8 @@ def mine_profiles_for_pid_horizon(
                 bootstrap_ci_upper=ci_upper,
                 chosen_depth=fold_summaries[direction_key]["chosen_depth"],
                 chosen_min_leaf=fold_summaries[direction_key]["chosen_min_leaf"],
+                n_folds_evaluated=len(outer),
+                validation_version="chronological_v1",
             )
         )
     return profiles

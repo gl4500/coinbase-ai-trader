@@ -1,62 +1,65 @@
-"""Purged Walk-Forward CV + nested inner CV for Phase 3 mining.
+"""Expanding chronological walk-forward splits with a purged label horizon.
 
-Pure numpy index math. No tensors, no trees, no I/O.
-
-Embargo rule: any train row whose ts falls within [test_start - horizon, test_start)
-is dropped from the train set to prevent label leakage (a train row's
-label_h{horizon} could span into the test fold).
+Only earlier rows may train a fold. Callers must supply chronologically ordered
+rows at least one bar apart; removing rows makes the positional gap conservative.
+This is deliberately not purged k-fold or combinatorial cross-validation.
 """
 
 from __future__ import annotations
 
+from numbers import Integral
 from typing import List, Tuple
 
 import numpy as np
 
 
 def outer_folds(
-    n_rows: int,
-    n_folds: int = 5,
-    embargo_bars: int = 168,
+    n_rows: int, n_folds: int = 5, embargo_bars: int = 168
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Chronological k-fold WF with embargo. Returns [(train_idx, test_idx), ...].
+    """Return up to n_folds expanding-prefix train/test pairs.
 
-    Fold k's test set = rows [k * size, (k+1) * size) (last fold absorbs remainder).
-    Train set = all rows OUTSIDE [embargo_lo, test_end) where embargo_lo = test_start - embargo_bars.
+    Reserve one block plus division remainder for initial training. Remaining
+    test blocks have equal size. Purge embargo_bars immediately before each
+    test; omit folds without training history. Never borrow future rows.
     """
-    base = n_rows // n_folds
-    out: List[Tuple[np.ndarray, np.ndarray]] = []
-    for k in range(n_folds):
-        test_start = k * base
-        test_end = (k + 1) * base if k < n_folds - 1 else n_rows
-        test_idx = np.arange(test_start, test_end, dtype=np.int64)
-        embargo_lo = max(0, test_start - embargo_bars)
-        train_mask = np.ones(n_rows, dtype=bool)
-        train_mask[embargo_lo:test_end] = False
-        train_idx = np.where(train_mask)[0]
-        out.append((train_idx, test_idx))
+    for name, value, minimum in (
+        ("n_rows", n_rows, 0),
+        ("n_folds", n_folds, 1),
+        ("embargo_bars", embargo_bars, 0),
+    ):
+        if isinstance(value, bool) or not isinstance(value, Integral) or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+    size = n_rows // (n_folds + 1)
+    if size == 0:
+        return []
+    warmup = n_rows - n_folds * size
+    out = []
+    for test_start in range(warmup, n_rows, size):
+        train_end = test_start - embargo_bars
+        if train_end <= 0:
+            continue
+        out.append(
+            (
+                np.arange(train_end, dtype=np.int64),
+                np.arange(test_start, test_start + size, dtype=np.int64),
+            )
+        )
     return out
 
 
 def inner_folds(
-    train_idx: np.ndarray,
-    n_folds: int = 3,
-    embargo_bars: int = 168,
+    train_idx: np.ndarray, n_folds: int = 3, embargo_bars: int = 168
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Nested CV on the outer-train subset.
-
-    Embargo computed on positions WITHIN train_idx, not on global row ids.
-    """
-    n = len(train_idx)
-    base = n // n_folds
-    out: List[Tuple[np.ndarray, np.ndarray]] = []
-    for k in range(n_folds):
-        test_start = k * base
-        test_end = (k + 1) * base if k < n_folds - 1 else n
-        embargo_lo = max(0, test_start - embargo_bars)
-        mask = np.ones(n, dtype=bool)
-        mask[embargo_lo:test_end] = False
-        inner_train = train_idx[mask]
-        inner_test = train_idx[test_start:test_end]
-        out.append((inner_train, inner_test))
-    return out
+    """Split ordered outer-training indices; the positional gap is conservative."""
+    train_idx = np.asarray(train_idx)
+    if (
+        train_idx.ndim != 1
+        or not np.issubdtype(train_idx.dtype, np.integer)
+        or np.any(train_idx < 0)
+        or np.any(train_idx[1:] <= train_idx[:-1])
+    ):
+        raise ValueError("train_idx must be strictly increasing nonnegative integer indices")
+    return [
+        (train_idx[train], train_idx[test])
+        for train, test in outer_folds(len(train_idx), n_folds, embargo_bars)
+    ]
