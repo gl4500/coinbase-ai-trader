@@ -10,15 +10,68 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping, Sequence
 from numbers import Integral
+from typing import Protocol, TypedDict, cast
 
-from tools.strategy_discovery.profit_tree import collect_leaves
+from tools.strategy_discovery.profit_tree import TreeNode, collect_leaves
 
 RULE_VERSION = "tree_path_hex_v1"
 BINDING_VERSION = "profile_rule_binding_v1"
 
 
-def validate_rule(rule: dict) -> None:
+class RuleCondition(TypedDict):
+    """One split on the path: go left when ``value <= float.fromhex(threshold_hex)``."""
+
+    feature: str
+    go_left: bool
+    threshold_hex: str
+
+
+class MachineRule(TypedDict):
+    """An executable leaf path. ``nan_policy`` is always ``"right"``."""
+
+    version: str
+    nan_policy: str
+    conditions: list[RuleCondition]
+
+
+class BoundRule(TypedDict):
+    """A rule bound to its profile group and source tree, plus the binding digest."""
+
+    version: str
+    pid: str
+    horizon: int
+    profile_leaf_id: int
+    source_leaf_id: int
+    source_outer_fold: int
+    source_tree_digest: str
+    feature_schema: list[str]
+    rule: MachineRule
+    digest: str
+
+
+class FeatureValues(Protocol):
+    """Values looked up by column name: a dict or a pandas Series row both qualify."""
+
+    def __contains__(self, key: object, /) -> bool: ...
+
+    def __getitem__(self, key: str, /) -> object: ...
+
+
+def validate_rule(rule: object) -> None:
+    """Accept only a well-formed ``MachineRule``; return None, raise otherwise.
+
+    Required: a dict with exactly ``version`` (== RULE_VERSION), ``nan_policy``
+    (== "right") and ``conditions`` (a list, possibly empty). Each condition is a
+    dict with exactly a non-blank str ``feature``, a bool ``go_left`` and a
+    ``threshold_hex`` that parses to a finite binary64 written canonically
+    (``float.hex`` round trip). An empty condition list is the unconditional root.
+
+    Raises:
+        ValueError: on any other shape, version, policy, type, unparseable,
+            non-finite or non-canonical threshold.
+    """
     if (
         not isinstance(rule, dict)
         or set(rule) != {"version", "nan_policy", "conditions"}
@@ -45,7 +98,19 @@ def validate_rule(rule: dict) -> None:
             raise ValueError("threshold must be finite canonical binary64")
 
 
-def encode_leaf_rule(root, leaf_id: int, feature_names) -> dict:
+def encode_leaf_rule(root: TreeNode, leaf_id: int, feature_names: Sequence[str]) -> MachineRule:
+    """Return the exact root-to-leaf path for ``collect_leaves(root)[leaf_id]``.
+
+    ``leaf_id`` is a non-bool integer index into ``collect_leaves(root)``.
+    ``feature_names[i]`` names split feature ``i``. Each split contributes one
+    condition with the threshold as canonical hex; the root leaf yields an empty
+    condition list. The result passes ``validate_rule``.
+
+    Raises:
+        ValueError: if ``leaf_id`` is not a valid leaf index, a split feature is
+            not a non-bool integer index into ``feature_names``, a split threshold
+            is not convertible to a finite float, or the leaf is unreachable.
+    """
     leaves = collect_leaves(root)
     if (
         not isinstance(leaf_id, Integral)
@@ -54,9 +119,9 @@ def encode_leaf_rule(root, leaf_id: int, feature_names) -> dict:
     ):
         raise ValueError("invalid leaf identity")
     target = leaves[leaf_id]
-    path = []
+    path: list[RuleCondition] = []
 
-    def visit(node):
+    def visit(node: TreeNode) -> bool:
         if node is target:
             return True
         if node.is_leaf:
@@ -88,19 +153,30 @@ def encode_leaf_rule(root, leaf_id: int, feature_names) -> dict:
 
     if not visit(root):
         raise ValueError("unresolved leaf identity")
-    rule = {"version": RULE_VERSION, "nan_policy": "right", "conditions": path}
+    rule: MachineRule = {"version": RULE_VERSION, "nan_policy": "right", "conditions": path}
     validate_rule(rule)
     return rule
 
 
-def rule_matches(rule: dict, values) -> bool:
+def rule_matches(rule: object, values: FeatureValues) -> bool:
+    """Return True when ``values`` follows every condition of ``rule``.
+
+    ``rule`` must pass ``validate_rule``. A condition goes left when
+    ``float(value) <= threshold``, so NaN routes right, matching the tree router.
+    A present value that cannot be converted to float makes the rule not match
+    (returns False). The empty (root) rule matches every row.
+
+    Raises:
+        ValueError: if ``rule`` is invalid, or a condition's feature column is
+            absent from ``values`` (a missing column is not a NaN).
+    """
     validate_rule(rule)
-    for clause in rule["conditions"]:
+    for clause in cast(MachineRule, rule)["conditions"]:
         feature = clause["feature"]
         if feature not in values:
             raise ValueError(f"missing feature column: {feature}")
         try:
-            value = float(values[feature])
+            value = float(values[feature])  # type: ignore[arg-type]
         except (TypeError, ValueError, OverflowError):
             return False
         goes_left = value <= float.fromhex(clause["threshold_hex"])
@@ -109,7 +185,7 @@ def rule_matches(rule: dict, values) -> bool:
     return True
 
 
-def _is_digest(value) -> bool:
+def _is_digest(value: object) -> bool:
     return (
         isinstance(value, str)
         and len(value) == 64
@@ -117,13 +193,21 @@ def _is_digest(value) -> bool:
     )
 
 
-def _binding_digest(body) -> str:
+def _binding_digest(body: Mapping[str, object]) -> str:
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def tree_source_digest(root, feature_schema) -> str:
-    """Fingerprint the tree's ordered leaf paths and the float64 feature schema."""
+def tree_source_digest(root: TreeNode, feature_schema: list[str]) -> str:
+    """Fingerprint the tree's ordered leaf paths and the float64 feature schema.
+
+    Required: ``feature_schema`` is a non-empty list of unique, non-blank str.
+    Returns a 64-char lowercase hex SHA-256 over the rule version, dtype, schema
+    and ``encode_leaf_rule`` for every leaf in ``collect_leaves`` order.
+
+    Raises:
+        ValueError: on an invalid schema, or anything ``encode_leaf_rule`` rejects.
+    """
     if (
         not isinstance(feature_schema, list)
         or not feature_schema
@@ -144,7 +228,7 @@ def tree_source_digest(root, feature_schema) -> str:
     )
 
 
-def _validate_binding_body(body) -> None:
+def _validate_binding_body(body: object) -> None:
     required = {
         "version",
         "pid",
@@ -180,20 +264,30 @@ def _validate_binding_body(body) -> None:
 
 
 def bind_rule(
-    rule,
+    rule: MachineRule,
     *,
-    pid,
-    horizon,
-    profile_leaf_id,
-    source_leaf_id,
-    source_outer_fold,
-    source_tree_digest,
-    feature_schema,
-) -> dict:
+    pid: str,
+    horizon: int,
+    profile_leaf_id: int,
+    source_leaf_id: int,
+    source_outer_fold: int,
+    source_tree_digest: str,
+    feature_schema: list[str],
+) -> BoundRule:
     """Bind a representative rule to its group and distinct source-tree identity.
 
     The digest detects stale/mixed artifacts; it is not a signature, proof of
     training history, or a claim that group metrics measure this rule's returns.
+
+    Required: ``rule`` passes ``validate_rule``; ``pid`` is a non-empty str with
+    no surrounding whitespace; ``horizon`` > 0 and the leaf/fold ids >= 0 are
+    plain int (not bool); ``source_outer_fold`` < 5; ``source_tree_digest`` is
+    64-char lowercase hex; ``feature_schema`` is a non-empty list of unique,
+    non-blank str containing every rule feature. Returns a JSON-normalized copy
+    with ``digest`` = SHA-256 of the canonical JSON body.
+
+    Raises:
+        ValueError: if any of the above does not hold.
     """
     body = dict(
         version=BINDING_VERSION,
@@ -208,13 +302,31 @@ def bind_rule(
     )
     _validate_binding_body(body)
     body = json.loads(json.dumps(body, allow_nan=False))
-    return {**body, "digest": _binding_digest(body)}
+    return cast(BoundRule, {**body, "digest": _binding_digest(body)})
 
 
 def validate_bound_rule(
-    payload, *, pid, horizon, profile_leaf_id, expected_digest, feature_schema
-) -> dict:
-    """Verify sidecar content against the independently stored profile-row digest."""
+    payload: object,
+    *,
+    pid: str,
+    horizon: int,
+    profile_leaf_id: int,
+    expected_digest: str,
+    feature_schema: list[str],
+) -> MachineRule:
+    """Verify sidecar content against the independently stored profile-row digest.
+
+    Required: ``payload`` is a ``BoundRule``-shaped dict whose body satisfies the
+    ``bind_rule`` contract; its ``digest``, the recomputed body digest and
+    ``expected_digest`` (from the profile row) are all equal; and its pid,
+    horizon, profile_leaf_id and feature_schema equal the arguments (``horizon``
+    and ``profile_leaf_id`` must be plain int). Returns a fresh copy of the bound
+    ``MachineRule``.
+
+    Raises:
+        ValueError: on a missing or malformed digest, an invalid body, a digest
+            mismatch, or a profile identity mismatch.
+    """
     if not isinstance(payload, dict) or not _is_digest(payload.get("digest")):
         raise ValueError("missing rule binding digest")
     body = {key: value for key, value in payload.items() if key != "digest"}
@@ -234,4 +346,4 @@ def validate_bound_rule(
         or body["feature_schema"] != feature_schema
     ):
         raise ValueError("rule binding profile identity mismatch")
-    return json.loads(json.dumps(body["rule"]))
+    return cast(MachineRule, json.loads(json.dumps(body["rule"])))
