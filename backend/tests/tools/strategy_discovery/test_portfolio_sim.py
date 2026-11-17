@@ -169,3 +169,26 @@ def test_horizon_collision_preserves_selected_rule_label_and_exit(
     assert closes[0].ts == horizon * 3_600_000
     assert closes[0].realized_pnl == pytest.approx(0.1 if horizon == 1 else -0.2)
     assert closes[0].closed_profile_id == selected.profile_id
+
+
+@pytest.mark.parametrize("rule", ["", "   ", None])
+def test_unresolved_rule_cannot_be_simulated_as_always_fire(rule):
+    profile = _make_profile("BTC-USD", 0, 1, rule)
+    feats = _make_pid_features("BTC-USD", 3, 1.5, 0.1)
+    with pytest.raises(ValueError, match="rule"):
+        simulate_portfolio([profile], 1, {"BTC-USD": feats})
+
+
+def test_duplicate_profiles_do_not_overwrite_simulation_rules():
+    first = _make_profile("BTC-USD", 0, 1, "price_over_ema20 > 1.0")
+    second = _make_profile("BTC-USD", 0, 1, "price_over_ema20 > 2.0")
+    feats = _make_pid_features("BTC-USD", 3, 1.5, 0.1)
+    with pytest.raises(ValueError, match="duplicate"):
+        simulate_portfolio([first, second], 1, {"BTC-USD": feats})
+
+
+def test_explicit_root_can_trade_without_conditions():
+    profile = _make_profile("BTC-USD", 0, 1, "(root)")
+    feats = _make_pid_features("BTC-USD", 3, 0.0, 0.1)
+    metrics, _ = simulate_portfolio([profile], 1, {"BTC-USD": feats})
+    assert metrics.trade_count > 0

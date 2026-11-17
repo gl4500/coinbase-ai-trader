@@ -340,3 +340,68 @@ def test_invalid_pass_counts_are_rejected_without_truncation(tmp_path, passed):
     )
     pd.DataFrame([row]).to_parquet(tmp_path / "profiles_h24.parquet", index=False)
     assert load_all_profiles(tmp_path, horizons=[24]) == []
+
+
+def _write_verified_rule_profile(path, copies=1):
+    row = {name: 0 for name in _PROFILE_COLUMNS}
+    row.update(
+        pid="BTC-USD",
+        horizon=24,
+        leaf_id=0,
+        rule_path_summary="(root)",
+        schema_version=2,
+        n_folds_passed_q0=5,
+        validation_version="chronological_v1",
+        n_folds_evaluated=5,
+    )
+    pd.DataFrame([row] * copies).to_parquet(path / "profiles_h24.parquet", index=False)
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [None, {}, {"BTC-USD__0": ""}, {"BTC-USD__0": "  "}, {"BTC-USD__0": None}, {"BTC-USD__0": 42}],
+)
+def test_unresolved_sidecar_rule_never_uses_summary(tmp_path, caplog, paths):
+    _write_verified_rule_profile(tmp_path)
+    if paths is not None:
+        _write_rule_paths_json(tmp_path / "rule_paths_h24.json", paths)
+    assert load_all_profiles(tmp_path, horizons=[24]) == []
+    assert "rule" in caplog.text.lower()
+
+
+def test_explicit_root_rule_remains_a_valid_profile(tmp_path):
+    _write_verified_rule_profile(tmp_path)
+    _write_rule_paths_json(tmp_path / "rule_paths_h24.json", {"BTC-USD__0": "(root)"})
+    assert load_all_profiles(tmp_path, horizons=[24])[0].rule_path == "(root)"
+
+
+def test_duplicate_complete_identity_is_rejected(tmp_path):
+    _write_verified_rule_profile(tmp_path, copies=2)
+    _write_rule_paths_json(tmp_path / "rule_paths_h24.json", {"BTC-USD__0": "(root)"})
+    with pytest.raises(ValueError, match="duplicate"):
+        load_all_profiles(tmp_path, horizons=[24])
+
+
+@pytest.mark.parametrize("row_horizon", [1, 24.5, None, float("nan"), "24", True])
+def test_row_horizon_must_match_artifact_without_coercion(tmp_path, caplog, row_horizon):
+    _write_verified_rule_profile(tmp_path)
+    artifact = tmp_path / "profiles_h24.parquet"
+    frame = pd.read_parquet(artifact)
+    frame["horizon"] = row_horizon
+    frame.to_parquet(artifact, index=False)
+    _write_rule_paths_json(tmp_path / "rule_paths_h24.json", {"BTC-USD__0": "(root)"})
+    assert load_all_profiles(tmp_path, horizons=[24]) == []
+    assert "horizon" in caplog.text.lower()
+
+
+def test_mismatched_horizon_exclusion_keeps_valid_rows(tmp_path, caplog):
+    _write_verified_rule_profile(tmp_path)
+    artifact = tmp_path / "profiles_h24.parquet"
+    frame = pd.read_parquet(artifact)
+    wrong = frame.copy()
+    wrong["horizon"] = 1
+    pd.concat([wrong, frame]).to_parquet(artifact, index=False)
+    _write_rule_paths_json(tmp_path / "rule_paths_h24.json", {"BTC-USD__0": "(root)"})
+    profiles = load_all_profiles(tmp_path, horizons=[24])
+    assert len(profiles) == 1
+    assert profiles[0].horizon == 24
