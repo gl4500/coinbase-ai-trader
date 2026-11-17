@@ -3,6 +3,7 @@
 Run from the repository root:
     <python> -m unittest tools/agent_guard/test_live_guard.py -v
 """
+
 import io
 import json
 import os
@@ -24,7 +25,8 @@ def _never(*_a, **_k):
 
 def decide(command, *, port_open=False, training=False, staged_py=False, window=False, cfg=CFG):
     return g.decide(
-        command, cfg,
+        command,
+        cfg,
         port_open=lambda port: port_open,
         training_running=lambda markers: training,
         staged_py=lambda *a: staged_py,
@@ -34,12 +36,18 @@ def decide(command, *, port_open=False, training=False, staged_py=False, window=
 
 class Classify(unittest.TestCase):
     def test_pytest_in_any_form_is_a_test_run(self):
-        for cmd in ("python -m pytest tests/ -v", "pytest backend/tests", ".venv/Scripts/python.exe -m pytest -q"):
+        for cmd in (
+            "python -m pytest tests/ -v",
+            "pytest backend/tests",
+            ".venv/Scripts/python.exe -m pytest -q",
+        ):
             self.assertIn("test", g.classify(cmd), cmd)
 
     def test_trading_app_runner_and_unittest_are_test_runs(self):
-        for cmd in (r"C:\Users\gl450\trading_app\runtime\python\python.exe run_tests.py -v",
-                    r"..\runtime\python\python.exe -m unittest tests.test_portfolio"):
+        for cmd in (
+            r"C:\Users\gl450\trading_app\runtime\python\python.exe run_tests.py -v",
+            r"..\runtime\python\python.exe -m unittest tests.test_portfolio",
+        ):
             self.assertIn("test", g.classify(cmd), cmd)
 
     def test_git_commit_is_a_commit(self):
@@ -47,25 +55,47 @@ class Classify(unittest.TestCase):
         self.assertIn("commit", g.classify("git -C repo commit -q -F msg.txt"))
 
     def test_process_kills_are_kills(self):
-        for cmd in ("Stop-Process -Id 5 -Force", "taskkill /F /PID 3", "kill -9 123", "pkill -f python",
-                    "Get-Process python | Stop-Process"):
+        for cmd in (
+            "Stop-Process -Id 5 -Force",
+            "taskkill /F /PID 3",
+            "kill -9 123",
+            "pkill -f python",
+            "Get-Process python | Stop-Process",
+        ):
             self.assertIn("kill", g.classify(cmd), cmd)
 
     def test_backend_starts_are_restarts(self):
-        for cmd in ("python main.py", "PORT=8002 python main.py", "uvicorn main:app --port 8001",
-                    "python -m backend.startup_guard --mode replace", "start_backend.ps1 -Replace"):
+        for cmd in (
+            "python main.py",
+            "PORT=8002 python main.py",
+            "uvicorn main:app --port 8001",
+            "python -m backend.startup_guard --mode replace",
+            "start_backend.ps1 -Replace",
+        ):
             self.assertIn("restart", g.classify(cmd), cmd)
 
     def test_repo_launchers_are_restarts(self):  # review R4
-        for cmd in ("powershell -File .\\start_backend.ps1", "python start_app.py", "python launcher.py",
-                    "scripts\\start.bat", "scripts\\start_backend.bat", "python scripts/launcher.py"):
+        for cmd in (
+            "powershell -File .\\start_backend.ps1",
+            "python start_app.py",
+            "python launcher.py",
+            "scripts\\start.bat",
+            "scripts\\start_backend.bat",
+            "python scripts/launcher.py",
+        ):
             self.assertIn("restart", g.classify(cmd), cmd)
 
     def test_frontend_launcher_is_not_a_restart(self):
         self.assertNotIn("restart", g.classify("powershell -File .\\start_frontend.ps1"))
 
     def test_harmless_commands_have_no_risk(self):
-        for cmd in ("git status", "git log -1 --stat", "ls backend/tests", "gh pr view 122", "cat main.py"):
+        for cmd in (
+            "git status",
+            "git log -1 --stat",
+            "ls backend/tests",
+            "gh pr view 122",
+            "cat main.py",
+        ):
             self.assertEqual(g.classify(cmd), frozenset(), cmd)
 
 
@@ -87,12 +117,20 @@ class Decide(unittest.TestCase):
         self.assertFalse(decide("python -m pytest tests/", port_open=True, window=True).block)
 
     def test_harmless_command_while_live_never_probes(self):
-        d = g.decide("git status", CFG, port_open=_never, training_running=_never,
-                     staged_py=_never, window_open=_never)
+        d = g.decide(
+            "git status",
+            CFG,
+            port_open=_never,
+            training_running=_never,
+            staged_py=_never,
+            window_open=_never,
+        )
         self.assertFalse(d.block)
 
     def test_commit_without_staged_python_is_allowed_while_live(self):
-        self.assertFalse(decide('git commit -m "docs" -- AGENTS.md', port_open=True, staged_py=False).block)
+        self.assertFalse(
+            decide('git commit -m "docs" -- AGENTS.md', port_open=True, staged_py=False).block
+        )
 
     def test_commit_with_staged_python_is_blocked_while_live(self):
         d = decide('git commit -m "fix" -- a.py', port_open=True, staged_py=True)
@@ -101,7 +139,9 @@ class Decide(unittest.TestCase):
 
     def test_commit_is_harmless_when_repo_hook_runs_no_tests(self):
         cfg = g.Config(port=8000, training_markers=(), commit_needs_staged_py=False)
-        self.assertFalse(decide('git commit -m "fix" -- a.py', port_open=True, staged_py=True, cfg=cfg).block)
+        self.assertFalse(
+            decide('git commit -m "fix" -- a.py', port_open=True, staged_py=True, cfg=cfg).block
+        )
 
     def test_kill_while_live_is_blocked_even_with_test_window(self):
         d = decide("Stop-Process -Id 5", port_open=True, window=True)
@@ -118,13 +158,196 @@ class Decide(unittest.TestCase):
     def test_probe_failure_on_a_risky_command_blocks(self):
         def broken(*_a):
             raise OSError("cannot list processes")
-        d = g.decide("python -m pytest", CFG, port_open=lambda p: False, training_running=broken,
-                     staged_py=lambda *a: False, window_open=lambda: False)
+
+        d = g.decide(
+            "python -m pytest",
+            CFG,
+            port_open=lambda p: False,
+            training_running=broken,
+            staged_py=lambda *a: False,
+            window_open=lambda: False,
+        )
         self.assertTrue(d.block)
         self.assertIn("could not check", d.reason)
 
 
-class CommitContents(unittest.TestCase):  # review R3: judge what the commit can include, not just the index
+PM_CFG = g.Config(
+    port=8001,
+    training_markers=("train_worker.py",),
+    commit_needs_staged_py=True,
+    tests_allowed_while_live=True,
+)
+
+
+class TestsAllowedWhileLive(unittest.TestCase):
+    """Operator decision 2026-11-15 (polymarket_app): separate-process test runs may run while 8001 is
+    live. Training still gates tests, and kills/starts keep their blocks."""
+
+    def test_test_run_while_only_live_is_allowed(self):
+        self.assertFalse(decide("python -m pytest tests/", port_open=True, cfg=PM_CFG).block)
+
+    def test_commit_with_staged_python_while_only_live_is_allowed(self):
+        self.assertFalse(
+            decide('git commit -m "fix" -- a.py', port_open=True, staged_py=True, cfg=PM_CFG).block
+        )
+
+    def test_test_run_while_training_is_still_blocked(self):
+        d = decide("python -m pytest tests/", port_open=True, training=True, cfg=PM_CFG)
+        self.assertTrue(d.block)
+        self.assertIn("training", d.reason)
+        self.assertNotIn("8001", d.reason)
+
+    def test_commit_with_staged_python_while_training_is_still_blocked(self):
+        self.assertTrue(
+            decide('git commit -m "fix" -- a.py', training=True, staged_py=True, cfg=PM_CFG).block
+        )
+
+    def test_test_window_still_opens_tests_during_training(self):
+        self.assertFalse(
+            decide("python -m pytest tests/", training=True, window=True, cfg=PM_CFG).block
+        )
+
+    def test_kill_while_live_is_still_blocked(self):
+        self.assertTrue(decide("Stop-Process -Id 5", port_open=True, cfg=PM_CFG).block)
+
+    def test_restart_while_training_is_still_blocked(self):
+        self.assertTrue(decide("python main.py", training=True, cfg=PM_CFG).block)
+
+    def test_test_run_does_not_need_the_port_probe(self):
+        def broken(*_a):
+            raise OSError("port probe failed")
+
+        d = g.decide(
+            "python -m pytest tests/",
+            PM_CFG,
+            port_open=broken,
+            training_running=lambda m: False,
+            staged_py=lambda *a: False,
+            window_open=lambda: False,
+        )
+        self.assertFalse(d.block)
+
+    def test_default_config_still_blocks_tests_while_live(self):  # trading_app keeps the old rule
+        self.assertTrue(decide("python -m pytest tests/", port_open=True).block)
+
+    def test_flag_is_parsed_from_the_command_line(self):
+        cfg = g._parse_args(["--port", "8001", "--tests-allowed-while-live"])
+        self.assertTrue(cfg.tests_allowed_while_live)
+        self.assertFalse(g._parse_args(["--port", "8001"]).tests_allowed_while_live)
+
+
+class QuotedText(unittest.TestCase):
+    """A risky word is ignored only inside a provably inert message argument: the message of
+    `herdr agent prompt`, `git commit -m/--message`, `gh --title/--body`, or an argument of
+    echo/printf/Write-Output/Write-Host, and only if the span is single-quoted or double-quoted
+    without `$(` or a backtick. Everything else is scanned raw (review G1/G2 on 1ce79cf)."""
+
+    def test_inert_message_arguments_are_not_kills(self):
+        for cmd in (
+            'herdr agent prompt rules-codex "never taskkill or Stop-Process the backend" --wait',
+            'git commit -m "test: kill -9 handling" -- a.md',
+            'git -C repo commit --message "pkill is forbidden" -- a.md',
+            'gh pr comment 5 --body "do not taskkill 8001"',
+            'herdr agent prompt x "line one\nthen; kill -9 123\nend"',
+        ):
+            self.assertNotIn("kill", g.classify(cmd), cmd)
+
+    def test_inert_message_mentioning_pytest_is_not_a_test_run(self):
+        self.assertNotIn(
+            "test", g.classify('herdr agent prompt x "please run pytest later" --wait')
+        )
+
+    def test_command_substitution_inside_double_quotes_still_counts(self):  # G1
+        for cmd in (
+            'Write-Output "$(Stop-Process -Id 424242)"',
+            'echo "$(kill -9 424242)"',
+            'herdr agent prompt x "$(taskkill /F /PID 3)"',
+            'git commit -m "`kill -9 1`" -- a.md',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_quoted_operands_of_other_commands_still_count(self):  # G2
+        for cmd in (
+            "& powershell '-Command' 'Stop-Process -Id 424242'",
+            "& ('Stop-Process') -Id 424242",
+            "env 'pkill' -f train_worker.py",
+            'herdr pane run w1:p1 "taskkill /F /PID 3"',
+            'FOO=1 echo "x"; kill -9 5',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_quoted_command_words_keep_their_category(self):  # G2 follow-up
+        self.assertIn("commit", g.classify('git "commit" -m "fix" -- a.py'))
+        self.assertIn("test", g.classify('python -m "pytest" -q'))
+        self.assertIn("kill", g.classify("bash -lc 'pkill -f dummy_marker'"))
+        self.assertIn("kill", g.classify('powershell -Command:"Stop-Process -Id 424242"'))
+        d = decide('git "commit" -m "fix" -- a.py', training=True, staged_py=True, cfg=PM_CFG)
+        self.assertTrue(d.block)
+
+    def test_printer_text_piped_or_redirected_still_counts(self):  # G4
+        for cmd in (
+            "Write-Output 'Stop-Process -Id 424242' | Invoke-Expression",
+            "echo 'pkill -f dummy_marker' | bash",
+            "printf 'kill -9 1' | sh",
+            "echo 'kill -9 1' > x.sh",
+            'herdr agent prompt x "never taskkill" | Invoke-Expression',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+        d = decide("echo 'pkill -f dummy_marker' | bash", port_open=True, training=True, cfg=PM_CFG)
+        self.assertTrue(d.block)
+
+    def test_printed_text_is_always_scanned(
+        self,
+    ):  # G4 follow-up: printers are not message positions
+        for cmd in (
+            "echo 'pkill -f python is forbidden'",
+            'Write-Output "never Stop-Process the backend"',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_variable_capture_chains_still_count(self):  # G4 follow-up
+        for cmd in (
+            "printf -v cmd '%s' 'pkill -f dummy_marker'; eval \"$cmd\"",
+            "Write-Output 'Stop-Process -Id 424242' -OutVariable cmd; Invoke-Expression $cmd",
+            "git commit -m 'kill -9 1' -- a.md; eval \"$(git log -1 --format=%s)\"",
+            "herdr agent prompt x 'taskkill /F /PID 3'; iex $m",
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+        d = decide(
+            "printf -v c '%s' 'pkill -f x'; eval \"$c\"", port_open=True, training=True, cfg=PM_CFG
+        )
+        self.assertTrue(d.block)
+
+    def test_message_with_only_stream_redirects_is_still_inert(self):
+        self.assertNotIn(
+            "kill", g.classify('herdr agent prompt x "never taskkill" --wait >/dev/null 2>&1')
+        )
+
+    def test_shell_wrappers_still_expose_their_quoted_commands(self):
+        for cmd in (
+            'powershell -Command "Stop-Process -Id 5"',
+            "bash -c 'kill -9 1'",
+            'cmd /c "taskkill /F /PID 3"',
+            'pwsh -c "Get-Process python | Stop-Process"',
+            "python -c \"import os; os.system('taskkill /F /PID 3')\"",
+            'Invoke-Expression "Stop-Process -Id 5"',
+        ):
+            self.assertIn("kill", g.classify(cmd), cmd)
+
+    def test_quoted_executable_in_command_position_still_counts(self):
+        self.assertIn("kill", g.classify(r'& "C:\Windows\System32\taskkill.exe" /F /PID 3'))
+        self.assertIn("restart", g.classify('& "C:/x/.venv/Scripts/python.exe" main.py'))
+
+    def test_unquoted_kill_after_a_quoted_argument_still_counts(self):
+        self.assertIn("kill", g.classify('echo "done"; kill -9 5'))
+
+    def test_unbalanced_quotes_fall_back_to_the_raw_text(self):
+        self.assertIn("kill", g.classify('herdr agent prompt x "taskkill /F /PID 3'))
+
+
+class CommitContents(
+    unittest.TestCase
+):  # review R3: judge what the commit can include, not just the index
     def may(self, command, staged=False):
         return g.commit_may_include_py(command, staged_py=lambda target: staged)
 
@@ -138,27 +361,37 @@ class CommitContents(unittest.TestCase):  # review R3: judge what the commit can
         self.assertTrue(self.may('git commit -m "fix" backend/example.py'))
 
     def test_directory_or_glob_pathspec_is_risky(self):
-        self.assertTrue(self.may('git commit -m x -- backend/'))
+        self.assertTrue(self.may("git commit -m x -- backend/"))
         self.assertTrue(self.may('git commit -m x -- "*.md"'))
 
     def test_add_then_commit_in_one_command_is_risky(self):
-        self.assertTrue(self.may('git add backend/example.py && git commit -m "fix" -- backend/example.py'))
-        self.assertTrue(self.may('git add -A; git commit -m x'))
+        self.assertTrue(
+            self.may('git add backend/example.py && git commit -m "fix" -- backend/example.py')
+        )
+        self.assertTrue(self.may("git add -A; git commit -m x"))
 
     def test_all_flags_are_risky(self):
-        for cmd in ('git commit -a -m x', 'git commit -am x', 'git commit --all -m x', 'git commit -qam x',
-                    'git commit -i -m x -- AGENTS.md', 'git commit --include -m x -- AGENTS.md'):
+        for cmd in (
+            "git commit -a -m x",
+            "git commit -am x",
+            "git commit --all -m x",
+            "git commit -qam x",
+            "git commit -i -m x -- AGENTS.md",
+            "git commit --include -m x -- AGENTS.md",
+        ):
             self.assertTrue(self.may(cmd), cmd)
 
     def test_changing_directory_first_is_risky(self):
-        self.assertTrue(self.may('cd ../other && git commit -m x -- AGENTS.md'))
+        self.assertTrue(self.may("cd ../other && git commit -m x -- AGENTS.md"))
 
     def test_staged_python_in_the_target_repo_is_risky(self):
         self.assertTrue(self.may('git commit -m "docs" -- AGENTS.md', staged=True))
 
     def test_git_dash_C_targets_that_repo(self):
         seen = []
-        g.commit_may_include_py('git -C ../repo2 commit -m x -- AGENTS.md', staged_py=lambda t: seen.append(t) or False)
+        g.commit_may_include_py(
+            "git -C ../repo2 commit -m x -- AGENTS.md", staged_py=lambda t: seen.append(t) or False
+        )
         self.assertEqual(seen, ["../repo2"])
 
     def test_message_text_mentioning_py_is_not_a_pathspec(self):
@@ -185,8 +418,15 @@ class PortProbe(unittest.TestCase):  # review R5: only a refused connection mean
     def test_unknown_port_state_blocks_a_risky_command(self):
         def unknown(port):
             raise OSError("probe timed out")
-        d = g.decide("pytest -q", CFG, port_open=unknown, training_running=lambda m: False,
-                     staged_py=lambda *a: False, window_open=lambda: False)
+
+        d = g.decide(
+            "pytest -q",
+            CFG,
+            port_open=unknown,
+            training_running=lambda m: False,
+            staged_py=lambda *a: False,
+            window_open=lambda: False,
+        )
         self.assertTrue(d.block)
 
 
@@ -194,7 +434,9 @@ class TrainingDetection(unittest.TestCase):
     M = ("train_worker.py",)
 
     def test_real_training_worker_is_detected(self):
-        self.assertTrue(g.training_in([("python.exe", "python backend/train_worker.py --epochs 3")], self.M))
+        self.assertTrue(
+            g.training_in([("python.exe", "python backend/train_worker.py --epochs 3")], self.M)
+        )
 
     def test_guards_own_command_line_is_not_training(self):
         # The guard is launched with --training-marker train_worker.py; it must not match itself.
@@ -202,7 +444,9 @@ class TrainingDetection(unittest.TestCase):
         self.assertFalse(g.training_in([("python.exe", own)], self.M))
 
     def test_shell_that_merely_mentions_the_marker_is_not_training(self):
-        self.assertFalse(g.training_in([("bash.exe", "bash -c 'grep -n train_worker.py cnn_agent.py'")], self.M))
+        self.assertFalse(
+            g.training_in([("bash.exe", "bash -c 'grep -n train_worker.py cnn_agent.py'")], self.M)
+        )
 
     def test_multiline_command_line_is_one_process(self):
         # A shell running a heredoc has newlines in its command line; it must be judged as one record.
@@ -211,8 +455,10 @@ class TrainingDetection(unittest.TestCase):
 
     def test_process_records_parse_from_tab_separated_output(self):
         out = "python.exe\tpython train_worker.py\nbash.exe\tbash -c x\n"
-        self.assertEqual(g.parse_process_records(out),
-                         [("python.exe", "python train_worker.py"), ("bash.exe", "bash -c x")])
+        self.assertEqual(
+            g.parse_process_records(out),
+            [("python.exe", "python train_worker.py"), ("bash.exe", "bash -c x")],
+        )
 
 
 class Window(unittest.TestCase):
@@ -227,10 +473,14 @@ class Window(unittest.TestCase):
         self.assertTrue(g.window_is_open(self._file((NOW + timedelta(hours=1)).isoformat()), NOW))
 
     def test_past_expiry_is_closed(self):
-        self.assertFalse(g.window_is_open(self._file((NOW - timedelta(minutes=1)).isoformat()), NOW))
+        self.assertFalse(
+            g.window_is_open(self._file((NOW - timedelta(minutes=1)).isoformat()), NOW)
+        )
 
     def test_missing_or_garbled_file_is_closed(self):
-        self.assertFalse(g.window_is_open(os.path.join(tempfile.gettempdir(), "no-such.window"), NOW))
+        self.assertFalse(
+            g.window_is_open(os.path.join(tempfile.gettempdir(), "no-such.window"), NOW)
+        )
         self.assertFalse(g.window_is_open(self._file("tomorrow-ish"), NOW))
 
     def test_expiry_without_timezone_is_closed(self):
@@ -241,14 +491,24 @@ class Main(unittest.TestCase):
     def run_main(self, payload, port_open=True, stdout=None):
         stdin = io.StringIO(payload if isinstance(payload, str) else json.dumps(payload))
         stderr = io.StringIO()
-        code = g.main(["--port", "8001", "--training-marker", "train_worker.py", "--commit-needs-staged-py"],
-                      stdin=stdin, stderr=stderr, stdout=stdout if stdout is not None else io.StringIO(),
-                      probes=dict(port_open=lambda p: port_open, training_running=lambda m: False,
-                                  staged_py=lambda *a: True, window_open=lambda: False))
+        code = g.main(
+            ["--port", "8001", "--training-marker", "train_worker.py", "--commit-needs-staged-py"],
+            stdin=stdin,
+            stderr=stderr,
+            stdout=stdout if stdout is not None else io.StringIO(),
+            probes=dict(
+                port_open=lambda p: port_open,
+                training_running=lambda m: False,
+                staged_py=lambda *a: True,
+                window_open=lambda: False,
+            ),
+        )
         return code, stderr.getvalue()
 
     def test_blocked_shell_command_exits_2_with_reason_on_stderr(self):
-        code, err = self.run_main({"tool_name": "Bash", "tool_input": {"command": "pytest -q"}, "cwd": "."})
+        code, err = self.run_main(
+            {"tool_name": "Bash", "tool_input": {"command": "pytest -q"}, "cwd": "."}
+        )
         self.assertEqual(code, 2)
         self.assertIn("8001", err)
 
@@ -267,7 +527,9 @@ class Main(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
 
     def test_powershell_tool_is_guarded_too(self):
-        code, _ = self.run_main({"tool_name": "PowerShell", "tool_input": {"command": "Stop-Process -Id 1"}})
+        code, _ = self.run_main(
+            {"tool_name": "PowerShell", "tool_input": {"command": "Stop-Process -Id 1"}}
+        )
         self.assertEqual(code, 2)
 
     def test_allowed_command_exits_0(self):
@@ -297,16 +559,24 @@ class CodexLauncher(unittest.TestCase):
 
     def launcher_code(self):
         import shlex
+
         with open(os.path.join(self.REPO, ".codex", "hooks.json"), encoding="utf-8") as fh:
             command = json.load(fh)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         return shlex.split(command, posix=True)[2]  # [python, -c, <code>, --port, ...]
 
     def run_launcher(self, cwd, command="pytest -q"):
         import subprocess
+
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd})
         # Port 9 (discard) is never listening here, so a healthy guard allows; failures must deny.
-        return subprocess.run([sys.executable, "-c", self.launcher_code(), "--port", "9"], cwd=cwd,
-                              input=payload, capture_output=True, text=True, timeout=60)
+        return subprocess.run(
+            [sys.executable, "-c", self.launcher_code(), "--port", "9"],
+            cwd=cwd,
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
 
     def assert_denied(self, result):
         self.assertEqual(result.returncode, 2, result.stderr)
@@ -315,12 +585,15 @@ class CodexLauncher(unittest.TestCase):
 
     def make_repo(self, guard_source=None):
         import subprocess
+
         d = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, d, True)
         subprocess.run(["git", "init", "-q", d], check=True)
         if guard_source is not None:
             os.makedirs(os.path.join(d, "tools", "agent_guard"))
-            with open(os.path.join(d, "tools", "agent_guard", "live_guard.py"), "w", encoding="utf-8") as fh:
+            with open(
+                os.path.join(d, "tools", "agent_guard", "live_guard.py"), "w", encoding="utf-8"
+            ) as fh:
                 fh.write(guard_source)
         return d
 

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe \"$CLAUDE_PROJECT_DIR/tools/agent_guard/live_guard.py\" --port 8001 --training-marker train_worker.py --commit-needs-staged-py",
+            "command": "C:/Users/gl450/polymarket_app/.venv/Scripts/python.exe \"$CLAUDE_PROJECT_DIR/tools/agent_guard/live_guard.py\" --port 8001 --training-marker train_worker.py --commit-needs-staged-py --tests-allowed-while-live",
             "shell": "bash",
             "timeout": 30,
             "onFailure": "block"

@@ -7,16 +7,26 @@ and both treat exit code 2 with a reason on stderr as "block this tool call".
 While the live backend port is listening or a training process runs, it blocks:
   * test runs (pytest, run_tests.py, python -m unittest), unless the operator opened a test window;
   * commits with staged .py files, where the repo's pre-commit hook then runs tests (same window rule);
+    with --tests-allowed-while-live, these two are blocked only while training runs, not merely
+    because the port is live (polymarket_app operator decision, 2026-11-15);
   * process kills (Stop-Process, taskkill, kill, pkill, killall), window or not;
   * backend starts and restarts while training runs (startup_guard already refuses an occupied port).
 
 A test window is a file `.agent-test-window` at the repository root holding an ISO-8601 expiry with a
 timezone, e.g. `2026-11-14T22:00:00-05:00`. It is gitignored and written by the operator.
 
+Risky words inside a provably inert message argument are ignored by the kill, test and commit checks:
+the message of `herdr agent prompt`, `git commit -m/--message` or `gh --title/--body`, when
+single-quoted or double-quoted without `$(` or a backtick. Any other quoted text (operands, printed
+text, wrapper arguments, substitutions) is scanned as written. Unbalanced quotes, any unquoted pipe,
+and any unquoted eval/iex/Invoke-Expression/source in the command fall back to the raw text.
+Backend-start detection always uses the raw text.
+
 Failure policy: if a check needed for a risky command fails, the command is blocked. A payload that
 cannot be parsed is let through with a warning, so a malformed event never locks an agent out.
 This is a guardrail against mistakes, not a security boundary: commands can be phrased to evade it.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,23 +48,166 @@ SHELL_TOOLS = ("Bash", "PowerShell")
 _PATTERNS = {
     "test": re.compile(r"\bpytest\b|\brun_tests\.py\b|-m\s+unittest\b", re.IGNORECASE),
     "commit": re.compile(r"\bgit\b[^|;&]*?\bcommit\b"),
-    "kill": re.compile(r"\bStop-Process\b|\btaskkill\b|\bpkill\b|\bkillall\b|(?:^|[\s;&|(])kill\s+-?\w",
-                       re.IGNORECASE),
+    "kill": re.compile(
+        r"\bStop-Process\b|\btaskkill\b|\bpkill\b|\bkillall\b|(?:^|[\s;&|('\"`])kill\s+-?\w",
+        re.IGNORECASE,
+    ),
     # Direct starts plus the repositories' own launchers (start_backend.ps1/.bat, start_app.py,
     # start.bat, launcher.py). start_frontend.* is deliberately not a backend start.
-    "restart": re.compile(r"python\S*\s+(?:-\S+\s+)*\S*main\.py\b|\buvicorn\b|\bstartup_guard\b|\s-Replace\b"
-                          r"|\bstart_backend\.(?:ps1|bat|cmd)\b|\bstart_app\.py\b|(?:^|[\\/\s])start\.bat\b"
-                          r"|\blauncher\.py\b", re.IGNORECASE),
+    "restart": re.compile(
+        r"python\S*\s+(?:-\S+\s+)*\S*main\.py\b|\buvicorn\b|\bstartup_guard\b|\s-Replace\b"
+        r"|\bstart_backend\.(?:ps1|bat|cmd)\b|\bstart_app\.py\b|(?:^|[\\/\s])start\.bat\b"
+        r"|\blauncher\.py\b",
+        re.IGNORECASE,
+    ),
 }
+
+# Categories matched against the command with inert message text removed (see _scan_text).
+_QUOTE_AWARE = frozenset({"test", "commit", "kill"})
+_SEPARATORS = ";|&\n"
+# Commands whose quoted message arguments are text, not code: (command word, option that takes the
+# message, or None if every fully quoted argument is a message). `herdr agent prompt` is special-cased.
+_MESSAGE_OPTIONS = {
+    "git": ("-m", "--message"),
+    "gh": ("--title", "--body", "-t", "-b"),
+}
+# Any of these anywhere in the command can turn earlier text into code: no redaction at all.
+_EVALUATORS = re.compile(r"(?i)(?<![\w-])(?:eval|iex|Invoke-Expression|source)(?![\w-])")
+
+
+def _quote_spans(command: str) -> Optional[list]:
+    """(start, end) index pairs of quoted spans, quotes included; None if quotes are unbalanced.
+    Inside double quotes a backslash or PowerShell backtick escapes the next character."""
+    spans, i, n = [], 0, len(command)
+    while i < n:
+        q = command[i]
+        if q not in "\"'":
+            i += 1
+            continue
+        j = i + 1
+        while j < n and command[j] != q:
+            j += 2 if q == '"' and command[j] in "\\`" else 1
+        if j >= n:
+            return None
+        spans.append((i, j))
+        i = j + 1
+    return spans
+
+
+def _tokens(command: str, start: int, end: int, spans: list) -> list:
+    """(start, end) ranges of the whitespace-separated words in command[start:end], quotes respected."""
+    inside = _inside_mask(command, spans)
+    words, i = [], start
+    while i < end:
+        if command[i].isspace() and not inside[i]:
+            i += 1
+            continue
+        j = i
+        while j < end and not (command[j].isspace() and not inside[j]):
+            j += 1
+        words.append((i, j))
+        i = j
+    return words
+
+
+def _inside_mask(command: str, spans: list) -> list:
+    inside = [False] * len(command)
+    for a, b in spans:
+        inside[a : b + 1] = [True] * (b + 1 - a)
+    return inside
+
+
+def _segments(command: str, spans: list) -> list:
+    """(start, end) ranges of the command split on separators that are outside quotes."""
+    inside = _inside_mask(command, spans)
+    cuts = [i for i, ch in enumerate(command) if ch in _SEPARATORS and not inside[i]]
+    starts = [0] + [c + 1 for c in cuts]
+    ends = cuts + [len(command)]
+    return [(starts[k], ends[k]) for k in range(len(ends))]
+
+
+def _inert(text: str) -> bool:
+    """A fully quoted word the shell cannot execute: single-quoted, or double-quoted without a
+    command substitution (`$(`) or a backtick (bash command substitution)."""
+    return text[0] == "'" or ("$(" not in text and "`" not in text)
+
+
+def _message_words(command: str, words: list, spans: set) -> list:
+    """The words of one segment that are provably inert message text."""
+    texts = [command[a:b] for a, b in words]
+    quoted = [(a, b - 1) in spans for a, b in words]
+    head = texts[0].lower() if texts and not quoted[0] else ""
+    picked = []
+    if (
+        head == "herdr"
+        and [t.lower() for t in texts[1:3]] == ["agent", "prompt"]
+        and len(texts) > 4
+    ):
+        picked = [4]
+    elif head in _MESSAGE_OPTIONS:
+        if head == "git" and "commit" not in texts:
+            return []
+        opts = _MESSAGE_OPTIONS[head]
+        picked = [k + 1 for k in range(1, len(texts) - 1) if not quoted[k] and texts[k] in opts]
+    return [words[k] for k in picked if quoted[k] and _inert(texts[k])]
+
+
+def _scan_text(command: str) -> str:
+    """The command with provably inert message arguments blanked (see _message_words); everything
+    else, including any quoted text a shell could run, is kept. Unbalanced quotes, an unquoted pipe or
+    an unquoted evaluator (eval/iex/Invoke-Expression/source): raw text."""
+    spans = _quote_spans(command)
+    if spans is None:
+        return command
+    inside = _inside_mask(command, spans)
+    if any(ch == "|" and not inside[i] for i, ch in enumerate(command)):
+        return command  # piped text may run downstream (`| Invoke-Expression`, `| bash`)
+    unquoted = "".join(" " if inside[i] else ch for i, ch in enumerate(command))
+    if _EVALUATORS.search(unquoted):
+        return command  # captured text may be evaluated later in the chain (eval "$cmd")
+    span_set = set(spans)
+    out = []
+    for start, end in _segments(command, spans):
+        blank = _message_words(command, _tokens(command, start, end, spans), span_set)
+        pieces, k = [], start
+        for a, b in blank:
+            pieces += [command[k:a], '""']
+            k = b
+        pieces.append(command[k:end])
+        out.append("".join(pieces))
+    return "\n".join(out)
+
 
 # Splits a shell line into commands; any of these separators may hide a second git operation.
 _SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n]")
 _DIR_CHANGE = re.compile(r"(?:^|\s)(?:cd|pushd|chdir|Set-Location|sl)(?:\s|$)", re.IGNORECASE)
-_INDEX_CHANGE = re.compile(r"\bgit\b[^|;&]*?\b(?:add|stage|rm|mv|restore|apply|checkout|stash|reset)\b")
-_COMMIT_OPTS_WITH_VALUE = frozenset({
-    "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message", "--author",
-    "--date", "-t", "--template", "--fixup", "--squash", "--cleanup", "--trailer", "--pathspec-from-file"})
-_COMMIT_STAGING_LONG = frozenset({"--all", "--include", "--interactive", "--patch", "--pathspec-from-file"})
+_INDEX_CHANGE = re.compile(
+    r"\bgit\b[^|;&]*?\b(?:add|stage|rm|mv|restore|apply|checkout|stash|reset)\b"
+)
+_COMMIT_OPTS_WITH_VALUE = frozenset(
+    {
+        "-m",
+        "--message",
+        "-F",
+        "--file",
+        "-C",
+        "--reuse-message",
+        "-c",
+        "--reedit-message",
+        "--author",
+        "--date",
+        "-t",
+        "--template",
+        "--fixup",
+        "--squash",
+        "--cleanup",
+        "--trailer",
+        "--pathspec-from-file",
+    }
+)
+_COMMIT_STAGING_LONG = frozenset(
+    {"--all", "--include", "--interactive", "--patch", "--pathspec-from-file"}
+)
 _COMMIT_STAGING_SHORT = frozenset("aip")
 
 
@@ -70,7 +223,9 @@ def _commit_segment_may_include_py(segment: str, staged_py: Callable[[str], bool
         tokens = shlex.split(segment.replace("\\", "/"))
     except ValueError:
         return True  # unbalanced quotes: cannot tell
-    git_at = next((i for i, t in enumerate(tokens) if os.path.basename(t).lower() in ("git", "git.exe")), None)
+    git_at = next(
+        (i for i, t in enumerate(tokens) if os.path.basename(t).lower() in ("git", "git.exe")), None
+    )
     if git_at is None or "commit" not in tokens[git_at:]:
         return True
     target, i = ".", git_at + 1
@@ -122,6 +277,7 @@ class Config:
     port: int
     training_markers: Tuple[str, ...]
     commit_needs_staged_py: bool
+    tests_allowed_while_live: bool = False
 
 
 @dataclass(frozen=True)
@@ -132,7 +288,12 @@ class Decision:
 
 def classify(command: str) -> FrozenSet[str]:
     """Return the risk categories a shell command falls into (empty if harmless)."""
-    return frozenset(name for name, pattern in _PATTERNS.items() if pattern.search(command))
+    scanned = _scan_text(command)
+    return frozenset(
+        name
+        for name, pattern in _PATTERNS.items()
+        if pattern.search(scanned if name in _QUOTE_AWARE else command)
+    )
 
 
 def decide(
@@ -150,29 +311,53 @@ def decide(
     if not risks:
         return Decision(False)
     try:
-        if "commit" in risks and not (cfg.commit_needs_staged_py and commit_may_include_py(command, staged_py)):
+        if "commit" in risks and not (
+            cfg.commit_needs_staged_py and commit_may_include_py(command, staged_py)
+        ):
             risks = risks - {"commit"}
         if not risks:
             return Decision(False)
-        live = port_open(cfg.port)
+        tests_gated_by_port = bool(risks & {"test", "commit"}) and not cfg.tests_allowed_while_live
+        live = port_open(cfg.port) if ("kill" in risks or tests_gated_by_port) else False
         training = bool(cfg.training_markers) and training_running(cfg.training_markers)
-        window = window_open() if (risks & {"test", "commit"}) and (live or training) else False
+        tests_blocked_by = (live and tests_gated_by_port) or training
+        window = window_open() if (risks & {"test", "commit"}) and tests_blocked_by else False
     except Exception as exc:  # fail closed: a risky command we cannot check is blocked
-        return Decision(True, f"live_guard: blocked; could not check the live backend ({exc}). Ask the operator.")
+        return Decision(
+            True,
+            f"live_guard: blocked; could not check the live backend ({exc}). Ask the operator.",
+        )
 
-    state = " and ".join(part for part in (
-        f"port {cfg.port} is live" if live else "",
-        "a training process is running" if training else "",
-    ) if part)
+    state = " and ".join(
+        part
+        for part in (
+            f"port {cfg.port} is live" if live else "",
+            "a training process is running" if training else "",
+        )
+        if part
+    )
     if "kill" in risks and (live or training):
-        return Decision(True, f"live_guard: blocked a process kill because {state}. Ask the operator first.")
+        return Decision(
+            True, f"live_guard: blocked a process kill because {state}. Ask the operator first."
+        )
     if "restart" in risks and training:
-        return Decision(True, "live_guard: blocked a backend start/restart because a training process is "
-                              "running. Wait for training to finish.")
-    if (risks & {"test", "commit"}) and (live or training) and not window:
-        what = "a test run" if "test" in risks else "a commit with staged .py files (the hook runs tests)"
-        return Decision(True, f"live_guard: blocked {what} because {state}. Ask the operator for a test "
-                              f"window: an ISO-8601 expiry with timezone in <repo>/{WINDOW_FILENAME}.")
+        return Decision(
+            True,
+            "live_guard: blocked a backend start/restart because a training process is "
+            "running. Wait for training to finish.",
+        )
+    if (risks & {"test", "commit"}) and tests_blocked_by and not window:
+        what = (
+            "a test run"
+            if "test" in risks
+            else "a commit with staged .py files (the hook runs tests)"
+        )
+        why = state if tests_gated_by_port else "a training process is running"
+        return Decision(
+            True,
+            f"live_guard: blocked {what} because {why}. Ask the operator for a test "
+            f"window: an ISO-8601 expiry with timezone in <repo>/{WINDOW_FILENAME}.",
+        )
     return Decision(False)
 
 
@@ -215,8 +400,10 @@ def port_listening(port: int, connect: Callable[[int], int] = _connect_ex) -> bo
 ProcessRecord = Tuple[str, str]  # (executable name, full command line on one line)
 
 # One record per line: "<name>\t<command line>", with newlines inside a command line flattened.
-_PS_LIST = ("Get-CimInstance Win32_Process | ForEach-Object { "
-            "$_.Name + \"`t\" + (($_.CommandLine -as [string]) -replace '[\\r\\n]+', ' ') }")
+_PS_LIST = (
+    "Get-CimInstance Win32_Process | ForEach-Object { "
+    "$_.Name + \"`t\" + (($_.CommandLine -as [string]) -replace '[\\r\\n]+', ' ') }"
+)
 
 
 def parse_process_records(out: str) -> list:
@@ -230,11 +417,17 @@ def parse_process_records(out: str) -> list:
 
 def _process_records() -> list:
     if os.name == "nt":
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", _PS_LIST],
-                             capture_output=True, text=True, timeout=15, check=True).stdout
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", _PS_LIST],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        ).stdout
     else:
-        out = subprocess.run(["ps", "-eo", "comm=,args="], capture_output=True, text=True,
-                             timeout=15, check=True).stdout
+        out = subprocess.run(
+            ["ps", "-eo", "comm=,args="], capture_output=True, text=True, timeout=15, check=True
+        ).stdout
         out = "\n".join("\t".join(part.split(None, 1)) for part in out.splitlines() if part.strip())
     return parse_process_records(out)
 
@@ -255,14 +448,24 @@ def _training_running(markers: Tuple[str, ...]) -> bool:
 
 
 def _repo_root(cwd: str) -> str:
-    out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    out = subprocess.run(
+        ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.strip()
     return out or cwd
 
 
 def _staged_py(cwd: str) -> bool:
-    out = subprocess.run(["git", "-C", cwd, "diff", "--cached", "--name-only"],
-                         capture_output=True, text=True, timeout=10, check=True).stdout
+    out = subprocess.run(
+        ["git", "-C", cwd, "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout
     return any(name.strip().endswith(".py") for name in out.splitlines())
 
 
@@ -271,8 +474,9 @@ def _default_probes(cwd: str) -> dict:
         port_open=port_listening,
         training_running=_training_running,
         staged_py=lambda target: _staged_py(os.path.join(cwd, target)),
-        window_open=lambda: window_is_open(os.path.join(_repo_root(cwd), WINDOW_FILENAME),
-                                           datetime.now(timezone.utc)),
+        window_open=lambda: window_is_open(
+            os.path.join(_repo_root(cwd), WINDOW_FILENAME), datetime.now(timezone.utc)
+        ),
     )
 
 
@@ -281,12 +485,20 @@ def _parse_args(argv: Sequence[str]) -> Config:
     p.add_argument("--port", type=int, required=True)
     p.add_argument("--training-marker", action="append", default=[])
     p.add_argument("--commit-needs-staged-py", action="store_true")
+    p.add_argument("--tests-allowed-while-live", action="store_true")
     a = p.parse_args(list(argv))
-    return Config(a.port, tuple(a.training_marker), a.commit_needs_staged_py)
+    return Config(
+        a.port, tuple(a.training_marker), a.commit_needs_staged_py, a.tests_allowed_while_live
+    )
 
 
-def main(argv: Sequence[str], stdin: TextIO = sys.stdin, stderr: TextIO = sys.stderr,
-         probes: Optional[dict] = None, stdout: TextIO = sys.stdout) -> int:
+def main(
+    argv: Sequence[str],
+    stdin: TextIO = sys.stdin,
+    stderr: TextIO = sys.stderr,
+    probes: Optional[dict] = None,
+    stdout: TextIO = sys.stdout,
+) -> int:
     cfg = _parse_args(argv)
     try:
         event = json.loads(stdin.read().lstrip("﻿") or "{}")  # Windows PowerShell pipes add a BOM
@@ -302,8 +514,18 @@ def main(argv: Sequence[str], stdin: TextIO = sys.stdin, stderr: TextIO = sys.st
     if decision.block:
         # Both signals: exit 2 + reason on stderr, and the JSON deny decision both agents accept on
         # stdout, so the block survives a shell wrapper that loses the exit code.
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                 "permissionDecisionReason": decision.reason}}), file=stdout)
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": decision.reason,
+                    }
+                }
+            ),
+            file=stdout,
+        )
         print(decision.reason, file=stderr)
         return 2
     return 0
