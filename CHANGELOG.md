@@ -1098,6 +1098,16 @@ no ledger closure, no reconciliation worker and no live integration, and leaves
 invariant 21's routing semantics untouched. Live promotion remains a separate
 operator decision.
 
+### Exact rule reporting - 2026-09-26
+
+- Version Phase 4 JSON reports as schema 2 and include the exact machine rule,
+  binding digest and complete profile identity beside an explicitly rounded display summary.
+- Label Phase 3 group search statistics separately; remove misleading expected-policy
+  metric names. These statistics do not establish representative-policy performance.
+- Show exact rule content and provenance in Markdown; remove unused production
+  text-rule parsing, retaining a parser only for handcrafted test fixtures.
+- Deployment remains blocked. Existing archived artifacts are not rewritten.
+
 ### Exact executable research rules - 2026-09-26
 
 - Store exact binary64 tree paths separately from display summaries. Pin left

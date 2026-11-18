@@ -48,6 +48,7 @@ def _write_deployment_json(
     output_path: Path,
 ) -> None:
     payload = {
+        "schema_version": 2,
         "evaluation_scope": "research_selection",
         "deployment_eligible": False,
         "deployment_blockers": list(DEPLOYMENT_BLOCKERS),
@@ -74,13 +75,19 @@ def _write_deployment_json(
                 "pid": p.pid,
                 "horizon": int(p.horizon),
                 "leaf_id": int(p.leaf_id),
-                "rule_path": p.rule_path,
-                "expected_avg_win": float(p.avg_win),
-                "expected_avg_loss": float(p.avg_loss),
-                "expected_max_dd": float(p.max_dd),
-                "expected_trade_count": int(p.trade_count),
-                "expected_sortino": float(p.sortino),
-                "phase3_cumulative_profit_deflated": float(p.cumulative_profit_deflated),
+                "profile_id": p.profile_id,
+                "rounded_display_summary": p.rule_path,
+                "machine_rule": p.machine_rule,
+                "rule_digest": p.rule_digest,
+                "group_search_metrics": {
+                    "scope": "qualifying_leaves_not_representative_policy",
+                    "avg_win": float(p.avg_win),
+                    "avg_loss": float(p.avg_loss),
+                    "max_dd": float(p.max_dd),
+                    "trade_count": int(p.trade_count),
+                    "sortino": float(p.sortino),
+                    "cumulative_profit_deflated": float(p.cumulative_profit_deflated),
+                },
             }
             for p in card.selected_profiles
         ],

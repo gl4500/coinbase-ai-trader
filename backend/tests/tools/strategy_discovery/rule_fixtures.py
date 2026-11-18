@@ -1,12 +1,34 @@
 """Explicit machine-rule fixtures; never used to migrate real legacy artifacts."""
 
 import json
+from typing import List, Tuple
 
 import pandas as pd
 
 from tools.strategy_discovery.mine_profiles import _FEATURE_COLUMNS
-from tools.strategy_discovery.portfolio_sim import parse_rule_path
 from tools.strategy_discovery.rule_contract import BINDING_VERSION, RULE_VERSION, bind_rule
+
+
+def parse_rule_path(rule_path: str) -> List[Tuple[str, str, float]]:
+    """Parse 'feat_a > 1.02 AND feat_b <= 0.08' into [(feature, op, threshold), ...].
+
+    Operators supported: >, <, >=, <=. Only explicit '(root)' is unconditional.
+    """
+    if not isinstance(rule_path, str) or not rule_path.strip():
+        raise ValueError("unresolved rule cannot be simulated")
+    if rule_path.strip() == "(root)":
+        return []
+    conditions: List[Tuple[str, str, float]] = []
+    for clause in rule_path.split(" AND "):
+        clause = clause.strip()
+        for op in (">=", "<=", ">", "<"):
+            if f" {op} " in clause:
+                feature, threshold_str = clause.split(f" {op} ", 1)
+                conditions.append((feature.strip(), op, float(threshold_str.strip())))
+                break
+        else:
+            raise ValueError(f"unparseable rule clause: {clause!r}")
+    return conditions
 
 
 def machine_rule_fixture(text):
