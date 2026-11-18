@@ -16,16 +16,19 @@ _STATUSES = {"pending", "running", "completed", "excluded", "error"}
 _FIELDS = {"pid", "horizon", "status", "reason_code", "observed"}
 
 
-def _pair(pid, horizon) -> Pair:
-    if not isinstance(pid, str) or not pid.strip() or pid != pid.strip():
-        raise ValueError("product identity must be a nonempty unpadded string")
-    if type(horizon) is not int or horizon <= 0:
-        raise ValueError("horizon must be a positive integer without coercion")
-    return pid, horizon
+def declare_pairs(pids: Iterable[object], horizons: Iterable[object]) -> tuple[Pair, ...]:
+    """Materialize once, validate, then deduplicate the complete request product.
 
+    Required: ``pids`` and ``horizons`` are non-string iterables, each non-empty.
+    Every pid must be a non-empty str with no surrounding whitespace; every
+    horizon a plain positive int (bool and other numeric types are not coerced).
+    Duplicates in either input are allowed and collapse. Returns the sorted,
+    de-duplicated cross product as ``(pid, horizon)`` tuples.
 
-def declare_pairs(pids: Iterable[str], horizons: Iterable[int]) -> tuple[Pair, ...]:
-    """Materialize once, validate, then deduplicate the complete request product."""
+    Raises:
+        ValueError: if either input is a str/bytes, either is empty, or any pid
+            or horizon is invalid.
+    """
     if isinstance(pids, (str, bytes)) or isinstance(horizons, (str, bytes)):
         raise ValueError("products and horizons must be collections")
     products, periods = list(pids), list(horizons)
@@ -36,6 +39,21 @@ def declare_pairs(pids: Iterable[str], horizons: Iterable[int]) -> tuple[Pair, .
 
 @dataclass(frozen=True)
 class CoverageSummary:
+    """Validated, immutable per-status counts over one declared request.
+
+    Construction enforces: every count is a plain int, ``requested_count`` > 0,
+    the five status counts are >= 0 and sum exactly to ``requested_count``;
+    ``dispositions_complete`` is True exactly when nothing is pending or running
+    (complete accounting, not valid evaluation); ``blockers`` is a tuple of
+    non-blank names that always contains ``fold_leaf_evidence_not_validated``,
+    plus ``incomplete_pair_dispositions``, ``excluded_pairs`` and
+    ``errored_pairs`` whenever those conditions hold. ``evaluation_validated``
+    and ``deployment_eligible`` are always False.
+
+    Raises:
+        ValueError: from construction when any of the above does not hold.
+    """
+
     requested_count: int
     pending_count: int
     running_count: int
@@ -45,7 +63,7 @@ class CoverageSummary:
     dispositions_complete: bool
     blockers: tuple[str, ...]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         counts = (
             self.pending_count,
             self.running_count,
@@ -86,13 +104,27 @@ class CoverageSummary:
         return False
 
 
-def summarize_coverage(requested: Iterable[Pair], records: Iterable[dict]) -> CoverageSummary:
+def summarize_coverage(requested: Iterable[object], records: Iterable[object]) -> CoverageSummary:
     """Require exactly one valid disposition per declared pair, including pending.
 
     A completed count records producer claims only. Terminal errors/exclusions can
     make accounting complete while leaving evaluation incomplete or invalid.
+
+    Required: ``requested`` is a non-empty iterable of distinct 2-item
+    tuples/lists ``(pid, horizon)``, each valid as in ``declare_pairs``.
+    ``records`` holds exactly one dict per requested pair with exactly the keys
+    pid, horizon, status, reason_code, observed: ``status`` is one of pending,
+    running, completed, excluded, error; ``observed`` is a dict of finite JSON
+    data; ``excluded``/``error`` need a non-blank str ``reason_code`` and
+    non-empty ``observed``; every other status needs ``reason_code`` None.
+    Returns the ``CoverageSummary`` with the blockers its counts require.
+
+    Raises:
+        ValueError: on an empty, malformed or duplicated request; a malformed,
+            unexpected or duplicate record; or any requested pair without a
+            record (absence is not success).
     """
-    expected = set()
+    expected: set[Pair] = set()
     for value in requested:
         if not isinstance(value, (tuple, list)) or len(value) != 2:
             raise ValueError("invalid requested pair")
@@ -102,8 +134,8 @@ def summarize_coverage(requested: Iterable[Pair], records: Iterable[dict]) -> Co
         expected.add(pair)
     if not expected:
         raise ValueError("missing requested pair declaration")
-    seen = set()
-    counts = Counter()
+    seen: set[Pair] = set()
+    counts: Counter[str] = Counter()
     for row in records:
         if not isinstance(row, dict) or set(row) != _FIELDS:
             raise ValueError("invalid pair disposition fields")
@@ -148,3 +180,11 @@ def summarize_coverage(requested: Iterable[Pair], records: Iterable[dict]) -> Co
         dispositions_complete=complete,
         blockers=tuple(blockers),
     )
+
+
+def _pair(pid: object, horizon: object) -> Pair:
+    if not isinstance(pid, str) or not pid.strip() or pid != pid.strip():
+        raise ValueError("product identity must be a nonempty unpadded string")
+    if type(horizon) is not int or horizon <= 0:
+        raise ValueError("horizon must be a positive integer without coercion")
+    return pid, horizon
