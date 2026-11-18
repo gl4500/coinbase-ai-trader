@@ -22,10 +22,11 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-from tools.strategy_discovery.mine_profiles import LeafProfile  # noqa: E402
+from tools.strategy_discovery.mine_profiles import _FEATURE_COLUMNS, LeafProfile  # noqa: E402
+from tools.strategy_discovery.rule_contract import validate_bound_rule  # noqa: E402
 
 _DEFAULT_HORIZONS = (1, 4, 24, 72, 168)
-_SCHEMA_VERSION = 2  # adds evaluated fold count and chronological-validation provenance
+_SCHEMA_VERSION = 3  # binds independently stored machine-rule digests to profile rows
 _DEFAULT_PHASE2_DIR = Path(BACKEND) / "data" / "phase2"
 _DEFAULT_OUTPUT_DIR = Path(BACKEND) / "data" / "phase3"
 
@@ -54,6 +55,18 @@ def write_profile_parquet(
     rows = []
     for p in profiles:
         d = asdict(p)
+        binding = d.pop("rule_binding")
+        if binding is not None:
+            validate_bound_rule(
+                binding,
+                pid=pid,
+                horizon=int(horizon),
+                profile_leaf_id=p.leaf_id,
+                expected_digest=binding.get("digest"),
+                feature_schema=list(_FEATURE_COLUMNS),
+            )
+        d["rule_digest"] = binding["digest"] if binding is not None else None
+        d["rule_version"] = binding["version"] if binding is not None else "legacy_unverified"
         d["pid"] = pid
         d["horizon"] = int(horizon)
         d["schema_version"] = _SCHEMA_VERSION
@@ -83,7 +96,7 @@ def mine_universe(
 
     pids = pids_from_universe_json(Path(universe_path))
     all_profiles: Dict[int, List[LeafProfile]] = {int(h): [] for h in horizons}
-    rule_paths_per_horizon: Dict[int, Dict[str, str]] = {int(h): {} for h in horizons}
+    rule_paths_per_horizon: Dict[int, Dict[str, dict]] = {int(h): {} for h in horizons}
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tasks: List[tuple] = []
@@ -116,7 +129,8 @@ def mine_universe(
                 output_path=output_dir / f"profiles_h{h}.parquet",
             )
             for p in profiles:
-                rule_paths_per_horizon[h][f"{pid}__{p.leaf_id}"] = p.rule_path_summary
+                if p.rule_binding is not None:
+                    rule_paths_per_horizon[h][f"{pid}__{p.leaf_id}"] = p.rule_binding
         elapsed = time.time() - start_time
         rate = idx / elapsed if elapsed > 0 else 0.0
         eta = (len(tasks) - idx) / rate if rate > 0 else 0.0

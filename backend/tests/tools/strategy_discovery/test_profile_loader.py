@@ -10,10 +10,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from tests.tools.strategy_discovery.rule_fixtures import (
+    machine_rule_fixture,
+    write_bound_sidecar_fixture,
+)
 from tools.strategy_discovery.profile_loader import (
     LoadedProfile,
     load_all_profiles,
 )
+from tools.strategy_discovery.rule_contract import BINDING_VERSION
 
 _PROFILE_COLUMNS = [
     "pid",
@@ -43,7 +48,9 @@ _PROFILE_COLUMNS = [
 
 def _write_profile_parquet(path: Path, rows):
     df = pd.DataFrame(rows, columns=_PROFILE_COLUMNS)
-    df["schema_version"] = 2
+    df["schema_version"] = 3
+    df["rule_version"] = BINDING_VERSION
+    df["rule_digest"] = None
     df["validation_version"] = "chronological_distinct_folds_v2"
     df["n_folds_evaluated"] = 5
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +59,7 @@ def _write_profile_parquet(path: Path, rows):
 
 def _write_rule_paths_json(path: Path, mapping: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping), encoding="utf-8")
+    write_bound_sidecar_fixture(path, mapping)
 
 
 def test_loads_all_horizon_parquets(tmp_path: Path):
@@ -152,12 +159,12 @@ def test_loads_all_horizon_parquets(tmp_path: Path):
     profiles = load_all_profiles(phase3_dir=phase3_dir, horizons=[1, 4, 24, 72, 168])
     assert len(profiles) == 3
     # All carry their (pid, horizon, leaf_id) identifiers + their rule_path
-    by_id = {p.profile_id: p for p in profiles}
+    by_id = {f"{p.pid}__h{p.horizon}__{p.leaf_id}": p for p in profiles}
     assert len(by_id) == 3
     assert by_id["BTC-USD__h1__0"].horizon == 1
     assert by_id["BTC-USD__h24__0"].horizon == 24
-    assert by_id["BTC-USD__h1__0"].rule_path == "vol_over_mc > 0.05"
-    assert by_id["BTC-USD__h24__0"].rule_path == "price_over_ema20 > 1.02"
+    assert by_id["BTC-USD__h1__0"].machine_rule == machine_rule_fixture("vol_over_mc > 0.05")
+    assert by_id["BTC-USD__h24__0"].machine_rule == machine_rule_fixture("price_over_ema20 > 1.02")
     assert all(isinstance(p, LoadedProfile) for p in profiles)
 
 
@@ -198,8 +205,11 @@ def test_attaches_rule_paths_from_sidecar_json(tmp_path: Path):
     )
     profiles = load_all_profiles(phase3_dir=phase3_dir, horizons=[24])
     assert len(profiles) == 1
-    # Full rule from JSON wins over the parquet's truncated rule_path_summary
-    assert profiles[0].rule_path == "vol_over_mc > 0.08 AND price_over_ema20 > 1.02"
+    # Display text remains descriptive; only the bound machine rule executes.
+    assert profiles[0].rule_path == "short_summary"
+    assert profiles[0].machine_rule == machine_rule_fixture(
+        "vol_over_mc > 0.08 AND price_over_ema20 > 1.02"
+    )
 
 
 def test_filters_profiles_below_min_folds_passed(tmp_path: Path):
@@ -212,7 +222,7 @@ def test_filters_profiles_below_min_folds_passed(tmp_path: Path):
                 "BTC-USD",
                 24,
                 0,
-                "rule_a",
+                "(root)",
                 0.05,
                 0.02,
                 0.03,
@@ -237,7 +247,7 @@ def test_filters_profiles_below_min_folds_passed(tmp_path: Path):
                 "ETH-USD",
                 24,
                 1,
-                "rule_b",
+                "(root)",
                 0.04,
                 0.01,
                 0.03,
@@ -262,7 +272,7 @@ def test_filters_profiles_below_min_folds_passed(tmp_path: Path):
                 "SOL-USD",
                 24,
                 2,
-                "rule_c",
+                "(root)",
                 0.03,
                 0.01,
                 0.02,
@@ -287,9 +297,9 @@ def test_filters_profiles_below_min_folds_passed(tmp_path: Path):
     _write_rule_paths_json(
         phase3_dir / "rule_paths_h24.json",
         {
-            "BTC-USD__0": "rule_a",
-            "ETH-USD__1": "rule_b",
-            "SOL-USD__2": "rule_c",
+            "BTC-USD__0": "(root)",
+            "ETH-USD__1": "(root)",
+            "SOL-USD__2": "(root)",
         },
     )
     profiles = load_all_profiles(phase3_dir=phase3_dir, horizons=[24], min_folds_passed_q0=4)
@@ -315,7 +325,9 @@ def test_rejects_unverified_profiles_and_reports_exclusion_count(tmp_path, caplo
         horizon=24,
         leaf_id=0,
         rule_path_summary="x > 1",
-        schema_version=2,
+        schema_version=3,
+        rule_version=BINDING_VERSION,
+        rule_digest=None,
         n_folds_passed_q0=5,
         **metadata,
     )
@@ -333,12 +345,15 @@ def test_invalid_pass_counts_are_rejected_without_truncation(tmp_path, passed):
         horizon=24,
         leaf_id=0,
         rule_path_summary="x > 1",
-        schema_version=2,
+        schema_version=3,
+        rule_version=BINDING_VERSION,
+        rule_digest=None,
         n_folds_passed_q0=passed,
         validation_version="chronological_distinct_folds_v2",
         n_folds_evaluated=5,
     )
     pd.DataFrame([row]).to_parquet(tmp_path / "profiles_h24.parquet", index=False)
+    _write_rule_paths_json(tmp_path / "rule_paths_h24.json", {"BTC-USD__0": "(root)"})
     assert load_all_profiles(tmp_path, horizons=[24]) == []
 
 
@@ -349,7 +364,9 @@ def _write_verified_rule_profile(path, copies=1):
         horizon=24,
         leaf_id=0,
         rule_path_summary="(root)",
-        schema_version=2,
+        schema_version=3,
+        rule_version=BINDING_VERSION,
+        rule_digest=None,
         n_folds_passed_q0=5,
         validation_version="chronological_distinct_folds_v2",
         n_folds_evaluated=5,
@@ -416,3 +433,43 @@ def test_mismatched_horizon_exclusion_keeps_valid_rows(tmp_path, caplog):
     profiles = load_all_profiles(tmp_path, horizons=[24])
     assert len(profiles) == 1
     assert profiles[0].horizon == 24
+
+
+@pytest.mark.parametrize(
+    "corruption", ["legacy", "digest", "schema", "threshold", "horizon", "features"]
+)
+def test_exact_loader_rejects_stale_or_corrupt_rule_binding(tmp_path, caplog, corruption):
+    _write_verified_rule_profile(tmp_path)
+    sidecar = tmp_path / "rule_paths_h24.json"
+    _write_rule_paths_json(sidecar, {"BTC-USD__0": "price_over_ema20 > 1.0249"})
+    assert len(load_all_profiles(tmp_path, horizons=[24])) == 1
+    mapping = json.loads(sidecar.read_text())
+    if corruption == "legacy":
+        mapping["BTC-USD__0"] = "price_over_ema20 > 1.02"
+    elif corruption == "threshold":
+        mapping["BTC-USD__0"]["rule"]["conditions"][0]["threshold_hex"] = float(1.02).hex()
+    elif corruption == "horizon":
+        mapping["BTC-USD__0"]["horizon"] = 1
+    elif corruption == "features":
+        mapping["BTC-USD__0"]["feature_schema"].reverse()
+    else:
+        parquet = tmp_path / "profiles_h24.parquet"
+        frame = pd.read_parquet(parquet)
+        frame["rule_digest" if corruption == "digest" else "schema_version"] = (
+            "b" * 64 if corruption == "digest" else 2
+        )
+        frame.to_parquet(parquet, index=False)
+    sidecar.write_text(json.dumps(mapping))
+    assert load_all_profiles(tmp_path, horizons=[24]) == []
+    assert "excluded" in caplog.text.lower()
+
+
+def test_same_group_ordinal_with_changed_rule_has_distinct_content_identity(tmp_path):
+    _write_verified_rule_profile(tmp_path)
+    sidecar = tmp_path / "rule_paths_h24.json"
+    _write_rule_paths_json(sidecar, {"BTC-USD__0": "price_over_ema20 > 1.0249"})
+    before = load_all_profiles(tmp_path, horizons=[24])[0]
+    _write_rule_paths_json(sidecar, {"BTC-USD__0": "price_over_ema20 > 1.02"})
+    after = load_all_profiles(tmp_path, horizons=[24])[0]
+    assert before.leaf_id == after.leaf_id
+    assert before.profile_id != after.profile_id

@@ -288,3 +288,28 @@ def test_multiple_leaves_in_one_period_count_as_one_fold(monkeypatch, passing_pe
         assert len(profiles) == 1
         assert profiles[0].n_folds_passed_q0 == passing_periods
         assert profiles[0].n_folds_passed_q0 <= profiles[0].n_folds_evaluated
+        binding = profiles[0].rule_binding
+        assert binding["profile_leaf_id"] == 0
+        assert binding["source_leaf_id"] == 3
+        assert binding["source_outer_fold"] == passing_periods - 1
+        assert binding["pid"] == "TEST"
+        assert binding["horizon"] == 168
+        assert binding["feature_schema"] == list(miner._FEATURE_COLUMNS)
+        assert len(binding["source_tree_digest"]) == 64
+
+
+def test_miner_rejects_changed_feature_dtype_before_fitting(monkeypatch):
+    miner = _stub_mining_frame(monkeypatch, np.arange(12000, dtype="int64") * 3_600_000)
+    original_tensor = miner.torch.tensor
+
+    def downcast_features(*args, **kwargs):
+        tensor = original_tensor(*args, **kwargs)
+        return tensor.float() if tensor.ndim == 2 else tensor
+
+    def forbidden(**kwargs):
+        pytest.fail("must not fit under an unsupported comparison dtype")
+
+    monkeypatch.setattr(miner.torch, "tensor", downcast_features)
+    monkeypatch.setattr(miner, "fit_tree", forbidden)
+    with pytest.raises(ValueError, match="float64"):
+        miner.mine_profiles_for_pid_horizon("TEST", 168, "unused", device="cpu")
