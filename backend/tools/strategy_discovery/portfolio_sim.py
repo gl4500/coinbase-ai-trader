@@ -79,6 +79,20 @@ def simulate_portfolio(
         validate_rule(profile.machine_rule)
         machine_rules[profile.profile_id] = profile.machine_rule
         frame = pid_features.get(profile.pid)
+        if frame is not None and not frame.empty:
+            # Legacy labels advance by rows; replay advances by hours. A gap can
+            # realize a label before its exit and release its occupied slot early.
+            if (
+                "ts" not in frame
+                or not pd.api.types.is_integer_dtype(frame["ts"].dtype)
+                or frame["ts"].isna().any()
+                or frame["ts"].duplicated().any()
+                or (frame["ts"].sort_values().diff().dropna() != 3_600_000).any()
+            ):
+                raise ValueError(
+                    "timestamps must be unique and contiguous hourly; "
+                    "label exit provenance required for gaps"
+                )
         if frame is not None:
             required = {clause["feature"] for clause in profile.machine_rule["conditions"]}
             missing = required.difference(frame.columns)

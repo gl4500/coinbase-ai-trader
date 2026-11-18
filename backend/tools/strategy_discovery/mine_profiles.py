@@ -292,13 +292,15 @@ def mine_profiles_for_pid_horizon(
     label_col = f"label_h{int(horizon)}"
     if label_col not in df.columns:
         return []
-    # Positional purging assumes bars are at least one hour apart. Validate
+    # Row-count labels and clock-hour replay agree only on contiguous hourly input. Validate
     # before dropping unlabeled rows so invalid source rows cannot be hidden.
     if "ts" not in df or not is_integer_dtype(df["ts"].dtype) or df["ts"].isna().any():
         raise ValueError("timestamps must be non-null integer milliseconds")
     df = df.sort_values("ts", kind="stable")
-    if df["ts"].duplicated().any() or (df["ts"].diff().dropna() < 3_600_000).any():
-        raise ValueError("timestamps must be unique and at least one hour apart")
+    if df["ts"].duplicated().any() or (df["ts"].diff().dropna() != 3_600_000).any():
+        raise ValueError(
+            "timestamps must be unique and contiguous hourly; label exit provenance required for gaps"
+        )
     df = df.dropna(subset=[label_col]).reset_index(drop=True)
     n = len(df)
     if n < 200:
