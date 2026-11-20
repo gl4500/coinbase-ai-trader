@@ -509,11 +509,19 @@ def test_any_one_sided_prior_output_refuses_the_build_and_survives(tmp_path: Pat
     """
     pid = "FOO-USD"
     output_dir = tmp_path / "phase2"
-    (output_dir / "endpoints" / pid).mkdir(parents=True)
+    output_dir.mkdir()
+    # Only the named target and its parents exist, so no OTHER occupied target can mask
+    # a missing guard for this one.
+    if variant == "empty_endpoint_dir":
+        (output_dir / "endpoints" / pid).mkdir(parents=True)
     for path in _prior_output_variants(output_dir, pid)[variant]:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"prior generation " + variant.encode())
+    entries_before = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*"))
+    endpoint_dir = str(Path("endpoints") / pid)
+    if variant in ("parquet_only", "sidecar_only", "sidecar_temp_only"):
+        assert endpoint_dir not in entries_before and len(entries_before) == 1
     before = _snapshot(output_dir)
-    entries_before = sorted(str(p) for p in output_dir.rglob("*"))
 
     with pytest.raises(FileExistsError, match="--output-dir"):
         build_phase2_for_pid(
@@ -521,7 +529,7 @@ def test_any_one_sided_prior_output_refuses_the_build_and_survives(tmp_path: Pat
         )
 
     assert _snapshot(output_dir) == before
-    assert sorted(str(p) for p in output_dir.rglob("*")) == entries_before
+    assert sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*")) == entries_before
 
 
 def test_a_rebuild_from_a_changed_frame_cannot_overwrite_the_prior_root(tmp_path: Path):
