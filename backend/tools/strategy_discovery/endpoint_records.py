@@ -109,6 +109,75 @@ class ExpectedEndpointContext:
     digest: str
 
 
+def endpoint_digest(record: LabelEndpoint) -> str:
+    """Deterministic content digest over every field of the record.
+
+    Integrity only: it detects alteration of the record. It attests nothing about
+    whether the simulation that produced it was correct, and recomputing it here
+    proves nothing unless compared against a digest stored with the artifact.
+    """
+    if not isinstance(record, LabelEndpoint):
+        raise ValueError("record must be a LabelEndpoint")
+    payload = asdict(record)
+    payload["blockers"] = list(payload["blockers"])
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def validate_endpoint(
+    record: LabelEndpoint,
+    *,
+    source_bar_starts: Mapping[int, int],
+    expected: ExpectedEndpointContext,
+) -> LabelEndpoint:
+    """Validate one endpoint record. Returns it, or raises `ValueError`.
+
+    Requires every invariant and rejects violations; it never repairs a record, and
+    every rejection is a `ValueError` — no other exception type escapes.
+
+    `source_bar_starts` is an **endpoint lookup subset**, not necessarily the whole
+    frame: it need only contain the rows this record references, and every key and
+    value in it is type-validated, so callers should scope it rather than passing a
+    full frame.
+    """
+    if not isinstance(record, LabelEndpoint):
+        raise ValueError("record must be a LabelEndpoint")
+    _validate_blockers(record.blockers)
+    _validate_exit_semantics(record)
+    _validate_bindings(record, expected)
+    _validate_rows_and_clocks(record, source_bar_starts)
+    return record
+
+
+def map_exit_to_first_retained_candidate(
+    exit_row_id: int, retained_row_ids: Sequence[int]
+) -> int | _Terminal:
+    """Map a source exit row to the first retained row at or after it.
+
+    Returns an **original-frame row id**, or `TERMINAL_SENTINEL` when no retained row
+    follows. The result is an **eligibility candidate boundary** — the earliest row at
+    which a new position may be considered. It is **not** a portfolio accounting time,
+    and it is **not** a position in any working array; callers must not confuse the
+    returned original row id with an index into their filtered frame.
+
+    A valid exit may legitimately land on a row the working frame dropped, because
+    that row carries no label of its own. That is a mapping step, not a rejection.
+    """
+    _int(exit_row_id, "exit_row_id", minimum=0)
+    if isinstance(retained_row_ids, (str, bytes)) or not isinstance(retained_row_ids, Sequence):
+        raise ValueError("retained_row_ids must be a sequence of row ids")
+    previous = None
+    for row_id in retained_row_ids:
+        _int(row_id, "retained row id", minimum=0)
+        if previous is not None and row_id <= previous:
+            raise ValueError("retained row ids must be strictly increasing and unique")
+        previous = row_id
+    for row_id in retained_row_ids:
+        if row_id >= exit_row_id:
+            return row_id
+    return TERMINAL_SENTINEL
+
+
 def _int(value: Any, field: str, *, minimum: Optional[int] = None) -> int:
     if type(value) is not int:
         raise ValueError(f"{field} must be an int without coercion, got {type(value).__name__}")
@@ -129,21 +198,6 @@ def _finite(value: Any, field: str) -> float:
     if not math.isfinite(float(value)):
         raise ValueError(f"{field} must be finite, got {value!r}")
     return float(value)
-
-
-def endpoint_digest(record: LabelEndpoint) -> str:
-    """Deterministic content digest over every field of the record.
-
-    Integrity only: it detects alteration of the record. It attests nothing about
-    whether the simulation that produced it was correct, and recomputing it here
-    proves nothing unless compared against a digest stored with the artifact.
-    """
-    if not isinstance(record, LabelEndpoint):
-        raise ValueError("record must be a LabelEndpoint")
-    payload = asdict(record)
-    payload["blockers"] = list(payload["blockers"])
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _validate_blockers(blockers: Any) -> None:
@@ -318,55 +372,3 @@ def _validate_bindings(record: LabelEndpoint, expected: ExpectedEndpointContext)
     actual = endpoint_digest(record)
     if actual != digest:
         raise ValueError(f"digest {actual} does not match the independently stored {digest}")
-
-
-def validate_endpoint(
-    record: LabelEndpoint,
-    *,
-    source_bar_starts: Mapping[int, int],
-    expected: ExpectedEndpointContext,
-) -> LabelEndpoint:
-    """Validate one endpoint record. Returns it, or raises `ValueError`.
-
-    Requires every invariant and rejects violations; it never repairs a record, and
-    every rejection is a `ValueError` — no other exception type escapes.
-
-    `source_bar_starts` is an **endpoint lookup subset**, not necessarily the whole
-    frame: it need only contain the rows this record references, and every key and
-    value in it is type-validated, so callers should scope it rather than passing a
-    full frame.
-    """
-    if not isinstance(record, LabelEndpoint):
-        raise ValueError("record must be a LabelEndpoint")
-    _validate_blockers(record.blockers)
-    _validate_exit_semantics(record)
-    _validate_bindings(record, expected)
-    _validate_rows_and_clocks(record, source_bar_starts)
-    return record
-
-
-def map_exit_to_first_retained_candidate(exit_row_id: int, retained_row_ids: Sequence[int]):
-    """Map a source exit row to the first retained row at or after it.
-
-    Returns an **original-frame row id**, or `TERMINAL_SENTINEL` when no retained row
-    follows. The result is an **eligibility candidate boundary** — the earliest row at
-    which a new position may be considered. It is **not** a portfolio accounting time,
-    and it is **not** a position in any working array; callers must not confuse the
-    returned original row id with an index into their filtered frame.
-
-    A valid exit may legitimately land on a row the working frame dropped, because
-    that row carries no label of its own. That is a mapping step, not a rejection.
-    """
-    _int(exit_row_id, "exit_row_id", minimum=0)
-    if isinstance(retained_row_ids, (str, bytes)) or not isinstance(retained_row_ids, Sequence):
-        raise ValueError("retained_row_ids must be a sequence of row ids")
-    previous = None
-    for row_id in retained_row_ids:
-        _int(row_id, "retained row id", minimum=0)
-        if previous is not None and row_id <= previous:
-            raise ValueError("retained row ids must be strictly increasing and unique")
-        previous = row_id
-    for row_id in retained_row_ids:
-        if row_id >= exit_row_id:
-            return row_id
-    return TERMINAL_SENTINEL

@@ -33,32 +33,6 @@ DATA_ID_VERSION = "endpoint_data_id_v1"
 _NON_FINITE = {"nan": "nan", "inf": "inf", "-inf": "-inf"}
 
 
-def _encode_float(value: Any) -> str:
-    """Exact, deterministic, and explicit about non-finite values."""
-    number = float(value)
-    if math.isnan(number):
-        return "nan"
-    if math.isinf(number):
-        return "inf" if number > 0 else "-inf"
-    return float.hex(number)
-
-
-def _encode_floats(values: Sequence[Any], field: str) -> list:
-    if values is None:
-        raise ValueError(f"{field} is required for the input identity")
-    return [_encode_float(v) for v in values]
-
-
-def _encode_ints(values: Sequence[Any], field: str) -> list:
-    out = []
-    for value in values:
-        number = int(value)
-        if number != value:
-            raise ValueError(f"{field} must contain whole numbers, got {value!r}")
-        out.append(number)
-    return out
-
-
 def build_data_id(
     *,
     product_id: str,
@@ -199,47 +173,6 @@ class LoadedEndpointDataset:
     semantic_validation_required: bool = field(init=False, default=True)
 
 
-def _validate_expected_candidate_values(values: Mapping[tuple, float]) -> None:
-    """Expected keys AND values must be well-formed before anything is compared to them.
-
-    A bool key component silently aliases an integer (`True` IS dict key `1`), so a
-    malformed expectation would quietly match the wrong row rather than fail.
-
-    The limit of this check is worth stating: it sees only bools that SURVIVED into the
-    mapping. A bool that aliased an already-present key was erased by `dict` before this
-    function ran, and nothing here can recover that history -- such a mapping is caught
-    later, and only if its overwritten value disagrees with the published label.
-    """
-    for key in values:
-        if not isinstance(key, tuple) or len(key) != len(_KEY_FIELDS):
-            raise ValueError(
-                f"expected_candidate_values keys must be {_KEY_FIELDS} triples; got {key!r}"
-            )
-        for name, value in zip(_KEY_FIELDS, key, strict=True):
-            if name == "product_id":
-                if not isinstance(value, str) or not value.strip():
-                    raise ValueError(
-                        f"expected_candidate_values key {key!r} has a malformed product_id"
-                    )
-            elif isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(
-                    f"expected_candidate_values key {key!r} has a malformed {name}: a "
-                    f"bool aliases an integer row id and would match the wrong record"
-                )
-        expected = values[key]
-        # A non-finite EXPECTATION is the other half of the same defect: `nan.hex()`
-        # equals `nan.hex()`, so a NaN expectation would vouch for a NaN row.
-        if isinstance(expected, bool) or not isinstance(expected, (int, float)):
-            raise ValueError(
-                f"expected_candidate_values[{key!r}] must be a real number, got {expected!r}"
-            )
-        if not math.isfinite(expected):
-            raise ValueError(
-                f"expected_candidate_values[{key!r}] is non-finite ({expected!r}); a "
-                f"non-finite label is a disposition, never candidate evidence"
-            )
-
-
 def dataset_checksum(content: bytes) -> str:
     """Checksum of the dataset's exact bytes."""
     if not isinstance(content, bytes):
@@ -258,13 +191,6 @@ def manifest_digest(manifest: Mapping[str, Any]) -> str:
         raise ValueError("manifest must be a mapping")
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _record_to_row(record: Any) -> dict:
-    row = {field: getattr(record, field) for field in _RECORD_FIELDS}
-    row["label_value"] = _encode_float(row["label_value"])
-    row["blockers"] = list(row["blockers"])
-    return row
 
 
 def serialize_dataset(endpoints: Sequence[Any]) -> bytes:
@@ -289,73 +215,9 @@ def serialize_dataset(endpoints: Sequence[Any]) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def _atomic_write_bytes(path, payload: bytes) -> None:
-    temporary = path.with_name(path.name + ".partial")
-    # "xb": an existing temp is earlier diagnostic evidence and is never truncated.
-    with open(temporary, "xb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-
-
-def _validated_header(endpoints: Sequence[Any], data_id: str) -> dict:
-    """The publication-wide header, validated against the endpoints, not copied from them.
-
-    `data_id` arrives from the caller and every row must match it; `label_version` must
-    match the version this code produces. `cost_version` and `config_id` are required to
-    be homogeneous, so a single substituted row cannot hide behind well-formed
-    neighbours. What this does NOT establish is that `config_id` describes the RIGHT
-    config -- that is semantics, and needs independently sourced config context.
-    """
-    from tools.strategy_discovery.endpoint_records import CAUSALITY_BLOCKER
-    from tools.strategy_discovery.labels import LABEL_VERSION
-
-    if not isinstance(data_id, str) or not data_id.strip():
-        raise ValueError("data_id must be a non-empty str naming the source frame")
-
-    header = {"data_id": data_id, "label_version": LABEL_VERSION}
-    for position, endpoint in enumerate(endpoints):
-        for name, expected in (
-            ("data_id", data_id),
-            ("label_version", LABEL_VERSION),
-        ):
-            actual = getattr(endpoint, name)
-            if actual != expected:
-                raise ValueError(
-                    f"record {position} declares {name} {actual!r} but the publication "
-                    f"declares {expected!r}; a row that disagrees with its own header is "
-                    f"not publishable"
-                )
-        for name in ("cost_version", "config_id"):
-            actual = getattr(endpoint, name)
-            if not isinstance(actual, str) or not actual.strip():
-                raise ValueError(f"record {position} has a malformed {name}")
-            if name not in header:
-                header[name] = actual
-            elif actual != header[name]:
-                raise ValueError(
-                    f"record {position} declares {name} {actual!r} while another record "
-                    f"declares {header[name]!r}; one publication carries one {name}"
-                )
-        label = endpoint.label_value
-        if isinstance(label, bool) or not isinstance(label, (int, float)):
-            raise ValueError(f"record {position} has a label_value that is not a real number")
-        if not math.isfinite(label):
-            raise ValueError(
-                f"record {position} has a non-finite label_value {label!r}; a non-finite "
-                f"label is a disposition to report, never a published endpoint"
-            )
-        if CAUSALITY_BLOCKER not in tuple(endpoint.blockers):
-            raise ValueError(
-                f"record {position} is missing the mandatory blocker "
-                f"{CAUSALITY_BLOCKER}; this label version is not causal and no record "
-                f"may be published as though it were"
-            )
-    return header
-
-
-def write_dataset(directory, *, endpoints: Sequence[Any], data_id: str) -> str:
+def write_dataset(
+    directory: str | os.PathLike[str], *, endpoints: Sequence[Any], data_id: str
+) -> str:
     """Publish the dataset and its manifest into a directory that holds neither. Returns
     the manifest digest.
 
@@ -369,6 +231,11 @@ def write_dataset(directory, *, endpoints: Sequence[Any], data_id: str) -> str:
     ever observes a PARTIAL file. Publication is per-file atomic but NOT pair-atomic: an
     interruption after the dataset lands leaves a dataset with no manifest, visibly
     incomplete, and nothing is rolled back.
+
+    Raises:
+        FileExistsError: an occupied directory, as above.
+        ValueError: an empty endpoint set, a malformed ``data_id``, or records whose
+            header fields, labels or mandatory blockers disagree (``_validated_header``).
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -404,7 +271,7 @@ def write_dataset(directory, *, endpoints: Sequence[Any], data_id: str) -> str:
 
 
 def load_dataset(
-    directory,
+    directory: str | os.PathLike[str],
     *,
     expected_manifest_digest: str,
     expected_candidate_values: Mapping[tuple, float],
@@ -606,3 +473,143 @@ def load_dataset(
         coverage_complete=not missing,
         dispositions=dispositions,
     )
+
+
+def _encode_float(value: Any) -> str:
+    """Exact, deterministic, and explicit about non-finite values."""
+    number = float(value)
+    if math.isnan(number):
+        return "nan"
+    if math.isinf(number):
+        return "inf" if number > 0 else "-inf"
+    return float.hex(number)
+
+
+def _encode_floats(values: Sequence[Any], field: str) -> list:
+    if values is None:
+        raise ValueError(f"{field} is required for the input identity")
+    return [_encode_float(v) for v in values]
+
+
+def _encode_ints(values: Sequence[Any], field: str) -> list:
+    out = []
+    for value in values:
+        number = int(value)
+        if number != value:
+            raise ValueError(f"{field} must contain whole numbers, got {value!r}")
+        out.append(number)
+    return out
+
+
+def _validate_expected_candidate_values(values: Mapping[tuple, float]) -> None:
+    """Expected keys AND values must be well-formed before anything is compared to them.
+
+    A bool key component silently aliases an integer (`True` IS dict key `1`), so a
+    malformed expectation would quietly match the wrong row rather than fail.
+
+    The limit of this check is worth stating: it sees only bools that SURVIVED into the
+    mapping. A bool that aliased an already-present key was erased by `dict` before this
+    function ran, and nothing here can recover that history -- such a mapping is caught
+    later, and only if its overwritten value disagrees with the published label.
+    """
+    for key in values:
+        if not isinstance(key, tuple) or len(key) != len(_KEY_FIELDS):
+            raise ValueError(
+                f"expected_candidate_values keys must be {_KEY_FIELDS} triples; got {key!r}"
+            )
+        for name, value in zip(_KEY_FIELDS, key, strict=True):
+            if name == "product_id":
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(
+                        f"expected_candidate_values key {key!r} has a malformed product_id"
+                    )
+            elif isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"expected_candidate_values key {key!r} has a malformed {name}: a "
+                    f"bool aliases an integer row id and would match the wrong record"
+                )
+        expected = values[key]
+        # A non-finite EXPECTATION is the other half of the same defect: `nan.hex()`
+        # equals `nan.hex()`, so a NaN expectation would vouch for a NaN row.
+        if isinstance(expected, bool) or not isinstance(expected, (int, float)):
+            raise ValueError(
+                f"expected_candidate_values[{key!r}] must be a real number, got {expected!r}"
+            )
+        if not math.isfinite(expected):
+            raise ValueError(
+                f"expected_candidate_values[{key!r}] is non-finite ({expected!r}); a "
+                f"non-finite label is a disposition, never candidate evidence"
+            )
+
+
+def _record_to_row(record: Any) -> dict:
+    row = {field: getattr(record, field) for field in _RECORD_FIELDS}
+    row["label_value"] = _encode_float(row["label_value"])
+    row["blockers"] = list(row["blockers"])
+    return row
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(path.name + ".partial")
+    # "xb": an existing temp is earlier diagnostic evidence and is never truncated.
+    with open(temporary, "xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _validated_header(endpoints: Sequence[Any], data_id: str) -> dict:
+    """The publication-wide header, validated against the endpoints, not copied from them.
+
+    `data_id` arrives from the caller and every row must match it; `label_version` must
+    match the version this code produces. `cost_version` and `config_id` are required to
+    be homogeneous, so a single substituted row cannot hide behind well-formed
+    neighbours. What this does NOT establish is that `config_id` describes the RIGHT
+    config -- that is semantics, and needs independently sourced config context.
+    """
+    from tools.strategy_discovery.endpoint_records import CAUSALITY_BLOCKER
+    from tools.strategy_discovery.labels import LABEL_VERSION
+
+    if not isinstance(data_id, str) or not data_id.strip():
+        raise ValueError("data_id must be a non-empty str naming the source frame")
+
+    header = {"data_id": data_id, "label_version": LABEL_VERSION}
+    for position, endpoint in enumerate(endpoints):
+        for name, expected in (
+            ("data_id", data_id),
+            ("label_version", LABEL_VERSION),
+        ):
+            actual = getattr(endpoint, name)
+            if actual != expected:
+                raise ValueError(
+                    f"record {position} declares {name} {actual!r} but the publication "
+                    f"declares {expected!r}; a row that disagrees with its own header is "
+                    f"not publishable"
+                )
+        for name in ("cost_version", "config_id"):
+            actual = getattr(endpoint, name)
+            if not isinstance(actual, str) or not actual.strip():
+                raise ValueError(f"record {position} has a malformed {name}")
+            if name not in header:
+                header[name] = actual
+            elif actual != header[name]:
+                raise ValueError(
+                    f"record {position} declares {name} {actual!r} while another record "
+                    f"declares {header[name]!r}; one publication carries one {name}"
+                )
+        label = endpoint.label_value
+        if isinstance(label, bool) or not isinstance(label, (int, float)):
+            raise ValueError(f"record {position} has a label_value that is not a real number")
+        if not math.isfinite(label):
+            raise ValueError(
+                f"record {position} has a non-finite label_value {label!r}; a non-finite "
+                f"label is a disposition to report, never a published endpoint"
+            )
+        if CAUSALITY_BLOCKER not in tuple(endpoint.blockers):
+            raise ValueError(
+                f"record {position} is missing the mandatory blocker "
+                f"{CAUSALITY_BLOCKER}; this label version is not causal and no record "
+                f"may be published as though it were"
+            )
+    return header

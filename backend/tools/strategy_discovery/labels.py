@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from tools.strategy_discovery.endpoint_records import LabelEndpoint
 
 _DEFAULT_HORIZONS: Tuple[int, ...] = (1, 4, 24, 72, 168)
 _DEFAULT_STOP_LOSS_PCT = 0.08
@@ -152,7 +155,7 @@ _EXIT_BASIS = {
 }
 
 
-def _validated_bar_starts(series) -> np.ndarray:
+def _validated_bar_starts(series: pd.Series) -> np.ndarray:
     """Bar starts as int64, validated rather than coerced.
 
     `to_numpy(dtype="int64")` truncates silently, so a fractional or boolean
@@ -198,6 +201,9 @@ def simulate_labels_with_endpoints(
     bar_duration_ms: int = 3_600_000,
     feature_recipe: str = "atr14_pct_wilder_v1",
     with_dispositions: bool = False,
+) -> (
+    tuple[pd.DataFrame, list[LabelEndpoint]]
+    | tuple[pd.DataFrame, list[LabelEndpoint], dict[str, int]]
 ):
     """Labels plus the endpoint each label's exit produced.
 

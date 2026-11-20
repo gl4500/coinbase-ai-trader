@@ -11,9 +11,12 @@ Mirrors backend/tools/xgb_v4_5_features_batch.py conventions for device handling
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 import torch
+
+if TYPE_CHECKING:
+    from tools.strategy_discovery.endpoint_consumers import ValidatedEndpoints
 
 _MS_PER_BAR: int = 3_600_000  # one 1h bar in epoch milliseconds
 
@@ -141,7 +144,11 @@ def best_split(
 
 
 def build_next_eligible_from_endpoints(
-    validated, retained_row_ids, *, horizon: int, device=None
+    validated: ValidatedEndpoints,
+    retained_row_ids: Iterable[object],
+    *,
+    horizon: int,
+    device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """`next_eligible` READ from published endpoints instead of re-derived from a clock.
 

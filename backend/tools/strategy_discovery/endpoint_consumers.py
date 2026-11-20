@@ -28,16 +28,20 @@ effort has been unwinding.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
 # Imported rather than reimplemented. Duplicating a validator is how the two halves of one
 # rule drift apart, and this one already rejects coerced timestamps correctly.
 from tools.strategy_discovery.labels import _validated_bar_starts
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _REQUIRED_SIDECAR_FIELDS = (
     "manifest_digest",
@@ -105,40 +109,21 @@ class ValidatedEndpoints:
 # ── identity: two id spaces, two rules (§9.3) ────────────────────────────────
 
 
-def _validated_int_ids(values, *, field_name: str) -> np.ndarray:
-    """int64 ids, VALIDATED rather than coerced.
-
-    `to_numpy(dtype="int64")` and `int()` truncate silently. A truncated timestamp yields a
-    bar start that does not describe the frame; a truncated row id is worse, because it
-    still points at a real row -- just the wrong one.
-    """
-    # `np.asarray` on a mixed sequence coerces bools to ints BEFORE the check below can
-    # see them, so `[False, 1]` validated cleanly as `[0, 1]`. An all-bool input WAS
-    # rejected, which made the check look correct. Iterate the original objects instead.
-    raw = list(values.to_numpy()) if hasattr(values, "to_numpy") else list(values)
-    out = np.empty(len(raw), dtype="int64")
-    for position, value in enumerate(raw):
-        if isinstance(value, (bool, np.bool_)):
-            raise ValueError(f"{field_name} at position {position} must not be a bool")
-        as_int = int(value)
-        if as_int != value:
-            raise ValueError(
-                f"{field_name} at position {position} is not a whole number ({value!r}); "
-                f"refusing to truncate a row reference"
-            )
-        if as_int < 0:
-            raise ValueError(f"{field_name} at position {position} is negative ({as_int})")
-        out[position] = as_int
-    return out
-
-
-def validated_source_ordinals(values) -> np.ndarray:
+def validated_source_ordinals(values: Iterable[object]) -> np.ndarray:
     """The UNFILTERED frame's ids: exactly `0..n-1`, no duplicates and no gaps.
 
     The producer writes `arange(n)`, so anything else means the frame was filtered,
     reordered or concatenated after labelling and its positions no longer mean what the
     endpoints reference. Uniqueness is checked HERE because the caller turns these into
     dictionary keys, where a duplicate silently overwrites rather than fails.
+
+    ``values`` is any iterable of ids, or a pandas Series/array (``to_numpy`` is used).
+    Returns int64 ids; an empty input returns an empty array.
+
+    Raises:
+        ValueError: on a bool, a non-whole or negative id, or ids that are not exactly
+            ``0..n-1`` in order. A non-numeric id raises from ``int()`` (ValueError or
+            TypeError).
     """
     ids = _validated_int_ids(values, field_name="source_row_id")
     if not np.array_equal(ids, np.arange(len(ids), dtype="int64")):
@@ -150,11 +135,18 @@ def validated_source_ordinals(values) -> np.ndarray:
     return ids
 
 
-def validated_retained_ids(values) -> np.ndarray:
+def validated_retained_ids(values: Iterable[object]) -> np.ndarray:
     """A FILTERED frame's ids: strictly increasing and unique, gaps expected.
 
     Gaps are the whole purpose of a finite-label filter. Duplicates and reordering are not,
     and either would corrupt the position mapping silently.
+
+    ``values`` is any iterable of ids, or a pandas Series/array. Returns int64 ids; an
+    empty input returns an empty array.
+
+    Raises:
+        ValueError: on a bool, a non-whole or negative id, or ids that are not strictly
+            increasing. A non-numeric id raises from ``int()`` (ValueError or TypeError).
     """
     ids = _validated_int_ids(values, field_name="source_row_id")
     if ids.size and (np.diff(ids) <= 0).any():
@@ -162,15 +154,21 @@ def validated_retained_ids(values) -> np.ndarray:
     return ids
 
 
-def working_positions(values) -> dict:
-    """source row id -> position in the working frame."""
+def working_positions(values: Iterable[object]) -> dict[int, int]:
+    """source row id -> position in the working frame.
+
+    Validated exactly as ``validated_retained_ids`` (same ValueError cases); an empty
+    input returns an empty dict.
+    """
     return {int(row_id): position for position, row_id in enumerate(validated_retained_ids(values))}
 
 
 # ── candidate values: finite means isfinite, not "not null" (§9.3) ───────────
 
 
-def finite_candidate_values(frame, *, product_id: str, horizons: Sequence[int]) -> dict:
+def finite_candidate_values(
+    frame: pd.DataFrame, *, product_id: str, horizons: Sequence[int]
+) -> dict[tuple[str, int, int], float]:
     """Expected labels for every finite candidate, built from the FRAME.
 
     `isfinite`, not `notna`: `dropna` RETAINS +/-inf, so a consumer that retained rows with
@@ -181,6 +179,16 @@ def finite_candidate_values(frame, *, product_id: str, horizons: Sequence[int]) 
     Keys are built from the DECLARED product and horizons crossed with the frame's rows,
     never enumerated from records: deriving expected keys from the records under test makes
     a missing record undetectable, because removing one removes its own expectation.
+
+    Required: ``frame`` has ``source_row_id`` (validated as retained ids) and a
+    ``label_h<h>`` column for every declared horizon. Returns
+    ``{(product_id, horizon, source_row_id): label}`` for finite labels only; non-finite
+    labels are simply absent.
+
+    Raises:
+        MissingEndpoint: a horizon that is not a non-bool int, or a missing label column.
+        ValueError: invalid ``source_row_id`` values.
+        KeyError: no ``source_row_id`` column.
     """
     ids = validated_retained_ids(frame["source_row_id"])
     values: dict = {}
@@ -202,36 +210,12 @@ def finite_candidate_values(frame, *, product_id: str, horizons: Sequence[int]) 
 # ── the adapter: load, verify identity, validate semantics ───────────────────
 
 
-def _validated_sidecar(sidecar: Any) -> Mapping[str, Any]:
-    if not isinstance(sidecar, Mapping):
-        raise MissingEndpoint("sidecar must be a mapping")
-    for name in _REQUIRED_SIDECAR_FIELDS:
-        if name not in sidecar:
-            raise MissingEndpoint(f"sidecar is missing required field {name!r}")
-    return sidecar
-
-
-def _validated_cap(exit_config: Any) -> int:
-    """The CONFIGURED cap, which is never a horizon (§9.4).
-
-    A record published at horizon 1 carries `max_hold_bars = 168` under the default
-    configuration, because the simulation uses `min(horizon, cap)` internally while the
-    record publishes the cap. Rebuilding this from `record.horizon` rejects every valid
-    short-horizon record.
-    """
-    if not isinstance(exit_config, Mapping) or "max_hold_bars" not in exit_config:
-        raise MissingEndpoint("sidecar exit_config must declare max_hold_bars")
-    cap = exit_config["max_hold_bars"]
-    # `True` passes isinstance(int) and `168.0` passes an equality check, so both are named.
-    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
-        raise MissingEndpoint(
-            f"sidecar exit_config.max_hold_bars must be a positive non-bool int, got {cap!r}"
-        )
-    return cap
-
-
 def load_validated_endpoints(
-    directory, *, frame, sidecar: Mapping[str, Any], product_id: str
+    directory: str | os.PathLike[str],
+    *,
+    frame: pd.DataFrame,
+    sidecar: Mapping[str, Any],
+    product_id: str,
 ) -> ValidatedEndpoints:
     """Load a published dataset and validate every record against the frame. Or raise.
 
@@ -251,6 +235,15 @@ def load_validated_endpoints(
     Step 4 is what the integrity-only loader deliberately does not do. A verified digest
     says the record has not changed; it says nothing about whether its clocks agree with
     the frame.
+
+    Returns an immutable ``ValidatedEndpoints``; it never returns a partially validated
+    set.
+
+    Raises:
+        MissingEndpoint: (a ValueError) a malformed sidecar or exit config, a frame or
+            config identity mismatch, or a record that fails coverage or semantics.
+        ValueError: invalid frame row ids, or dataset integrity failures from
+            ``load_dataset``.
     """
     from tools.strategy_discovery.endpoint_dataset import build_data_id, load_dataset
     from tools.strategy_discovery.endpoint_records import (
@@ -349,6 +342,123 @@ def load_validated_endpoints(
 # ── the two quantities, from validated records only ─────────────────────────
 
 
+def eligibility_boundaries(
+    validated: object,
+    retained_ids: Iterable[object],
+    *,
+    horizon: int,
+    require_all: bool = True,
+) -> np.ndarray:
+    """Working-frame POSITION at which each retained candidate's slot reopens (§9.1).
+
+    `len(retained_ids)` encodes terminal -- no retained row follows the exit -- the same
+    convention `build_next_eligible` produces via `clamp_max(n)`, so `walk_and_sum` needs no
+    change.
+
+    Occupancy is half-open `[entry, exit)`: `searchsorted(..., side="left")` returns the
+    position OF the exit row, which is itself eligible (§3a tie-order).
+
+    ``validated`` must be a ``ValidatedEndpoints`` from ``load_validated_endpoints``.
+    Returns one int64 position per retained id; ``len(retained_ids)`` means terminal,
+    and is also left in place for an absent record when ``require_all`` is False.
+
+    Raises:
+        TypeError: ``validated`` is not a ``ValidatedEndpoints``.
+        ValueError: ``require_all`` is not a bool, ``horizon`` is not a non-bool int,
+            duplicate records for one entry, or invalid ``retained_ids``.
+        MissingEndpoint: a retained id has no record while ``require_all`` is True.
+    """
+    validated = _require_validated(validated)
+    if require_all is not True and require_all is not False:
+        raise ValueError("require_all must be an actual bool")
+    ids = validated_retained_ids(retained_ids)
+    selected = _for_horizon(validated, horizon)
+    terminal = len(ids)
+    out = np.full(terminal, terminal, dtype="int64")
+    for position, row_id in enumerate(ids):
+        record = selected.get(int(row_id))
+        if record is None:
+            if require_all:
+                raise MissingEndpoint(
+                    f"no endpoint for retained candidate source row {int(row_id)} at "
+                    f"horizon {horizon}; a retained row has a finite label and a finite "
+                    f"label produces an endpoint, so absence is a contradiction -- never a "
+                    f"reason to fall back to a clock"
+                )
+            continue
+        out[position] = int(np.searchsorted(ids, int(record.exit_row_id), side="left"))
+    return out
+
+
+def accounting_times(validated: object, *, horizon: int) -> dict[int, int]:
+    """entry source row id -> `exit_observable_at`. A clock INSTANT, never a position.
+
+    Raises:
+        TypeError: ``validated`` is not a ``ValidatedEndpoints``.
+        ValueError: ``horizon`` is not a non-bool int, or duplicate records for one entry.
+    """
+    validated = _require_validated(validated)
+    return {
+        key: int(record.exit_observable_at)
+        for key, record in _for_horizon(validated, horizon).items()
+    }
+
+
+def _validated_int_ids(values: Iterable[object], *, field_name: str) -> np.ndarray:
+    """int64 ids, VALIDATED rather than coerced.
+
+    `to_numpy(dtype="int64")` and `int()` truncate silently. A truncated timestamp yields a
+    bar start that does not describe the frame; a truncated row id is worse, because it
+    still points at a real row -- just the wrong one.
+    """
+    # `np.asarray` on a mixed sequence coerces bools to ints BEFORE the check below can
+    # see them, so `[False, 1]` validated cleanly as `[0, 1]`. An all-bool input WAS
+    # rejected, which made the check look correct. Iterate the original objects instead.
+    raw = list(values.to_numpy()) if hasattr(values, "to_numpy") else list(values)
+    out = np.empty(len(raw), dtype="int64")
+    for position, value in enumerate(raw):
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"{field_name} at position {position} must not be a bool")
+        as_int = int(value)
+        if as_int != value:
+            raise ValueError(
+                f"{field_name} at position {position} is not a whole number ({value!r}); "
+                f"refusing to truncate a row reference"
+            )
+        if as_int < 0:
+            raise ValueError(f"{field_name} at position {position} is negative ({as_int})")
+        out[position] = as_int
+    return out
+
+
+def _validated_sidecar(sidecar: Any) -> Mapping[str, Any]:
+    if not isinstance(sidecar, Mapping):
+        raise MissingEndpoint("sidecar must be a mapping")
+    for name in _REQUIRED_SIDECAR_FIELDS:
+        if name not in sidecar:
+            raise MissingEndpoint(f"sidecar is missing required field {name!r}")
+    return sidecar
+
+
+def _validated_cap(exit_config: Any) -> int:
+    """The CONFIGURED cap, which is never a horizon (§9.4).
+
+    A record published at horizon 1 carries `max_hold_bars = 168` under the default
+    configuration, because the simulation uses `min(horizon, cap)` internally while the
+    record publishes the cap. Rebuilding this from `record.horizon` rejects every valid
+    short-horizon record.
+    """
+    if not isinstance(exit_config, Mapping) or "max_hold_bars" not in exit_config:
+        raise MissingEndpoint("sidecar exit_config must declare max_hold_bars")
+    cap = exit_config["max_hold_bars"]
+    # `True` passes isinstance(int) and `168.0` passes an equality check, so both are named.
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        raise MissingEndpoint(
+            f"sidecar exit_config.max_hold_bars must be a positive non-bool int, got {cap!r}"
+        )
+    return cap
+
+
 def _require_validated(value: Any) -> ValidatedEndpoints:
     """A consumer may not hand these helpers endpoints nobody checked.
 
@@ -376,49 +486,6 @@ def _for_horizon(validated: ValidatedEndpoints, horizon: Any) -> dict:
             raise ValueError(f"two endpoints claim entry row {key} at horizon {horizon}")
         selected[key] = record
     return selected
-
-
-def eligibility_boundaries(
-    validated, retained_ids, *, horizon: int, require_all: bool = True
-) -> np.ndarray:
-    """Working-frame POSITION at which each retained candidate's slot reopens (§9.1).
-
-    `len(retained_ids)` encodes terminal -- no retained row follows the exit -- the same
-    convention `build_next_eligible` produces via `clamp_max(n)`, so `walk_and_sum` needs no
-    change.
-
-    Occupancy is half-open `[entry, exit)`: `searchsorted(..., side="left")` returns the
-    position OF the exit row, which is itself eligible (§3a tie-order).
-    """
-    validated = _require_validated(validated)
-    if require_all is not True and require_all is not False:
-        raise ValueError("require_all must be an actual bool")
-    ids = validated_retained_ids(retained_ids)
-    selected = _for_horizon(validated, horizon)
-    terminal = len(ids)
-    out = np.full(terminal, terminal, dtype="int64")
-    for position, row_id in enumerate(ids):
-        record = selected.get(int(row_id))
-        if record is None:
-            if require_all:
-                raise MissingEndpoint(
-                    f"no endpoint for retained candidate source row {int(row_id)} at "
-                    f"horizon {horizon}; a retained row has a finite label and a finite "
-                    f"label produces an endpoint, so absence is a contradiction -- never a "
-                    f"reason to fall back to a clock"
-                )
-            continue
-        out[position] = int(np.searchsorted(ids, int(record.exit_row_id), side="left"))
-    return out
-
-
-def accounting_times(validated, *, horizon: int) -> dict:
-    """entry source row id -> `exit_observable_at`. A clock INSTANT, never a position."""
-    validated = _require_validated(validated)
-    return {
-        key: int(record.exit_observable_at)
-        for key, record in _for_horizon(validated, horizon).items()
-    }
 
 
 __all__ = [
