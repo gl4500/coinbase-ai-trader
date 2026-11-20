@@ -17,7 +17,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -26,13 +26,21 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+from tools.strategy_discovery.endpoint_dataset import write_dataset  # noqa: E402
+from tools.strategy_discovery.endpoint_records import endpoint_digest  # noqa: E402
 from tools.strategy_discovery.features import (  # noqa: E402
     add_trend_features,
     first_valid_index,
 )
 from tools.strategy_discovery.labels import (  # noqa: E402
+    _DEFAULT_ATR_TRAIL_FLOOR,
     _DEFAULT_HORIZONS,
-    simulate_dynamic_exit_labels,
+    _DEFAULT_MAX_HOLD_BARS,
+    _DEFAULT_ROUND_TRIP_FEE,
+    _DEFAULT_STOP_LOSS_PCT,
+    COST_VERSION,
+    LABEL_VERSION,
+    simulate_labels_with_endpoints,
 )
 from tools.strategy_discovery.tokenomic_stamp import (  # noqa: E402
     SupplySnapshot,
@@ -46,6 +54,12 @@ _DEFAULT_SUPPLY_PATH = Path(BACKEND) / "data" / "supply" / "snapshot.parquet"
 _DEFAULT_OUTPUT_DIR = Path(BACKEND) / "data" / "phase2"
 
 
+# The sidecar schema a consumer reads; bump together with any field change.
+_SIDECAR_VERSION = 1
+# Names the recipe that produced atr14_pct, so a consumer can recompute the frame identity.
+_FEATURE_RECIPE = "atr14_pct_wilder_v1"
+
+
 @dataclass
 class BuildResult:
     pid: str
@@ -53,6 +67,10 @@ class BuildResult:
     rows_dropped_missing_volume: int = 0
     nan_label_counts: Dict[str, int] = field(default_factory=dict)
     error: Optional[str] = None
+    # The digest a consumer must retain to verify the published endpoints against
+    # something it did not compute. None when the frame produced no endpoints at all.
+    endpoint_manifest_digest: Optional[str] = None
+    endpoint_dispositions: Dict[str, int] = field(default_factory=dict)
 
 
 def _load_supply_snapshot(supply_path: Path, pid: str) -> Optional[SupplySnapshot]:
@@ -96,7 +114,15 @@ def build_phase2_for_pid(
     supply_path: Path,
     output_dir: Path,
 ) -> BuildResult:
-    """End-to-end Phase 2 build for one pid. Writes output_dir/{pid}.parquet."""
+    """End-to-end Phase 2 build for one pid. Writes output_dir/{pid}.parquet.
+
+    Never overwrites: if any of this pid's outputs already exists in ``output_dir``
+    (parquet, sidecar, sidecar temp, or ``endpoints/<pid>``, even empty) it raises
+    FileExistsError before reading inputs or writing anything. Publish a rebuild into a
+    fresh output root. A failure part-way through leaves that NEW root partial; it is
+    not rolled back. One writer per output root is assumed, not enforced.
+    """
+    _refuse_occupied(Path(output_dir), [pid])
     history_path = Path(history_dir) / f"{pid}.parquet"
     marketcap_path = Path(marketcap_dir) / f"{pid}.parquet"
     if not history_path.exists():
@@ -119,7 +145,15 @@ def build_phase2_for_pid(
     rows_pre_drop = len(df_feat)
     df_stamped = stamp_tokenomic(df_feat, df_daily, supply, drop_on_missing_volume=True)
     rows_dropped = rows_pre_drop - len(df_stamped)
-    df_labeled = simulate_dynamic_exit_labels(df_stamped, horizons=list(_DEFAULT_HORIZONS))
+    # Publishes the exit the simulation already chose, instead of discarding it and
+    # leaving three consumers to re-derive it from different clocks. Label values are
+    # unchanged: both paths share one _SimResult.
+    df_labeled, endpoints, dispositions = simulate_labels_with_endpoints(
+        df_stamped,
+        horizons=list(_DEFAULT_HORIZONS),
+        product_id=pid,
+        with_dispositions=True,
+    )
 
     df_labeled["pid"] = pid
     df_labeled["schema_version"] = _SCHEMA_VERSION
@@ -130,12 +164,121 @@ def build_phase2_for_pid(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     out_path = Path(output_dir) / f"{pid}.parquet"
     df_labeled.to_parquet(out_path, compression="snappy", index=False)
+
+    endpoint_digest_value = _publish_endpoints(Path(output_dir), pid, endpoints, _DEFAULT_HORIZONS)
     return BuildResult(
         pid=pid,
         rows_written=len(df_labeled),
         rows_dropped_missing_volume=rows_dropped,
         nan_label_counts=nan_counts,
+        endpoint_manifest_digest=endpoint_digest_value,
+        endpoint_dispositions=dict(dispositions),
     )
+
+
+def _publish_endpoints(
+    output_dir: Path, pid: str, endpoints: List, declared_horizons: Sequence[int]
+) -> Optional[str]:
+    """Write the endpoint dataset and the sidecar a consumer verifies it against.
+
+    Refuses (FileExistsError) if this pid's sidecar, sidecar temp or endpoint directory
+    already exists -- checked here as well as by the build, because this is callable on
+    its own -- and never deletes an earlier run's files.
+
+    Returns the manifest digest, or None when the frame produced no endpoints -- which is
+    normal for a frame too short to carry any label, and must not be confused with a
+    failure. `write_dataset` refuses to publish an empty set precisely so that
+    nothing-survived cannot look like nothing-was-attempted.
+
+    The SIDECAR is the point. A consumer reads the manifest digest and the declared exit
+    config from here, so it checks the dataset against values it did not compute. Per-record
+    digests are captured now, at publication: one recomputed later from the record under
+    test would attest nothing. Contract section 9.2 also states the limit -- this is an
+    anchor, not a root of trust, since replacing frame, dataset and sidecar together is
+    coherent and undetectable.
+    """
+    sidecar_path, sidecar_temp, endpoint_dir = _endpoint_targets(output_dir, pid)
+    occupied = [path for path in (sidecar_path, sidecar_temp, endpoint_dir) if path.exists()]
+    if occupied:
+        raise FileExistsError(_occupied_message(output_dir, occupied))
+    if not endpoints:
+        # Nothing to publish, and (checked above) no earlier sidecar to contradict the
+        # parquet: an earlier run's files are refused, never deleted.
+        return None
+
+    data_id = endpoints[0].data_id
+    manifest_digest = write_dataset(endpoint_dir, endpoints=endpoints, data_id=data_id)
+
+    sidecar = {
+        "sidecar_version": _SIDECAR_VERSION,
+        "manifest_digest": manifest_digest,
+        "data_id": data_id,
+        "product_id": pid,
+        # The REQUESTED horizons, never the surviving ones. A frame too short for a long
+        # horizon emits no endpoints for it, and a survivor-derived set would drop that
+        # horizon from the sidecar entirely -- so a consumer would build expectations only
+        # for horizons that happened to survive, and complete coverage would pass because
+        # the missing horizon was never expected. That is coverage derived from the thing
+        # under test, the same defect the dataset loader already refuses. Executed on a
+        # 30-row frame: declared [1, 4, 24, 72, 168], surviving [1, 4, 24].
+        "horizons": sorted(int(h) for h in declared_horizons),
+        "bar_duration_ms": int(endpoints[0].bar_duration_ms),
+        "feature_recipe": _FEATURE_RECIPE,
+        "label_version": LABEL_VERSION,
+        "cost_version": COST_VERSION,
+        # The CONFIGURED cap, which is not a horizon. A consumer that rebuilt it from a
+        # record's own horizon would reject every valid short-horizon record.
+        "exit_config": {
+            "stop_loss_pct": _DEFAULT_STOP_LOSS_PCT,
+            "atr_trail_floor": _DEFAULT_ATR_TRAIL_FLOOR,
+            "max_hold_bars": _DEFAULT_MAX_HOLD_BARS,
+            "round_trip_fee": _DEFAULT_ROUND_TRIP_FEE,
+        },
+        "record_digests": {f"{e.horizon}:{e.entry_row_id}": endpoint_digest(e) for e in endpoints},
+    }
+    # Same-directory temp then os.replace: a half-written sidecar would be a parse error
+    # at best, and a plausible-looking partial document at worst.
+    # Exclusive create: an existing temp is someone else's evidence and is never
+    # truncated. Only a temp this call created is cleaned up on failure.
+    with open(sidecar_temp, "x", encoding="utf-8") as handle:
+        try:
+            handle.write(json.dumps(sidecar, sort_keys=True, indent=2))
+        except OSError:
+            handle.close()
+            sidecar_temp.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(sidecar_temp, sidecar_path)
+    except OSError:
+        sidecar_temp.unlink(missing_ok=True)
+        raise
+    return manifest_digest
+
+
+def _endpoint_targets(output_dir: Path, pid: str) -> tuple[Path, Path, Path]:
+    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    sidecar_temp = sidecar_path.with_name(sidecar_path.name + ".partial")
+    return sidecar_path, sidecar_temp, output_dir / "endpoints" / pid
+
+
+def _occupied_outputs(output_dir: Path, pid: str) -> list[Path]:
+    targets = (output_dir / f"{pid}.parquet", *_endpoint_targets(output_dir, pid))
+    return [path for path in targets if path.exists()]
+
+
+def _occupied_message(output_dir: Path, occupied: Sequence[Path]) -> str:
+    names = ", ".join(str(path) for path in occupied)
+    return (
+        f"refusing to overwrite prior Phase 2 output in {output_dir}: {names}. Prior "
+        f"versions are preserved, never replaced; publish into a fresh --output-dir "
+        f"(one writer per output root)."
+    )
+
+
+def _refuse_occupied(output_dir: Path, pids: Sequence[str]) -> None:
+    occupied = [path for pid in pids for path in _occupied_outputs(output_dir, pid)]
+    if occupied:
+        raise FileExistsError(_occupied_message(output_dir, occupied))
 
 
 def _pids_from_universe_json(universe_path: Path) -> List[str]:
@@ -155,12 +298,18 @@ def build_phase2_for_universe(
     supply_path: Optional[Path] = None,
     output_dir: Optional[Path] = None,
 ) -> List[BuildResult]:
-    """Iterate every pid in the universe JSON; collect per-pid BuildResults."""
+    """Iterate every pid in the universe JSON; collect per-pid BuildResults.
+
+    Fails fast: every pid's outputs are checked before the first build, and an occupied
+    root raises FileExistsError with nothing written. Exceptions are not caught per pid,
+    so the run stops at the first one.
+    """
     history_dir = Path(history_dir) if history_dir else _DEFAULT_HISTORY_DIR
     marketcap_dir = Path(marketcap_dir) if marketcap_dir else _DEFAULT_MARKETCAP_DIR
     supply_path = Path(supply_path) if supply_path else _DEFAULT_SUPPLY_PATH
     output_dir = Path(output_dir) if output_dir else _DEFAULT_OUTPUT_DIR
     pids = _pids_from_universe_json(Path(universe_path))
+    _refuse_occupied(output_dir, pids)
     results: List[BuildResult] = []
     for pid in pids:
         results.append(
@@ -176,7 +325,11 @@ def build_phase2_for_universe(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CLI entrypoint — build Phase 2 parquet for an entire universe."""
+    """CLI entrypoint — build Phase 2 parquet for an entire universe.
+
+    Writes into --output-dir (default data/phase2) and refuses, before writing anything,
+    if that root already holds output for any universe pid: rebuilds go to a fresh root.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="Build Phase 2 features+labels for a universe.")

@@ -11,9 +11,12 @@ Mirrors backend/tools/xgb_v4_5_features_batch.py conventions for device handling
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 import torch
+
+if TYPE_CHECKING:
+    from tools.strategy_discovery.endpoint_consumers import ValidatedEndpoints
 
 _MS_PER_BAR: int = 3_600_000  # one 1h bar in epoch milliseconds
 
@@ -138,3 +141,30 @@ def best_split(
                     score=best_score,
                 )
     return best
+
+
+def build_next_eligible_from_endpoints(
+    validated: ValidatedEndpoints,
+    retained_row_ids: Iterable[object],
+    *,
+    horizon: int,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """`next_eligible` READ from published endpoints instead of re-derived from a clock.
+
+    Same dtype, shape and terminal convention as `build_next_eligible`, so `walk_and_sum`,
+    `best_split` and `fit_tree` consume it unchanged.
+
+    `build_next_eligible` is deliberately kept rather than replaced. It is the baseline the
+    equivalence test compares against, and without it there would be no evidence that this
+    is a GENERALISATION of the old behaviour rather than a different algorithm that happens
+    to produce plausible numbers.
+
+    Takes a `ValidatedEndpoints`, never a raw sequence: eligibility derived from records
+    nobody checked against the frame would reintroduce exactly the silent disagreement the
+    endpoint contract removes.
+    """
+    from tools.strategy_discovery.endpoint_consumers import eligibility_boundaries
+
+    boundaries = eligibility_boundaries(validated, retained_row_ids, horizon=horizon)
+    return torch.tensor(boundaries, dtype=torch.int64, device=device)
