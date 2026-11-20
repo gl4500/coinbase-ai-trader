@@ -7,6 +7,15 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-20 - ATR probe and miner endpoint helpers typed and documented (review R1, PR #79)
+
+- New APIs only: `atr_causality_probe`, `atr_causality_report`, `atr_contiguous_probe` and
+  `mine_profiles._require_published_endpoints` gain concrete types and Returns/Raises
+  contracts. The probe docs state which inputs are assumed rather than validated (sequence
+  alignment, index range, horizon sign, a NaN clock). Private helpers move below the public
+  API. No behaviour change (logic-equivalence checked with docstrings and annotations
+  stripped).
+
 ### 2026-11-20 - ATR probe reports never overwrite prior output (review R2, PR #79)
 
 - `run_probe`, `run_clock_audit` and `run_contiguous_probe` refuse, before reading any

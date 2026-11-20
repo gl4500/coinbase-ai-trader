@@ -96,35 +96,6 @@ class BracketReport:
     lower_bound_result: VariantResult
 
 
-def _checked_spec(spec: VariantSpec) -> VariantSpec:
-    lag = spec.atr_lag_bars
-    if isinstance(lag, bool) or not isinstance(lag, numbers.Integral) or int(lag) < 0:
-        raise ValueError(
-            f"atr_lag_bars must be a non-negative integer without coercion, got {lag!r}"
-        )
-    if spec.ordering not in _ORDERINGS:
-        raise ValueError(f"ordering must be one of {list(_ORDERINGS)}, got {spec.ordering!r}")
-    if type(spec.gap_fill) is not bool:
-        raise ValueError("gap_fill must be an actual bool")
-    return spec
-
-
-def _threshold(atr_pcts: Sequence[float], index: int, lag: int, floor: float) -> float:
-    """The trail threshold for the bar at `index`, from `lag` bars earlier.
-
-    Clamped at 0 so an early bar cannot read before the array; the non-finite fallback to the
-    floor is production behaviour, preserved deliberately (proposal §3.1) even though the SET of
-    rows that take it shifts with the lag.
-    """
-    source = index - int(lag)
-    if source < 0:
-        source = 0
-    value = float(atr_pcts[source])
-    if not math.isfinite(value):
-        value = floor
-    return max(value, floor)
-
-
 def simulate_variant(
     *,
     entry_idx: int,
@@ -137,7 +108,34 @@ def simulate_variant(
     config: Mapping[str, float],
     spec: VariantSpec,
 ) -> VariantResult:
-    """One trade under one variant. Mirrors `labels._simulate_one` when `spec is LEGACY`."""
+    """One trade under one variant. Mirrors `labels._simulate_one` when `spec is LEGACY`.
+
+    Required ``config`` keys: ``stop_loss_pct``, ``atr_trail_floor``, ``max_hold_bars``,
+    ``round_trip_fee``. Their ranges are NOT checked here (``atr_contiguous_probe`` checks
+    them before calling).
+
+    Assumed, NOT validated by this function:
+      * the five price/ATR sequences are index-aligned and of equal length ``n``;
+      * ``0 <= entry_idx < n``: a negative index reads from the end of the sequences;
+      * prices are finite and the entry close is non-zero;
+      * ``horizon`` is positive: a non-positive one is not rejected and yields a
+        ``"horizon"`` exit read at ``entry_idx + min(horizon, max_hold_bars)``.
+
+    Returns a ``VariantResult``. When ``entry_idx + min(horizon, max_hold_bars) >= n`` the
+    full horizon does not fit and the result is ``pnl=nan`` with no exit fields (the
+    production precheck). Otherwise it is the net pnl after ``round_trip_fee``, bars held,
+    exit kind (``"stop"``, ``"trail"`` or ``"horizon"``), exit price and, for gap-enabled
+    variants, whether the fill gapped.
+
+    Raises:
+        ValueError: an invalid ``spec`` (``atr_lag_bars`` not a non-negative integer, an
+            unknown ``ordering``, or ``gap_fill`` not a bool), or a config value that
+            ``float``/``int`` cannot convert.
+        KeyError: a missing required config key.
+        TypeError: a config value of a type ``float``/``int`` rejects.
+        IndexError: ``entry_idx >= n``, or a companion sequence shorter than ``closes``.
+        ZeroDivisionError: a zero entry close.
+    """
     spec = _checked_spec(spec)
     stop_loss_pct = float(config["stop_loss_pct"])
     atr_trail_floor = float(config["atr_trail_floor"])
@@ -228,26 +226,6 @@ def simulate_variant(
     )
 
 
-def _fill(level: float, level_at_open: float, bar_open: float, gap_fill: bool) -> tuple:
-    """The fill price, and whether the bar had already gapped through its level at the open.
-
-    `level_at_open` is the exit level that EXISTED when the bar opened; `level` is the one that
-    actually triggered. They differ on the trail branch under `high_before_low`, where this bar's
-    own high raises the peak and so lifts the level mid-bar.
-
-    A gap means the price was already beyond a level that was in force at the open. Testing the
-    open against a level created later in the same bar is not a gap (Codex cb898726): with prior
-    peak 100, open 100, high 120, low 95 and a 6% floor, the level at the open was 94 -- the open
-    never gapped through it -- yet the triggering level of 112.8 is above the open, and the
-    earlier version reported a fabricated fill at 100.0 (pnl 0.0000) instead of 112.8 (+0.1280).
-    """
-    if not gap_fill:
-        return level, False
-    if bar_open < level_at_open:
-        return bar_open, True
-    return level, False
-
-
 def bracket_orderings(
     *,
     entry_idx: int,
@@ -267,6 +245,16 @@ def bracket_orderings(
     ambiguity. What a PUBLISHED label should then be is operator question 1 and is not decided
     here -- `lower_bound_pnl` is a diagnostic comparison over the two enumerated orderings, and
     calling it the published label was an overclaim (Codex c6c670ee).
+
+    Both orderings run through ``simulate_variant`` with the same inputs, so its required
+    config keys and unvalidated assumptions apply unchanged. Returns a ``BracketReport``:
+    both results, whether they agree, and the lower of the two pnls with the ordering that
+    produced it (``"high_before_low"`` on a tie). When the horizon does not fit, both pnls
+    are NaN: the report says they agree and carries a NaN lower bound.
+
+    Raises:
+        Whatever ``simulate_variant`` raises; in particular ValueError for an invalid
+        ``atr_lag_bars`` or a ``gap_fill`` that is not a bool.
     """
     shared = dict(
         entry_idx=entry_idx,
@@ -305,3 +293,54 @@ def bracket_orderings(
     else:
         worse, worse_name = high_first, "high_before_low"
     return BracketReport(high_first, low_first, agree, worse.pnl, worse_name, worse)
+
+
+def _checked_spec(spec: VariantSpec) -> VariantSpec:
+    lag = spec.atr_lag_bars
+    if isinstance(lag, bool) or not isinstance(lag, numbers.Integral) or int(lag) < 0:
+        raise ValueError(
+            f"atr_lag_bars must be a non-negative integer without coercion, got {lag!r}"
+        )
+    if spec.ordering not in _ORDERINGS:
+        raise ValueError(f"ordering must be one of {list(_ORDERINGS)}, got {spec.ordering!r}")
+    if type(spec.gap_fill) is not bool:
+        raise ValueError("gap_fill must be an actual bool")
+    return spec
+
+
+def _threshold(atr_pcts: Sequence[float], index: int, lag: int, floor: float) -> float:
+    """The trail threshold for the bar at `index`, from `lag` bars earlier.
+
+    Clamped at 0 so an early bar cannot read before the array; the non-finite fallback to the
+    floor is production behaviour, preserved deliberately (proposal §3.1) even though the SET of
+    rows that take it shifts with the lag.
+    """
+    source = index - int(lag)
+    if source < 0:
+        source = 0
+    value = float(atr_pcts[source])
+    if not math.isfinite(value):
+        value = floor
+    return max(value, floor)
+
+
+def _fill(
+    level: float, level_at_open: float, bar_open: float, gap_fill: bool
+) -> tuple[float, bool]:
+    """The fill price, and whether the bar had already gapped through its level at the open.
+
+    `level_at_open` is the exit level that EXISTED when the bar opened; `level` is the one that
+    actually triggered. They differ on the trail branch under `high_before_low`, where this bar's
+    own high raises the peak and so lifts the level mid-bar.
+
+    A gap means the price was already beyond a level that was in force at the open. Testing the
+    open against a level created later in the same bar is not a gap (Codex cb898726): with prior
+    peak 100, open 100, high 120, low 95 and a 6% floor, the level at the open was 94 -- the open
+    never gapped through it -- yet the triggering level of 112.8 is above the open, and the
+    earlier version reported a fabricated fill at 100.0 (pnl 0.0000) instead of 112.8 (+0.1280).
+    """
+    if not gap_fill:
+        return level, False
+    if bar_open < level_at_open:
+        return bar_open, True
+    return level, False

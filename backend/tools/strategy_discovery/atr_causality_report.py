@@ -21,7 +21,7 @@ import math
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from tools.strategy_discovery.atr_causality_probe import (
     ALL_VARIANTS,
@@ -30,6 +30,9 @@ from tools.strategy_discovery.atr_causality_probe import (
     bracket_orderings,
     simulate_variant,
 )
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _REQUIRED_COLUMNS = ("ts", "open", "high", "low", "close", "atr14_pct")
 
@@ -97,7 +100,7 @@ class FrameReport:
 
 
 def scan_frame(
-    frame,
+    frame: pd.DataFrame,
     *,
     product_id: str,
     horizon: int,
@@ -105,7 +108,20 @@ def scan_frame(
     variants: Sequence[VariantSpec] = ALL_VARIANTS,
     max_entries: Optional[int] = None,
 ) -> FrameReport:
-    """Every variant over one frame and horizon, each summarised against legacy."""
+    """Every variant over one frame and horizon, each summarised against legacy.
+
+    Never raises for an unusable frame: missing required columns, a missing
+    ``label_h<horizon>`` column or a frame defect (``_frame_defect``) return a
+    ``FrameReport`` with ``skipped_reason`` set and zero records. Otherwise the first
+    ``max_entries`` rows (all when None) are simulated under every variant.
+
+    ``config`` and ``max_entries`` are not validated here: ``simulate_variant``'s config
+    assumptions apply, and a non-positive ``max_entries`` simply scans nothing.
+
+    Raises:
+        ValueError: an invalid ``VariantSpec`` in ``variants``.
+        KeyError: a missing required config key.
+    """
     missing = [name for name in _REQUIRED_COLUMNS if name not in frame.columns]
     label_col = f"label_h{int(horizon)}"
     if missing:
@@ -226,85 +242,19 @@ def scan_frame(
     )
 
 
-def _frame_defect(frame) -> Optional[str]:
-    """Why this frame cannot carry a row-count label, or None.
-
-    `ts` was previously required and never checked (Codex c6f81f65). The label semantics are
-    row-count based, so a gapped, reversed or duplicated clock silently turns row offsets into
-    false hourly horizons -- the exact defect class the endpoint contract exists to remove.
-    """
-    import numpy as np
-    from pandas.api.types import is_integer_dtype
-
-    if not is_integer_dtype(frame["ts"].dtype) or frame["ts"].isna().any():
-        return "ts must be non-null integer milliseconds"
-    ts = frame["ts"].to_numpy(dtype="int64")
-    if len(ts) > 1:
-        steps = np.diff(ts)
-        if (steps != _BAR_MS).any():
-            return (
-                "ts must be unique, ascending and contiguous hourly; a gapped or reordered clock "
-                "makes row-count horizons false"
-            )
-    for name in ("open", "high", "low", "close"):
-        values = frame[name].to_numpy(dtype="float64")
-        if not np.isfinite(values).all() or (values <= 0.0).any():
-            return f"{name} must be finite and positive"
-    high = frame["high"].to_numpy(dtype="float64")
-    low = frame["low"].to_numpy(dtype="float64")
-    if (high < low).any():
-        return "high must not be below low"
-    for name in ("open", "close"):
-        values = frame[name].to_numpy(dtype="float64")
-        if (values > high).any() or (values < low).any():
-            return f"{name} must lie within [low, high]"
-    return None
-
-
 _BAR_MS = 3_600_000
 
 
-def _finite(value: float) -> bool:
-    return isinstance(value, float) and math.isfinite(value)
-
-
-def _summarise(name: str, bucket: dict) -> VariantSummary:
-    deltas = bucket["deltas"]
-    return VariantSummary(
-        variant=name,
-        records=bucket["records"],
-        pnl_changed=bucket["pnl_changed"],
-        result_changed=bucket["result_changed"],
-        kind_migration=dict(sorted(bucket["migration"].items())),
-        sign_flips=bucket["flips"],
-        bars_held_changed=bucket["bars"],
-        gapped_fills=bucket["gapped"],
-        pnl_delta_min=min(deltas) if deltas else None,
-        pnl_delta_max=max(deltas) if deltas else None,
-        pnl_delta_abs_mean_over_changed=(
-            (sum(abs(d) for d in deltas) / len(deltas)) if deltas else None
-        ),
-    )
-
-
-def _input_fingerprint(frames_dir: Path) -> Dict[str, Tuple[int, int]]:
-    """Size and mtime of every input file, so a test can prove the run touched nothing."""
-    return {
-        path.name: (path.stat().st_size, path.stat().st_mtime_ns)
-        for path in sorted(frames_dir.glob("*.parquet"))
-    }
-
-
 def run_probe(
-    frames_dir,
-    output_dir,
+    frames_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
     *,
     horizons: Sequence[int] = (24,),
     config: Mapping[str, float] = DEFAULT_CONFIG,
     products: Optional[Sequence[str]] = None,
     limit: Optional[int] = None,
     max_entries: Optional[int] = 2000,
-) -> dict:
+) -> Dict[str, object]:
     """Scan frames read-only and write one JSON report. Returns the summary payload.
 
     `status` is `"ok"` when at least one frame was scanned and `"no_data"` otherwise, with a
@@ -316,6 +266,15 @@ def run_probe(
     directory and unrelated files are fine. Publish a rerun into a fresh ``output_dir``. The
     check is not an atomic reservation: one writer per output directory is assumed, not
     enforced.
+
+    Returns the payload written, plus ``output_path``. A missing ``frames_dir`` is not an
+    error: it reports ``no_data``.
+
+    Raises:
+        ValueError: ``output_dir`` is ``frames_dir`` or inside it.
+        FileExistsError: the report or its temp already exists (before any read).
+        RuntimeError: the frames directory changed during the run.
+        OSError: a read or publication failure (the owned temp is removed first).
     """
     import pyarrow.parquet as pq
 
@@ -438,8 +397,19 @@ class ClockAudit:
     exposed_fraction: Optional[float] = None
 
 
-def audit_frame_clock(frame, *, product_id: str, horizon: int) -> ClockAudit:
-    """Per-entry exposure to clock gaps, which is narrower than per-frame failure."""
+def audit_frame_clock(frame: pd.DataFrame, *, product_id: str, horizon: int) -> ClockAudit:
+    """Per-entry exposure to clock gaps, which is narrower than per-frame failure.
+
+    Requires an integer-millisecond ``ts`` column; a missing ``label_h<horizon>`` column is
+    treated as all-NaN (nothing counted). Only entries with a finite stored label whose
+    window end fits in the frame are counted. ``horizon`` is assumed positive and ``ts``
+    ordered, finite and integral; none of that is validated. A NaN ``ts`` is NOT rejected:
+    the int64 cast turns it into an arbitrary integer (numpy only warns), so the caller must
+    supply a clean clock.
+
+    Raises:
+        KeyError: no ``ts`` column.
+    """
     import numpy as np
 
     ts = frame["ts"].to_numpy(dtype="int64")
@@ -481,11 +451,11 @@ def audit_frame_clock(frame, *, product_id: str, horizon: int) -> ClockAudit:
 
 
 def run_clock_audit(
-    frames_dir,
-    output_dir,
+    frames_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
     *,
     horizons: Sequence[int] = (24,),
-) -> dict:
+) -> Dict[str, object]:
     """Audit every frame's clock and persist the result. Read-only, isolated output.
 
     Never overwrites: if ``output_dir`` already holds this report (``clock_audit.json``) or its
@@ -493,6 +463,14 @@ def run_clock_audit(
     directory and unrelated files are fine. Publish a rerun into a fresh ``output_dir``. The
     check is not an atomic reservation: one writer per output directory is assumed, not
     enforced.
+
+    Returns the payload written, plus ``output_path``.
+
+    Raises:
+        ValueError: ``output_dir`` is ``frames_dir`` or inside it.
+        FileExistsError: the report or its temp already exists (before any read).
+        KeyError: a frame without a ``ts`` column.
+        OSError: a read or publication failure (the owned temp is removed first).
     """
     import pyarrow.parquet as pq
 
@@ -534,6 +512,72 @@ def run_clock_audit(
     destination = _publish_report(output_dir, "clock_audit.json", payload)
     payload["output_path"] = str(destination)
     return payload
+
+
+def _frame_defect(frame: pd.DataFrame) -> Optional[str]:
+    """Why this frame cannot carry a row-count label, or None.
+
+    `ts` was previously required and never checked (Codex c6f81f65). The label semantics are
+    row-count based, so a gapped, reversed or duplicated clock silently turns row offsets into
+    false hourly horizons -- the exact defect class the endpoint contract exists to remove.
+    """
+    import numpy as np
+    from pandas.api.types import is_integer_dtype
+
+    if not is_integer_dtype(frame["ts"].dtype) or frame["ts"].isna().any():
+        return "ts must be non-null integer milliseconds"
+    ts = frame["ts"].to_numpy(dtype="int64")
+    if len(ts) > 1:
+        steps = np.diff(ts)
+        if (steps != _BAR_MS).any():
+            return (
+                "ts must be unique, ascending and contiguous hourly; a gapped or reordered clock "
+                "makes row-count horizons false"
+            )
+    for name in ("open", "high", "low", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if not np.isfinite(values).all() or (values <= 0.0).any():
+            return f"{name} must be finite and positive"
+    high = frame["high"].to_numpy(dtype="float64")
+    low = frame["low"].to_numpy(dtype="float64")
+    if (high < low).any():
+        return "high must not be below low"
+    for name in ("open", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if (values > high).any() or (values < low).any():
+            return f"{name} must lie within [low, high]"
+    return None
+
+
+def _finite(value: float) -> bool:
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _summarise(name: str, bucket: dict) -> VariantSummary:
+    deltas = bucket["deltas"]
+    return VariantSummary(
+        variant=name,
+        records=bucket["records"],
+        pnl_changed=bucket["pnl_changed"],
+        result_changed=bucket["result_changed"],
+        kind_migration=dict(sorted(bucket["migration"].items())),
+        sign_flips=bucket["flips"],
+        bars_held_changed=bucket["bars"],
+        gapped_fills=bucket["gapped"],
+        pnl_delta_min=min(deltas) if deltas else None,
+        pnl_delta_max=max(deltas) if deltas else None,
+        pnl_delta_abs_mean_over_changed=(
+            (sum(abs(d) for d in deltas) / len(deltas)) if deltas else None
+        ),
+    )
+
+
+def _input_fingerprint(frames_dir: Path) -> Dict[str, Tuple[int, int]]:
+    """Size and mtime of every input file, so a test can prove the run touched nothing."""
+    return {
+        path.name: (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in sorted(frames_dir.glob("*.parquet"))
+    }
 
 
 def _refuse_occupied_report(output_dir: Path, name: str) -> Tuple[Path, Path]:

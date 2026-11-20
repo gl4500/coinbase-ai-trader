@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from tools.strategy_discovery.atr_causality_probe import (
     ALL_VARIANTS,
@@ -33,6 +33,12 @@ from tools.strategy_discovery.atr_causality_report import (
     _publish_report,
     _refuse_occupied_report,
 )
+
+if TYPE_CHECKING:
+    import os
+    import subprocess
+
+    import pandas as pd
 
 _BAR_MS = 3_600_000
 _REQUIRED_COLUMNS = ("ts", "open", "high", "low", "close", "atr14_pct")
@@ -94,77 +100,6 @@ CAVEATS = (
 )
 
 
-def _retained_ranges(positions) -> list:
-    """Run-length encode retained positions as [start, end] inclusive pairs.
-
-    First and last timestamps cannot reproduce WHICH entries were excluded (Codex dd462ea4), and a
-    flat list of 11k integers per product is unwieldy. Ranges are exact and compact.
-    """
-    ranges = []
-    for position in positions:
-        if ranges and position == ranges[-1][1] + 1:
-            ranges[-1][1] = position
-        else:
-            ranges.append([position, position])
-    return [[int(a), int(b)] for a, b in ranges]
-
-
-def _file_digest(path) -> str:
-    """sha256 of one input file, so a reader can confirm they hold the same bytes."""
-    import hashlib
-
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
-
-
-def _git_provenance() -> Dict[str, object]:
-    """The commit this ran from AND whether the tree was modified at the time.
-
-    A bare commit SHA is worse than none when the executed code was uncommitted: it invites a
-    reader to check out that SHA and get different behaviour (Codex 35985ceb -- the first artifact
-    recorded a9e07b1 while the hex matching, coherence guards and these very fields were still
-    working-tree changes later committed as e94408b). `tree_dirty` makes that condition visible in
-    the artifact instead of inferable only by someone who already knows.
-    """
-    import subprocess
-
-    def _run(args):
-        try:
-            return subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                cwd=str(Path(__file__).resolve().parent),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-
-    head = _run(["git", "rev-parse", "HEAD"])
-    commit = head.stdout.strip() if head is not None and head.returncode == 0 else None
-
-    # Tracked modifications only: an untracked file cannot change what `git checkout <sha>` yields,
-    # but it is counted separately so the reader can judge.
-    diff = _run(["git", "diff", "--quiet", "HEAD"])
-    dirty = None if diff is None else (diff.returncode != 0)
-
-    untracked = _run(["git", "ls-files", "--others", "--exclude-standard"])
-    count = (
-        len([line for line in untracked.stdout.splitlines() if line.strip()])
-        if untracked is not None and untracked.returncode == 0
-        else None
-    )
-    return {
-        "commit": commit,
-        "tree_dirty": dirty,
-        "untracked_files": count,
-        "reproducible_from_commit": bool(commit) and dirty is False,
-    }
-
-
 @dataclass(frozen=True)
 class VariantDelta:
     variant: str
@@ -199,99 +134,8 @@ class ContiguousScan:
     skipped_reason: Optional[str] = None
 
 
-def _finite(value) -> bool:
-    return isinstance(value, float) and math.isfinite(value)
-
-
-def _skip(product_id, horizon, rows, reason) -> ContiguousScan:
-    return ContiguousScan(
-        product_id=product_id,
-        horizon=int(horizon),
-        rows=rows,
-        positions_considered=0,
-        retained_entries=0,
-        excluded_label_not_finite=0,
-        excluded_window_incomplete=0,
-        excluded_window_has_gap=0,
-        legacy_matches_stored=0,
-        retained_first_ts=None,
-        retained_last_ts=None,
-        skipped_reason=reason,
-    )
-
-
-def _frame_defect(frame) -> Optional[str]:
-    """Defects that make a frame unusable even for window selection.
-
-    A GAPPED clock is explicitly allowed here -- that is the whole point. A reversed or duplicated
-    clock is not: that is a broken frame rather than a sparse one, and no window selection makes
-    it meaningful.
-    """
-    import numpy as np
-    from pandas.api.types import is_integer_dtype
-
-    if not is_integer_dtype(frame["ts"].dtype) or frame["ts"].isna().any():
-        return "ts must be non-null integer milliseconds"
-    ts = frame["ts"].to_numpy(dtype="int64")
-    if len(ts) > 1 and (np.diff(ts) <= 0).any():
-        return (
-            "ts must be strictly increasing; a reversed or duplicated clock is a broken frame, "
-            "not a gapped one"
-        )
-    for name in ("open", "high", "low", "close"):
-        values = frame[name].to_numpy(dtype="float64")
-        if not np.isfinite(values).all() or (values <= 0.0).any():
-            return f"{name} must be finite and positive"
-
-    # The RELATIONS, not just the magnitudes (Codex dd462ea4). A bar whose low exceeds its high,
-    # or whose open or close sits outside [low, high], describes no traversable path -- yet the
-    # simulation would still produce an exit from it, so the diagnostic must refuse the frame
-    # rather than report a number derived from an impossible bar.
-    high = frame["high"].to_numpy(dtype="float64")
-    low = frame["low"].to_numpy(dtype="float64")
-    if (low > high).any():
-        return "low must not exceed high"
-    for name in ("open", "close"):
-        values = frame[name].to_numpy(dtype="float64")
-        if (values > high).any() or (values < low).any():
-            return f"{name} must lie within [low, high]"
-    return None
-
-
-def _checked_positive_int(value, field: str) -> int:
-    """A strictly positive integer, without coercion.
-
-    `int(value)` accepted 24.9 and True, and a negative `max_entries` produced an empty range that
-    would read as a clean run with no evidence rather than as bad input.
-    """
-    import numbers
-
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
-        raise ValueError(f"{field} must be an integer without coercion, got {value!r}")
-    if int(value) <= 0:
-        raise ValueError(f"{field} must be strictly positive, got {value!r}")
-    return int(value)
-
-
-def _checked_config(config) -> Mapping[str, float]:
-    """Every threshold present, finite and in range. A missing key must not default silently."""
-    required = ("stop_loss_pct", "atr_trail_floor", "max_hold_bars", "round_trip_fee")
-    missing = [key for key in required if key not in config]
-    if missing:
-        raise ValueError(f"config is missing {sorted(missing)}")
-    for key in ("stop_loss_pct", "atr_trail_floor"):
-        value = float(config[key])
-        if not math.isfinite(value) or not 0.0 < value < 1.0:
-            raise ValueError(f"config[{key!r}] must be a finite fraction in (0, 1), got {value!r}")
-    fee = float(config["round_trip_fee"])
-    if not math.isfinite(fee) or fee < 0.0:
-        raise ValueError(f"config['round_trip_fee'] must be finite and non-negative, got {fee!r}")
-    _checked_positive_int(config["max_hold_bars"], "config['max_hold_bars']")
-    return config
-
-
 def scan_contiguous_windows(
-    frame,
+    frame: pd.DataFrame,
     *,
     product_id: str,
     horizon: int,
@@ -299,7 +143,21 @@ def scan_contiguous_windows(
     variants: Sequence[VariantSpec] = ALL_VARIANTS,
     max_entries: Optional[int] = 1500,
 ) -> ContiguousScan:
-    """Variants over entries whose own forward window is contiguous hourly."""
+    """Variants over entries whose own forward window is contiguous hourly.
+
+    ``horizon``, ``config`` and ``max_entries`` are validated first and raise. An unusable
+    frame does not raise: missing required columns, a missing ``label_h<horizon>`` column
+    or a frame defect (``_frame_defect``; a gapped clock is allowed) return a
+    ``ContiguousScan`` with ``skipped_reason`` set. Otherwise the first ``max_entries``
+    positions (all when None) are considered and only entries with a finite stored label
+    and a complete, gap-free forward window are retained and simulated.
+
+    Raises:
+        ValueError: ``horizon`` or ``max_entries`` not a strictly positive integer (no
+            coercion), a config key missing or out of range, or an invalid ``VariantSpec``
+            in ``variants``.
+        TypeError: a config value ``float`` rejects.
+    """
     import numpy as np
 
     horizon = _checked_positive_int(horizon, "horizon")
@@ -427,34 +285,15 @@ def scan_contiguous_windows(
     )
 
 
-def _summarise(name: str, bucket: dict) -> VariantDelta:
-    deltas = bucket["deltas"]
-    return VariantDelta(
-        variant=name,
-        records=bucket["records"],
-        pnl_changed=bucket["pnl_changed"],
-        result_changed=bucket["result_changed"],
-        bars_held_changed=bucket["bars"],
-        gapped_fills=bucket["gapped"],
-        sign_flips=bucket["flips"],
-        kind_migration=dict(sorted(bucket["migration"].items())),
-        pnl_delta_min=min(deltas) if deltas else None,
-        pnl_delta_max=max(deltas) if deltas else None,
-        pnl_delta_abs_mean_over_changed=(
-            (sum(abs(d) for d in deltas) / len(deltas)) if deltas else None
-        ),
-    )
-
-
 def run_contiguous_probe(
-    frames_dir,
-    output_dir,
+    frames_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
     *,
     horizons: Sequence[int] = (24,),
     config: Mapping[str, float] = DEFAULT_CONFIG,
     limit: Optional[int] = 8,
     max_entries: Optional[int] = 1500,
-) -> dict:
+) -> Dict[str, object]:
     """Scan read-only, write one JSON to an isolated directory, report no-data explicitly.
 
     Never overwrites: if ``output_dir`` already holds this report (``contiguous_window_report.json``) or its
@@ -462,6 +301,16 @@ def run_contiguous_probe(
     directory and unrelated files are fine. Publish a rerun into a fresh ``output_dir``. The
     check is not an atomic reservation: one writer per output directory is assumed, not
     enforced.
+
+    Returns the payload written, plus ``output_path``. A missing ``frames_dir`` is not an
+    error: it reports ``no_data``.
+
+    Raises:
+        ValueError: an invalid config, horizon, ``limit`` or ``max_entries``, no horizons,
+            or ``output_dir`` that is ``frames_dir`` or inside it.
+        FileExistsError: the report or its temp already exists (before any read).
+        RuntimeError: the frames directory changed during the run.
+        OSError: a read or publication failure (the owned temp is removed first).
     """
     import pyarrow.parquet as pq
 
@@ -536,7 +385,188 @@ def run_contiguous_probe(
     return payload
 
 
-def _fingerprint(frames_dir: Path) -> Dict[str, tuple]:
+def _retained_ranges(positions: Iterable[int]) -> List[List[int]]:
+    """Run-length encode retained positions as [start, end] inclusive pairs.
+
+    First and last timestamps cannot reproduce WHICH entries were excluded (Codex dd462ea4), and a
+    flat list of 11k integers per product is unwieldy. Ranges are exact and compact.
+    """
+    ranges = []
+    for position in positions:
+        if ranges and position == ranges[-1][1] + 1:
+            ranges[-1][1] = position
+        else:
+            ranges.append([position, position])
+    return [[int(a), int(b)] for a, b in ranges]
+
+
+def _file_digest(path: str | os.PathLike[str]) -> str:
+    """sha256 of one input file, so a reader can confirm they hold the same bytes."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _git_provenance() -> Dict[str, object]:
+    """The commit this ran from AND whether the tree was modified at the time.
+
+    A bare commit SHA is worse than none when the executed code was uncommitted: it invites a
+    reader to check out that SHA and get different behaviour (Codex 35985ceb -- the first artifact
+    recorded a9e07b1 while the hex matching, coherence guards and these very fields were still
+    working-tree changes later committed as e94408b). `tree_dirty` makes that condition visible in
+    the artifact instead of inferable only by someone who already knows.
+    """
+    import subprocess
+
+    def _run(args: Sequence[str]) -> Optional[subprocess.CompletedProcess[str]]:
+        try:
+            return subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(Path(__file__).resolve().parent),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    head = _run(["git", "rev-parse", "HEAD"])
+    commit = head.stdout.strip() if head is not None and head.returncode == 0 else None
+
+    # Tracked modifications only: an untracked file cannot change what `git checkout <sha>` yields,
+    # but it is counted separately so the reader can judge.
+    diff = _run(["git", "diff", "--quiet", "HEAD"])
+    dirty = None if diff is None else (diff.returncode != 0)
+
+    untracked = _run(["git", "ls-files", "--others", "--exclude-standard"])
+    count = (
+        len([line for line in untracked.stdout.splitlines() if line.strip()])
+        if untracked is not None and untracked.returncode == 0
+        else None
+    )
+    return {
+        "commit": commit,
+        "tree_dirty": dirty,
+        "untracked_files": count,
+        "reproducible_from_commit": bool(commit) and dirty is False,
+    }
+
+
+def _finite(value: object) -> bool:
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _skip(product_id: str, horizon: int, rows: int, reason: str) -> ContiguousScan:
+    return ContiguousScan(
+        product_id=product_id,
+        horizon=int(horizon),
+        rows=rows,
+        positions_considered=0,
+        retained_entries=0,
+        excluded_label_not_finite=0,
+        excluded_window_incomplete=0,
+        excluded_window_has_gap=0,
+        legacy_matches_stored=0,
+        retained_first_ts=None,
+        retained_last_ts=None,
+        skipped_reason=reason,
+    )
+
+
+def _frame_defect(frame: pd.DataFrame) -> Optional[str]:
+    """Defects that make a frame unusable even for window selection.
+
+    A GAPPED clock is explicitly allowed here -- that is the whole point. A reversed or duplicated
+    clock is not: that is a broken frame rather than a sparse one, and no window selection makes
+    it meaningful.
+    """
+    import numpy as np
+    from pandas.api.types import is_integer_dtype
+
+    if not is_integer_dtype(frame["ts"].dtype) or frame["ts"].isna().any():
+        return "ts must be non-null integer milliseconds"
+    ts = frame["ts"].to_numpy(dtype="int64")
+    if len(ts) > 1 and (np.diff(ts) <= 0).any():
+        return (
+            "ts must be strictly increasing; a reversed or duplicated clock is a broken frame, "
+            "not a gapped one"
+        )
+    for name in ("open", "high", "low", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if not np.isfinite(values).all() or (values <= 0.0).any():
+            return f"{name} must be finite and positive"
+
+    # The RELATIONS, not just the magnitudes (Codex dd462ea4). A bar whose low exceeds its high,
+    # or whose open or close sits outside [low, high], describes no traversable path -- yet the
+    # simulation would still produce an exit from it, so the diagnostic must refuse the frame
+    # rather than report a number derived from an impossible bar.
+    high = frame["high"].to_numpy(dtype="float64")
+    low = frame["low"].to_numpy(dtype="float64")
+    if (low > high).any():
+        return "low must not exceed high"
+    for name in ("open", "close"):
+        values = frame[name].to_numpy(dtype="float64")
+        if (values > high).any() or (values < low).any():
+            return f"{name} must lie within [low, high]"
+    return None
+
+
+def _checked_positive_int(value: object, field: str) -> int:
+    """A strictly positive integer, without coercion.
+
+    `int(value)` accepted 24.9 and True, and a negative `max_entries` produced an empty range that
+    would read as a clean run with no evidence rather than as bad input.
+    """
+    import numbers
+
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{field} must be an integer without coercion, got {value!r}")
+    if int(value) <= 0:
+        raise ValueError(f"{field} must be strictly positive, got {value!r}")
+    return int(value)
+
+
+def _checked_config(config: Mapping[str, object]) -> Mapping[str, float]:
+    """Every threshold present, finite and in range. A missing key must not default silently."""
+    required = ("stop_loss_pct", "atr_trail_floor", "max_hold_bars", "round_trip_fee")
+    missing = [key for key in required if key not in config]
+    if missing:
+        raise ValueError(f"config is missing {sorted(missing)}")
+    for key in ("stop_loss_pct", "atr_trail_floor"):
+        value = float(config[key])
+        if not math.isfinite(value) or not 0.0 < value < 1.0:
+            raise ValueError(f"config[{key!r}] must be a finite fraction in (0, 1), got {value!r}")
+    fee = float(config["round_trip_fee"])
+    if not math.isfinite(fee) or fee < 0.0:
+        raise ValueError(f"config['round_trip_fee'] must be finite and non-negative, got {fee!r}")
+    _checked_positive_int(config["max_hold_bars"], "config['max_hold_bars']")
+    return config
+
+
+def _summarise(name: str, bucket: dict) -> VariantDelta:
+    deltas = bucket["deltas"]
+    return VariantDelta(
+        variant=name,
+        records=bucket["records"],
+        pnl_changed=bucket["pnl_changed"],
+        result_changed=bucket["result_changed"],
+        bars_held_changed=bucket["bars"],
+        gapped_fills=bucket["gapped"],
+        sign_flips=bucket["flips"],
+        kind_migration=dict(sorted(bucket["migration"].items())),
+        pnl_delta_min=min(deltas) if deltas else None,
+        pnl_delta_max=max(deltas) if deltas else None,
+        pnl_delta_abs_mean_over_changed=(
+            (sum(abs(d) for d in deltas) / len(deltas)) if deltas else None
+        ),
+    )
+
+
+def _fingerprint(frames_dir: Path) -> Dict[str, Tuple[int, int]]:
     return {
         path.name: (path.stat().st_size, path.stat().st_mtime_ns)
         for path in sorted(frames_dir.glob("*.parquet"))

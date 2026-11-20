@@ -11,7 +11,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -24,6 +24,13 @@ from tools.strategy_discovery.profit_split import (
 from tools.strategy_discovery.profit_tree import TreeNode, collect_leaves, fit_tree
 from tools.strategy_discovery.purged_wf import inner_folds, outer_folds
 from tools.strategy_discovery.rule_contract import bind_rule, encode_leaf_rule, tree_source_digest
+
+if TYPE_CHECKING:
+    import os
+
+    import pandas as pd
+
+    from tools.strategy_discovery.endpoint_consumers import ValidatedEndpoints
 
 _DEPTH_GRID = (3, 5, 7)
 _MIN_LEAF_GRID = (20, 50, 100)
@@ -270,36 +277,6 @@ def _assign_leaves(root: TreeNode, features_subset: torch.Tensor) -> List[int]:
     return assignments
 
 
-def _require_published_endpoints(frame, *, pid: str, parquet_path):
-    """Validated endpoints for this product, or raise. There is no fallback on purpose.
-
-    The layout is the producer's own: `build_phase2` writes `{pid}.endpoints.json` and
-    `endpoints/{pid}/` beside `{pid}.parquet`, so the location is derived from the parquet's
-    parent rather than threaded through a new parameter no caller would have a better value
-    for.
-
-    Mining a product on horizon arithmetic because its publication is missing would be the
-    worst available outcome: the run would emit ordinary-looking profiles measured on an
-    occupancy basis that disagrees with the labels, and nothing downstream could tell.
-    """
-    directory = Path(parquet_path).parent
-    sidecar_path = directory / f"{pid}.endpoints.json"
-    if not sidecar_path.exists():
-        raise FileNotFoundError(
-            f"{sidecar_path} is missing, so {pid} has no published endpoints. Mining cannot "
-            f"fall back to a wall-clock horizon -- that is the disagreement the endpoint "
-            f"contract removes. Re-run Phase 2 for this product first."
-        )
-    with open(sidecar_path, "r", encoding="utf-8") as handle:
-        sidecar = json.load(handle)
-    return load_validated_endpoints(
-        directory / "endpoints" / pid,
-        frame=frame,
-        sidecar=sidecar,
-        product_id=pid,
-    )
-
-
 def mine_profiles_for_pid_horizon(
     pid: str,
     horizon: int,
@@ -537,3 +514,44 @@ def mine_profiles_for_pid_horizon(
             )
         )
     return profiles
+
+
+def _require_published_endpoints(
+    frame: pd.DataFrame, *, pid: str, parquet_path: str | os.PathLike[str]
+) -> ValidatedEndpoints:
+    """Validated endpoints for this product, or raise. There is no fallback on purpose.
+
+    The layout is the producer's own: `build_phase2` writes `{pid}.endpoints.json` and
+    `endpoints/{pid}/` beside `{pid}.parquet`, so the location is derived from the parquet's
+    parent rather than threaded through a new parameter no caller would have a better value
+    for.
+
+    Mining a product on horizon arithmetic because its publication is missing would be the
+    worst available outcome: the run would emit ordinary-looking profiles measured on an
+    occupancy basis that disagrees with the labels, and nothing downstream could tell.
+
+    Returns the ``ValidatedEndpoints`` from ``load_validated_endpoints`` for ``frame``.
+
+    Raises:
+        FileNotFoundError: no ``{pid}.endpoints.json`` beside the parquet.
+        OSError: the sidecar cannot be read.
+        ValueError: the sidecar is not valid JSON (``json.JSONDecodeError``).
+        Anything ``load_validated_endpoints`` raises, unchanged (see its Raises;
+        ``MissingEndpoint`` is a ValueError).
+    """
+    directory = Path(parquet_path).parent
+    sidecar_path = directory / f"{pid}.endpoints.json"
+    if not sidecar_path.exists():
+        raise FileNotFoundError(
+            f"{sidecar_path} is missing, so {pid} has no published endpoints. Mining cannot "
+            f"fall back to a wall-clock horizon -- that is the disagreement the endpoint "
+            f"contract removes. Re-run Phase 2 for this product first."
+        )
+    with open(sidecar_path, "r", encoding="utf-8") as handle:
+        sidecar = json.load(handle)
+    return load_validated_endpoints(
+        directory / "endpoints" / pid,
+        frame=frame,
+        sidecar=sidecar,
+        product_id=pid,
+    )
