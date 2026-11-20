@@ -357,7 +357,7 @@ def load_validated_endpoints(
 # ── the two quantities, from validated records only ─────────────────────────
 
 
-def frame_fingerprint(frame) -> str:
+def frame_fingerprint(frame: pd.DataFrame) -> str:
     """Digest of the frame's FULL content: every column and every value.
 
     Needed because `build_data_id` is NARROWER than it looks. It covers the arrays the exit
@@ -370,6 +370,13 @@ def frame_fingerprint(frame) -> str:
     This is an IN-PROCESS binding, not a persisted artifact digest: a `ValidatedEndpoints`
     lives in memory, so the fingerprint only has to be stable within one process, and the
     producer's `data_id` version is deliberately untouched.
+
+    Required: a DataFrame whose column names are unique once converted to str. Returns
+    ``"sha256:<64 hex>"``; column order does not change it, while renaming, retyping or
+    changing any value (index included) does.
+
+    Raises:
+        ValueError: duplicate column names.
     """
     import pandas as pd
 
