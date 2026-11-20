@@ -7,6 +7,15 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-20 - Phase 4 drops a feature-excluded product's profiles (review R2, PR #78)
+
+- `build_phase4` now removes profiles for every product without usable features or
+  endpoints, unconditionally. Before, the profile filter ran only when some product was
+  unpublished, so a product with missing or empty Phase 2 features kept its profiles and
+  the replay aborted with `MissingEndpoint`. It is now reported as
+  `phase2_features_missing_or_empty` and the remaining products replay.
+- A published artifact that fails validation still raises `EndpointArtifactError`.
+
 ### 2026-11-20 - Phase 2 endpoint publication never overwrites prior output (review R2, PR #77)
 
 - `build_phase2_for_pid` and `build_phase2_for_universe` refuse an output root that

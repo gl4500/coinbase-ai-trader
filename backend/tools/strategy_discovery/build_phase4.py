@@ -218,11 +218,10 @@ def build_phase4(
     # reason rather than replayed on horizon arithmetic.
     endpoints_by_pid, unpublished_products = _load_endpoints(pid_features, phase2_dir)
     exclusions.update(unpublished_products)
-    if unpublished_products:
-        pid_features = {
-            pid: frame for pid, frame in pid_features.items() if pid in endpoints_by_pid
-        }
-        profiles = [p for p in profiles if p.pid in endpoints_by_pid]
+    # Unconditional: a product excluded for its FEATURES must leave the profile pool as well,
+    # not only when some other product happens to be unpublished.
+    pid_features = {pid: frame for pid, frame in pid_features.items() if pid in endpoints_by_pid}
+    profiles = [p for p in profiles if p.pid in pid_features]
     universe = {
         "requested_products": requested_pids,
         "evaluated_products": sorted(pid_features),

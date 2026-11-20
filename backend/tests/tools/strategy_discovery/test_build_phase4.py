@@ -14,7 +14,7 @@ import pytest
 from tools.strategy_discovery.build_phase4 import build_phase4
 
 
-def _write_minimal_phase3(phase3_dir: Path):
+def _write_minimal_phase3(phase3_dir: Path, pids=None):
     _PROFILE_COLUMNS = [
         "pid",
         "horizon",
@@ -113,6 +113,8 @@ def _write_minimal_phase3(phase3_dir: Path):
             1,
         ),
     ]
+    if pids is not None:
+        rows = [row for row in rows if row[0] in pids]
     df = pd.DataFrame(rows, columns=_PROFILE_COLUMNS)
     df["schema_version"] = 3
     df["rule_version"] = "profile_rule_binding_v1"
@@ -128,6 +130,8 @@ def _write_minimal_phase3(phase3_dir: Path):
         "ETH-USD__1": "price_over_ema20 > 1.0",
         "SOL-USD__2": "price_over_ema20 > 1.0",
     }
+    if pids is not None:
+        sidecar = {key: text for key, text in sidecar.items() if key.split("__")[0] in pids}
     from tests.tools.strategy_discovery.rule_fixtures import write_bound_sidecar_fixture
 
     write_bound_sidecar_fixture(phase3_dir / "rule_paths_h24.json", sidecar)
@@ -383,6 +387,68 @@ def test_a_corrupt_published_artifact_stops_the_run(tmp_path: Path):
     assert not (output_dir / "deployment_n2.json").exists(), (
         "a run that hit a corrupt artifact must not leave an apparently successful scorecard"
     )
+
+
+# -- a product excluded for its FEATURES leaves the profile pool too -----------------
+# Codex R2-78. The profile filter used to run only when some product was unpublished, so a
+# product with missing or empty features kept its profiles while its frame was dropped. No
+# unpublished product is present in these runs: the feature exclusion must be enough.
+
+
+def _write_empty_phase2(phase2_dir: Path, pid: str) -> None:
+    phase2_dir.mkdir(parents=True, exist_ok=True)
+    empty = pd.DataFrame(
+        {
+            "ts": pd.Series([], dtype="int64"),
+            "source_row_id": pd.Series([], dtype="int64"),
+            "close": pd.Series([], dtype="float64"),
+            "price_over_ema20": pd.Series([], dtype="float64"),
+            "label_h24": pd.Series([], dtype="float64"),
+        }
+    )
+    pq.write_table(pa.Table.from_pandas(empty, preserve_index=False), phase2_dir / f"{pid}.parquet")
+
+
+@pytest.mark.parametrize("bad_features", ["missing", "empty"])
+def test_a_product_without_usable_features_leaves_the_pool_and_the_rest_replays(
+    tmp_path: Path, bad_features
+):
+    phase3_dir, phase2_dir, output_dir = tmp_path / "p3", tmp_path / "p2", tmp_path / "out"
+    _write_minimal_phase3(phase3_dir, pids={"BTC-USD", "ETH-USD"})
+    _write_minimal_phase2(phase2_dir, ["BTC-USD"])
+    if bad_features == "empty":
+        _write_empty_phase2(phase2_dir, "ETH-USD")
+    assert not (phase2_dir / "ETH-USD.endpoints.json").exists()
+
+    build_phase4(phase3_dir=phase3_dir, phase2_dir=phase2_dir, output_dir=output_dir, caps=[1])
+
+    payload = json.loads((output_dir / "deployment_n1.json").read_text(encoding="utf-8"))
+    universe = payload["universe"]
+    assert universe["requested_products"] == ["BTC-USD", "ETH-USD"]
+    assert universe["evaluated_products"] == ["BTC-USD"]
+    assert universe["excluded_products"] == {"ETH-USD": "phase2_features_missing_or_empty"}
+    assert universe["requested_product_count"] == 2
+    assert universe["evaluated_product_count"] == 1
+    assert [p["pid"] for p in payload["profiles"]] == ["BTC-USD"]
+    assert payload["portfolio_metrics"]["trade_count"] > 0, "the GOOD product must really replay"
+
+
+def test_a_corrupt_artifact_still_raises_beside_a_feature_exclusion(tmp_path: Path):
+    """The exclusion path must not swallow the fail-closed one."""
+    from tools.strategy_discovery.build_phase4 import EndpointArtifactError
+
+    phase3_dir, phase2_dir, output_dir = tmp_path / "p3", tmp_path / "p2", tmp_path / "out"
+    _write_minimal_phase3(phase3_dir, pids={"BTC-USD", "ETH-USD"})
+    _write_minimal_phase2(phase2_dir, ["BTC-USD"])
+    frame = pq.read_table(phase2_dir / "BTC-USD.parquet").to_pandas()
+    frame.loc[0, "close"] = float(frame.loc[0, "close"]) + 1.0
+    pq.write_table(
+        pa.Table.from_pandas(frame, preserve_index=False), phase2_dir / "BTC-USD.parquet"
+    )
+
+    with pytest.raises(EndpointArtifactError, match="BTC-USD"):
+        build_phase4(phase3_dir=phase3_dir, phase2_dir=phase2_dir, output_dir=output_dir, caps=[1])
+    assert not (output_dir / "deployment_n1.json").exists()
 
 
 def test_labels_and_endpoints_from_the_real_producer_reach_the_replay(tmp_path: Path):
