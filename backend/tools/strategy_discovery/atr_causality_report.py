@@ -310,6 +310,12 @@ def run_probe(
     `status` is `"ok"` when at least one frame was scanned and `"no_data"` otherwise, with a
     reason -- an empty result is reported explicitly rather than looking like a clean run with
     nothing to say.
+
+    Never overwrites: if ``output_dir`` already holds this report (``atr_causality_report.json``) or its
+    ``.partial`` temp, raises FileExistsError before any input is read. An existing empty
+    directory and unrelated files are fine. Publish a rerun into a fresh ``output_dir``. The
+    check is not an atomic reservation: one writer per output directory is assumed, not
+    enforced.
     """
     import pyarrow.parquet as pq
 
@@ -323,6 +329,7 @@ def run_probe(
             "under its read-only inputs (Codex c6f81f65: an equality-only guard permitted a "
             "subdirectory, contradicting the promise)"
         )
+    _refuse_occupied_report(output_dir, "atr_causality_report.json")
 
     before = _input_fingerprint(frames_dir) if frames_dir.exists() else {}
     candidates = sorted(frames_dir.glob("*.parquet")) if frames_dir.exists() else []
@@ -399,15 +406,7 @@ def run_probe(
         else:
             payload["no_data_reason"] = "every candidate frame was skipped; see frames_skipped"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    destination = output_dir / "atr_causality_report.json"
-    temporary = destination.with_name(destination.name + ".partial")
-    try:
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, destination)
-    except OSError:
-        temporary.unlink(missing_ok=True)
-        raise
+    destination = _publish_report(output_dir, "atr_causality_report.json", payload)
 
     if frames_dir.exists():
         after = _input_fingerprint(frames_dir)
@@ -487,7 +486,14 @@ def run_clock_audit(
     *,
     horizons: Sequence[int] = (24,),
 ) -> dict:
-    """Audit every frame's clock and persist the result. Read-only, isolated output."""
+    """Audit every frame's clock and persist the result. Read-only, isolated output.
+
+    Never overwrites: if ``output_dir`` already holds this report (``clock_audit.json``) or its
+    ``.partial`` temp, raises FileExistsError before any input is read. An existing empty
+    directory and unrelated files are fine. Publish a rerun into a fresh ``output_dir``. The
+    check is not an atomic reservation: one writer per output directory is assumed, not
+    enforced.
+    """
     import pyarrow.parquet as pq
 
     frames_dir = Path(frames_dir)
@@ -496,6 +502,7 @@ def run_clock_audit(
     resolved_output = output_dir.resolve()
     if resolved_output == resolved_frames or resolved_frames in resolved_output.parents:
         raise ValueError("output_dir must not be the frames directory or inside it")
+    _refuse_occupied_report(output_dir, "clock_audit.json")
 
     audits: List[ClockAudit] = []
     for path in sorted(frames_dir.glob("*.parquet")):
@@ -524,14 +531,60 @@ def run_clock_audit(
             "are otherwise correct, and nothing about profitability.",
         ],
     }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    destination = output_dir / "clock_audit.json"
-    temporary = destination.with_name(destination.name + ".partial")
-    try:
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, destination)
-    except OSError:
-        temporary.unlink(missing_ok=True)
-        raise
+    destination = _publish_report(output_dir, "clock_audit.json", payload)
     payload["output_path"] = str(destination)
     return payload
+
+
+def _refuse_occupied_report(output_dir: Path, name: str) -> Tuple[Path, Path]:
+    """``(final, temp)`` paths for report ``name`` in ``output_dir``, both verified absent.
+
+    Only these two named targets count as occupied; the directory itself and unrelated files
+    do not. Checking is not reserving: one writer per output directory is assumed.
+
+    Raises:
+        FileExistsError: the final report or its ``.partial`` temp already exists.
+    """
+    destination = Path(output_dir) / name
+    temporary = destination.with_name(name + ".partial")
+    occupied = [path for path in (destination, temporary) if path.exists()]
+    if occupied:
+        raise FileExistsError(
+            f"refusing to overwrite a prior report: {', '.join(str(p) for p in occupied)}. "
+            f"Prior versions are preserved, never replaced; publish into a fresh output_dir "
+            f"(one writer per output directory)."
+        )
+    return destination, temporary
+
+
+def _publish_report(output_dir: Path, name: str, payload: Mapping[str, object]) -> Path:
+    """Write ``payload`` as JSON to ``output_dir/name`` via an exclusively created temp.
+
+    Rechecks both targets itself, because it is callable without an entrypoint's preflight.
+    The temp is created with ``"x"``: if it appeared after the check it belongs to someone
+    else, the create fails and that file is left untouched. Once this call owns the temp,
+    any failure in write, flush, close or rename removes that temp and re-raises. A
+    destination created by another writer between the check and the rename would be
+    replaced: the one-writer assumption, not a lock, prevents that. Returns the final path.
+
+    Raises:
+        FileExistsError: an occupied target (see ``_refuse_occupied_report``) or a temp that
+            appeared before the exclusive create.
+        TypeError: ``payload`` is not JSON-serializable (nothing is written).
+        OSError: a write, flush, close or rename failure, after removing the owned temp.
+    """
+    destination, temporary = _refuse_occupied_report(output_dir, name)
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    handle = open(temporary, "x", encoding="utf-8")
+    try:
+        try:
+            handle.write(text)
+            handle.flush()
+        finally:
+            handle.close()
+        os.replace(temporary, destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return destination

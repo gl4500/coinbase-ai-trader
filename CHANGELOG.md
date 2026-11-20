@@ -7,6 +7,18 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-20 - ATR probe reports never overwrite prior output (review R2, PR #79)
+
+- `run_probe`, `run_clock_audit` and `run_contiguous_probe` refuse, before reading any
+  input, when their report (`atr_causality_report.json`, `clock_audit.json`,
+  `contiguous_window_report.json`) or its `.partial` temp already exists in `output_dir`.
+  Reruns go to a fresh `output_dir`; an empty directory and unrelated files are fine.
+- Publication goes through one helper that rechecks both targets, creates the temp
+  exclusively (a foreign temp is never truncated or deleted) and removes only its own temp
+  on a write, flush, close or rename failure.
+- The check is not an atomic reservation: one writer per output directory is assumed. No
+  existing report is migrated, moved or deleted.
+
 ### 2026-11-20 - Phase 4 endpoint helpers typed and documented (review R1, PR #78)
 
 - `verify_frame_matches`, `build_phase4._load_endpoints` and the `replay_timeline`

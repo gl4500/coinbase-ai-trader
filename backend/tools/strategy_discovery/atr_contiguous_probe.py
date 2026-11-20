@@ -18,9 +18,7 @@ decay out of it.
 
 from __future__ import annotations
 
-import json
 import math
-import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence
@@ -30,6 +28,10 @@ from tools.strategy_discovery.atr_causality_probe import (
     LEGACY,
     VariantSpec,
     simulate_variant,
+)
+from tools.strategy_discovery.atr_causality_report import (
+    _publish_report,
+    _refuse_occupied_report,
 )
 
 _BAR_MS = 3_600_000
@@ -453,7 +455,14 @@ def run_contiguous_probe(
     limit: Optional[int] = 8,
     max_entries: Optional[int] = 1500,
 ) -> dict:
-    """Scan read-only, write one JSON to an isolated directory, report no-data explicitly."""
+    """Scan read-only, write one JSON to an isolated directory, report no-data explicitly.
+
+    Never overwrites: if ``output_dir`` already holds this report (``contiguous_window_report.json``) or its
+    ``.partial`` temp, raises FileExistsError before any input is read. An existing empty
+    directory and unrelated files are fine. Publish a rerun into a fresh ``output_dir``. The
+    check is not an atomic reservation: one writer per output directory is assumed, not
+    enforced.
+    """
     import pyarrow.parquet as pq
 
     config = _checked_config(config)
@@ -471,6 +480,7 @@ def run_contiguous_probe(
     resolved_output = output_dir.resolve()
     if resolved_output == resolved_frames or resolved_frames in resolved_output.parents:
         raise ValueError("output_dir must not be the frames directory or inside it")
+    _refuse_occupied_report(output_dir, "contiguous_window_report.json")
 
     before = _fingerprint(frames_dir) if frames_dir.exists() else {}
     candidates = sorted(frames_dir.glob("*.parquet")) if frames_dir.exists() else []
@@ -518,15 +528,7 @@ def run_contiguous_probe(
             else "no entry in any candidate frame satisfied the selection rule"
         )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    destination = output_dir / "contiguous_window_report.json"
-    temporary = destination.with_name(destination.name + ".partial")
-    try:
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, destination)
-    except OSError:
-        temporary.unlink(missing_ok=True)
-        raise
+    destination = _publish_report(output_dir, "contiguous_window_report.json", payload)
 
     if frames_dir.exists() and _fingerprint(frames_dir) != before:
         raise RuntimeError("the frames directory changed during the run; the probe is read-only")

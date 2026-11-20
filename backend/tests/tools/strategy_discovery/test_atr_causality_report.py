@@ -8,6 +8,7 @@ was nothing to scan rather than emitting a clean-looking empty report.
 
 from __future__ import annotations
 
+import builtins
 import json
 
 import numpy as np
@@ -16,6 +17,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from tools.strategy_discovery import atr_causality_report as _report
+from tools.strategy_discovery import atr_contiguous_probe as _contiguous
 from tools.strategy_discovery.atr_causality_report import (
     DEFAULT_CONFIG,
     run_probe,
@@ -302,3 +305,168 @@ def test_the_clock_audit_persists_and_refuses_to_write_into_the_frames_dir(tmp_p
     written = json.loads((tmp_path / "out" / "clock_audit.json").read_text(encoding="utf-8"))
     assert written["frames_audited"] == 2
     assert any("NOT the same as every entry" in c for c in written["caveats"])
+
+
+# -- retention: a report is published once into a fresh destination, never overwritten -----
+# AGENTS.md "Run isolation & data retention" (Codex R2-79). Each entrypoint refuses, before it
+# reads or fingerprints anything, when its named report or that report's .partial temp already
+# exists. An existing empty output_dir and unrelated files are fine. The check is not an atomic
+# reservation: one writer per output directory is assumed, not enforced.
+
+_ENTRYPOINTS = {
+    "run_probe": (
+        "atr_causality_report.json",
+        lambda f, o: _report.run_probe(f, o, horizons=(24,)),
+    ),
+    "run_clock_audit": (
+        "clock_audit.json",
+        lambda f, o: _report.run_clock_audit(f, o, horizons=(24,)),
+    ),
+    "run_contiguous_probe": (
+        "contiguous_window_report.json",
+        lambda f, o: _contiguous.run_contiguous_probe(f, o, horizons=(24,), max_entries=50),
+    ),
+}
+_PRIOR = b"prior generation -- must survive byte for byte"
+_FOREIGN = b"an unrelated file in the output directory"
+
+
+def _listing(root) -> dict:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def _forbid_reading(monkeypatch) -> None:
+    def _no(*args, **kwargs):
+        raise AssertionError("inputs were read before the occupied destination was refused")
+
+    import pyarrow.parquet
+
+    monkeypatch.setattr(pyarrow.parquet, "read_table", _no)
+    monkeypatch.setattr(_report, "_input_fingerprint", _no)
+    monkeypatch.setattr(_contiguous, "_fingerprint", _no)
+    monkeypatch.setattr(_contiguous, "_file_digest", _no)
+
+
+@pytest.mark.parametrize("entry", sorted(_ENTRYPOINTS))
+@pytest.mark.parametrize("occupied", ["final", "temp"])
+def test_an_occupied_report_target_is_refused_before_any_input_is_read(
+    tmp_path, monkeypatch, entry, occupied
+):
+    """Isolated cases: ONLY the final report, or ONLY its temp, exists. Fresh frames would
+    produce a different payload, yet every prior byte and entry is unchanged."""
+    name, run = _ENTRYPOINTS[entry]
+    frames = _write_frames(tmp_path / "frames")
+    out = tmp_path / "out"
+    out.mkdir()
+    target = out / (name if occupied == "final" else name + ".partial")
+    target.write_bytes(_PRIOR)
+    (out / "unrelated.txt").write_bytes(_FOREIGN)
+    before = _listing(out)
+    _forbid_reading(monkeypatch)
+
+    with pytest.raises(FileExistsError, match="fresh output_dir"):
+        run(frames, out)
+    assert _listing(out) == before
+
+
+@pytest.mark.parametrize("entry", sorted(_ENTRYPOINTS))
+def test_a_fresh_destination_publishes_beside_unrelated_files(tmp_path, entry):
+    name, run = _ENTRYPOINTS[entry]
+    frames = _write_frames(tmp_path / "frames")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "unrelated.txt").write_bytes(_FOREIGN)
+
+    payload = run(frames, out)
+
+    assert payload["output_path"] == str(out / name)
+    written = json.loads((out / name).read_text(encoding="utf-8"))
+    assert written == {k: v for k, v in payload.items() if k != "output_path"}
+    assert not (out / (name + ".partial")).exists()
+    assert (out / "unrelated.txt").read_bytes() == _FOREIGN
+
+
+class _FailingHandle:
+    def __init__(self, handle, fail_on):
+        self._handle, self._fail_on = handle, fail_on
+
+    def write(self, text):
+        if self._fail_on == "write":
+            raise OSError("injected write failure")
+        return self._handle.write(text)
+
+    def flush(self):
+        self._handle.flush()
+        if self._fail_on == "flush":
+            raise OSError("injected flush failure")
+
+    def close(self):
+        self._handle.close()
+        if self._fail_on == "close":
+            raise OSError("injected close failure")
+
+
+def _inject(monkeypatch, fail_on: str) -> None:
+    if fail_on == "replace":
+        import os as _os
+
+        real = _os.replace
+
+        def _replace(src, dst):
+            if str(src).endswith(".partial"):
+                raise OSError("injected rename failure")
+            return real(src, dst)
+
+        monkeypatch.setattr(_os, "replace", _replace)
+        return
+
+    def _open(path, mode="r", *args, **kwargs):
+        handle = builtins.open(path, mode, *args, **kwargs)
+        return _FailingHandle(handle, fail_on) if "x" in mode else handle
+
+    monkeypatch.setattr(_report, "open", _open, raising=False)
+
+
+@pytest.mark.parametrize("entry", sorted(_ENTRYPOINTS))
+@pytest.mark.parametrize("fail_on", ["write", "flush", "close", "replace"])
+def test_a_failed_publication_removes_only_its_own_temp(tmp_path, monkeypatch, entry, fail_on):
+    """Cleanup covers the whole owned scope (write, flush, close, rename) and touches nothing
+    it did not create. The error propagates; no report is left."""
+    name, run = _ENTRYPOINTS[entry]
+    frames = _write_frames(tmp_path / "frames")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "unrelated.txt").write_bytes(_FOREIGN)
+    _inject(monkeypatch, fail_on)
+
+    with pytest.raises(OSError, match="injected"):
+        run(frames, out)
+    assert _listing(out) == {"unrelated.txt": _FOREIGN}
+
+
+def test_the_publish_helper_rechecks_its_own_targets(tmp_path):
+    """Callable on its own, so it does not rely on an entrypoint's preflight."""
+    for suffix in ("", ".partial"):
+        out = tmp_path / f"case{suffix or '_final'}"
+        out.mkdir()
+        (out / ("r.json" + suffix)).write_bytes(_PRIOR)
+        before = _listing(out)
+        with pytest.raises(FileExistsError, match="fresh output_dir"):
+            _report._publish_report(out, "r.json", {"new": 1})
+        assert _listing(out) == before
+
+
+def test_an_exclusive_create_collision_never_deletes_the_foreign_temp(tmp_path, monkeypatch):
+    """A temp that appears after the recheck belongs to someone else: the exclusive create
+    fails and that file survives untouched (ownership was never established)."""
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(
+        _report, "_refuse_occupied_report", lambda d, n: (d / n, d / (n + ".partial"))
+    )
+    (out / "r.json.partial").write_bytes(_PRIOR)
+    with pytest.raises(FileExistsError):
+        _report._publish_report(out, "r.json", {"new": 1})
+    assert _listing(out) == {"r.json.partial": _PRIOR}
