@@ -114,7 +114,15 @@ def build_phase2_for_pid(
     supply_path: Path,
     output_dir: Path,
 ) -> BuildResult:
-    """End-to-end Phase 2 build for one pid. Writes output_dir/{pid}.parquet."""
+    """End-to-end Phase 2 build for one pid. Writes output_dir/{pid}.parquet.
+
+    Never overwrites: if any of this pid's outputs already exists in ``output_dir``
+    (parquet, sidecar, sidecar temp, or ``endpoints/<pid>``, even empty) it raises
+    FileExistsError before reading inputs or writing anything. Publish a rebuild into a
+    fresh output root. A failure part-way through leaves that NEW root partial; it is
+    not rolled back. One writer per output root is assumed, not enforced.
+    """
+    _refuse_occupied(Path(output_dir), [pid])
     history_path = Path(history_dir) / f"{pid}.parquet"
     marketcap_path = Path(marketcap_dir) / f"{pid}.parquet"
     if not history_path.exists():
@@ -173,6 +181,10 @@ def _publish_endpoints(
 ) -> Optional[str]:
     """Write the endpoint dataset and the sidecar a consumer verifies it against.
 
+    Refuses (FileExistsError) if this pid's sidecar, sidecar temp or endpoint directory
+    already exists -- checked here as well as by the build, because this is callable on
+    its own -- and never deletes an earlier run's files.
+
     Returns the manifest digest, or None when the frame produced no endpoints -- which is
     normal for a frame too short to carry any label, and must not be confused with a
     failure. `write_dataset` refuses to publish an empty set precisely so that
@@ -185,15 +197,15 @@ def _publish_endpoints(
     anchor, not a root of trust, since replacing frame, dataset and sidecar together is
     coherent and undetectable.
     """
-    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    sidecar_path, sidecar_temp, endpoint_dir = _endpoint_targets(output_dir, pid)
+    occupied = [path for path in (sidecar_path, sidecar_temp, endpoint_dir) if path.exists()]
+    if occupied:
+        raise FileExistsError(_occupied_message(output_dir, occupied))
     if not endpoints:
-        # Remove any earlier run's sidecar rather than leaving it to describe a dataset
-        # that no longer corresponds to the parquet beside it. `write_dataset` already
-        # refuses to publish an empty set; this closes the other half.
-        sidecar_path.unlink(missing_ok=True)
+        # Nothing to publish, and (checked above) no earlier sidecar to contradict the
+        # parquet: an earlier run's files are refused, never deleted.
         return None
 
-    endpoint_dir = output_dir / "endpoints" / pid
     data_id = endpoints[0].data_id
     manifest_digest = write_dataset(endpoint_dir, endpoints=endpoints, data_id=data_id)
 
@@ -226,20 +238,47 @@ def _publish_endpoints(
     }
     # Same-directory temp then os.replace: a half-written sidecar would be a parse error
     # at best, and a plausible-looking partial document at worst.
-    temporary = sidecar_path.with_name(sidecar_path.name + ".partial")
+    # Exclusive create: an existing temp is someone else's evidence and is never
+    # truncated. Only a temp this call created is cleaned up on failure.
+    with open(sidecar_temp, "x", encoding="utf-8") as handle:
+        try:
+            handle.write(json.dumps(sidecar, sort_keys=True, indent=2))
+        except OSError:
+            handle.close()
+            sidecar_temp.unlink(missing_ok=True)
+            raise
     try:
-        # The WRITE is inside the cleanup scope too, not just the rename: a failure
-        # part-way through writing would otherwise leave a .partial behind that the
-        # cleanup claim did not actually cover.
-        temporary.write_text(json.dumps(sidecar, sort_keys=True, indent=2), encoding="utf-8")
-        os.replace(temporary, sidecar_path)
+        os.replace(sidecar_temp, sidecar_path)
     except OSError:
-        # What this guarantees is that the previous sidecar is INTACT -- not that it is
-        # still correct. If the dataset beside it was already replaced, the pair is
-        # mismatched, and it is the consumer's data_id recompute that must reject it.
-        temporary.unlink(missing_ok=True)
+        sidecar_temp.unlink(missing_ok=True)
         raise
     return manifest_digest
+
+
+def _endpoint_targets(output_dir: Path, pid: str) -> tuple[Path, Path, Path]:
+    sidecar_path = output_dir / f"{pid}.endpoints.json"
+    sidecar_temp = sidecar_path.with_name(sidecar_path.name + ".partial")
+    return sidecar_path, sidecar_temp, output_dir / "endpoints" / pid
+
+
+def _occupied_outputs(output_dir: Path, pid: str) -> list[Path]:
+    targets = (output_dir / f"{pid}.parquet", *_endpoint_targets(output_dir, pid))
+    return [path for path in targets if path.exists()]
+
+
+def _occupied_message(output_dir: Path, occupied: Sequence[Path]) -> str:
+    names = ", ".join(str(path) for path in occupied)
+    return (
+        f"refusing to overwrite prior Phase 2 output in {output_dir}: {names}. Prior "
+        f"versions are preserved, never replaced; publish into a fresh --output-dir "
+        f"(one writer per output root)."
+    )
+
+
+def _refuse_occupied(output_dir: Path, pids: Sequence[str]) -> None:
+    occupied = [path for pid in pids for path in _occupied_outputs(output_dir, pid)]
+    if occupied:
+        raise FileExistsError(_occupied_message(output_dir, occupied))
 
 
 def _pids_from_universe_json(universe_path: Path) -> List[str]:
@@ -259,12 +298,18 @@ def build_phase2_for_universe(
     supply_path: Optional[Path] = None,
     output_dir: Optional[Path] = None,
 ) -> List[BuildResult]:
-    """Iterate every pid in the universe JSON; collect per-pid BuildResults."""
+    """Iterate every pid in the universe JSON; collect per-pid BuildResults.
+
+    Fails fast: every pid's outputs are checked before the first build, and an occupied
+    root raises FileExistsError with nothing written. Exceptions are not caught per pid,
+    so the run stops at the first one.
+    """
     history_dir = Path(history_dir) if history_dir else _DEFAULT_HISTORY_DIR
     marketcap_dir = Path(marketcap_dir) if marketcap_dir else _DEFAULT_MARKETCAP_DIR
     supply_path = Path(supply_path) if supply_path else _DEFAULT_SUPPLY_PATH
     output_dir = Path(output_dir) if output_dir else _DEFAULT_OUTPUT_DIR
     pids = _pids_from_universe_json(Path(universe_path))
+    _refuse_occupied(output_dir, pids)
     results: List[BuildResult] = []
     for pid in pids:
         results.append(
@@ -280,7 +325,11 @@ def build_phase2_for_universe(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CLI entrypoint — build Phase 2 parquet for an entire universe."""
+    """CLI entrypoint — build Phase 2 parquet for an entire universe.
+
+    Writes into --output-dir (default data/phase2) and refuses, before writing anything,
+    if that root already holds output for any universe pid: rebuilds go to a fresh root.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="Build Phase 2 features+labels for a universe.")

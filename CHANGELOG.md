@@ -7,6 +7,20 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-20 - Phase 2 endpoint publication never overwrites prior output (review R2, PR #77)
+
+- `build_phase2_for_pid` and `build_phase2_for_universe` refuse an output root that
+  already holds any of a pid's outputs (parquet, endpoint sidecar or its temp,
+  `endpoints/<pid>`, even empty), before reading inputs or writing anything. Rebuilds go
+  to a fresh `--output-dir`. The universe run checks every pid first, so it fails fast
+  with nothing written.
+- `_publish_endpoints` guards its own targets and no longer deletes an earlier sidecar.
+- `write_dataset` refuses a directory holding the dataset, the manifest or either temp;
+  temps are created exclusively, so leftover evidence is never truncated.
+- A failure part-way through leaves the NEW root partial; nothing is rolled back. The
+  existence check is not a reservation: one writer per output root is assumed.
+- No existing data is migrated, moved or deleted.
+
 ### 2026-11-14 - Local pre-commit hooks made real and worktree-safe (TD-1/TD-2/TD-3)
 
 - `pytest-backend` now runs `tools/hooks/run_backend_pytest.sh`.

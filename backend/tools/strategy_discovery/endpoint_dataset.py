@@ -291,7 +291,8 @@ def serialize_dataset(endpoints: Sequence[Any]) -> bytes:
 
 def _atomic_write_bytes(path, payload: bytes) -> None:
     temporary = path.with_name(path.name + ".partial")
-    with open(temporary, "wb") as handle:
+    # "xb": an existing temp is earlier diagnostic evidence and is never truncated.
+    with open(temporary, "xb") as handle:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
@@ -355,23 +356,33 @@ def _validated_header(endpoints: Sequence[Any], data_id: str) -> dict:
 
 
 def write_dataset(directory, *, endpoints: Sequence[Any], data_id: str) -> str:
-    """Publish the dataset and its manifest atomically. Returns the manifest digest.
+    """Publish the dataset and its manifest into a directory that holds neither. Returns
+    the manifest digest.
+
+    Never overwrites: if the dataset, the manifest, or either one's ``.partial`` temp
+    already exists, raises FileExistsError and leaves every file as it was (prior
+    versions are preserved; a leftover temp is diagnostic evidence). Publish a new
+    version into a new directory. This check is not an atomic reservation: one writer
+    per directory is assumed, not enforced.
 
     Each file is written under a temporary name and then `os.replace`d, so no reader
-    ever observes a PARTIAL file. Publication is therefore per-file atomic but NOT
-    pair-atomic, and the difference is worth stating precisely:
-
-      * FIRST publication, interrupted after the dataset lands -> a dataset with no
-        manifest, visibly incomplete.
-      * OVERWRITE, interrupted after the dataset lands -> the dataset is new while the
-        manifest is the OLD one. Not "no manifest". That pair is contained by the
-        CHECKSUM, which no longer matches, not by atomicity.
-
-    Nothing silently passes in either case, but the containment is the hash chain, and
-    saying "atomic" without that distinction would overclaim.
+    ever observes a PARTIAL file. Publication is per-file atomic but NOT pair-atomic: an
+    interruption after the dataset lands leaves a dataset with no manifest, visibly
+    incomplete, and nothing is rolled back.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    occupied = [
+        directory / name
+        for base in (DATASET_FILENAME, MANIFEST_FILENAME)
+        for name in (base, base + ".partial")
+        if (directory / name).exists()
+    ]
+    if occupied:
+        raise FileExistsError(
+            f"refusing to overwrite a published endpoint dataset: "
+            f"{', '.join(str(path) for path in occupied)}; publish into a new directory"
+        )
     header = _validated_header(endpoints, data_id)
     content = serialize_dataset(endpoints)
 

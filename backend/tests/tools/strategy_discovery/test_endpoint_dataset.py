@@ -179,11 +179,15 @@ def test_a_coherently_swapped_dataset_and_manifest_pair_is_rejected(tmp_path):
     _, other_endpoints = simulate_labels_with_endpoints(
         other_frame, horizons=[1, 2], product_id="BTC-USD"
     )
-    # A complete, internally coherent republication over the top of the first.
+    # A complete, internally coherent pair, published elsewhere and copied over the
+    # first. The writer refuses to overwrite, so the swap is what tampering looks like.
+    other_dir = tmp_path / "other"
     other_digest = write_dataset(
-        tmp_path, endpoints=other_endpoints, data_id=other_endpoints[0].data_id
+        other_dir, endpoints=other_endpoints, data_id=other_endpoints[0].data_id
     )
     assert other_digest != digest, "the swap must actually change the content"
+    for name in (DATASET_FILENAME, MANIFEST_FILENAME):
+        (tmp_path / name).write_bytes((other_dir / name).read_bytes())
 
     with pytest.raises(ValueError, match="manifest"):
         _load(tmp_path, labelled, endpoints, digest)
@@ -354,13 +358,48 @@ def test_no_temporary_files_survive_a_successful_publication(tmp_path):
     assert names == sorted([DATASET_FILENAME, MANIFEST_FILENAME])
 
 
-def test_republication_replaces_both_files_atomically(tmp_path):
-    labelled, endpoints, first = _published(tmp_path)
-    second = write_dataset(tmp_path, endpoints=endpoints, data_id=endpoints[0].data_id)
-    assert first == second  # same content, same digest
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
-        [DATASET_FILENAME, MANIFEST_FILENAME]
-    )
+def test_republication_into_an_occupied_directory_is_refused(tmp_path):
+    """Never overwrite a published pair: prior versions are preserved (AGENTS.md data
+    retention). Same content or not, the refusal leaves every prior byte unchanged."""
+    _published(tmp_path)
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    _, endpoints = _produce()
+    with pytest.raises(FileExistsError):
+        write_dataset(tmp_path, endpoints=endpoints, data_id=endpoints[0].data_id)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+@pytest.mark.parametrize(
+    "occupied",
+    [
+        DATASET_FILENAME,
+        MANIFEST_FILENAME,
+        DATASET_FILENAME + ".partial",
+        MANIFEST_FILENAME + ".partial",
+    ],
+)
+def test_any_existing_final_or_temporary_file_refuses_publication(tmp_path, occupied):
+    """A leftover .partial is diagnostic evidence of an earlier interruption: refuse
+    rather than truncate it. Nothing else is created."""
+    (tmp_path / occupied).write_bytes(b"earlier generation")
+    _, endpoints = _produce()
+    with pytest.raises(FileExistsError):
+        write_dataset(tmp_path, endpoints=endpoints, data_id=endpoints[0].data_id)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == {occupied: b"earlier generation"}
+
+
+def test_the_temporary_write_never_truncates_an_existing_temp(tmp_path):
+    """Defence in depth behind the up-front check: the temp is created exclusively, so a
+    temp that appears between check and write (another writer) is refused, not wiped."""
+    from tools.strategy_discovery.endpoint_dataset import _atomic_write_bytes
+
+    target = tmp_path / DATASET_FILENAME
+    temp = tmp_path / (DATASET_FILENAME + ".partial")
+    temp.write_bytes(b"someone else's write")
+    with pytest.raises(FileExistsError):
+        _atomic_write_bytes(target, b"new payload")
+    assert temp.read_bytes() == b"someone else's write"
+    assert not target.exists()
 
 
 def test_publishing_an_empty_endpoint_set_is_refused(tmp_path):

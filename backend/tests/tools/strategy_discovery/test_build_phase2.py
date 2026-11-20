@@ -383,24 +383,6 @@ def test_a_stale_sidecar_from_an_earlier_run_cannot_validate_a_new_frame(tmp_pat
         )
 
 
-def test_a_frame_with_no_endpoints_leaves_no_stale_sidecar_behind(tmp_path: Path):
-    """A rebuild that produces no endpoints must not leave an earlier run's sidecar in
-    place, where it would describe a dataset that no longer corresponds to the parquet.
-
-    `write_dataset` already refuses to publish an empty set, so nothing-survived cannot look
-    like nothing-was-attempted; this closes the other half, where the previous run's
-    description survives its own data.
-    """
-    result, output_dir, pid = _build_with_endpoints(tmp_path)
-    sidecar_path = output_dir / f"{pid}.endpoints.json"
-    assert sidecar_path.exists() and result.endpoint_manifest_digest is not None
-
-    from tools.strategy_discovery.build_phase2 import _publish_endpoints
-
-    assert _publish_endpoints(output_dir, pid, [], _DEFAULT_HORIZONS) is None
-    assert not sidecar_path.exists(), "an earlier run's sidecar outlived its data"
-
-
 def _write_short_history(path: Path, n_hours: int):
     _write_history_parquet(path, n_hours=n_hours)
 
@@ -481,45 +463,145 @@ def test_the_sidecar_is_replaced_atomically(tmp_path: Path):
     assert json.loads(before)  # the earlier sidecar was complete and parseable
 
 
-def test_a_failed_replacement_leaves_the_previous_sidecar_byte_for_byte(tmp_path: Path):
-    """The behaviour the temp-and-rename exists for, rather than the fact that it is used.
+# -- retention: a Phase 2 output root is written once and never overwritten ---------
+# AGENTS.md "Run isolation & data retention": prior versions are preserved before any
+# mutable publication. These builders do not version, so they refuse an occupied root
+# and the caller publishes into a fresh --output-dir. Check-then-write is not an atomic
+# reservation: one writer per output root is a documented precondition, not enforced.
 
-    Injects a failure at the replacement step while an EXISTING sidecar is in place, and
-    asserts the old file survives with its exact original bytes. A direct `write_text` would
-    have truncated it before failing, leaving a partial document that could parse as
-    plausible. The leftover temp file is also asserted gone, so a later reader cannot mistake
-    it for a published artifact.
+
+def _snapshot(root: Path) -> dict:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def _prior_output_variants(output_dir: Path, pid: str) -> dict:
+    from tools.strategy_discovery.endpoint_dataset import DATASET_FILENAME, MANIFEST_FILENAME
+
+    endpoint_dir = output_dir / "endpoints" / pid
+    return {
+        "parquet_only": [output_dir / f"{pid}.parquet"],
+        "sidecar_only": [output_dir / f"{pid}.endpoints.json"],
+        "sidecar_temp_only": [output_dir / f"{pid}.endpoints.json.partial"],
+        "dataset_only": [endpoint_dir / DATASET_FILENAME],
+        "manifest_only": [endpoint_dir / MANIFEST_FILENAME],
+        "empty_endpoint_dir": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "parquet_only",
+        "sidecar_only",
+        "sidecar_temp_only",
+        "dataset_only",
+        "manifest_only",
+        "empty_endpoint_dir",
+    ],
+)
+def test_any_one_sided_prior_output_refuses_the_build_and_survives(tmp_path: Path, variant):
+    """Partial prior publications count as occupied, including an empty endpoint dir.
+
+    The refusal happens before inputs are even read, so nothing new is written and every
+    prior byte is unchanged.
     """
+    pid = "FOO-USD"
+    output_dir = tmp_path / "phase2"
+    (output_dir / "endpoints" / pid).mkdir(parents=True)
+    for path in _prior_output_variants(output_dir, pid)[variant]:
+        path.write_bytes(b"prior generation " + variant.encode())
+    before = _snapshot(output_dir)
+    entries_before = sorted(str(p) for p in output_dir.rglob("*"))
+
+    with pytest.raises(FileExistsError, match="--output-dir"):
+        build_phase2_for_pid(
+            pid, tmp_path / "history", tmp_path / "marketcap", tmp_path / "s.parquet", output_dir
+        )
+
+    assert _snapshot(output_dir) == before
+    assert sorted(str(p) for p in output_dir.rglob("*")) == entries_before
+
+
+def test_a_rebuild_from_a_changed_frame_cannot_overwrite_the_prior_root(tmp_path: Path):
+    """Not an idempotent same-bytes rerun: the source changes, so an overwrite would be
+    visible. The prior parquet, sidecar, dataset and manifest all survive byte for byte."""
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    before = _snapshot(output_dir)
+    assert {f"{pid}.parquet", f"{pid}.endpoints.json"} <= set(before)
+
+    history = tmp_path / "history" / f"{pid}.parquet"
+    frame = pq.read_table(history).to_pandas()
+    frame["close"] = frame["close"] * 1.01
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), history)
+
+    with pytest.raises(FileExistsError, match="--output-dir"):
+        build_phase2_for_pid(
+            pid,
+            tmp_path / "history",
+            tmp_path / "marketcap",
+            tmp_path / "supply" / "snapshot.parquet",
+            output_dir,
+        )
+    assert _snapshot(output_dir) == before
+
+
+def test_publish_endpoints_guards_its_own_targets_even_with_no_endpoints(tmp_path: Path):
+    """Callable on its own, so it cannot rely on the build's preflight. An empty run into
+    an occupied root refuses; it never deletes the earlier sidecar."""
+    from tools.strategy_discovery.build_phase2 import _publish_endpoints
+
+    _, output_dir, pid = _build_with_endpoints(tmp_path)
+    before = _snapshot(output_dir)
+    with pytest.raises(FileExistsError, match="--output-dir"):
+        _publish_endpoints(output_dir, pid, [], _DEFAULT_HORIZONS)
+    assert _snapshot(output_dir) == before
+
+
+def test_publish_endpoints_refuses_an_endpoint_dir_left_without_a_sidecar(tmp_path: Path):
+    from tools.strategy_discovery.build_phase2 import _publish_endpoints
+
+    pid = "FOO-USD"
+    (tmp_path / "endpoints" / pid).mkdir(parents=True)
+    with pytest.raises(FileExistsError):
+        _publish_endpoints(tmp_path, pid, [], _DEFAULT_HORIZONS)
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["FOO-USD", "endpoints"]
+
+
+def test_a_failed_fresh_publication_leaves_the_prior_root_intact_and_reports(tmp_path: Path):
+    """Failure between publication steps. The prior root is untouched; the NEW root is
+    left partial (parquet written, no sidecar) and the error propagates. That is not a
+    rollback, and the test says so rather than implying one."""
     from unittest.mock import patch
 
-    result, output_dir, pid = _build_with_endpoints(tmp_path)
-    sidecar_path = output_dir / f"{pid}.endpoints.json"
-    original_bytes = sidecar_path.read_bytes()
-    assert original_bytes and json.loads(original_bytes)
+    _, prior_root, pid = _build_with_endpoints(tmp_path)
+    before = _snapshot(prior_root)
+    fresh_root = tmp_path / "phase2_rerun"
 
-    from tools.strategy_discovery.build_phase2 import _publish_endpoints
-    from tools.strategy_discovery.endpoint_dataset import DATASET_FILENAME
-    from tools.strategy_discovery.endpoint_records import LabelEndpoint  # noqa: F401
+    with patch(
+        "tools.strategy_discovery.build_phase2.write_dataset",
+        side_effect=OSError("disk failed mid-publication"),
+    ):
+        with pytest.raises(OSError, match="mid-publication"):
+            build_phase2_for_pid(
+                pid,
+                tmp_path / "history",
+                tmp_path / "marketcap",
+                tmp_path / "supply" / "snapshot.parquet",
+                fresh_root,
+            )
 
-    # a second generation's records, so the write would genuinely change the file
-    frame = pq.read_table(output_dir / f"{pid}.parquet").to_pandas()
-    sidecar = json.loads(original_bytes)
-    validated = load_validated_endpoints(
-        output_dir / "endpoints" / pid, frame=frame, sidecar=sidecar, product_id=pid
-    )
+    assert _snapshot(prior_root) == before
+    assert (fresh_root / f"{pid}.parquet").exists(), "the partial new root is visible"
+    assert not (fresh_root / f"{pid}.endpoints.json").exists()
 
-    # The second publication must produce DIFFERENT bytes, or "preserved" and "overwritten
-    # with the same content" are indistinguishable and the test proves nothing. Verified by
-    # reverting the implementation to a direct write: with identical content the test passed
-    # against the broken variant.
-    changed_horizons = [1, 4]
-    assert sorted(changed_horizons) != sorted(_DEFAULT_HORIZONS)
 
-    # Fail ONLY the sidecar rename. Patching `build_phase2.os.replace` patches the SHARED
-    # os module attribute, so a blanket side_effect also breaks write_dataset's atomic write
-    # and the failure happens before the sidecar is ever touched -- which made an earlier
-    # version of this test pass against a deliberately broken direct write.
+def test_a_failed_sidecar_rename_in_a_fresh_root_leaves_no_sidecar_or_temp(tmp_path: Path):
+    """The temp-and-rename still contains a torn sidecar write: the rename fails, no
+    sidecar and no leftover .partial remain, and the error propagates."""
     import os as _os
+    from unittest.mock import patch
 
     real_replace = _os.replace
 
@@ -528,15 +610,35 @@ def test_a_failed_replacement_leaves_the_previous_sidecar_byte_for_byte(tmp_path
             raise OSError("interrupted before the rename")
         return real_replace(src, dst)
 
+    pid = "FOO-USD"
     with patch("tools.strategy_discovery.build_phase2.os.replace", new=_fail_only_the_sidecar):
         with pytest.raises(OSError, match="interrupted"):
-            _publish_endpoints(output_dir, pid, list(validated.records), changed_horizons)
+            _build_with_endpoints(tmp_path, pid=pid)
+    output_dir = tmp_path / "phase2"
+    assert not (output_dir / f"{pid}.endpoints.json").exists()
+    assert not list(output_dir.glob(f"{pid}.endpoints.json.partial"))
 
-    assert sidecar_path.read_bytes() == original_bytes, (
-        "the previous sidecar was damaged by a failed replacement"
-    )
-    assert json.loads(sidecar_path.read_bytes())["horizons"] == sorted(_DEFAULT_HORIZONS)
-    assert not list(output_dir.glob(f"{pid}.endpoints.json.partial")), (
-        "a leftover temp file could be mistaken for a published artifact"
-    )
-    assert (output_dir / "endpoints" / pid / DATASET_FILENAME).exists()
+
+def test_the_universe_build_refuses_before_writing_any_pid(tmp_path: Path):
+    """Fail fast across the whole universe: one occupied pid stops the run before ANY
+    pid is written, so a root is never half-overwritten pid by pid."""
+    output_dir = tmp_path / "phase2"
+    # AAA-USD is fully buildable, so without the universe-wide preflight it WOULD be
+    # written before BAR-USD refused.
+    _write_history_parquet(tmp_path / "history" / "AAA-USD.parquet", n_hours=400)
+    _write_marketcap_parquet(tmp_path / "marketcap" / "AAA-USD.parquet", n_days=20)
+    _write_supply_snapshot(tmp_path / "supply" / "snapshot.parquet", pid="AAA-USD")
+    (output_dir / "endpoints" / "BAR-USD").mkdir(parents=True)
+    universe_path = tmp_path / "universe.json"
+    universe_path.write_text(json.dumps({"large": ["AAA-USD", "BAR-USD"]}), encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="BAR-USD"):
+        build_phase2_for_universe(
+            universe_path,
+            history_dir=tmp_path / "history",
+            marketcap_dir=tmp_path / "marketcap",
+            supply_path=tmp_path / "supply" / "snapshot.parquet",
+            output_dir=output_dir,
+        )
+    assert not (output_dir / "AAA-USD.parquet").exists()
+    assert not (output_dir / "endpoints" / "AAA-USD").exists()
