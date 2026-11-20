@@ -7,6 +7,13 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-20 - Phase 4 endpoint helpers typed and documented (review R1, PR #78)
+
+- `verify_frame_matches`, `build_phase4._load_endpoints` and the `replay_timeline`
+  functions gain concrete types and Returns/Raises contracts; private helpers in
+  `replay_timeline` move below the public API. No behaviour change (logic-equivalence
+  checked with docstrings and annotations stripped).
+
 ### 2026-11-20 - Phase 4 drops a feature-excluded product's profiles (review R2, PR #78)
 
 - `build_phase4` now removes profiles for every product without usable features or

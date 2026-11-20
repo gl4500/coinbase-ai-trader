@@ -405,7 +405,7 @@ def frame_fingerprint(frame: pd.DataFrame) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def verify_frame_matches(validated, frame, *, product_id: str) -> str:
+def verify_frame_matches(validated: object, frame: pd.DataFrame, *, product_id: str) -> str:
     """Confirm these records were validated against THIS frame. Returns its `data_id`.
 
     Two checks, because one is not enough:
@@ -419,6 +419,16 @@ def verify_frame_matches(validated, frame, *, product_id: str) -> str:
     A `ValidatedEndpoints` proves SOME frame was validated. Only these prove it was this one,
     and both inputs are ordinary public values, so no construction gate substitutes for them.
     Neither check can say WHICH field moved.
+
+    ``validated`` must be a ``ValidatedEndpoints`` from ``load_validated_endpoints``;
+    ``frame`` must hold the ``_FRAME_COLUMNS``. Returns the recomputed ``data_id``, equal to
+    ``validated.data_id``. Reads only; nothing is mutated.
+
+    Raises:
+        TypeError: ``validated`` is not a ``ValidatedEndpoints``.
+        MissingEndpoint: (a ValueError) the fingerprint differs, a required column is
+            missing, or the recomputed ``data_id`` differs.
+        ValueError: duplicate frame column names, or invalid ``ts`` bar starts.
     """
     from tools.strategy_discovery.endpoint_dataset import build_data_id
 

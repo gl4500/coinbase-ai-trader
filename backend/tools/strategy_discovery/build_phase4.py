@@ -15,11 +15,14 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+if TYPE_CHECKING:
+    from tools.strategy_discovery.endpoint_consumers import ValidatedEndpoints
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BACKEND not in sys.path:
@@ -136,7 +139,9 @@ class EndpointArtifactError(RuntimeError):
     """
 
 
-def _load_endpoints(pid_features, phase2_dir: Path):
+def _load_endpoints(
+    pid_features: Mapping[str, pd.DataFrame], phase2_dir: Path
+) -> Tuple[Dict[str, ValidatedEndpoints], Dict[str, str]]:
     """Validated endpoints per product, plus the products with no publication at all.
 
     The two cases are treated differently on purpose (§9.3):
@@ -148,10 +153,18 @@ def _load_endpoints(pid_features, phase2_dir: Path):
         A mismatched `data_id`, a bad checksum, incomplete coverage or a record that fails
         semantic validation all mean the artifact and the frame are not a matched pair, and no
         amount of per-product exclusion repairs that.
+
+    Returns ``(loaded, unpublished)``: validated endpoints keyed by pid, and pid ->
+    ``"endpoint_sidecar_missing"``. Every input pid lands in exactly one of the two, or the
+    call raises. Reads only.
+
+    Raises:
+        EndpointArtifactError: a sidecar that is present but unreadable, or a publication
+            that fails validation against its own frame.
     """
     from tools.strategy_discovery.endpoint_consumers import load_validated_endpoints
 
-    loaded: Dict[str, object] = {}
+    loaded: Dict[str, ValidatedEndpoints] = {}
     unpublished: Dict[str, str] = {}
     for pid, frame in pid_features.items():
         sidecar_path = Path(phase2_dir) / f"{pid}.endpoints.json"

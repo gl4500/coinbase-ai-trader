@@ -29,52 +29,9 @@ from typing import Iterable, Mapping, Optional, Sequence
 import numpy as np
 
 
-def _whole(value, field: str) -> int:
-    """An integral timestamp, VALIDATED rather than coerced.
-
-    The property wanted is "this IS an integer", which is `numbers.Integral` -- checked
-    BEFORE any conversion. An earlier version did `int(value)` and compared the round trip,
-    which is still coercion: it happened to catch fractions but accepted integral FLOATS, so
-    `bar_duration_ms=1.0` sailed through as 1. It also rejected only Python `bool`, and
-    `np.bool_` is not a `bool` subclass, so a numpy boolean converted happily to 1.
-
-    numpy integer scalars ARE accepted, because frames hand them out and rejecting them
-    would make this module unusable on real input. Integral means integral, whatever the
-    container.
-
-    Every rejection is a `ValueError`. Without the explicit check the failure type depended
-    on the input -- `int(nan)` raises `ValueError`, `int(inf)` raises `OverflowError`, and a
-    string or `None` raises `TypeError` -- so a caller could not catch one thing.
-    """
-    if isinstance(value, (bool, np.bool_)):
-        raise ValueError(f"{field} must not be a bool, got {value!r}")
-    if not isinstance(value, numbers.Integral):
-        raise ValueError(
-            f"{field} must be an integer without coercion, got {type(value).__name__} {value!r}"
-        )
-    return int(value)
-
-
-def _validated_duration(bar_duration_ms) -> int:
-    duration = _whole(bar_duration_ms, "bar_duration_ms")
-    if duration <= 0:
-        raise ValueError(f"bar_duration_ms must be positive, got {duration}")
-    return duration
-
-
-def _validated_starts(starts: Sequence, *, pid: str) -> list:
-    out = []
-    previous = None
-    for start in starts:
-        current = _whole(start, f"{pid} bar start")
-        if previous is not None and current <= previous:
-            raise ValueError(f"{pid} bar starts must be strictly increasing and unique")
-        previous = current
-        out.append(current)
-    return out
-
-
-def bar_availability_instants(starts: Sequence, row_ids: Sequence, *, bar_duration_ms: int) -> dict:
+def bar_availability_instants(
+    starts: Sequence[object], row_ids: Sequence[object], *, bar_duration_ms: int
+) -> dict[int, int]:
     """availability instant -> the SOURCE row that becomes decidable at it.
 
     The per-product lookup a consumer needs to pair an instant with its row, and to
@@ -86,6 +43,13 @@ def bar_availability_instants(starts: Sequence, row_ids: Sequence, *, bar_durati
     passed a filtered sequence. That is the same identity confusion `reset_index(drop=True)`
     creates downstream, and it is cheaper to make the caller state the ids than to document
     the hazard.
+
+    Returns ``{bar_start + bar_duration_ms: source_row_id}``; empty inputs give ``{}``.
+
+    Raises:
+        ValueError: a non-integral, bool or non-positive ``bar_duration_ms``; starts that are
+            non-integral or not strictly increasing; a length mismatch; or row ids that are
+            non-integral, negative or not strictly increasing.
     """
     duration = _validated_duration(bar_duration_ms)
     validated_starts = _validated_starts(starts, pid="frame")
@@ -111,11 +75,11 @@ def bar_availability_instants(starts: Sequence, row_ids: Sequence, *, bar_durati
 
 
 def decision_instants(
-    pid_bar_starts: Mapping[str, Sequence],
+    pid_bar_starts: Mapping[str, Sequence[object]],
     *,
     bar_duration_ms: int,
     participating: Optional[Iterable[str]] = None,
-) -> list:
+) -> list[int]:
     """Unique union of bar closes: the entry opportunities AND the sampling basis (§9.5).
 
     One entry per unique master availability timestamp, matching the convention the
@@ -126,6 +90,12 @@ def decision_instants(
     frame contributes, and an unrelated input would change the denominator. A named product
     missing from the grid raises rather than contributing nothing: silently understating the
     denominator gives no signal at all.
+
+    Returns the sorted unique closes (``start + bar_duration_ms``) of the selected products.
+
+    Raises:
+        ValueError: an invalid ``bar_duration_ms``, a participating product with no grid,
+            or a selected product's starts that are non-integral or not strictly increasing.
     """
     duration = _validated_duration(bar_duration_ms)
     if participating is None:
@@ -146,7 +116,7 @@ def decision_instants(
     return sorted(instants)
 
 
-def close_checkpoints(candidate_exit_instants: Iterable) -> list:
+def close_checkpoints(candidate_exit_instants: Iterable[object]) -> list[int]:
     """Unique instants at which an OPEN position may become due.
 
     These SCHEDULE AN INSPECTION and nothing else: they create no positions and realize no
@@ -157,11 +127,18 @@ def close_checkpoints(candidate_exit_instants: Iterable) -> list:
     Duplicates collapse. Two positions due at the same instant are both closed by one
     inspection, because closing is driven by the open positions rather than by a count of
     events.
+
+    Returns the sorted unique instants.
+
+    Raises:
+        ValueError: an instant that is a bool or not integral (no coercion).
     """
     return sorted({_whole(instant, "exit instant") for instant in candidate_exit_instants})
 
 
-def ordered_instants(decisions: Iterable, checkpoints: Iterable) -> list:
+def ordered_instants(
+    decisions: Iterable[object], checkpoints: Iterable[object]
+) -> list[tuple[int, bool]]:
     """`(instant, is_decision)` ascending, one entry per unique instant.
 
     A checkpoint coinciding with a decision instant yields ONE entry, marked as a decision:
@@ -172,10 +149,60 @@ def ordered_instants(decisions: Iterable, checkpoints: Iterable) -> list:
     so `ordered_instants([0.5], [True])` returned `[(0.5, True), (True, False)]` -- a fraction
     survived into the output, and the bool is worse than useless: `True == 1`, so it either
     vanishes into instant 1 or masquerades as it, and the collision is invisible afterwards.
+
+    Returns ``[(instant, is_decision), ...]`` sorted by instant.
+
+    Raises:
+        ValueError: any decision or checkpoint instant that is a bool or not integral.
     """
     decision_set = {_whole(instant, "decision instant") for instant in decisions}
     checkpoint_set = {_whole(instant, "checkpoint instant") for instant in checkpoints}
     return [(instant, instant in decision_set) for instant in sorted(decision_set | checkpoint_set)]
+
+
+def _whole(value: object, field: str) -> int:
+    """An integral timestamp, VALIDATED rather than coerced.
+
+    The property wanted is "this IS an integer", which is `numbers.Integral` -- checked
+    BEFORE any conversion. An earlier version did `int(value)` and compared the round trip,
+    which is still coercion: it happened to catch fractions but accepted integral FLOATS, so
+    `bar_duration_ms=1.0` sailed through as 1. It also rejected only Python `bool`, and
+    `np.bool_` is not a `bool` subclass, so a numpy boolean converted happily to 1.
+
+    numpy integer scalars ARE accepted, because frames hand them out and rejecting them
+    would make this module unusable on real input. Integral means integral, whatever the
+    container.
+
+    Every rejection is a `ValueError`. Without the explicit check the failure type depended
+    on the input -- `int(nan)` raises `ValueError`, `int(inf)` raises `OverflowError`, and a
+    string or `None` raises `TypeError` -- so a caller could not catch one thing.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{field} must not be a bool, got {value!r}")
+    if not isinstance(value, numbers.Integral):
+        raise ValueError(
+            f"{field} must be an integer without coercion, got {type(value).__name__} {value!r}"
+        )
+    return int(value)
+
+
+def _validated_duration(bar_duration_ms: object) -> int:
+    duration = _whole(bar_duration_ms, "bar_duration_ms")
+    if duration <= 0:
+        raise ValueError(f"bar_duration_ms must be positive, got {duration}")
+    return duration
+
+
+def _validated_starts(starts: Sequence[object], *, pid: str) -> list[int]:
+    out = []
+    previous = None
+    for start in starts:
+        current = _whole(start, f"{pid} bar start")
+        if previous is not None and current <= previous:
+            raise ValueError(f"{pid} bar starts must be strictly increasing and unique")
+        previous = current
+        out.append(current)
+    return out
 
 
 __all__ = [
