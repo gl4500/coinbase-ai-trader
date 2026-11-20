@@ -152,6 +152,8 @@ def test_the_semantics_flag_cannot_be_constructed_as_false(tmp_path):
             data_id="sha256:x",
             bar_duration_ms=_BAR,
             exit_config=_exit_config(),
+            feature_recipe="atr14_pct_wilder_v1",
+            frame_fingerprint="sha256:fixture-frame",
             semantic_validation_performed=False,
         )
 
@@ -446,6 +448,8 @@ def _validated_with(tmp_path, pairs, *, horizon):
         data_id=sidecar["data_id"],
         bar_duration_ms=_BAR,
         exit_config=_exit_config(),
+        feature_recipe="atr14_pct_wilder_v1",
+        frame_fingerprint="sha256:fixture-frame",
         token=_VALIDATED_BY_LOADER,
     )
 
@@ -482,6 +486,8 @@ def test_validated_endpoints_cannot_be_forged_by_direct_construction():
             data_id="unverified",
             bar_duration_ms=1,
             exit_config={},
+            feature_recipe="atr14_pct_wilder_v1",
+            frame_fingerprint="sha256:fixture-frame",
         )
 
 
@@ -493,3 +499,57 @@ def test_a_validated_results_config_cannot_be_mutated_afterwards(tmp_path):
     with pytest.raises(TypeError):
         validated.exit_config["max_hold_bars"] = 1
     assert validated.exit_config["max_hold_bars"] == _DEFAULT_MAX_HOLD_BARS
+
+
+# ── the frame fingerprint, and the collision it had ──────────────────────────
+
+
+def test_renaming_two_columns_to_swap_them_changes_the_fingerprint():
+    """Codex 6dfdbd5c, reproduced before fixing.
+
+    An earlier version hashed SORTED column names and then all row values together. Renaming
+    two columns to swap their names -- without moving a single value -- produced an IDENTICAL
+    fingerprint, because the sorted header lost the name-to-position binding while the row
+    hashes followed physical order. `price_over_ema20` went 1.5 -> 0.01 undetected, which is
+    exactly a changed rule feature.
+    """
+    from tools.strategy_discovery.endpoint_consumers import frame_fingerprint
+
+    original = pd.DataFrame({"price_over_ema20": [1.5], "vol_over_mc": [0.01]})
+    swapped = original.rename(
+        columns={"price_over_ema20": "vol_over_mc", "vol_over_mc": "price_over_ema20"}
+    )
+    assert original["price_over_ema20"].tolist() == [1.5]
+    assert swapped["price_over_ema20"].tolist() == [0.01], "the swap must change the feature"
+    assert frame_fingerprint(original) != frame_fingerprint(swapped)
+
+
+def test_reordering_columns_does_not_change_the_fingerprint():
+    """The other direction, which the same earlier version got wrong too: a harmless column
+    reorder changed the fingerprint. Rules look columns up by NAME, so order carries no
+    meaning and flagging it would be a false positive."""
+    from tools.strategy_discovery.endpoint_consumers import frame_fingerprint
+
+    original = pd.DataFrame({"price_over_ema20": [1.5], "vol_over_mc": [0.01]})
+    reordered = original[["vol_over_mc", "price_over_ema20"]]
+    assert list(reordered.columns) != list(original.columns)
+    assert frame_fingerprint(original) == frame_fingerprint(reordered)
+
+
+def test_duplicate_column_names_cannot_be_fingerprinted():
+    """With two columns of one name there is no name-to-values mapping to bind."""
+    from tools.strategy_discovery.endpoint_consumers import frame_fingerprint
+
+    with pytest.raises(ValueError, match="duplicate column names"):
+        frame_fingerprint(pd.DataFrame([[1, 2]], columns=["x", "x"]))
+
+
+def test_a_changed_value_changes_the_fingerprint():
+    """The base case, so the two tests above are not the only evidence the digest responds to
+    anything at all."""
+    from tools.strategy_discovery.endpoint_consumers import frame_fingerprint
+
+    original = pd.DataFrame({"price_over_ema20": [1.5], "vol_over_mc": [0.01]})
+    changed = original.copy()
+    changed.loc[0, "price_over_ema20"] = 1.6
+    assert frame_fingerprint(original) != frame_fingerprint(changed)
