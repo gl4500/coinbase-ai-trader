@@ -7,6 +7,25 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-20 - Snyk dependency scanning is weekly and advisory (operator decision)
+
+- The `snyk` job leaves the per-push `ci.yml` pipeline and the Security gate's `needs`. It
+  ran two `snyk test` calls on every push to every branch and exhausted the free monthly
+  quota.
+- New `.github/workflows/snyk.yml` runs the same steps (token check, install then
+  `snyk test --severity-threshold=high` for backend pip and frontend npm) weekly on Monday
+  06:00 UTC, on manual dispatch, and on pull requests to main that change a dependency
+  manifest. A run without `SNYK_TOKEN` writes "not scanned" to the job summary.
+- Its actions are pinned to full commit SHAs (checkout v4.4.0, setup-python v5.6.0,
+  setup-node v4.4.0, snyk/actions/setup v1.0.0) instead of `@v4`/`@v5`/`@master`; the Snyk
+  CLI version itself stays `latest`.
+- Advisory by operator decision ("option A"): a high-severity finding no longer blocks
+  merge. Branch protection still requires only `Security gate`, which is unchanged in name.
+- Not affected: the external `code/snyk` status (Snyk Code via Snyk's GitHub integration,
+  separate quota), configured in the Snyk dashboard.
+- `tools/ci/test_workflows.py` pins this layout; the CI step that runs `tools/ci` tests
+  installs `pyyaml==6.0.3` for it.
+
 ### 2026-11-20 - ATR probe and miner endpoint helpers typed and documented (review R1, PR #79)
 
 - New APIs only: `atr_causality_probe`, `atr_causality_report`, `atr_contiguous_probe` and
