@@ -14,6 +14,9 @@
 # No-op (concludes success, summary says "not scanned") until a SNYK_TOKEN repo secret is
 # configured. Get a token at snyk.io -> Account -> Auth Token, then add it under
 # Settings -> Secrets and variables -> Actions -> SNYK_TOKEN.
+#
+# Actions are pinned to full commit SHAs (release noted beside each); a branch or tag can
+# move. The Snyk CLI itself is still installed at `latest` by snyk/actions/setup.
 
 name: Snyk — dependency scan
 
@@ -43,7 +46,7 @@ jobs:
     name: Snyk (dependencies)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check SNYK_TOKEN present
         id: tok
         env:
@@ -56,15 +59,15 @@ jobs:
           else
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         if: steps.tok.outputs.present == 'true'
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.tok.outputs.present == 'true'
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: snyk/actions/setup@master
+      - uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
         if: steps.tok.outputs.present == 'true'
       - name: Snyk — backend (Python SCA)
         if: steps.tok.outputs.present == 'true'
