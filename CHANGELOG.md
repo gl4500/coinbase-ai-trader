@@ -7,6 +7,18 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-23 - Search diagnostics contract follows published endpoints (PR #71)
+
+- Correct the proposed contract's legacy clock-based claims against main `cfc7d3b`:
+  current mining requires endpoint publications and contiguous input; portfolio exit
+  accounting uses observable endpoints. Keep the clock mismatch as a legacy-artifact
+  blocker and require per-pair publication identity without profitability claims.
+- Add missing/invalid endpoint and timestamp error dispositions while preserving
+  exception propagation. Preserve every fold's fitting evidence and identify the exact
+  last qualifying fold/leaf summary used by an emitted profile.
+- Update merged/open specification references and target main. Documentation only;
+  no miner, collector, archive, model or live-backend behavior changes.
+
 ### 2026-11-20 - Snyk dependency scanning is weekly and advisory (operator decision)
 
 - The `snyk` job leaves the per-push `ci.yml` pipeline and the Security gate's `needs`. It
