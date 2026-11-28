@@ -7,6 +7,15 @@ Format: reverse-chronological by session date.
 
 ## Unreleased
 
+### 2026-11-28 - Correct the Codex live-guard matcher diagnosis (SWCFG-D4)
+
+- Official documentation and the source for installed Codex 0.171.0 identify shell
+  hook payloads as `Bash` with `tool_input.command`, including unified exec.
+  Document why the existing `^Bash$` matcher is correct for that contract.
+- Record a safe simulated-payload denial and its limits: native dispatch of the
+  earlier unblocked probe remains unresolved. No matcher, guard, trust or runtime
+  settings changed; no process-termination probe repeated.
+
 ### 2026-11-20 - Snyk dependency scanning is weekly and advisory (operator decision)
 
 - The `snyk` job leaves the per-push `ci.yml` pipeline and the Security gate's `needs`. It

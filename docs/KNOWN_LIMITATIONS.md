@@ -18,3 +18,40 @@ legacy ledger, its features or its helpers as evidence of a deployable edge.**
 
 Data preservation: see the **Run isolation & data retention** section of `CLAUDE.md`, and
 `backend/tools/data_snapshot`.
+
+## Codex live-guard observation (SWCFG-D4, 2026-11-28)
+
+The native hook UI was reported by the operator/pm-claude as showing one installed,
+active `PreToolUse` hook. That observation establishes the UI state at that time;
+it does not establish that a particular shell invocation reached the guard.
+The 2026-11-21 nonexistent-PID probe was not denied. No real process was terminated.
+Its cause remains unresolved; do not treat the guard as observed enforcement on
+that invocation, or repeat a termination probe to investigate it.
+
+The suspected `exec_command` versus `Bash` matcher mismatch is contradicted by the
+[official hook tool-coverage documentation](https://learn.chatgpt.com/docs/hooks#tool-coverage)
+and the source matching the locally installed `codex-cli 0.171.0`:
+
+- [ExecCommandHandler](https://github.com/openai/codex/blob/ccf9be8cc458bd6b8336fe84d68d8893f2691a5e/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs)
+  constructs a `Bash` hook identity and puts `args.cmd` in `tool_input.command`.
+- [HookToolName](https://github.com/openai/codex/blob/ccf9be8cc458bd6b8336fe84d68d8893f2691a5e/codex-rs/core/src/tools/hook_names.rs)
+  defines that shell identity as `Bash`.
+
+The current `.codex/hooks.json` matcher `^Bash$` and the guard's `command` payload
+reader match that contract. Replacing the matcher with `^exec_command$` would not
+match this documented shell-hook name. Retain the existing matcher unless direct
+version/path-specific payload evidence supports a different change.
+
+A non-destructive in-process verification supplied a documented `Bash` payload,
+injected training/live-port probes and no test window. The matcher matched, and
+`live_guard.main` returned exit 2 with a JSON deny decision. The command in that
+payload was data only: no shell command or real training/port probe was executed.
+This checks the guard when given the documented input, not native hook dispatch.
+
+Remaining evidence needed: correlate an actual harmless invocation with its native
+hook event/payload, loaded client revision, hook result and dispatch path (including
+nested code-mode calls). Do not infer the historical payload from the model-visible
+tool name. Tool hooks have coverage limits and are not a complete enforcement boundary.
+Changing hook scripts/configuration or trust to capture that evidence needs the
+operator's separate authorization. No hook/trust/global settings change is made by
+this documentation update, and it does not close the native-dispatch investigation.
