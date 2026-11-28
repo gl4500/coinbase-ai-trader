@@ -18,6 +18,9 @@ Format: reverse-chronological by session date.
   last qualifying fold/leaf summary used by an emitted profile.
 - Update merged/open specification references and target main. Documentation only;
   no miner, collector, archive, model or live-backend behavior changes.
+- Review R1 (2026-11-28): require originating-stage evidence for error codes, with
+  collision fixtures for timestamps, sidecars and vanished parquet inputs; exception
+  class alone cannot identify the failed check.
 
 ### 2026-11-20 - Snyk dependency scanning is weekly and advisory (operator decision)
 

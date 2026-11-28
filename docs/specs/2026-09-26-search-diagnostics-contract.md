@@ -55,6 +55,9 @@ duplicate or out-of-order source rows; do not sort or filter them to repair inpu
 a missing product parquet. `invalid_endpoint_publication` includes malformed sidecars,
 missing/corrupted declared dataset content, and failed frame/config/record validation.
 Unreadable paths and unexpected I/O remain errors with their exception evidence.
+Assign reason codes from the originating check stage, never from the exception class
+alone: preserve a stage marker/check identity at the boundary inside the pair call
+alongside the exception type/message, since unrelated checks can raise the same type.
 
 Today the miner raises `ValueError` for invalid timestamps and `FileNotFoundError`
 for a missing publication sidecar; endpoint-loader validation exceptions propagate.
@@ -218,7 +221,8 @@ not itself establish a numerical research budget or authorize further holdout us
    rule/data bindings. No writer or miner changes in this first slice.
 2. Producer capture: declare all requested pairs before file checks, preserve every
    early-return and raised-error disposition, record each fitted leaf before filters,
-   and record rejected groups. Preserve existing profile-return and exception behavior.
+   and record rejected groups. Stage/check instrumentation inside the pair call is
+   part of this slice; preserve existing profile-return and exception behavior.
    Tests stub fitting
    and use synthetic data; they must not mine real archives.
 3. Run writer: atomic run-isolated persistence, interruption recovery, strict JSON,
@@ -240,6 +244,9 @@ that collection does not change which legacy profiles are emitted. Include passi
 folds with distinct fitting values and multiple qualifying leaves in one fold;
 assert preservation of every fold's values and the exact last-summary fold/leaf
 used by the emitted profile, including its deflation inputs.
+Include a timestamp `ValueError` and a sidecar `JSONDecodeError` receiving different
+stage-derived codes, and a vanished product parquet receiving `missing_input`, never
+`missing_endpoint_publication`. Assert that propagation remains unchanged in each case.
 
 A completed implementation still requires a separately predeclared decision process,
 causal feature/label validation, holdout access discipline, funded-equity replay,
